@@ -17,6 +17,8 @@ config = context.config
 
 # No SQLAlchemy models in use yet.
 target_metadata = None
+VERSION_TABLE = "alembic_version"
+VERSION_NUM_LENGTH = 255
 
 
 def configure_import_path() -> None:
@@ -102,6 +104,38 @@ def configure_context(connection: Connection | None = None) -> None:
     )
 
 
+def ensure_version_table(connection: Connection, migration_schema: str) -> None:
+    """@brief 确保 Alembic 版本表可容纳长 revision / Ensure Alembic version table fits long revisions.
+
+    @param connection 同步数据库连接 / Synchronous database connection.
+    @param migration_schema 迁移元数据 schema / Migration metadata schema.
+    @return None / None.
+    @note Alembic 默认 version_num 为 VARCHAR(32)，本项目 revision 名可能更长 / Alembic defaults version_num to VARCHAR(32), while this project can use longer revision names.
+    """
+
+    version_table = (
+        f"{quote_identifier(migration_schema)}.{quote_identifier(VERSION_TABLE)}"
+    )
+    connection.execute(
+        text(
+            f"""
+            CREATE TABLE IF NOT EXISTS {version_table} (
+                version_num VARCHAR({VERSION_NUM_LENGTH}) NOT NULL,
+                CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            f"""
+            ALTER TABLE {version_table}
+            ALTER COLUMN version_num TYPE VARCHAR({VERSION_NUM_LENGTH})
+            """
+        )
+    )
+
+
 def run_migrations_offline() -> None:
     """@brief 离线执行迁移 / Run migrations offline.
 
@@ -124,6 +158,8 @@ def do_run_migrations(connection: Connection) -> None:
     connection.execute(
         text(f"CREATE SCHEMA IF NOT EXISTS {quote_identifier(migration_schema)}")
     )
+    ensure_version_table(connection, migration_schema)
+    connection.commit()
     configure_context(connection)
     with context.begin_transaction():
         context.run_migrations()
