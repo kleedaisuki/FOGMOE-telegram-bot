@@ -1,19 +1,16 @@
 """Add recharge block column to user table."""
 
-from alembic import op
+from fogmoe_bot.infrastructure.database.migrations.runner import run_migration_sql
 
-revision = "0009_add_recharge_blocked_until"
-down_revision = "0008_merge_heads"
+revision = '0009_add_recharge_blocked_until'
+down_revision = '0008_merge_heads'
 branch_labels = None
 depends_on = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE `user` "
-        "ADD COLUMN `recharge_blocked_until` DATETIME NULL"
-    )
+    run_migration_sql(__file__, "up")
 
 
 def downgrade() -> None:
-    op.execute("ALTER TABLE `user` DROP COLUMN `recharge_blocked_until`")
+    run_migration_sql(__file__, "down")

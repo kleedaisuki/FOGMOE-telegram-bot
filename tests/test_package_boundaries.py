@@ -3,6 +3,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src" / "fogmoe_bot"
+MIGRATIONS_ROOT = SRC_ROOT / "infrastructure" / "database" / "migrations"
 
 
 def test_old_ai_package_names_do_not_return():
@@ -85,3 +86,30 @@ def test_unnecessary_assistant_facades_do_not_return():
     ]
 
     assert [path for path in forbidden_files if path.exists()] == []
+
+
+def test_alembic_versions_are_backend_agnostic_sql_wrappers():
+    forbidden_snippets = [
+        "from alembic import op",
+        "op.execute",
+        "CREATE TABLE",
+        "ALTER TABLE",
+        "DROP TABLE",
+        "INSERT INTO",
+        "UPDATE ",
+        "DELETE ",
+        "SELECT ",
+    ]
+
+    offenders = []
+    missing_sql_files = []
+    sql_root = MIGRATIONS_ROOT / "sql" / "mysql"
+    for path in (MIGRATIONS_ROOT / "versions").glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if any(snippet in text for snippet in forbidden_snippets):
+            offenders.append(path.relative_to(SRC_ROOT))
+        if "run_migration_sql" in text and not (sql_root / f"{path.stem}.sql").is_file():
+            missing_sql_files.append(path.relative_to(SRC_ROOT))
+
+    assert offenders == []
+    assert missing_sql_files == []
