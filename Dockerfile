@@ -1,4 +1,4 @@
-# Minimal image for running the Telegram bot (Python only, MySQL is external)
+# Minimal image for running the Telegram bot (Python only, PostgreSQL is external)
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -7,16 +7,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install Python dependencies
-COPY requirements.txt .
+# Install Python dependencies from pyproject.toml.
+COPY pyproject.toml README.md LICENSE ./
+COPY src ./src
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir -e .
 
 # Copy application code
-COPY pyproject.toml .
-COPY src ./src
 COPY resources ./resources
 COPY .env.example ./.env.example
+COPY alembic.ini ./alembic.ini
 
 # Expose no ports; the bot connects out to Telegram
-CMD ["python", "-u", "-m", "fogmoe_bot"]
+CMD ["fogmoe-bot"]

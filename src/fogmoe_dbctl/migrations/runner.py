@@ -83,10 +83,10 @@ def _render_template(sql: str) -> str:
     if "{{" not in sql:
         return sql
 
-    from fogmoe_bot.infrastructure import config
+    from fogmoe_dbctl import config
 
     replacements = {
-        "{{ admin_user_id }}": str(int(config.ADMIN_USER_ID)),
+        "{{ admin_user_id }}": str(config.admin_user_id()),
     }
     for token, value in replacements.items():
         sql = sql.replace(token, value)

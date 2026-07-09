@@ -1,8 +1,8 @@
-"""Add last_rotated_at to chat_records."""
+"""Add stake reward pool table."""
 
-from fogmoe_bot.infrastructure.database.migrations.runner import run_migration_sql
+from fogmoe_dbctl.migrations.runner import run_migration_sql
 
-revision = '0002_add_chat_records_last_rotated_at'
+revision = '0002_stake_reward_pool'
 down_revision = '0001_initial'
 branch_labels = None
 depends_on = None

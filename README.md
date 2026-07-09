@@ -63,11 +63,11 @@
 
 ```bash
 # 克隆项目
-git clone https://github.com/fogmoe/telegram-bot.git
-cd telegram-bot
+git clone https://github.com/kleedaisuki/FOGMOE-telegram-bot.git
+cd FOGMOE-telegram-bot
 
-# 安装 Python 依赖
-pip3 install -r requirements.txt
+# 安装 Python 依赖和命令行入口
+python3 -m pip install -e .
 ```
 
 ### 配置环境变量
@@ -93,23 +93,19 @@ AI_CLASSIFIER_PROVIDER=openai
 ### 数据库设置
 
 ```bash
-# 登录 PostgreSQL
-psql -U postgres
+# 本地 PostgreSQL：创建数据库、运行时角色、迁移角色和 psql service 文件
+fogmoe-dbctl bootstrap-postgres
 
-# 创建数据库
-CREATE DATABASE fogmoe;
-
-# 运行迁移（确保 .env 中已配置数据库连接信息）
-alembic upgrade head
+# 已有外部数据库：配置 .env 或 psql service 后直接运行迁移
+fogmoe-dbctl migrate
 ```
-
-机器人启动时默认也会自动执行 `alembic upgrade head`；需要手动管理迁移时，可设置 `DB_AUTO_MIGRATE=false`。
+数据库迁移由 `fogmoe-dbctl` 显式管理，机器人启动时不会自动迁移外部数据库。
 
 ### 启动机器人
 
 ```bash
-# 方式一：直接运行
-PYTHONPATH=src python3 -m fogmoe_bot
+# 方式一：直接运行命令行入口
+fogmoe-bot
 
 # 方式二：使用脚本（后台运行）
 chmod +x runBot.sh
@@ -188,7 +184,7 @@ venv\Scripts\activate
 
    如果服务器上的 Docker 需要 root 权限，把 `docker` 改成 `sudo docker` 即可。
 
-> 默认镜像基于 `python:3.11-slim`，入口命令为 `python -u -m fogmoe_bot`，仅依赖外部 PostgreSQL。
+> 默认镜像基于 `python:3.11-slim`，入口命令为 `fogmoe-bot`，仅依赖外部 PostgreSQL。
 
 
 ### 使用的主要技术
@@ -233,7 +229,7 @@ venv\Scripts\activate
 ### 第三方许可证
 
 本项目使用的第三方库遵循各自的许可证：
-- 依赖库请查看 `requirements.txt`
+- 依赖库请查看 `pyproject.toml`
 
 ---
 

@@ -8,11 +8,13 @@ import os
 import secrets
 import stat
 import subprocess
+import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_DIR = PROJECT_ROOT / "var" / "psql"
 
 
@@ -28,9 +30,10 @@ class RoleSecret:
     password: str
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """@brief 解析命令行参数 / Parse command-line arguments.
 
+    @param argv 命令行参数 / Command-line arguments.
     @return argparse 命名空间 / argparse namespace.
     """
 
@@ -77,7 +80,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print SQL and file paths without changing PostgreSQL or files.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def quote_ident(value: str) -> str:
@@ -418,13 +421,14 @@ user={automation.role}
     pgpass_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     """@brief 脚本入口 / Script entry point.
 
+    @param argv 命令行参数 / Command-line arguments.
     @return None / None.
     """
 
-    args = parse_args()
+    args = parse_args(argv)
     config_dir = args.config_dir.resolve()
     pgpass_path = config_dir / "pgpass"
     bot = RoleSecret(
@@ -478,4 +482,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

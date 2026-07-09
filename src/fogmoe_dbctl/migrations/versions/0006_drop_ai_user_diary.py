@@ -1,6 +1,6 @@
 """Drop ai_user_diary table."""
 
-from fogmoe_bot.infrastructure.database.migrations.runner import run_migration_sql
+from fogmoe_dbctl.migrations.runner import run_migration_sql
 
 revision = '0006_drop_ai_user_diary'
 down_revision = '0005_add_ai_user_diary_pages'

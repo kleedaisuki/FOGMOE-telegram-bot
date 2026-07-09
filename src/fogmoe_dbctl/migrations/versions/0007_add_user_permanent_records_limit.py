@@ -1,6 +1,6 @@
 """Add permanent_records_limit to user table."""
 
-from fogmoe_bot.infrastructure.database.migrations.runner import run_migration_sql
+from fogmoe_dbctl.migrations.runner import run_migration_sql
 
 revision = '0007_add_user_permanent_records_limit'
 down_revision = '0006_drop_ai_user_diary'

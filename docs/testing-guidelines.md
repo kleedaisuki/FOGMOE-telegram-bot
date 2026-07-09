@@ -70,5 +70,5 @@ $env:ENV_API_CONNECTIVITY_PROVIDERS = "gemini"
 开发依赖安装：
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```

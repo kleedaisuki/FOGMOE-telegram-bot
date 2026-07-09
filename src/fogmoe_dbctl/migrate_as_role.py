@@ -8,12 +8,13 @@ import configparser
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_DIR = PROJECT_ROOT / "var" / "psql"
 DEFAULT_SCHEMAS = (
     "identity",
@@ -44,9 +45,10 @@ class ServiceConfig:
     password: str
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """@brief 解析命令行参数 / Parse command-line arguments.
 
+    @param argv 命令行参数 / Command-line arguments.
     @return argparse 命名空间 / argparse namespace.
     """
 
@@ -68,7 +70,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print commands and SQL without changing the database.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def quote_ident(value: str) -> str:
@@ -372,13 +374,14 @@ def schema_list(raw_schemas: str) -> list[str]:
     return [schema.strip() for schema in raw_schemas.split(",") if schema.strip()]
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     """@brief 脚本入口 / Script entry point.
 
+    @param argv 命令行参数 / Command-line arguments.
     @return None / None.
     """
 
-    args = parse_args()
+    args = parse_args(argv)
     config_dir = args.config_dir.resolve()
     service = read_service(config_dir, args.service)
     run_alembic(
@@ -404,4 +407,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

@@ -7,7 +7,7 @@ SRC_DIR="$BOT_DIR/src"
 LOG_DIR="$BOT_DIR/logs"
 LOG_FILE="$LOG_DIR/tgbot.log"
 VENV_DIR="$BOT_DIR/venv"
-REQUIREMENTS_FILE="$BOT_DIR/requirements.txt"
+PYPROJECT_FILE="$BOT_DIR/pyproject.toml"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 
 # 获取bot进程ID
 get_bot_pid() {
-    ps -ef | grep "[p]ython3.*-m fogmoe_bot" | awk '{print $2}'
+    ps -ef | grep -E "[f]ogmoe-bot|[p]ython3.*-m fogmoe_bot" | awk '{print $2}'
 }
 
 # 检查并创建虚拟环境
@@ -49,10 +49,10 @@ install_dependencies() {
     echo "升级 pip..."
     pip install --upgrade pip -q
 
-    # 安装依赖
-    if [ -f "$REQUIREMENTS_FILE" ]; then
-        echo "安装 requirements.txt 中的依赖..."
-        pip install -r "$REQUIREMENTS_FILE"
+    # 安装项目和依赖
+    if [ -f "$PYPROJECT_FILE" ]; then
+        echo "按 pyproject.toml 安装项目依赖..."
+        pip install -e "$BOT_DIR"
 
         if [ $? -eq 0 ]; then
             echo -e "${GREEN}✓ 依赖安装成功${NC}"
@@ -61,7 +61,7 @@ install_dependencies() {
             exit 1
         fi
     else
-        echo -e "${RED}错误: requirements.txt 文件不存在${NC}"
+        echo -e "${RED}错误: pyproject.toml 文件不存在${NC}"
         exit 1
     fi
 }
@@ -101,7 +101,7 @@ init_environment() {
     echo ""
     echo "下一步:"
     echo "  1. 配置 .env 文件中的必要参数"
-    echo "  2. 运行数据库迁移: alembic upgrade head"
+    echo "  2. 运行数据库迁移: $VENV_DIR/bin/fogmoe-dbctl migrate"
     echo "  3. 启动 bot: $0 start"
 }
 
@@ -130,9 +130,9 @@ start_bot() {
         exit 1
     fi
 
-    # 确保 main.py 存在
-    if [ ! -f "$SRC_DIR/main.py" ]; then
-        echo -e "${RED}错误: main.py 不存在: $SRC_DIR/main.py${NC}"
+    # 确保 bot 包存在
+    if [ ! -f "$SRC_DIR/fogmoe_bot/main.py" ]; then
+        echo -e "${RED}错误: bot 入口不存在: $SRC_DIR/fogmoe_bot/main.py${NC}"
         exit 1
     fi
 
@@ -171,7 +171,7 @@ start_bot() {
     mkdir -p "$LOG_DIR"
     echo "日志文件: $LOG_FILE"
     PYTHONPATH="$SRC_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-        nohup python3 -u -m fogmoe_bot > "$LOG_FILE" 2>&1 &
+        nohup "$VENV_DIR/bin/fogmoe-bot" > "$LOG_FILE" 2>&1 &
 
     # 获取新进程PID
     NEW_PID=$!
@@ -332,7 +332,7 @@ show_help() {
     echo "首次使用流程:"
     echo "  1. $0 init                           # 初始化环境"
     echo "  2. 编辑 .env 文件配置必要参数         # nano .env"
-    echo "  3. 运行数据库迁移                     # alembic upgrade head"
+    echo "  3. 运行数据库迁移                     # $VENV_DIR/bin/fogmoe-dbctl migrate"
     echo "  4. $0 start                          # 启动bot"
 }
 

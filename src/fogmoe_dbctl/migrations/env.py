@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 
-SRC_ROOT = Path(__file__).resolve().parents[4]
+SRC_ROOT = Path(__file__).resolve().parents[2]
 
 config = context.config
 
@@ -48,12 +48,9 @@ def get_url() -> str:
     @return 数据库连接 URL / Database connection URL.
     """
 
-    try:
-        from fogmoe_bot.infrastructure.config import SQLALCHEMY_DATABASE_URI
+    from fogmoe_dbctl import config as dbctl_config
 
-        return SQLALCHEMY_DATABASE_URI
-    except Exception:
-        return config.get_main_option("sqlalchemy.url")
+    return dbctl_config.sqlalchemy_database_uri()
 
 
 def quote_identifier(identifier: str) -> str:
@@ -72,12 +69,9 @@ def get_migration_schema() -> str:
     @return Alembic 版本表 schema / Alembic version table schema.
     """
 
-    try:
-        from fogmoe_bot.infrastructure.config import DB_MIGRATION_SCHEMA
+    from fogmoe_dbctl import config as dbctl_config
 
-        return DB_MIGRATION_SCHEMA
-    except Exception:
-        return "infra"
+    return dbctl_config.migration_schema()
 
 
 def configure_context(connection: Connection | None = None) -> None:

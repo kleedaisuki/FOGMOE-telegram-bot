@@ -1,6 +1,6 @@
 """为用户表增加套餐字段。"""
 
-from fogmoe_bot.infrastructure.database.migrations.runner import run_migration_sql
+from fogmoe_dbctl.migrations.runner import run_migration_sql
 
 revision = '0012_add_user_plan'
 down_revision = '0011_add_user_coins_paid'

@@ -31,9 +31,13 @@ dev = [
 
 [project.scripts]
 fogmoe-bot = "fogmoe_bot.main:main"
+fogmoe-dbctl = "fogmoe_dbctl.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+fogmoe_dbctl = ["migrations/sql/postgresql/*.sql"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

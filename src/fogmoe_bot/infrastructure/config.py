@@ -124,8 +124,6 @@ class AppSettings(BaseSettings):
     DB_POOL_RECYCLE: int = 1800
     DB_CONNECT_TIMEOUT: int = 10
     DB_SEARCH_PATH: str = "identity,conversation,assistant,economy,moderation,crypto,game,public"
-    DB_MIGRATION_SCHEMA: str = "infra"
-    DB_AUTO_MIGRATE: bool = True
     DATABASE_URL: str | None = None
 
     LOG_LEVEL: str = "INFO"
@@ -152,21 +150,6 @@ class AppSettings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
-
-    @field_validator("DB_AUTO_MIGRATE", mode="before")
-    @classmethod
-    def _parse_db_auto_migrate(cls, value: object) -> bool:
-        if value is None:
-            return True
-        if isinstance(value, bool):
-            return value
-        return str(value).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-
 
 SETTINGS = AppSettings()
 
@@ -281,8 +264,6 @@ DB_MAX_OVERFLOW = SETTINGS.DB_MAX_OVERFLOW
 DB_POOL_RECYCLE = SETTINGS.DB_POOL_RECYCLE
 DB_CONNECT_TIMEOUT = SETTINGS.DB_CONNECT_TIMEOUT
 DB_SEARCH_PATH = SETTINGS.DB_SEARCH_PATH
-DB_MIGRATION_SCHEMA = SETTINGS.DB_MIGRATION_SCHEMA
-DB_AUTO_MIGRATE = SETTINGS.DB_AUTO_MIGRATE
 
 def _build_postgres_dsn() -> str:
     user = POSTGRES_CONFIG.get("user") or "postgres"

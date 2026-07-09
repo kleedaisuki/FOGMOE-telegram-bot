@@ -1,6 +1,6 @@
 """为用户表增加付费金币字段。"""
 
-from fogmoe_bot.infrastructure.database.migrations.runner import run_migration_sql
+from fogmoe_dbctl.migrations.runner import run_migration_sql
 
 revision = '0011_add_user_coins_paid'
 down_revision = '0010_add_user_give_daily'

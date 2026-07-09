@@ -3,7 +3,8 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src" / "fogmoe_bot"
-MIGRATIONS_ROOT = SRC_ROOT / "infrastructure" / "database" / "migrations"
+DBCTL_ROOT = PROJECT_ROOT / "src" / "fogmoe_dbctl"
+MIGRATIONS_ROOT = DBCTL_ROOT / "migrations"
 
 
 def test_old_ai_package_names_do_not_return():
@@ -88,6 +89,23 @@ def test_unnecessary_assistant_facades_do_not_return():
     assert [path for path in forbidden_files if path.exists()] == []
 
 
+def test_database_control_plane_stays_out_of_bot_package():
+    assert not (SRC_ROOT / "infrastructure" / "database" / "migrations").exists()
+    assert not (SRC_ROOT / "infrastructure" / "database" / "migration_service.py").exists()
+    assert (DBCTL_ROOT / "cli.py").is_file()
+    assert MIGRATIONS_ROOT.is_dir()
+
+
+def test_database_control_plane_does_not_import_bot_package():
+    offenders = []
+    for path in DBCTL_ROOT.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "from fogmoe_bot" in text or "import fogmoe_bot" in text:
+            offenders.append(path.relative_to(DBCTL_ROOT))
+
+    assert offenders == []
+
+
 def test_alembic_versions_are_backend_agnostic_sql_wrappers():
     forbidden_snippets = [
         "from alembic import op",
@@ -106,11 +124,13 @@ def test_alembic_versions_are_backend_agnostic_sql_wrappers():
     sql_root = MIGRATIONS_ROOT / "sql" / "postgresql"
     assert not (MIGRATIONS_ROOT / "sql" / "mysql").exists()
     for path in (MIGRATIONS_ROOT / "versions").glob("*.py"):
+        if path.name == "__init__.py":
+            continue
         text = path.read_text(encoding="utf-8")
         if any(snippet in text for snippet in forbidden_snippets):
-            offenders.append(path.relative_to(SRC_ROOT))
+            offenders.append(path.relative_to(DBCTL_ROOT))
         if "run_migration_sql" in text and not (sql_root / f"{path.stem}.sql").is_file():
-            missing_sql_files.append(path.relative_to(SRC_ROOT))
+            missing_sql_files.append(path.relative_to(DBCTL_ROOT))
 
     assert offenders == []
     assert missing_sql_files == []

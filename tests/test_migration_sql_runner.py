@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fogmoe_bot.infrastructure.database.migrations import runner
+from fogmoe_dbctl.migrations import runner
 
 
 def test_migration_sql_sections_are_parsed():
