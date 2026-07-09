@@ -1,7 +1,7 @@
 import logging
 from typing import Dict, List, Optional, Union, Tuple
 
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import game_repository
 
 # 道具栏容量上限
@@ -47,7 +47,7 @@ async def add_item_to_inventory(user_id: int, item_id: int, quantity: int = 1) -
         existing_item = next((i for i in inventory if i['item_id'] == item_id), None)
         
         if existing_item:
-            async with mysql_connection.transaction() as connection:
+            async with db_connection.transaction() as connection:
                 await game_repository.increment_inventory_item(
                     user_id,
                     item_id,
@@ -60,7 +60,7 @@ async def add_item_to_inventory(user_id: int, item_id: int, quantity: int = 1) -
         if len(inventory) >= INVENTORY_CAPACITY:
             return False, f"道具栏已满（最多{INVENTORY_CAPACITY}个）"
 
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             await game_repository.insert_inventory_item(
                 user_id,
                 item_id,
@@ -89,10 +89,10 @@ async def remove_item_from_inventory(user_id: int, item_id: int, quantity: int =
             return False, f"道具数量不足（需要{quantity}个，但只有{existing_item['quantity']}个）"
             
         if existing_item['quantity'] == quantity:
-            async with mysql_connection.transaction() as connection:
+            async with db_connection.transaction() as connection:
                 await game_repository.delete_inventory_item(user_id, item_id, connection=connection)
         else:
-            async with mysql_connection.transaction() as connection:
+            async with db_connection.transaction() as connection:
                 await game_repository.decrement_inventory_item(
                     user_id,
                     item_id,

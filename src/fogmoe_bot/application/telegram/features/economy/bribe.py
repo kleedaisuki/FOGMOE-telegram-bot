@@ -7,7 +7,7 @@ from typing import Sequence
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.application.economy import process_user
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
 
@@ -53,7 +53,7 @@ async def bribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     try:
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             account = await process_user.get_user_account(
                 user_id,
                 connection=connection,

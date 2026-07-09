@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import ai_schedule_repository
 
 from .context import get_tool_request_context
@@ -148,7 +148,7 @@ def schedule_ai_message_tool(
         ):
             warnings.append("extra fields ignored for list action")
 
-        rows = mysql_connection.run_sync(
+        rows = db_connection.run_sync(
             ai_schedule_repository.list_for_user(user_id, limit=MAX_TOTAL_SCHEDULES)
         )
         tasks = []
@@ -210,7 +210,7 @@ def schedule_ai_message_tool(
         if any([timestamp_utc, recurrence_unit, recurrence_interval, trigger_reason, context, instruction]):
             warnings.append("extra fields ignored for cancel action")
 
-        cancelled = mysql_connection.run_sync(
+        cancelled = db_connection.run_sync(
             ai_schedule_repository.cancel_pending_for_user(schedule_id_value, user_id)
         )
         if not cancelled:
@@ -282,7 +282,7 @@ def schedule_ai_message_tool(
         elif len(context_value) > 1000:
             return {"user_id": user_id, "error": "context exceeds 1000 characters"}
 
-    schedule_id, created_at, replaced, blocked_reason = mysql_connection.run_sync(
+    schedule_id, created_at, replaced, blocked_reason = db_connection.run_sync(
         _create_or_replace_schedule(
             user_id,
             run_at,

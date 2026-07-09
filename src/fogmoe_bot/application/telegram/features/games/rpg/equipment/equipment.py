@@ -1,7 +1,7 @@
 import logging
 from typing import Dict, List, Optional, Union, Tuple
 
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import game_repository
 
 
@@ -70,7 +70,7 @@ async def equip_item(user_id: int, equipment_id: int) -> Tuple[bool, str]:
             return False, f"不支持的装备类型: {equipment_type}"
             
         # 更新玩家装备
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             rows_affected = await game_repository.set_player_equipment_slot(
                 user_id,
                 slot_column,
@@ -120,7 +120,7 @@ async def unequip_item(user_id: int, equipment_type: str) -> Tuple[bool, str]:
         equipment_name = current_equipment[slot_name]
             
         # 更新玩家装备
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             await game_repository.set_player_equipment_slot(
                 user_id,
                 slot_column,
@@ -166,7 +166,7 @@ async def update_equipment_stats(user_id: int) -> bool:
                     total_matk_bonus += equipment['matk_bonus']
         
         # 更新装备统计缓存表
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             await game_repository.upsert_player_equipment_stats(
                 user_id,
                 total_atk_bonus,

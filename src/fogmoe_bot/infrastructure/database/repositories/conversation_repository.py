@@ -1,7 +1,7 @@
 import json
 from typing import Any
 
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 
 
 async def user_diary_exists(user_id: int, *, connection=None) -> bool:
@@ -12,7 +12,7 @@ async def user_diary_exists(user_id: int, *, connection=None) -> bool:
     @return 存在非空日记页返回 True / True when a non-empty diary page exists.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT 1 FROM ai_user_diary_pages WHERE user_id = %s AND content != '' LIMIT 1",
         (user_id,),
         connection=connection,
@@ -28,7 +28,7 @@ async def fetch_chat_messages_raw(conversation_id: int, *, connection=None) -> A
     @return 原始 messages 值；不存在时返回 None / Raw messages value, or None when absent.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT messages FROM chat_records WHERE conversation_id = %s",
         (conversation_id,),
         connection=connection,
@@ -61,7 +61,7 @@ async def insert_permanent_snapshot(user_id: int, snapshot_text: str, *, connect
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO permanent_chat_records (user_id, conversation_snapshot) VALUES (%s, %s)",
         (user_id, snapshot_text),
         connection=connection,
@@ -76,7 +76,7 @@ async def delete_chat_record(conversation_id: int, *, connection=None) -> None:
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "DELETE FROM chat_records WHERE conversation_id = %s",
         (conversation_id,),
         connection=connection,
@@ -93,13 +93,13 @@ async def archive_and_clear_chat(user_id: int, conversation_id: int) -> tuple[bo
 
     snapshot_created = False
     archived_records: list[dict] = []
-    async with mysql_connection.transaction() as connection:
+    async with db_connection.transaction() as connection:
         raw_snapshot = await fetch_chat_messages_raw(conversation_id, connection=connection)
         snapshot_text = normalise_snapshot_text(raw_snapshot)
         if snapshot_text:
             await insert_permanent_snapshot(user_id, snapshot_text, connection=connection)
             snapshot_created = True
-            archived_records = await mysql_connection.prune_permanent_records(
+            archived_records = await connection.prune_permanent_records(
                 user_id,
                 connection=connection,
             )
@@ -114,7 +114,7 @@ async def fetch_pending_permanent_snapshot(user_id: int):
     @return `(record_id, snapshot_text)`；不存在时返回 None / `(record_id, snapshot_text)`, or None when absent.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT id, conversation_snapshot FROM permanent_chat_records "
         "WHERE user_id = %s AND (summary IS NULL OR summary = '') "
         "ORDER BY created_at DESC, id DESC LIMIT 1",
@@ -136,7 +136,7 @@ async def update_permanent_summary(record_id: int, summary_text: str) -> None:
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "UPDATE permanent_chat_records SET summary = %s WHERE id = %s",
         (summary_text, record_id),
     )
@@ -149,7 +149,7 @@ async def count_summarised_permanent_records(user_id: int) -> int:
     @return 已摘要记录数 / Summarised record count.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT COUNT(*) FROM permanent_chat_records WHERE user_id = %s "
         "AND summary IS NOT NULL AND summary != ''",
         (user_id,),
@@ -166,7 +166,7 @@ async def fetch_summarised_permanent_records(user_id: int, *, limit: int, offset
     @return 数据库结果行 / Database rows.
     """
 
-    return await mysql_connection.fetch_all(
+    return await db_connection.fetch_all(
         """
         SELECT id, summary, created_at
         FROM permanent_chat_records
@@ -185,7 +185,7 @@ async def count_permanent_records(user_id: int) -> int:
     @return 永久记录数量 / Permanent record count.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT COUNT(*) FROM permanent_chat_records WHERE user_id = %s",
         (user_id,),
     )
@@ -209,7 +209,7 @@ async def fetch_permanent_records_batch(
     """
 
     order_clause = "ORDER BY created_at DESC, id DESC" if newest_first else "ORDER BY created_at ASC, id ASC"
-    return await mysql_connection.fetch_all(
+    return await db_connection.fetch_all(
         f"""
         SELECT id, conversation_snapshot, created_at
         FROM permanent_chat_records
@@ -228,7 +228,7 @@ async def fetch_max_diary_page(user_id: int) -> int:
     @return 最大页码；无日记时为 0 / Maximum page number, or 0 when absent.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT MAX(page_no) FROM ai_user_diary_pages WHERE user_id = %s",
         (user_id,),
     )
@@ -243,7 +243,7 @@ async def fetch_diary_page(user_id: int, page_no: int):
     @return 数据库结果行；不存在时返回 None / Database row, or None when absent.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT content, created_at, updated_at FROM ai_user_diary_pages "
         "WHERE user_id = %s AND page_no = %s",
         (user_id, page_no),
@@ -259,11 +259,13 @@ async def upsert_diary_page(user_id: int, page_no: int, content: str) -> None:
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         """
         INSERT INTO ai_user_diary_pages (user_id, page_no, content)
         VALUES (%s, %s, %s)
-        ON DUPLICATE KEY UPDATE content = VALUES(content), updated_at = CURRENT_TIMESTAMP
+        ON CONFLICT (user_id, page_no) DO UPDATE SET
+            content = EXCLUDED.content,
+            updated_at = CURRENT_TIMESTAMP
         """,
         (user_id, page_no, content),
     )
@@ -291,7 +293,7 @@ async def insert_group_message(
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO chat_records_group "
         "(group_id, message_id, user_id, message_type, content, created_at) "
         "VALUES (%s, %s, %s, %s, %s, %s)",
@@ -314,7 +316,7 @@ async def prune_group_history(
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "DELETE FROM chat_records_group "
         "WHERE group_id = %s AND id NOT IN ("
         "  SELECT id FROM ("
@@ -352,7 +354,7 @@ async def fetch_group_context_rows(
         "LEFT JOIN user u ON u.id = cr.user_id "
     )
     if around_message_id:
-        before = await mysql_connection.fetch_all(
+        before = await db_connection.fetch_all(
             select_columns
             + "WHERE group_id = %s AND message_id <= %s "
             "ORDER BY created_at DESC, id DESC LIMIT %s",
@@ -360,7 +362,7 @@ async def fetch_group_context_rows(
             mapping=True,
             connection=connection,
         )
-        after = await mysql_connection.fetch_all(
+        after = await db_connection.fetch_all(
             select_columns
             + "WHERE group_id = %s AND message_id > %s "
             "ORDER BY created_at ASC, id ASC LIMIT %s",
@@ -370,7 +372,7 @@ async def fetch_group_context_rows(
         )
         return list(reversed(before)) + list(after)
 
-    records = await mysql_connection.fetch_all(
+    records = await db_connection.fetch_all(
         select_columns
         + "WHERE group_id = %s "
         "ORDER BY created_at DESC, id DESC LIMIT %s",

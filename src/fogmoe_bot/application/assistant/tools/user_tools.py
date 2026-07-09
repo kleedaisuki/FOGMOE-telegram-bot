@@ -3,7 +3,7 @@ import random
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import kindness_repository, user_repository
 from fogmoe_bot.application.economy import process_user
 
@@ -13,7 +13,7 @@ AFFECTION_TOOL_ENABLED = False
 
 
 def _get_last_kindness_for_recipient(recipient_id: int) -> Optional[dict[str, object]]:
-    row = mysql_connection.run_sync(
+    row = db_connection.run_sync(
         kindness_repository.fetch_latest_gift_for_recipient(recipient_id)
     )
     if not row:
@@ -31,7 +31,7 @@ def kindness_gift_tool(
     except (TypeError, ValueError):
         return {"error": "Missing recipient information, cannot execute gift"}
 
-    recipient = mysql_connection.run_sync(user_repository.fetch_user_account(recipient_id))
+    recipient = db_connection.run_sync(user_repository.fetch_user_account(recipient_id))
     if not recipient:
         return {"error": "Recipient user not found"}
 
@@ -56,7 +56,7 @@ def kindness_gift_tool(
 
     try:
         async def _record_gift():
-            async with mysql_connection.transaction() as connection:
+            async with db_connection.transaction() as connection:
                 await process_user.add_free_coins(
                     recipient.user_id,
                     amt,
@@ -68,7 +68,7 @@ def kindness_gift_tool(
                     connection=connection,
                 )
 
-        mysql_connection.run_sync(_record_gift())
+        db_connection.run_sync(_record_gift())
     except Exception as exc:
         logging.error("Failed to record kindness gift: %s", exc)
         return {"error": "Error recording gift, please try again later"}

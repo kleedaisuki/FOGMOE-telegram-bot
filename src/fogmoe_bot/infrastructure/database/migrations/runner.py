@@ -32,9 +32,7 @@ def _dialect_candidates(dialect_name: str) -> list[str]:
     """
 
     normalized = (dialect_name or "").lower()
-    candidates = [normalized]
-    if normalized in {"mariadb", "mysql+pymysql", "mysql+aiomysql"}:
-        candidates.append("mysql")
+    candidates = ["postgresql" if normalized in {"postgres", "postgresql"} else normalized]
     candidates.append("generic")
     return [candidate for candidate in candidates if candidate]
 

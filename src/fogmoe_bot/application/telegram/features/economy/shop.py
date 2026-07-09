@@ -1,6 +1,6 @@
 import asyncio
 import random
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.application.economy import process_user
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -86,7 +86,7 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 购买永久记忆上限 +1
         async with lock:
             try:
-                async with mysql_connection.transaction() as connection:
+                async with db_connection.transaction() as connection:
                     account = await process_user.get_user_account(
                         user_id,
                         connection=connection,
@@ -144,7 +144,7 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 执行购买升级权限到1级的操作
         async with lock:
             try:
-                async with mysql_connection.transaction() as connection:
+                async with db_connection.transaction() as connection:
                     account = await process_user.get_user_account(
                         user_id,
                         connection=connection,
@@ -182,7 +182,7 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 执行购买升级权限到2级的操作
         async with lock:
             try:
-                async with mysql_connection.transaction() as connection:
+                async with db_connection.transaction() as connection:
                     account = await process_user.get_user_account(
                         user_id,
                         connection=connection,
@@ -222,7 +222,7 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 执行购买升级权限到3级的操作
         async with lock:
             try:
-                async with mysql_connection.transaction() as connection:
+                async with db_connection.transaction() as connection:
                     account = await process_user.get_user_account(
                         user_id,
                         connection=connection,
@@ -262,7 +262,7 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 购买刮刮乐：扣除10金币，随机获得0～20金币
         async with lock:
             try:
-                async with mysql_connection.transaction() as connection:
+                async with db_connection.transaction() as connection:
                     account = await process_user.get_user_account(
                         user_id,
                         connection=connection,
@@ -400,7 +400,7 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 购买欢乐彩：扣除1金币，根据概率获得奖励
         async with lock:
             try:
-                async with mysql_connection.transaction() as connection:
+                async with db_connection.transaction() as connection:
                     account = await process_user.get_user_account(
                         user_id,
                         connection=connection,

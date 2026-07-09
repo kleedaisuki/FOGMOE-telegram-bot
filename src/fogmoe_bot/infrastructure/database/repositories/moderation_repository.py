@@ -1,4 +1,4 @@
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 
 
 async def fetch_group_keywords(group_id: int, *, connection=None):
@@ -9,7 +9,7 @@ async def fetch_group_keywords(group_id: int, *, connection=None):
     @return `(keyword, response)` 行列表 / Rows of `(keyword, response)`.
     """
 
-    return await mysql_connection.fetch_all(
+    return await db_connection.fetch_all(
         "SELECT keyword, response FROM group_keywords WHERE group_id = %s",
         (group_id,),
         connection=connection,
@@ -25,7 +25,7 @@ async def group_keyword_exists(group_id: int, keyword: str, *, connection=None) 
     @return 存在返回 True / True when the keyword exists.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT keyword FROM group_keywords WHERE group_id = %s AND keyword = %s",
         (group_id, keyword),
         connection=connection,
@@ -41,7 +41,7 @@ async def count_group_keywords(group_id: int, *, connection=None) -> int:
     @return 关键词数量 / Keyword count.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT COUNT(*) FROM group_keywords WHERE group_id = %s",
         (group_id,),
         connection=connection,
@@ -67,10 +67,11 @@ async def upsert_group_keyword(
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO group_keywords (group_id, keyword, response, created_by) "
         "VALUES (%s, %s, %s, %s) "
-        "ON DUPLICATE KEY UPDATE response = VALUES(response), created_by = VALUES(created_by)",
+        "ON CONFLICT (group_id, keyword) DO UPDATE SET "
+        "response = EXCLUDED.response, created_by = EXCLUDED.created_by",
         (group_id, keyword, response, created_by),
         connection=connection,
     )
@@ -85,7 +86,7 @@ async def delete_group_keyword(group_id: int, keyword: str, *, connection=None) 
     @return 删除行数 / Deleted row count.
     """
 
-    return await mysql_connection.execute(
+    return await db_connection.execute(
         "DELETE FROM group_keywords WHERE group_id = %s AND keyword = %s",
         (group_id, keyword),
         connection=connection,
@@ -100,7 +101,7 @@ async def fetch_spam_control(group_id: int, *, connection=None):
     @return `(enabled, block_links, block_mentions)`；不存在时返回 None / Settings row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT enabled, block_links, block_mentions FROM group_spam_control WHERE group_id = %s",
         (group_id,),
         connection=connection,
@@ -127,12 +128,13 @@ async def upsert_spam_enabled(
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO group_spam_control "
         "(group_id, enabled, block_links, block_mentions, enabled_by) "
         "VALUES (%s, %s, %s, %s, %s) "
-        "ON DUPLICATE KEY UPDATE enabled = VALUES(enabled), "
-        "enabled_by = VALUES(enabled_by), updated_at = CURRENT_TIMESTAMP",
+        "ON CONFLICT (group_id) DO UPDATE SET enabled = EXCLUDED.enabled, "
+        "block_links = EXCLUDED.block_links, block_mentions = EXCLUDED.block_mentions, "
+        "enabled_by = EXCLUDED.enabled_by, updated_at = CURRENT_TIMESTAMP",
         (group_id, enabled, block_links, block_mentions, enabled_by),
         connection=connection,
     )
@@ -147,7 +149,7 @@ async def set_spam_link_blocking(group_id: int, enabled: bool, *, connection=Non
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "UPDATE group_spam_control SET block_links = %s, updated_at = CURRENT_TIMESTAMP "
         "WHERE group_id = %s",
         (enabled, group_id),
@@ -164,7 +166,7 @@ async def set_spam_mention_blocking(group_id: int, enabled: bool, *, connection=
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "UPDATE group_spam_control SET block_mentions = %s, updated_at = CURRENT_TIMESTAMP "
         "WHERE group_id = %s",
         (enabled, group_id),
@@ -180,7 +182,7 @@ async def fetch_group_spam_keywords(group_id: int, *, connection=None):
     @return `(keyword, is_regex)` 行列表 / Rows of `(keyword, is_regex)`.
     """
 
-    return await mysql_connection.fetch_all(
+    return await db_connection.fetch_all(
         "SELECT keyword, is_regex FROM group_spam_keywords WHERE group_id = %s",
         (group_id,),
         connection=connection,
@@ -196,7 +198,7 @@ async def group_spam_keyword_exists(group_id: int, keyword: str, *, connection=N
     @return 存在返回 True / True when present.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT id FROM group_spam_keywords WHERE group_id = %s AND keyword = %s",
         (group_id, keyword),
         connection=connection,
@@ -212,7 +214,7 @@ async def count_group_spam_keywords(group_id: int, *, connection=None) -> int:
     @return 自定义垃圾词数量 / Custom spam keyword count.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT COUNT(*) FROM group_spam_keywords WHERE group_id = %s",
         (group_id,),
         connection=connection,
@@ -238,10 +240,11 @@ async def upsert_group_spam_keyword(
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO group_spam_keywords (group_id, keyword, is_regex, created_by) "
         "VALUES (%s, %s, %s, %s) "
-        "ON DUPLICATE KEY UPDATE is_regex = VALUES(is_regex), created_by = VALUES(created_by)",
+        "ON CONFLICT (group_id, keyword) DO UPDATE SET "
+        "is_regex = EXCLUDED.is_regex, created_by = EXCLUDED.created_by",
         (group_id, keyword, is_regex, created_by),
         connection=connection,
     )
@@ -256,7 +259,7 @@ async def delete_group_spam_keyword(group_id: int, keyword: str, *, connection=N
     @return 删除行数 / Deleted row count.
     """
 
-    return await mysql_connection.execute(
+    return await db_connection.execute(
         "DELETE FROM group_spam_keywords WHERE group_id = %s AND keyword = %s",
         (group_id, keyword),
         connection=connection,
@@ -271,7 +274,7 @@ async def verification_group_exists(group_id: int, *, connection=None) -> bool:
     @return 启用返回 True / True when enabled.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT group_id FROM group_verification WHERE group_id = %s",
         (group_id,),
         connection=connection,
@@ -288,9 +291,9 @@ async def enable_group_verification(group_id: int, group_name: str, *, connectio
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO group_verification (group_id, group_name) VALUES (%s, %s) "
-        "ON DUPLICATE KEY UPDATE group_name = VALUES(group_name)",
+        "ON CONFLICT (group_id) DO UPDATE SET group_name = EXCLUDED.group_name",
         (group_id, group_name),
         connection=connection,
     )
@@ -304,7 +307,7 @@ async def disable_group_verification(group_id: int, *, connection=None) -> None:
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "DELETE FROM group_verification WHERE group_id = %s",
         (group_id,),
         connection=connection,
@@ -329,10 +332,11 @@ async def upsert_verification_task(
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO verification_tasks (user_id, group_id, message_id, expire_time) "
         "VALUES (%s, %s, %s, %s) "
-        "ON DUPLICATE KEY UPDATE message_id = VALUES(message_id), expire_time = VALUES(expire_time)",
+        "ON CONFLICT (user_id, group_id) DO UPDATE SET "
+        "message_id = EXCLUDED.message_id, expire_time = EXCLUDED.expire_time",
         (user_id, group_id, message_id, expire_time),
         connection=connection,
     )
@@ -347,7 +351,7 @@ async def delete_verification_task(user_id: int, group_id: int, *, connection=No
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "DELETE FROM verification_tasks WHERE user_id = %s AND group_id = %s",
         (user_id, group_id),
         connection=connection,
@@ -362,7 +366,7 @@ async def fetch_active_verification_tasks(now, *, connection=None):
     @return `(user_id, group_id, message_id, expire_time)` 行列表 / Active task rows.
     """
 
-    return await mysql_connection.fetch_all(
+    return await db_connection.fetch_all(
         "SELECT user_id, group_id, message_id, expire_time FROM verification_tasks WHERE expire_time > %s",
         (now,),
         connection=connection,
@@ -376,45 +380,45 @@ async def fetch_developer_stats(limit: int = 20):
     @return 统计字典 / Statistics dictionary.
     """
 
-    user_row = await mysql_connection.fetch_one("SELECT COUNT(*) as count FROM user", mapping=True)
-    keyword_row = await mysql_connection.fetch_one(
+    user_row = await db_connection.fetch_one("SELECT COUNT(*) as count FROM users", mapping=True)
+    keyword_row = await db_connection.fetch_one(
         "SELECT COUNT(DISTINCT group_id) as count FROM group_keywords",
         mapping=True,
     )
-    verify_row = await mysql_connection.fetch_one(
+    verify_row = await db_connection.fetch_one(
         "SELECT COUNT(*) as count FROM group_verification",
         mapping=True,
     )
-    spam_row = await mysql_connection.fetch_one(
+    spam_row = await db_connection.fetch_one(
         "SELECT COUNT(*) as count FROM group_spam_control WHERE enabled = TRUE",
         mapping=True,
     )
-    chart_row = await mysql_connection.fetch_one(
+    chart_row = await db_connection.fetch_one(
         "SELECT COUNT(DISTINCT group_id) as count FROM group_chart_tokens",
         mapping=True,
     )
-    keyword_groups = await mysql_connection.fetch_all(
+    keyword_groups = await db_connection.fetch_all(
         "SELECT DISTINCT group_id FROM group_keywords LIMIT %s",
         (limit,),
         mapping=True,
     )
-    verify_groups = await mysql_connection.fetch_all(
+    verify_groups = await db_connection.fetch_all(
         "SELECT group_id FROM group_verification LIMIT %s",
         (limit,),
         mapping=True,
     )
-    spam_groups = await mysql_connection.fetch_all(
+    spam_groups = await db_connection.fetch_all(
         "SELECT group_id FROM group_spam_control WHERE enabled = TRUE LIMIT %s",
         (limit,),
         mapping=True,
     )
-    chart_groups = await mysql_connection.fetch_all(
+    chart_groups = await db_connection.fetch_all(
         "SELECT DISTINCT group_id FROM group_chart_tokens LIMIT %s",
         (limit,),
         mapping=True,
     )
-    recent_users = await mysql_connection.fetch_all(
-        "SELECT id, name FROM user ORDER BY id DESC LIMIT 10",
+    recent_users = await db_connection.fetch_all(
+        "SELECT id, name FROM users ORDER BY id DESC LIMIT 10",
         mapping=True,
     )
 

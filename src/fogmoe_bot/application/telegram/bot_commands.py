@@ -14,7 +14,7 @@ from fogmoe_bot.application.telegram.archive_utils import send_permanent_records
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
 from fogmoe_bot.application.economy import process_user, stake_reward_pool
 from fogmoe_bot.infrastructure import config
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import (
     conversation_repository,
     group_repository,
@@ -249,7 +249,7 @@ async def me(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             account = await process_user.register_telegram_user(
                 user_id,
                 user_name,
@@ -438,7 +438,7 @@ async def give_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         fee = _calculate_give_fee(amount)
         total_cost = amount + fee
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             sender_account = await process_user.get_user_account(
                 sender_id,
                 connection=connection,

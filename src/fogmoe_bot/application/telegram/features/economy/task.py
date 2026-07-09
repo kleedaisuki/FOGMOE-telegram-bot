@@ -1,5 +1,5 @@
 import asyncio
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.application.economy import process_user
 from fogmoe_bot.infrastructure.database.repositories import economy_repository
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -92,7 +92,7 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 发放奖励并记录任务完成
     try:
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             await process_user.add_free_coins(
                 user_id,
                 reward_coins,

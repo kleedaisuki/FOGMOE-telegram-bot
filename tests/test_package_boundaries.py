@@ -36,7 +36,7 @@ def test_telegram_handlers_do_not_return_to_presentation_layer():
 def test_presentation_layer_does_not_contain_sql():
     presentation_root = SRC_ROOT / "presentation"
     forbidden_snippets = [
-        "mysql_connection.",
+        "connection.",
         "exec_driver_sql(",
         "SELECT ",
         "INSERT ",
@@ -58,9 +58,9 @@ def test_application_layer_does_not_contain_direct_sql():
         SRC_ROOT / "application",
     ]
     forbidden_snippets = [
-        "mysql_connection.fetch_one",
-        "mysql_connection.fetch_all",
-        "mysql_connection.execute",
+        "db_connection.fetch_one",
+        "db_connection.fetch_all",
+        "db_connection.execute",
         "exec_driver_sql(",
         "SELECT ",
         "INSERT ",
@@ -103,7 +103,8 @@ def test_alembic_versions_are_backend_agnostic_sql_wrappers():
 
     offenders = []
     missing_sql_files = []
-    sql_root = MIGRATIONS_ROOT / "sql" / "mysql"
+    sql_root = MIGRATIONS_ROOT / "sql" / "postgresql"
+    assert not (MIGRATIONS_ROOT / "sql" / "mysql").exists()
     for path in (MIGRATIONS_ROOT / "versions").glob("*.py"):
         text = path.read_text(encoding="utf-8")
         if any(snippet in text for snippet in forbidden_snippets):

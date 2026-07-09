@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,7 @@ async def count_pending_for_user(user_id: int, *, connection=None) -> int:
     @return 待执行任务数量 / Pending schedule count.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT COUNT(*) FROM ai_schedules WHERE user_id = %s AND status = 'pending'",
         (user_id,),
         connection=connection,
@@ -45,7 +45,7 @@ async def count_total_for_user(user_id: int, *, connection=None) -> int:
     @return 任务总数 / Total schedule count.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT COUNT(*) FROM ai_schedules WHERE user_id = %s",
         (user_id,),
         connection=connection,
@@ -61,7 +61,7 @@ async def fetch_oldest_non_pending_id(user_id: int, *, connection=None) -> int |
     @return 任务 ID；不存在时返回 None / Schedule ID, or None when absent.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT id FROM ai_schedules WHERE user_id = %s AND status != 'pending' "
         "ORDER BY created_at ASC, id ASC LIMIT 1",
         (user_id,),
@@ -94,11 +94,11 @@ async def replace_schedule(
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "UPDATE ai_schedules "
         "SET run_at = %s, recurrence_unit = %s, recurrence_interval = %s, "
         "trigger_reason = %s, context = %s, prompt = %s, "
-        "status = 'pending', created_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP(), "
+        "status = 'pending', created_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, "
         "executed_at = NULL, last_run_at = NULL, error = NULL "
         "WHERE id = %s",
         (
@@ -138,10 +138,11 @@ async def insert_schedule(
     @return 新任务 ID；无法读取时返回 None / New schedule ID, or None if it cannot be read.
     """
 
-    result = await connection.exec_driver_sql(
+    row = await db_connection.fetch_one(
         "INSERT INTO ai_schedules "
         "(user_id, run_at, recurrence_unit, recurrence_interval, trigger_reason, context, prompt) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+        "RETURNING id",
         (
             user_id,
             run_at,
@@ -151,12 +152,8 @@ async def insert_schedule(
             context_text,
             instruction_text,
         ),
+        connection=connection,
     )
-    lastrowid = getattr(result, "lastrowid", None)
-    if lastrowid is not None:
-        return int(lastrowid)
-
-    row = await mysql_connection.fetch_one("SELECT LAST_INSERT_ID()", connection=connection)
     return int(row[0]) if row and row[0] is not None else None
 
 
@@ -168,7 +165,7 @@ async def fetch_created_at(schedule_id: int, *, connection=None) -> datetime | N
     @return 创建时间；不存在时返回 None / Creation timestamp, or None when absent.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT created_at FROM ai_schedules WHERE id = %s",
         (schedule_id,),
         connection=connection,
@@ -203,7 +200,7 @@ async def create_or_replace_for_user(
     """
 
     replaced = False
-    async with mysql_connection.transaction() as connection:
+    async with db_connection.transaction() as connection:
         pending_count = await count_pending_for_user(user_id, connection=connection)
         if pending_count >= max_pending:
             return ScheduleCreateResult(None, None, False, "pending_limit")
@@ -253,7 +250,7 @@ async def list_for_user(user_id: int, *, limit: int):
     @return 数据库结果行列表 / Database rows.
     """
 
-    return await mysql_connection.fetch_all(
+    return await db_connection.fetch_all(
         "SELECT id, run_at, recurrence_unit, recurrence_interval, created_at, "
         "executed_at, last_run_at, status, trigger_reason, context, prompt, error "
         "FROM ai_schedules WHERE user_id = %s "
@@ -270,7 +267,7 @@ async def cancel_pending_for_user(schedule_id: int, user_id: int) -> bool:
     @return 取消成功返回 True / True when a row was cancelled.
     """
 
-    rowcount = await mysql_connection.execute(
+    rowcount = await db_connection.execute(
         "UPDATE ai_schedules SET status = 'cancelled' "
         "WHERE id = %s AND user_id = %s AND status = 'pending'",
         (schedule_id, user_id),
@@ -288,20 +285,20 @@ async def mark_status(schedule_id: int, status: str, *, error: str | None = None
     """
 
     if error is not None:
-        await mysql_connection.execute(
+        await db_connection.execute(
             "UPDATE ai_schedules SET status = %s, error = %s WHERE id = %s",
             (status, error, schedule_id),
         )
         return
 
     if status == "executed":
-        await mysql_connection.execute(
-            "UPDATE ai_schedules SET status = %s, executed_at = UTC_TIMESTAMP() WHERE id = %s",
+        await db_connection.execute(
+            "UPDATE ai_schedules SET status = %s, executed_at = CURRENT_TIMESTAMP WHERE id = %s",
             (status, schedule_id),
         )
         return
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "UPDATE ai_schedules SET status = %s WHERE id = %s",
         (status, schedule_id),
     )
@@ -316,10 +313,10 @@ async def reschedule_recurring(schedule_id: int, *, last_run_at: datetime, next_
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "UPDATE ai_schedules "
         "SET status = 'pending', run_at = %s, last_run_at = %s, "
-        "executed_at = UTC_TIMESTAMP(), error = NULL "
+        "executed_at = CURRENT_TIMESTAMP, error = NULL "
         "WHERE id = %s",
         (next_run_at, last_run_at, schedule_id),
     )
@@ -332,14 +329,14 @@ async def claim_due(limit: int):
     @return 已领取的任务行 / Claimed schedule rows.
     """
 
-    async with mysql_connection.transaction() as connection:
-        rows = await mysql_connection.fetch_all(
+    async with db_connection.transaction() as connection:
+        rows = await db_connection.fetch_all(
             "SELECT id, user_id, run_at, created_at, trigger_reason, context, prompt, "
             "recurrence_unit, recurrence_interval "
             "FROM ai_schedules "
-            "WHERE status = 'pending' AND run_at <= UTC_TIMESTAMP() "
+            "WHERE status = 'pending' AND run_at <= CURRENT_TIMESTAMP "
             "ORDER BY run_at ASC, id ASC "
-            "LIMIT %s FOR UPDATE",
+            "LIMIT %s FOR UPDATE SKIP LOCKED",
             (limit,),
             connection=connection,
         )
@@ -348,9 +345,10 @@ async def claim_due(limit: int):
 
         schedule_ids = [row[0] for row in rows]
         placeholders = ", ".join(["%s"] * len(schedule_ids))
-        await connection.exec_driver_sql(
+        await db_connection.execute(
             f"UPDATE ai_schedules SET status = 'executing' WHERE id IN ({placeholders})",
             tuple(schedule_ids),
+            connection=connection,
         )
 
     return rows

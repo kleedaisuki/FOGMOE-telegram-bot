@@ -5,7 +5,7 @@ from typing import Optional
 
 from telegram.ext import ContextTypes
 
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import ai_schedule_repository, conversation_repository
 from fogmoe_bot.application.economy import process_user
 from fogmoe_bot.application.telegram.archive_utils import send_permanent_records_archive
@@ -136,7 +136,7 @@ async def _handle_overflow_summary(conversation_id: int, level: Optional[str]) -
         return
     summary_text = await summary.generate_summary_immediately(conversation_id)
     if summary_text:
-        await mysql_connection.async_update_latest_history_state_summary(
+        await db_connection.async_update_latest_history_state_summary(
             conversation_id,
             summary_text,
         )
@@ -174,7 +174,7 @@ async def _persist_tool_logs(
     tool_record_entries = tool_logs_to_record_entries(tool_logs)
 
     if tool_record_entries:
-        snapshot_created, warning_level, archived_records = await mysql_connection.async_insert_chat_records(
+        snapshot_created, warning_level, archived_records = await db_connection.async_insert_chat_records(
             conversation_id,
             tool_record_entries,
         )
@@ -254,7 +254,7 @@ async def _process_schedule_task_locked(
             instruction=instruction or "",
         )
 
-        snapshot_created, warning_level, archived_records = await mysql_connection.async_insert_chat_record(
+        snapshot_created, warning_level, archived_records = await db_connection.async_insert_chat_record(
             user_id,
             "user",
             scheduled_message,
@@ -271,7 +271,7 @@ async def _process_schedule_task_locked(
         if snapshot_created and warning_level != "overflow":
             summary.schedule_summary_generation(user_id)
 
-        chat_history = await mysql_connection.async_get_chat_history(user_id)
+        chat_history = await db_connection.async_get_chat_history(user_id)
         tool_context = {
             "is_group": False,
             "group_id": None,
@@ -314,7 +314,7 @@ async def _process_schedule_task_locked(
             await _persist_tool_logs(user_id, tool_logs, context, user_id)
 
         if assistant_message.strip():
-            snapshot_created, warning_level, archived_records = await mysql_connection.async_insert_chat_record(
+            snapshot_created, warning_level, archived_records = await db_connection.async_insert_chat_record(
                 user_id,
                 "assistant",
                 assistant_message,

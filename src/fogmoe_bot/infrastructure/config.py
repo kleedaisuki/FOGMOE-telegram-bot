@@ -106,15 +106,18 @@ class AppSettings(BaseSettings):
     ADMIN_USER_ID: int = 1002288404
     NEW_USER_BONUS_COINS: int = 10
 
-    MYSQL_HOST: str | None = None
-    MYSQL_USER: str | None = None
-    MYSQL_PASSWORD: str | None = None
-    MYSQL_DATABASE: str | None = None
-    MYSQL_PORT: int | None = None
-    MYSQL_POOL_SIZE: int = 5
-    MYSQL_MAX_OVERFLOW: int = 10
-    MYSQL_POOL_RECYCLE: int = 1800
-    MYSQL_CONNECT_TIMEOUT: int = 10
+    POSTGRES_HOST: str | None = None
+    POSTGRES_USER: str | None = None
+    POSTGRES_PASSWORD: str | None = None
+    POSTGRES_DATABASE: str | None = None
+    POSTGRES_PORT: int | None = None
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 10
+    DB_POOL_RECYCLE: int = 1800
+    DB_CONNECT_TIMEOUT: int = 10
+    DB_SEARCH_PATH: str = "identity,conversation,assistant,economy,moderation,crypto,game,public"
+    DB_MIGRATION_SCHEMA: str = "infra"
+    DB_AUTO_MIGRATE: bool = True
     DATABASE_URL: str | None = None
 
     LOG_LEVEL: str = "INFO"
@@ -133,7 +136,7 @@ class AppSettings(BaseSettings):
             "on",
         }
 
-    @field_validator("MYSQL_PORT", mode="before")
+    @field_validator("POSTGRES_PORT", mode="before")
     @classmethod
     def _parse_optional_port(cls, value: object) -> object:
         if value is None:
@@ -141,6 +144,20 @@ class AppSettings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator("DB_AUTO_MIGRATE", mode="before")
+    @classmethod
+    def _parse_db_auto_migrate(cls, value: object) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
 
 SETTINGS = AppSettings()
@@ -237,33 +254,36 @@ FISH_AUDIO_REFERENCE_ID = SETTINGS.FISH_AUDIO_REFERENCE_ID
 ADMIN_USER_ID = SETTINGS.ADMIN_USER_ID
 NEW_USER_BONUS_COINS = SETTINGS.NEW_USER_BONUS_COINS
 
-MYSQL_CONFIG = {
-    "host": SETTINGS.MYSQL_HOST,
-    "user": SETTINGS.MYSQL_USER,
-    "password": SETTINGS.MYSQL_PASSWORD,
-    "database": SETTINGS.MYSQL_DATABASE,
+POSTGRES_CONFIG = {
+    "host": SETTINGS.POSTGRES_HOST,
+    "user": SETTINGS.POSTGRES_USER,
+    "password": SETTINGS.POSTGRES_PASSWORD,
+    "database": SETTINGS.POSTGRES_DATABASE,
 }
 
-MYSQL_POOL_SIZE = SETTINGS.MYSQL_POOL_SIZE
-MYSQL_MAX_OVERFLOW = SETTINGS.MYSQL_MAX_OVERFLOW
-MYSQL_POOL_RECYCLE = SETTINGS.MYSQL_POOL_RECYCLE
-MYSQL_CONNECT_TIMEOUT = SETTINGS.MYSQL_CONNECT_TIMEOUT
+DB_POOL_SIZE = SETTINGS.DB_POOL_SIZE
+DB_MAX_OVERFLOW = SETTINGS.DB_MAX_OVERFLOW
+DB_POOL_RECYCLE = SETTINGS.DB_POOL_RECYCLE
+DB_CONNECT_TIMEOUT = SETTINGS.DB_CONNECT_TIMEOUT
+DB_SEARCH_PATH = SETTINGS.DB_SEARCH_PATH
+DB_MIGRATION_SCHEMA = SETTINGS.DB_MIGRATION_SCHEMA
+DB_AUTO_MIGRATE = SETTINGS.DB_AUTO_MIGRATE
 
-def _build_mysql_dsn() -> str:
-    user = MYSQL_CONFIG.get("user") or ""
-    password = MYSQL_CONFIG.get("password") or ""
-    host = MYSQL_CONFIG.get("host") or "localhost"
-    database = MYSQL_CONFIG.get("database") or ""
-    port = SETTINGS.MYSQL_PORT
+def _build_postgres_dsn() -> str:
+    user = POSTGRES_CONFIG.get("user") or "postgres"
+    password = POSTGRES_CONFIG.get("password") or ""
+    host = POSTGRES_CONFIG.get("host") or "localhost"
+    database = POSTGRES_CONFIG.get("database") or "fogmoe"
+    port = SETTINGS.POSTGRES_PORT or 5432
 
     auth = user
     if password:
         auth = f"{user}:{quote_plus(password)}"
 
     location = f"{host}:{port}" if port else host
-    return f"mysql+asyncmy://{auth}@{location}/{database}?charset=utf8mb4"
+    return f"postgresql+asyncpg://{auth}@{location}/{database}"
 
-SQLALCHEMY_DATABASE_URI = SETTINGS.DATABASE_URL or _build_mysql_dsn()
+SQLALCHEMY_DATABASE_URI = SETTINGS.DATABASE_URL or _build_postgres_dsn()
 
 # 日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)
 LOG_LEVEL = SETTINGS.LOG_LEVEL

@@ -1,6 +1,6 @@
 from decimal import Decimal, ROUND_DOWN
 
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import economy_repository
 
 POOL_ROW_ID = 1
@@ -47,7 +47,7 @@ async def add_to_pool(amount, *, connection=None) -> Decimal:
     if amount <= 0:
         return Decimal("0")
     if connection is None:
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             return await add_to_pool(amount, connection=connection)
     await _ensure_pool_row(connection=connection)
     await economy_repository.add_stake_reward_pool_balance(
@@ -63,7 +63,7 @@ async def subtract_from_pool(amount, *, connection=None) -> Decimal:
     if amount <= 0:
         return Decimal("0")
     if connection is None:
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             return await subtract_from_pool(amount, connection=connection)
     await _ensure_pool_row(connection=connection)
     await economy_repository.subtract_stake_reward_pool_balance(

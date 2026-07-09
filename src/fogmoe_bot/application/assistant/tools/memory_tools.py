@@ -4,7 +4,7 @@ from typing import Dict, Optional
 
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.application.chat import group_chat_history
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import (
     conversation_repository,
     user_repository,
@@ -86,11 +86,11 @@ def fetch_permanent_summaries_tool(
     window_size = max(1, min(window_size, 5))
     offset = start_idx - 1
 
-    total_rows = mysql_connection.run_sync(
+    total_rows = db_connection.run_sync(
         conversation_repository.count_summarised_permanent_records(user_id)
     )
 
-    rows = mysql_connection.run_sync(
+    rows = db_connection.run_sync(
         conversation_repository.fetch_summarised_permanent_records(
             user_id,
             limit=window_size,
@@ -152,7 +152,7 @@ def search_permanent_records_tool(
         warning = "Invalid regex pattern, treated as literal string"
         matcher = re.compile(re.escape(pattern), re.IGNORECASE | re.DOTALL)
 
-    total_rows = mysql_connection.run_sync(
+    total_rows = db_connection.run_sync(
         conversation_repository.count_permanent_records(user_id)
     )
     if total_rows <= 0:
@@ -167,9 +167,9 @@ def search_permanent_records_tool(
             response["warning"] = warning
         return response
 
-    max_records = mysql_connection.PERMANENT_RECORDS_KEEP
+    max_records = db_connection.PERMANENT_RECORDS_KEEP
     try:
-        account = mysql_connection.run_sync(user_repository.fetch_user_account(user_id))
+        account = db_connection.run_sync(user_repository.fetch_user_account(user_id))
     except Exception:
         account = None
     if account and account.permanent_records_limit is not None:
@@ -181,7 +181,7 @@ def search_permanent_records_tool(
     batch_size = 50
 
     def _fetch_rows(offset: int, size: int) -> list[tuple]:
-        return mysql_connection.run_sync(
+        return db_connection.run_sync(
             conversation_repository.fetch_permanent_records_batch(
                 user_id,
                 newest_first=not oldest_first_value,
@@ -322,9 +322,9 @@ def user_diary_tool(
     if page_value < 1 or page_value > MAX_USER_DIARY_PAGES:
         return {"user_id": user_id, "error": f"Page number out of range (max={MAX_USER_DIARY_PAGES})"}
 
-    max_page = mysql_connection.run_sync(conversation_repository.fetch_max_diary_page(user_id))
+    max_page = db_connection.run_sync(conversation_repository.fetch_max_diary_page(user_id))
 
-    row = mysql_connection.run_sync(
+    row = db_connection.run_sync(
         conversation_repository.fetch_diary_page(user_id, page_value)
     )
 
@@ -477,7 +477,7 @@ def user_diary_tool(
         merged_content = merged_content[-MAX_USER_DIARY_PAGE_CHARS:]
         truncated = True
 
-    mysql_connection.run_sync(
+    db_connection.run_sync(
         conversation_repository.upsert_diary_page(user_id, page_value, merged_content)
     )
 

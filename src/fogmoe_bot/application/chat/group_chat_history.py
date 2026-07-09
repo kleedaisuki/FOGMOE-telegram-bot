@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy.exc import OperationalError
 
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import conversation_repository
 
 _bot_user_id: Optional[int] = None
@@ -93,7 +93,7 @@ async def _log_group_message(record: Tuple[int, int, int, str, str, datetime]) -
         created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)
 
     try:
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             await conversation_repository.insert_group_message(
                 group_id,
                 message_id,
@@ -129,7 +129,7 @@ def _is_lock_error(exc: OperationalError) -> bool:
 async def _cleanup_group_history(group_id: int, retries: int = 3) -> None:
     for attempt in range(retries):
         try:
-            async with mysql_connection.transaction() as connection:
+            async with db_connection.transaction() as connection:
                 await conversation_repository.prune_group_history(
                     group_id,
                     connection=connection,
@@ -149,7 +149,7 @@ def get_group_context(
 ) -> List[Dict[str, object]]:
     if not group_id:
         return []
-    return mysql_connection.run_sync(
+    return db_connection.run_sync(
         async_get_group_context(group_id, around_message_id, window_size)
     )
 
@@ -169,7 +169,7 @@ async def _get_group_context(
     around_message_id: Optional[int],
     window_size: int,
 ) -> List[Dict[str, object]]:
-    async with mysql_connection.connect() as connection:
+    async with db_connection.connect() as connection:
         try:
             records = await conversation_repository.fetch_group_context_rows(
                 group_id,

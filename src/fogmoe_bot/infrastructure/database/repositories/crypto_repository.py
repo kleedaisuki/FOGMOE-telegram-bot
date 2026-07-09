@@ -1,4 +1,4 @@
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 
 
 async def upsert_group_chart_token(
@@ -19,9 +19,11 @@ async def upsert_group_chart_token(
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO group_chart_tokens (group_id, chain, ca, set_by) VALUES (%s, %s, %s, %s) "
-        "ON DUPLICATE KEY UPDATE chain = VALUES(chain), ca = VALUES(ca), set_by = VALUES(set_by)",
+        "ON CONFLICT (group_id) DO UPDATE SET "
+        "chain = EXCLUDED.chain, ca = EXCLUDED.ca, set_by = EXCLUDED.set_by, "
+        "updated_at = CURRENT_TIMESTAMP",
         (group_id, chain, ca, set_by),
         connection=connection,
     )
@@ -35,7 +37,7 @@ async def fetch_group_chart_token(group_id: int, *, connection=None):
     @return `(chain, ca)` 行；不存在时返回 None / `(chain, ca)` row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT chain, ca FROM group_chart_tokens WHERE group_id = %s",
         (group_id,),
         connection=connection,
@@ -50,7 +52,7 @@ async def delete_group_chart_token(group_id: int, *, connection=None) -> int:
     @return 删除行数 / Deleted row count.
     """
 
-    return await mysql_connection.execute(
+    return await db_connection.execute(
         "DELETE FROM group_chart_tokens WHERE group_id = %s",
         (group_id,),
         connection=connection,
@@ -65,7 +67,7 @@ async def count_pending_swap_requests(user_id: int, *, connection=None) -> int:
     @return 待处理请求数量 / Pending request count.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT COUNT(*) FROM token_swap_requests WHERE user_id = %s AND status = 'pending'",
         (user_id,),
         connection=connection,
@@ -81,7 +83,7 @@ async def fetch_latest_pending_swap_request(user_id: int, *, connection=None):
     @return `(amount, wallet_address, request_time)` 行；不存在时返回 None / Pending request row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT amount, wallet_address, request_time "
         "FROM token_swap_requests "
         "WHERE user_id = %s AND status = 'pending' "
@@ -109,7 +111,7 @@ async def insert_swap_request(
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO token_swap_requests (user_id, username, wallet_address, amount) "
         "VALUES (%s, %s, %s, %s)",
         (user_id, username, wallet_address, amount),
@@ -126,7 +128,7 @@ async def fetch_active_btc_prediction(user_id: int, now, *, connection=None):
     @return 活跃预测行；不存在时返回 None / Active prediction row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT predict_type, amount, start_price, start_time, end_time "
         "FROM user_btc_predictions "
         "WHERE user_id = %s AND is_completed = FALSE AND end_time > %s",
@@ -143,7 +145,7 @@ async def fetch_uncompleted_btc_prediction(user_id: int, *, connection=None):
     @return 未完成预测行；不存在时返回 None / Uncompleted prediction row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT user_id, predict_type, amount, start_price, end_time "
         "FROM user_btc_predictions WHERE user_id = %s AND is_completed = FALSE",
         (user_id,),
@@ -159,7 +161,7 @@ async def fetch_uncompleted_btc_prediction_result(user_id: int, *, connection=No
     @return `(predict_type, amount, start_price)` 行；不存在时返回 None / Result input row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT predict_type, amount, start_price FROM user_btc_predictions "
         "WHERE user_id = %s AND is_completed = FALSE",
         (user_id,),
@@ -175,7 +177,7 @@ async def complete_btc_predictions(user_id: int, *, connection=None) -> None:
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "UPDATE user_btc_predictions SET is_completed = TRUE WHERE user_id = %s",
         (user_id,),
         connection=connection,
@@ -190,7 +192,7 @@ async def complete_active_btc_prediction(user_id: int, *, connection=None) -> No
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "UPDATE user_btc_predictions SET is_completed = TRUE "
         "WHERE user_id = %s AND is_completed = FALSE",
         (user_id,),
@@ -220,12 +222,12 @@ async def replace_btc_prediction(
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "DELETE FROM user_btc_predictions WHERE user_id = %s",
         (user_id,),
         connection=connection,
     )
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO user_btc_predictions "
         "(user_id, predict_type, amount, start_price, start_time, end_time) "
         "VALUES (%s, %s, %s, %s, %s, %s)",

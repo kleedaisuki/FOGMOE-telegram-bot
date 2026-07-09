@@ -1,6 +1,6 @@
 import asyncio
 import random
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.application.economy import process_user
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -76,7 +76,7 @@ async def gamble_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 从数据库中检测用户硬币余额是否充足，并扣除押注硬币
     try:
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             account = await process_user.get_user_account(
                 user_id,
                 connection=connection,

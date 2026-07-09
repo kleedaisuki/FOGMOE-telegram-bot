@@ -1,4 +1,4 @@
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 
 
 async def fetch_latest_gift_for_recipient(recipient_id: int, *, connection=None):
@@ -9,7 +9,7 @@ async def fetch_latest_gift_for_recipient(recipient_id: int, *, connection=None)
     @return `(amount, created_at)` 行；不存在时返回 None / `(amount, created_at)` row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT amount, created_at FROM kindness_gifts "
         "WHERE recipient_id = %s ORDER BY created_at DESC LIMIT 1",
         (recipient_id,),
@@ -26,7 +26,7 @@ async def insert_gift(recipient_id: int, amount: int, *, connection=None) -> Non
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO kindness_gifts (recipient_id, amount, created_at) VALUES (%s, %s, NOW())",
         (recipient_id, amount),
         connection=connection,

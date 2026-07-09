@@ -56,7 +56,7 @@
 ### 环境要求
 
 - **Python**: 3.10 或更高版本
-- **MySQL**: 8.0 或更高版本
+- **PostgreSQL**: 15 或更高版本
 - **操作系统**: Linux / macOS / Windows
 
 ### 安装依赖
@@ -93,15 +93,17 @@ AI_CLASSIFIER_PROVIDER=openai
 ### 数据库设置
 
 ```bash
-# 登录 MySQL
-mysql -u root -p
+# 登录 PostgreSQL
+psql -U postgres
 
 # 创建数据库
-CREATE DATABASE fogmoe_telegram_bot_db CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE fogmoe;
 
 # 运行迁移（确保 .env 中已配置数据库连接信息）
 alembic upgrade head
 ```
+
+机器人启动时默认也会自动执行 `alembic upgrade head`；需要手动管理迁移时，可设置 `DB_AUTO_MIGRATE=false`。
 
 ### 启动机器人
 
@@ -160,11 +162,11 @@ venv\Scripts\activate
 可参考 [@FogMoeBot](https://t.me/FogMoeBot) 或配置文件中的说明进行使用。
 
 
-## 🐳 Docker 部署（仅 Python，外部 MySQL）
+## 🐳 Docker 部署（仅 Python，外部 PostgreSQL）
 
-无需在容器内运行 MySQL，只容器化机器人。
+无需在容器内运行 PostgreSQL，只容器化机器人。
 
-1. 复制 `.env.example` 为 `.env`，填好 Telegram/AI/MySQL 配置；`MYSQL_HOST` 设为外部数据库地址（宿主机 MySQL 可用 `host.docker.internal` 或宿主机 IP）。  
+1. 复制 `.env.example` 为 `.env`，填好 Telegram/AI/PostgreSQL 配置；`POSTGRES_HOST` 设为外部数据库地址（宿主机 PostgreSQL 可用 `host.docker.internal` 或宿主机 IP）。  
 2. 构建镜像：
    ```bash
    docker compose build bot
@@ -186,7 +188,7 @@ venv\Scripts\activate
 
    如果服务器上的 Docker 需要 root 权限，把 `docker` 改成 `sudo docker` 即可。
 
-> 默认镜像基于 `python:3.11-slim`，入口命令为 `python -u -m fogmoe_bot`，仅依赖外部 MySQL。
+> 默认镜像基于 `python:3.11-slim`，入口命令为 `python -u -m fogmoe_bot`，仅依赖外部 PostgreSQL。
 
 
 ### 使用的主要技术
@@ -197,7 +199,7 @@ venv\Scripts\activate
 - [Google Gemini](https://ai.google.dev/) - AI 聊天模型
 - [Azure OpenAI](https://azure.microsoft.com/en-us/products/ai-services/openai-service) - AI 服务
 - [智谱 AI](https://open.bigmodel.cn/) - 中文 AI 模型
-- [MySQL](https://www.mysql.com/) - 数据库
+- [PostgreSQL](https://www.postgresql.org/) - 数据库
 
 ---
 

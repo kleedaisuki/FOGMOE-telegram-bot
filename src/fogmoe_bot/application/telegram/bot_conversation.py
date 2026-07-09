@@ -15,7 +15,7 @@ from fogmoe_bot.application.chat import group_chat_history
 from fogmoe_bot.application.economy import process_user, stake_reward_pool
 from fogmoe_bot.domain.conversation.prompt_utils import format_metadata_attrs, format_user_state_prompt, xml_escape
 from fogmoe_bot.infrastructure import config
-from fogmoe_bot.infrastructure.database import db, mysql_connection
+from fogmoe_bot.infrastructure.database import db, connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import conversation_repository
 from fogmoe_bot.infrastructure.telegram.telegram_utils import (
     describe_forward_for_context,
@@ -545,7 +545,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
             return
         summary_text = await summary.generate_summary_immediately(conversation_id)
         if summary_text:
-            await mysql_connection.async_update_latest_history_state_summary(
+            await db_connection.async_update_latest_history_state_summary(
                 conversation_id,
                 summary_text,
             )
@@ -593,7 +593,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
     if not message_jobs:
         return
 
-    async with mysql_connection.transaction() as connection:
+    async with db_connection.transaction() as connection:
         account = await process_user.get_user_account(
             user_id,
             connection=connection,
@@ -788,7 +788,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
         return
 
     # 异步插入用户消息
-    user_snapshot_created, user_storage_warning, user_archived_records = await mysql_connection.async_insert_chat_records(
+    user_snapshot_created, user_storage_warning, user_archived_records = await db_connection.async_insert_chat_records(
         conversation_id,
         user_record_entries,
         system_prompt_extra=user_state_prompt,
@@ -807,7 +807,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
         summary.schedule_summary_generation(conversation_id)
 
     # 立即获取最新历史记录，以便AI能看到刚刚插入的消息
-    chat_history = await mysql_connection.async_get_chat_history(conversation_id)
+    chat_history = await db_connection.async_get_chat_history(conversation_id)
 
     chat_history_for_ai = _replace_user_messages_for_ai(
         chat_history,
@@ -861,7 +861,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
     tool_record_entries = tool_logs_to_record_entries(tool_logs)
 
     if tool_record_entries:
-        tool_snapshot_created, tool_storage_warning, tool_archived_records = await mysql_connection.async_insert_chat_records(
+        tool_snapshot_created, tool_storage_warning, tool_archived_records = await db_connection.async_insert_chat_records(
             conversation_id,
             tool_record_entries,
         )
@@ -884,7 +884,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
             assistant_snapshot_created,
             assistant_storage_warning,
             assistant_archived_records,
-        ) = await mysql_connection.async_insert_chat_record(
+        ) = await db_connection.async_insert_chat_record(
             conversation_id,
             "assistant",
             assistant_message,

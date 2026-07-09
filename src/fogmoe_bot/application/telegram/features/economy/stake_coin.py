@@ -5,7 +5,7 @@ from decimal import Decimal
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import economy_repository
 from fogmoe_bot.application.economy import process_user
 from fogmoe_bot.application.economy import stake_reward_pool
@@ -202,7 +202,7 @@ async def stake_coins(update: Update, context: ContextTypes.DEFAULT_TYPE, amount
             return
 
         try:
-            async with mysql_connection.transaction() as connection:
+            async with db_connection.transaction() as connection:
                 existing_stake = await get_user_stake(user_id, connection=connection)
 
                 if existing_stake:
@@ -266,7 +266,7 @@ async def stake_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def collect_reward(query, user_id):
     async with lock:
         try:
-            async with mysql_connection.transaction() as connection:
+            async with db_connection.transaction() as connection:
                 user_stake = await get_user_stake(user_id, connection=connection)
                 if not user_stake:
                     await query.answer("您没有质押任何金币。", show_alert=True)
@@ -344,7 +344,7 @@ async def collect_reward(query, user_id):
 async def withdraw_stake(query, user_id):
     async with lock:
         try:
-            async with mysql_connection.transaction() as connection:
+            async with db_connection.transaction() as connection:
                 user_stake = await get_user_stake(user_id, connection=connection)
                 if not user_stake:
                     await query.answer("您没有质押任何金币。", show_alert=True)

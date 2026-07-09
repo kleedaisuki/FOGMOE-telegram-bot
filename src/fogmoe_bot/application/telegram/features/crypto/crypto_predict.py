@@ -1,5 +1,5 @@
 import asyncio
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.application.economy import process_user
 from fogmoe_bot.infrastructure.database.repositories import crypto_repository, user_repository
 import logging
@@ -398,7 +398,7 @@ async def get_user_active_prediction(user_id):
 async def create_prediction(user_id, predict_type, amount, start_price):
     """创建新的预测记录"""
     try:
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             existing_prediction = await crypto_repository.fetch_uncompleted_btc_prediction(
                 user_id,
                 connection=connection,
@@ -459,7 +459,7 @@ async def create_prediction(user_id, predict_type, amount, start_price):
 async def check_prediction_result(user_id):
     """检查预测结果并更新用户金币"""
     try:
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             result = await crypto_repository.fetch_uncompleted_btc_prediction_result(
                 user_id,
                 connection=connection,

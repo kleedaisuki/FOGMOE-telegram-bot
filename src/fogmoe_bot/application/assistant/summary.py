@@ -6,7 +6,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Tuple
 
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import conversation_repository
 from fogmoe_bot.domain.conversation.token_estimator import estimate_tokens
 from .task_runner import run_ai_task
@@ -59,8 +59,8 @@ def _process_summary_for_user(user_id: int) -> None:
         summary_text = _generate_and_store_summary(user_id)
         if summary_text is None:
             return
-        mysql_connection.run_sync(
-            mysql_connection.async_update_latest_history_state_summary(
+        db_connection.run_sync(
+            db_connection.async_update_latest_history_state_summary(
                 user_id,
                 summary_text,
             )
@@ -70,7 +70,7 @@ def _process_summary_for_user(user_id: int) -> None:
 
 
 def _fetch_pending_snapshot(user_id: int) -> Optional[Tuple[int, str]]:
-    return mysql_connection.run_sync(
+    return db_connection.run_sync(
         conversation_repository.fetch_pending_permanent_snapshot(user_id)
     )
 
@@ -258,6 +258,6 @@ def _generate_summary(user_id: int, snapshot_text: str) -> Optional[str]:
 
 
 def _store_summary(record_id: int, summary_text: str) -> None:
-    mysql_connection.run_sync(
+    db_connection.run_sync(
         conversation_repository.update_permanent_summary(record_id, summary_text)
     )

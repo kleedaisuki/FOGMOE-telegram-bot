@@ -87,7 +87,7 @@ def test_spend_user_coins_does_not_write_when_balance_is_insufficient(monkeypatc
 def test_shop_handler_keeps_sql_out_of_telegram_callback():
     source = Path(shop.__file__).read_text(encoding="utf-8")
 
-    assert "mysql_connection.fetch_one" not in source
-    assert "mysql_connection.fetch_all" not in source
-    assert "mysql_connection.execute" not in source
+    assert "db_connection.fetch_one" not in source
+    assert "db_connection.fetch_all" not in source
+    assert "db_connection.execute" not in source
     assert "exec_driver_sql" not in source

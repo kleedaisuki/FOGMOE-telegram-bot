@@ -8,7 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes
 )
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.application.economy import process_user
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
 
@@ -50,7 +50,7 @@ def get_user_lock(user_id: int) -> asyncio.Lock:
 # 安全更新用户金币
 async def update_user_coins_safely(user_id: int, amount: int) -> bool:
     try:
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             if not await process_user.get_user_account(user_id, connection=connection):
                 logger.error(f"更新用户金币失败: 用户ID {user_id} 不存在")
                 return False

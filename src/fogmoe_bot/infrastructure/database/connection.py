@@ -220,7 +220,7 @@ async def _get_user_permanent_records_limit(
     connection,
 ) -> int:
     row = await fetch_one(
-        "SELECT permanent_records_limit FROM user WHERE id = %s",
+        "SELECT permanent_records_limit FROM users WHERE id = %s",
         (user_id,),
         connection=connection,
     )
@@ -267,9 +267,9 @@ async def execute(
 ) -> int:
     if connection is None:
         async with transaction() as connection:
-            result: Result = await connection.exec_driver_sql(sql, params)
+            result: Result = await db.exec_sql(sql, params, connection=connection)
             return result.rowcount
-    result: Result = await connection.exec_driver_sql(sql, params)
+    result: Result = await db.exec_sql(sql, params, connection=connection)
     return result.rowcount
 
 
@@ -325,9 +325,10 @@ async def prune_permanent_records(
         )
 
     placeholders = ", ".join(["%s"] * len(record_ids))
-    await connection.exec_driver_sql(
+    await db.exec_sql(
         f"DELETE FROM permanent_chat_records WHERE user_id = %s AND id IN ({placeholders})",
         (user_id, *record_ids),
+        connection=connection,
     )
 
     records.reverse()
@@ -525,9 +526,10 @@ async def insert_chat_records(
                 if idx not in kept_set
             ]
             snapshot_value = json.dumps(archived_messages, ensure_ascii=False)
-            await connection.exec_driver_sql(
+            await db.exec_sql(
                 "INSERT INTO permanent_chat_records (user_id, conversation_snapshot) VALUES (%s, %s)",
                 (conversation_id, snapshot_value),
+                connection=connection,
             )
             archived_records = await prune_permanent_records(
                 conversation_id,
@@ -544,27 +546,31 @@ async def insert_chat_records(
 
         if row:
             if overflow:
-                await connection.exec_driver_sql(
+                await db.exec_sql(
                     "UPDATE chat_records SET messages = %s, last_rotated_at = CURRENT_TIMESTAMP "
                     "WHERE conversation_id = %s",
                     (json.dumps(messages, ensure_ascii=False), conversation_id),
+                    connection=connection,
                 )
             else:
-                await connection.exec_driver_sql(
+                await db.exec_sql(
                     "UPDATE chat_records SET messages = %s WHERE conversation_id = %s",
                     (json.dumps(messages, ensure_ascii=False), conversation_id),
+                    connection=connection,
                 )
         else:
             if overflow:
-                await connection.exec_driver_sql(
+                await db.exec_sql(
                     "INSERT INTO chat_records (conversation_id, messages, last_rotated_at) "
                     "VALUES (%s, %s, CURRENT_TIMESTAMP)",
                     (conversation_id, json.dumps(messages, ensure_ascii=False)),
+                    connection=connection,
                 )
             else:
-                await connection.exec_driver_sql(
+                await db.exec_sql(
                     "INSERT INTO chat_records (conversation_id, messages) VALUES (%s, %s)",
                     (conversation_id, json.dumps(messages, ensure_ascii=False)),
+                    connection=connection,
                 )
 
     return snapshot_created, warning_level, archived_records
@@ -698,7 +704,7 @@ async def async_update_latest_history_state_summary(
 
 
 async def check_user_exists(user_id: int) -> bool:
-    row = await fetch_one("SELECT id FROM user WHERE id = %s", (user_id,))
+    row = await fetch_one("SELECT id FROM users WHERE id = %s", (user_id,))
     return row is not None
 
 

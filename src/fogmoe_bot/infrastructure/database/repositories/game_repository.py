@@ -1,4 +1,4 @@
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 
 RPG_CHARACTER_UPDATE_FIELDS = {
     "level",
@@ -28,7 +28,7 @@ async def fetch_user_omikuji(user_id: int, fortune_date, *, connection=None):
     @return `(fortune,)` 行；不存在时返回 None / Fortune row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT fortune FROM user_omikuji WHERE user_id = %s AND fortune_date = %s",
         (user_id, fortune_date),
         connection=connection,
@@ -45,9 +45,9 @@ async def upsert_user_omikuji(user_id: int, fortune_date, fortune: str, *, conne
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO user_omikuji (user_id, fortune_date, fortune) VALUES (%s, %s, %s) "
-        "ON DUPLICATE KEY UPDATE fortune = VALUES(fortune)",
+        "ON CONFLICT (user_id, fortune_date) DO UPDATE SET fortune = EXCLUDED.fortune",
         (user_id, fortune_date, fortune),
         connection=connection,
     )
@@ -61,7 +61,7 @@ async def fetch_rpg_character(user_id: int, *, connection=None):
     @return 映射行；不存在时返回 None / Mapping row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT * FROM rpg_characters WHERE user_id = %s",
         (user_id,),
         mapping=True,
@@ -77,7 +77,7 @@ async def insert_rpg_character(user_id: int, *, connection=None) -> None:
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO rpg_characters "
         "(user_id, level, hp, max_hp, atk, matk, def, experience, allow_battle) "
         "VALUES (%s, 1, 10, 10, 2, 0, 1, 0, TRUE)",
@@ -105,7 +105,7 @@ async def update_rpg_character_stats(user_id: int, updates: dict, *, connection=
     set_clause = ", ".join(f"{key} = %s" for key in updates)
     values = [updates[key] for key in updates]
     values.append(user_id)
-    return await mysql_connection.execute(
+    return await db_connection.execute(
         f"UPDATE rpg_characters SET {set_clause} WHERE user_id = %s",
         tuple(values),
         connection=connection,
@@ -120,7 +120,7 @@ async def fetch_player_inventory(user_id: int, *, connection=None):
     @return 映射行列表 / Mapping rows.
     """
 
-    return await mysql_connection.fetch_all(
+    return await db_connection.fetch_all(
         "SELECT pi.id, pi.user_id, pi.item_id, pi.quantity, "
         "i.name, i.type, i.effect, i.description, i.price "
         "FROM rpg_player_inventory pi "
@@ -140,7 +140,7 @@ async def fetch_rpg_item(item_id: int, *, connection=None):
     @return 映射行；不存在时返回 None / Mapping row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT * FROM rpg_items WHERE id = %s",
         (item_id,),
         mapping=True,
@@ -158,7 +158,7 @@ async def increment_inventory_item(user_id: int, item_id: int, quantity: int, *,
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "UPDATE rpg_player_inventory SET quantity = quantity + %s "
         "WHERE user_id = %s AND item_id = %s",
         (quantity, user_id, item_id),
@@ -176,7 +176,7 @@ async def insert_inventory_item(user_id: int, item_id: int, quantity: int, *, co
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO rpg_player_inventory (user_id, item_id, quantity) VALUES (%s, %s, %s)",
         (user_id, item_id, quantity),
         connection=connection,
@@ -192,7 +192,7 @@ async def delete_inventory_item(user_id: int, item_id: int, *, connection=None) 
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "DELETE FROM rpg_player_inventory WHERE user_id = %s AND item_id = %s",
         (user_id, item_id),
         connection=connection,
@@ -209,7 +209,7 @@ async def decrement_inventory_item(user_id: int, item_id: int, quantity: int, *,
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "UPDATE rpg_player_inventory SET quantity = quantity - %s "
         "WHERE user_id = %s AND item_id = %s",
         (quantity, user_id, item_id),
@@ -225,7 +225,7 @@ async def fetch_player_equipment(user_id: int, *, connection=None):
     @return 映射行；不存在时返回 None / Mapping row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT pe.user_id, pe.weapon_id, pe.offhand_id, pe.armor_id, "
         "pe.treasure1_id, pe.treasure2_id, "
         "w.name as weapon_name, o.name as offhand_name, a.name as armor_name, "
@@ -251,7 +251,7 @@ async def ensure_player_equipment(user_id: int, *, connection=None) -> None:
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO rpg_player_equipment (user_id) VALUES (%s)",
         (user_id,),
         connection=connection,
@@ -266,7 +266,7 @@ async def fetch_rpg_equipment(equipment_id: int, *, connection=None):
     @return 映射行；不存在时返回 None / Mapping row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT * FROM rpg_equipment WHERE id = %s",
         (equipment_id,),
         mapping=True,
@@ -293,7 +293,7 @@ async def set_player_equipment_slot(
 
     if slot_column not in RPG_EQUIPMENT_SLOT_COLUMNS:
         raise ValueError(f"invalid RPG equipment slot: {slot_column}")
-    return await mysql_connection.execute(
+    return await db_connection.execute(
         f"UPDATE rpg_player_equipment SET {slot_column} = %s WHERE user_id = %s",
         (equipment_id, user_id),
         connection=connection,
@@ -319,7 +319,7 @@ async def insert_player_equipment_slot(
 
     if slot_column not in RPG_EQUIPMENT_SLOT_COLUMNS:
         raise ValueError(f"invalid RPG equipment slot: {slot_column}")
-    await mysql_connection.execute(
+    await db_connection.execute(
         f"INSERT INTO rpg_player_equipment (user_id, {slot_column}) VALUES (%s, %s)",
         (user_id, equipment_id),
         connection=connection,
@@ -346,13 +346,13 @@ async def upsert_player_equipment_stats(
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO rpg_player_equipment_stats "
         "(user_id, total_atk_bonus, total_def_bonus, total_hp_bonus, total_matk_bonus) "
         "VALUES (%s, %s, %s, %s, %s) "
-        "ON DUPLICATE KEY UPDATE total_atk_bonus = VALUES(total_atk_bonus), "
-        "total_def_bonus = VALUES(total_def_bonus), total_hp_bonus = VALUES(total_hp_bonus), "
-        "total_matk_bonus = VALUES(total_matk_bonus)",
+        "ON CONFLICT (user_id) DO UPDATE SET total_atk_bonus = EXCLUDED.total_atk_bonus, "
+        "total_def_bonus = EXCLUDED.total_def_bonus, total_hp_bonus = EXCLUDED.total_hp_bonus, "
+        "total_matk_bonus = EXCLUDED.total_matk_bonus, updated_at = CURRENT_TIMESTAMP",
         (user_id, total_atk_bonus, total_def_bonus, total_hp_bonus, total_matk_bonus),
         connection=connection,
     )
@@ -366,7 +366,7 @@ async def fetch_player_equipment_stats(user_id: int, *, connection=None):
     @return 映射行；不存在时返回 None / Mapping row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT * FROM rpg_player_equipment_stats WHERE user_id = %s",
         (user_id,),
         mapping=True,

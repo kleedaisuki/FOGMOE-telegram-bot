@@ -1,4 +1,4 @@
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 
 
 async def fetch_user_checkin(user_id: int, *, connection=None):
@@ -9,7 +9,7 @@ async def fetch_user_checkin(user_id: int, *, connection=None):
     @return `(last_checkin_date, consecutive_days)` 行；不存在时返回 None / Check-in row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT last_checkin_date, consecutive_days FROM user_checkin WHERE user_id = %s",
         (user_id,),
         connection=connection,
@@ -32,11 +32,11 @@ async def upsert_user_checkin(
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO user_checkin (user_id, last_checkin_date, consecutive_days) "
         "VALUES (%s, %s, %s) "
-        "ON DUPLICATE KEY UPDATE last_checkin_date = VALUES(last_checkin_date), "
-        "consecutive_days = VALUES(consecutive_days)",
+        "ON CONFLICT (user_id) DO UPDATE SET last_checkin_date = EXCLUDED.last_checkin_date, "
+        "consecutive_days = EXCLUDED.consecutive_days, updated_at = CURRENT_TIMESTAMP",
         (user_id, checkin_date, consecutive_days),
         connection=connection,
     )
@@ -51,7 +51,7 @@ async def user_task_completed(user_id: int, task_id: int, *, connection=None) ->
     @return 已完成返回 True / True when completed.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT 1 FROM user_task WHERE user_id = %s AND task_id = %s",
         (user_id, task_id),
         connection=connection,
@@ -68,7 +68,7 @@ async def insert_user_task(user_id: int, task_id: int, *, connection=None) -> No
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO user_task (user_id, task_id) VALUES (%s, %s)",
         (user_id, task_id),
         connection=connection,
@@ -83,7 +83,7 @@ async def fetch_web_password(user_id: int, *, connection=None):
     @return 映射行；不存在时返回 None / Mapping row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT password, created_at, updated_at FROM web_password WHERE user_id = %s",
         (user_id,),
         mapping=True,
@@ -100,9 +100,9 @@ async def upsert_web_password(user_id: int, password_hash: str, *, connection=No
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO web_password (user_id, password) VALUES (%s, %s) "
-        "ON DUPLICATE KEY UPDATE password = VALUES(password)",
+        "ON CONFLICT (user_id) DO UPDATE SET password = EXCLUDED.password, updated_at = CURRENT_TIMESTAMP",
         (user_id, password_hash),
         connection=connection,
     )
@@ -116,9 +116,9 @@ async def ensure_stake_reward_pool(pool_id: int, *, connection=None) -> None:
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO stake_reward_pool (id, balance) VALUES (%s, 0) "
-        "ON DUPLICATE KEY UPDATE balance = balance",
+        "ON CONFLICT (id) DO NOTHING",
         (pool_id,),
         connection=connection,
     )
@@ -134,7 +134,7 @@ async def fetch_stake_reward_pool_balance(pool_id: int, *, connection=None, for_
     """
 
     lock_clause = " FOR UPDATE" if for_update else ""
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         f"SELECT balance FROM stake_reward_pool WHERE id = %s{lock_clause}",
         (pool_id,),
         connection=connection,
@@ -151,7 +151,7 @@ async def add_stake_reward_pool_balance(pool_id: int, amount, *, connection=None
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "UPDATE stake_reward_pool SET balance = balance + %s WHERE id = %s",
         (amount, pool_id),
         connection=connection,
@@ -167,7 +167,7 @@ async def subtract_stake_reward_pool_balance(pool_id: int, amount, *, connection
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "UPDATE stake_reward_pool SET balance = balance - %s WHERE id = %s",
         (amount, pool_id),
         connection=connection,
@@ -181,7 +181,7 @@ async def sum_user_coin_balances(*, connection=None):
     @return 金币总量 / Total coin balance.
     """
 
-    row = await mysql_connection.fetch_one("SELECT SUM(coins + coins_paid) FROM user", connection=connection)
+    row = await db_connection.fetch_one("SELECT SUM(coins + coins_paid) FROM users", connection=connection)
     return row[0] if row and row[0] else 0
 
 
@@ -192,7 +192,7 @@ async def sum_user_stakes(*, connection=None):
     @return 质押总量 / Total staked amount.
     """
 
-    row = await mysql_connection.fetch_one("SELECT SUM(stake_amount) FROM user_stakes", connection=connection)
+    row = await db_connection.fetch_one("SELECT SUM(stake_amount) FROM user_stakes", connection=connection)
     return row[0] if row and row[0] else 0
 
 
@@ -204,7 +204,7 @@ async def fetch_user_stake(user_id: int, *, connection=None):
     @return `(stake_amount, stake_time, last_reward_time)` 行；不存在时返回 None / Stake row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT stake_amount, stake_time, last_reward_time FROM user_stakes WHERE user_id = %s",
         (user_id,),
         connection=connection,
@@ -221,7 +221,7 @@ async def insert_user_stake(user_id: int, amount: int, stake_time, *, connection
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO user_stakes (user_id, stake_amount, stake_time) VALUES (%s, %s, %s)",
         (user_id, amount, stake_time),
         connection=connection,
@@ -237,7 +237,7 @@ async def set_user_stake_last_reward_time(user_id: int, last_reward_time, *, con
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "UPDATE user_stakes SET last_reward_time = %s WHERE user_id = %s",
         (last_reward_time, user_id),
         connection=connection,
@@ -252,7 +252,7 @@ async def delete_user_stake(user_id: int, *, connection=None) -> None:
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "DELETE FROM user_stakes WHERE user_id = %s",
         (user_id,),
         connection=connection,
@@ -267,7 +267,7 @@ async def fetch_redemption_code_for_update(code: str, *, connection):
     @return 兑换码行；不存在时返回 None / Redemption code row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT id, code, amount, is_used, used_by, used_at FROM redemption_codes "
         "WHERE code = %s FOR UPDATE",
         (code,),
@@ -285,7 +285,7 @@ async def mark_redemption_code_used(code_id: int, user_id: int, used_at, *, conn
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "UPDATE redemption_codes SET is_used = TRUE, used_by = %s, used_at = %s WHERE id = %s",
         (user_id, used_at, code_id),
         connection=connection,
@@ -300,7 +300,7 @@ async def redemption_code_exists(code: str, *, connection=None) -> bool:
     @return 存在返回 True / True when present.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT id FROM redemption_codes WHERE code = %s",
         (code,),
         connection=connection,
@@ -317,7 +317,7 @@ async def insert_redemption_code(code: str, amount: int, *, connection=None) -> 
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO redemption_codes (code, amount) VALUES (%s, %s)",
         (code, amount),
         connection=connection,
@@ -332,7 +332,7 @@ async def fetch_invitation_referrer(invited_user_id: int, *, connection=None):
     @return `(referrer_id,)` 行；不存在时返回 None / Referrer row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT referrer_id FROM user_invitations WHERE invited_user_id = %s",
         (invited_user_id,),
         connection=connection,
@@ -353,7 +353,7 @@ async def insert_invitation(
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO user_invitations "
         "(invited_user_id, referrer_id, invitation_time, reward_claimed) "
         "VALUES (%s, %s, NOW(), TRUE)",
@@ -370,7 +370,7 @@ async def count_invited_users(referrer_id: int, *, connection=None) -> int:
     @return 邀请人数 / Invitation count.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT COUNT(*) FROM user_invitations WHERE referrer_id = %s",
         (referrer_id,),
         connection=connection,
@@ -386,7 +386,7 @@ async def fetch_invited_users(referrer_id: int, *, connection=None):
     @return `(invited_user_id, name, invitation_time)` 行列表 / Invited user rows.
     """
 
-    return await mysql_connection.fetch_all(
+    return await db_connection.fetch_all(
         "SELECT i.invited_user_id, u.name, i.invitation_time "
         "FROM user_invitations i "
         "JOIN user u ON i.invited_user_id = u.id "
@@ -405,7 +405,7 @@ async def fetch_referrer_with_name(invited_user_id: int, *, connection=None):
     @return `(referrer_id, name)` 行；不存在时返回 None / Referrer row, or None.
     """
 
-    return await mysql_connection.fetch_one(
+    return await db_connection.fetch_one(
         "SELECT ui.referrer_id, u.name "
         "FROM user_invitations ui "
         "JOIN user u ON ui.referrer_id = u.id "

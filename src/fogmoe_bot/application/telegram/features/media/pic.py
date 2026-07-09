@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from functools import lru_cache
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, ContextTypes, CallbackQueryHandler
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.application.economy import process_user
 from fogmoe_bot.application.economy import stake_reward_pool
 from fogmoe_bot.application.telegram.command_cooldown import cooldown

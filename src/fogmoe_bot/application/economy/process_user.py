@@ -2,7 +2,7 @@ import random
 from datetime import datetime, timedelta
 
 from fogmoe_bot.infrastructure import config
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import user_repository
 
 USER_PLAN_FREE = "free"
@@ -127,7 +127,7 @@ async def spend_user_coins(user_id, amount, *, connection=None) -> bool:
     if amount <= 0:
         return True
     if connection is None:
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             return await spend_user_coins(user_id, amount, connection=connection)
 
     account = await get_user_account(
@@ -173,7 +173,7 @@ async def user_exists(user_id):
 
 
 def user_exists_sync(user_id):
-    return mysql_connection.run_sync(user_exists(user_id))
+    return db_connection.run_sync(user_exists(user_id))
 
 
 async def async_user_exists(user_id):
@@ -233,7 +233,7 @@ async def get_user_personal_info(user_id: int) -> str:
 
 
 def get_user_personal_info_sync(user_id: int) -> str:
-    return mysql_connection.run_sync(get_user_personal_info(user_id))
+    return db_connection.run_sync(get_user_personal_info(user_id))
 
 
 async def async_get_user_personal_info(user_id: int) -> str:
@@ -245,7 +245,7 @@ async def get_user_coins(user_id: int) -> int:
 
 
 def get_user_coins_sync(user_id: int) -> int:
-    return mysql_connection.run_sync(get_user_coins(user_id))
+    return db_connection.run_sync(get_user_coins(user_id))
 
 
 async def async_get_user_coins(user_id: int) -> int:
@@ -258,7 +258,7 @@ async def get_user_affection(user_id: int) -> int:
 
 
 def get_user_affection_sync(user_id: int) -> int:
-    return mysql_connection.run_sync(get_user_affection(user_id))
+    return db_connection.run_sync(get_user_affection(user_id))
 
 
 async def update_user_affection(user_id: int, delta: int) -> int:
@@ -268,7 +268,7 @@ async def update_user_affection(user_id: int, delta: int) -> int:
     elif delta < -10:
         delta = -10
 
-    async with mysql_connection.transaction() as connection:
+    async with db_connection.transaction() as connection:
         current = await user_repository.fetch_affection(
             user_id,
             connection=connection,
@@ -287,7 +287,7 @@ async def update_user_affection(user_id: int, delta: int) -> int:
 
 
 def update_user_affection_sync(user_id: int, delta: int) -> int:
-    return mysql_connection.run_sync(update_user_affection(user_id, delta))
+    return db_connection.run_sync(update_user_affection(user_id, delta))
 
 
 async def async_get_user_affection(user_id: int) -> int:
@@ -304,7 +304,7 @@ async def get_user_permission(user_id: int) -> int:
 
 
 def get_user_permission_sync(user_id: int) -> int:
-    return mysql_connection.run_sync(get_user_permission(user_id))
+    return db_connection.run_sync(get_user_permission(user_id))
 
 
 async def async_get_user_permission(user_id: int) -> int:
@@ -320,12 +320,12 @@ async def get_user_impression(user_id: int) -> str:
 
 
 def get_user_impression_sync(user_id: int) -> str:
-    return mysql_connection.run_sync(get_user_impression(user_id))
+    return db_connection.run_sync(get_user_impression(user_id))
 
 
 async def update_user_impression(user_id: int, impression: str) -> str:
     text = (impression or "").strip()
-    async with mysql_connection.transaction() as connection:
+    async with db_connection.transaction() as connection:
         await user_repository.upsert_impression(
             user_id,
             text,
@@ -347,7 +347,7 @@ async def update_user_personal_info(user_id: int, info: str, *, connection=None)
 
 
 def update_user_impression_sync(user_id: int, impression: str) -> str:
-    return mysql_connection.run_sync(update_user_impression(user_id, impression))
+    return db_connection.run_sync(update_user_impression(user_id, impression))
 
 
 async def async_get_user_impression(user_id: int) -> str:

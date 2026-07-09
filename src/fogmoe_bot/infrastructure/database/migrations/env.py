@@ -5,7 +5,7 @@ import sys
 from logging.config import fileConfig
 from pathlib import Path
 
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -54,6 +54,30 @@ def get_url() -> str:
         return config.get_main_option("sqlalchemy.url")
 
 
+def quote_identifier(identifier: str) -> str:
+    """@brief 引用 PostgreSQL 标识符 / Quote a PostgreSQL identifier.
+
+    @param identifier 标识符 / Identifier.
+    @return 双引号引用后的标识符 / Double-quoted identifier.
+    """
+
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def get_migration_schema() -> str:
+    """@brief 获取迁移元数据 schema / Get migration metadata schema.
+
+    @return Alembic 版本表 schema / Alembic version table schema.
+    """
+
+    try:
+        from fogmoe_bot.infrastructure.config import DB_MIGRATION_SCHEMA
+
+        return DB_MIGRATION_SCHEMA
+    except Exception:
+        return "infra"
+
+
 def configure_context(connection: Connection | None = None) -> None:
     """@brief 配置 Alembic 上下文 / Configure Alembic context.
 
@@ -67,10 +91,15 @@ def configure_context(connection: Connection | None = None) -> None:
             target_metadata=target_metadata,
             literal_binds=True,
             dialect_opts={"paramstyle": "named"},
+            version_table_schema=get_migration_schema(),
         )
         return
 
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        version_table_schema=get_migration_schema(),
+    )
 
 
 def run_migrations_offline() -> None:
@@ -91,6 +120,10 @@ def do_run_migrations(connection: Connection) -> None:
     @return None / None.
     """
 
+    migration_schema = get_migration_schema()
+    connection.execute(
+        text(f"CREATE SCHEMA IF NOT EXISTS {quote_identifier(migration_schema)}")
+    )
     configure_context(connection)
     with context.begin_transaction():
         context.run_migrations()

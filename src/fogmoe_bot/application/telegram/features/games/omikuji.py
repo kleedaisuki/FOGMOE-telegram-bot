@@ -6,7 +6,7 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 import telegram
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.application.economy import process_user
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
 from fogmoe_bot.infrastructure.database.repositories import game_repository
@@ -291,7 +291,7 @@ def get_daily_fortune(user_id: int) -> str:
 async def check_and_deduct_coins(user_id: int) -> bool:
     """检查用户是否有足够的金币并扣除"""
     try:
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             user = await process_user.get_user_account(
                 user_id,
                 connection=connection,

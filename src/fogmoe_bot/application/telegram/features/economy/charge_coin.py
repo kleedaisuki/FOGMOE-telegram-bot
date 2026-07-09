@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 from fogmoe_bot.infrastructure import config
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import economy_repository, user_repository
 from fogmoe_bot.application.economy import process_user
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
@@ -84,7 +84,7 @@ async def verify_and_use_code(user_id: int, code: str) -> tuple:
         code_locks[code] = True
 
     try:
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             result = await economy_repository.fetch_redemption_code_for_update(
                 code,
                 connection=connection,
@@ -414,7 +414,7 @@ async def admin_create_code(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         duplicate_count = 0
         max_retries = 3  # 最大重试次数
 
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             for _ in range(count):
                 retry_count = 0
                 while retry_count < max_retries:

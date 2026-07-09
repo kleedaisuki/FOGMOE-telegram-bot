@@ -2,7 +2,7 @@ import logging
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 
 KNOWN_GROUP_ID_TABLES = (
     "group_keywords",
@@ -24,7 +24,7 @@ async def list_known_group_ids(*, connection=None) -> list[int]:
     group_ids: set[int] = set()
     for table_name in KNOWN_GROUP_ID_TABLES:
         try:
-            rows = await mysql_connection.fetch_all(
+            rows = await db_connection.fetch_all(
                 f"SELECT DISTINCT group_id FROM {table_name}",
                 connection=connection,
             )

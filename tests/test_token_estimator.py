@@ -1,5 +1,5 @@
 from fogmoe_bot.domain.conversation import token_estimator
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection
 from fogmoe_bot.domain.conversation.token_estimator import (
     DEFAULT_MESSAGE_OVERHEAD,
     estimate_conversation_tokens,
@@ -118,14 +118,14 @@ def test_estimate_conversation_tokens_counts_system_prompt_with_litellm(monkeypa
 
 
 def test_chat_token_count_model_uses_first_configured_chat_model(monkeypatch):
-    monkeypatch.setattr(mysql_connection.config, "AI_SERVICE_ORDER", ["openai", "gemini"])
-    monkeypatch.setattr(mysql_connection.config, "OPENAI_CHAT_MODEL", None)
-    monkeypatch.setattr(mysql_connection.config, "GEMINI_CHAT_MODEL", "gemini-2.5-pro")
-    monkeypatch.setattr(mysql_connection.config, "GEMINI_CHAT_FALLBACK_MODEL", None)
+    monkeypatch.setattr(connection.config, "AI_SERVICE_ORDER", ["openai", "gemini"])
+    monkeypatch.setattr(connection.config, "OPENAI_CHAT_MODEL", None)
+    monkeypatch.setattr(connection.config, "GEMINI_CHAT_MODEL", "gemini-2.5-pro")
+    monkeypatch.setattr(connection.config, "GEMINI_CHAT_FALLBACK_MODEL", None)
     monkeypatch.setattr(
-        mysql_connection,
+        connection,
         "litellm_model_name",
         lambda provider, model: f"{provider}/{model}",
     )
 
-    assert mysql_connection._chat_token_count_model() == "gemini/gemini-2.5-pro"
+    assert connection._chat_token_count_model() == "gemini/gemini-2.5-pro"

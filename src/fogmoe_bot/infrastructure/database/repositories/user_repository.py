@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 
 DEFAULT_PERMANENT_RECORDS_LIMIT = 100
 
@@ -80,10 +80,10 @@ async def fetch_user_account(
     """
 
     lock_clause = " FOR UPDATE" if for_update else ""
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT id, permission, coins, coins_paid, permanent_records_limit, info, "
         "name, user_plan, recharge_blocked_until "
-        f"FROM user WHERE id = %s{lock_clause}",
+        f"FROM users WHERE id = %s{lock_clause}",
         (user_id,),
         connection=connection,
     )
@@ -97,7 +97,7 @@ async def list_user_ids(*, connection=None) -> list[int]:
     @return 用户 ID 列表 / List of user IDs.
     """
 
-    rows = await mysql_connection.fetch_all("SELECT id FROM user", connection=connection)
+    rows = await db_connection.fetch_all("SELECT id FROM users", connection=connection)
     return [int(row[0]) for row in rows]
 
 
@@ -117,9 +117,9 @@ async def upsert_telegram_user(
     @return None / None.
     """
 
-    await mysql_connection.execute(
-        "INSERT INTO user (id, name, coins) VALUES (%s, %s, %s) "
-        "ON DUPLICATE KEY UPDATE name = VALUES(name)",
+    await db_connection.execute(
+        "INSERT INTO users (id, name, coins) VALUES (%s, %s, %s) "
+        "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name",
         (user_id, name, initial_coins),
         connection=connection,
     )
@@ -134,8 +134,8 @@ async def set_user_plan(user_id: int, user_plan: str, *, connection=None) -> Non
     @return None / None.
     """
 
-    await mysql_connection.execute(
-        "UPDATE user SET user_plan = %s WHERE id = %s",
+    await db_connection.execute(
+        "UPDATE users SET user_plan = %s WHERE id = %s",
         (user_plan, user_id),
         connection=connection,
     )
@@ -150,8 +150,8 @@ async def set_info(user_id: int, info: str, *, connection=None) -> None:
     @return None / None.
     """
 
-    await mysql_connection.execute(
-        "UPDATE user SET info = %s WHERE id = %s",
+    await db_connection.execute(
+        "UPDATE users SET info = %s WHERE id = %s",
         (info, user_id),
         connection=connection,
     )
@@ -165,9 +165,9 @@ async def fetch_top_coin_users(limit: int = 5, *, connection=None):
     @return `(name, coins_total)` 行列表 / Rows of `(name, coins_total)`.
     """
 
-    return await mysql_connection.fetch_all(
+    return await db_connection.fetch_all(
         "SELECT name, (coins + coins_paid) AS coins_total "
-        "FROM user ORDER BY coins_total DESC LIMIT %s",
+        "FROM users ORDER BY coins_total DESC LIMIT %s",
         (int(limit),),
         connection=connection,
     )
@@ -181,8 +181,8 @@ async def find_user_id_by_name(name: str, *, connection=None) -> int | None:
     @return 用户 ID；不存在时返回 None / User ID, or None when absent.
     """
 
-    row = await mysql_connection.fetch_one(
-        "SELECT id FROM user WHERE name = %s",
+    row = await db_connection.fetch_one(
+        "SELECT id FROM users WHERE name = %s",
         (name,),
         connection=connection,
     )
@@ -197,8 +197,8 @@ async def fetch_display_name(user_id: int, *, connection=None) -> str | None:
     @return 用户名；不存在时返回 None / Display name, or None when absent.
     """
 
-    row = await mysql_connection.fetch_one(
-        "SELECT name FROM user WHERE id = %s",
+    row = await db_connection.fetch_one(
+        "SELECT name FROM users WHERE id = %s",
         (user_id,),
         connection=connection,
     )
@@ -213,8 +213,8 @@ async def fetch_recharge_blocked_until(user_id: int, *, connection=None) -> date
     @return 截止时间；不存在时返回 None / Deadline, or None when absent.
     """
 
-    row = await mysql_connection.fetch_one(
-        "SELECT recharge_blocked_until FROM user WHERE id = %s",
+    row = await db_connection.fetch_one(
+        "SELECT recharge_blocked_until FROM users WHERE id = %s",
         (user_id,),
         connection=connection,
     )
@@ -235,8 +235,8 @@ async def set_recharge_blocked_until(
     @return None / None.
     """
 
-    await mysql_connection.execute(
-        "UPDATE user SET recharge_blocked_until = %s WHERE id = %s",
+    await db_connection.execute(
+        "UPDATE users SET recharge_blocked_until = %s WHERE id = %s",
         (blocked_until, user_id),
         connection=connection,
     )
@@ -256,7 +256,7 @@ async def fetch_daily_give_count_for_update(
     @return 当日赠送次数 / Give count for the date.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT give_count FROM user_give_daily WHERE user_id = %s AND give_date = %s FOR UPDATE",
         (user_id, give_date),
         connection=connection,
@@ -278,9 +278,9 @@ async def increment_daily_give_count(
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO user_give_daily (user_id, give_date, give_count) VALUES (%s, %s, 1) "
-        "ON DUPLICATE KEY UPDATE give_count = give_count + 1",
+        "ON CONFLICT (user_id, give_date) DO UPDATE SET give_count = user_give_daily.give_count + 1",
         (user_id, give_date),
         connection=connection,
     )
@@ -294,8 +294,8 @@ async def user_exists(user_id: int, *, connection=None) -> bool:
     @return 存在返回 True，否则返回 False / True when the user exists, otherwise False.
     """
 
-    row = await mysql_connection.fetch_one(
-        "SELECT id FROM user WHERE id = %s",
+    row = await db_connection.fetch_one(
+        "SELECT id FROM users WHERE id = %s",
         (user_id,),
         connection=connection,
     )
@@ -310,7 +310,7 @@ async def fetch_lottery_date(user_id: int, *, connection=None):
     @return 上次抽奖时间；不存在时返回 None / Last lottery timestamp, or None when missing.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT last_lottery_date FROM user_lottery WHERE user_id = %s",
         (user_id,),
         connection=connection,
@@ -327,9 +327,9 @@ async def upsert_lottery_date(user_id: int, lottery_date: datetime, *, connectio
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO user_lottery (user_id, last_lottery_date) VALUES (%s, %s) "
-        "ON DUPLICATE KEY UPDATE last_lottery_date = VALUES(last_lottery_date)",
+        "ON CONFLICT (user_id) DO UPDATE SET last_lottery_date = EXCLUDED.last_lottery_date",
         (user_id, lottery_date),
         connection=connection,
     )
@@ -344,8 +344,8 @@ async def add_free_coins(user_id: int, coins: int, *, connection=None) -> None:
     @return None / None.
     """
 
-    await mysql_connection.execute(
-        "UPDATE user SET coins = coins + %s WHERE id = %s",
+    await db_connection.execute(
+        "UPDATE users SET coins = coins + %s WHERE id = %s",
         (coins, user_id),
         connection=connection,
     )
@@ -367,8 +367,8 @@ async def add_paid_coins_and_plan(
     @return None / None.
     """
 
-    await mysql_connection.execute(
-        "UPDATE user SET coins_paid = coins_paid + %s, user_plan = %s WHERE id = %s",
+    await db_connection.execute(
+        "UPDATE users SET coins_paid = coins_paid + %s, user_plan = %s WHERE id = %s",
         (coins, user_plan, user_id),
         connection=connection,
     )
@@ -392,8 +392,8 @@ async def set_coin_balances_and_plan(
     @return None / None.
     """
 
-    await mysql_connection.execute(
-        "UPDATE user SET coins = %s, coins_paid = %s, user_plan = %s WHERE id = %s",
+    await db_connection.execute(
+        "UPDATE users SET coins = %s, coins_paid = %s, user_plan = %s WHERE id = %s",
         (coins, coins_paid, user_plan, user_id),
         connection=connection,
     )
@@ -408,8 +408,8 @@ async def set_permission(user_id: int, permission: int, *, connection=None) -> N
     @return None / None.
     """
 
-    await mysql_connection.execute(
-        "UPDATE user SET permission = %s WHERE id = %s",
+    await db_connection.execute(
+        "UPDATE users SET permission = %s WHERE id = %s",
         (permission, user_id),
         connection=connection,
     )
@@ -429,8 +429,8 @@ async def increment_permanent_records_limit(
     @return 更新后的永久记忆上限 / Updated permanent memory record limit.
     """
 
-    await mysql_connection.execute(
-        "UPDATE user SET permanent_records_limit = COALESCE(permanent_records_limit, 100) + %s "
+    await db_connection.execute(
+        "UPDATE users SET permanent_records_limit = COALESCE(permanent_records_limit, 100) + %s "
         "WHERE id = %s",
         (delta, user_id),
         connection=connection,
@@ -451,7 +451,7 @@ async def fetch_affection(user_id: int, *, connection=None, for_update: bool = F
     """
 
     lock_clause = " FOR UPDATE" if for_update else ""
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         f"SELECT affection FROM ai_user_affection WHERE user_id = %s{lock_clause}",
         (user_id,),
         connection=connection,
@@ -467,7 +467,7 @@ async def fetch_impression(user_id: int, *, connection=None) -> str:
     @return 用户印象文本；不存在时返回空字符串 / Impression text, or an empty string when missing.
     """
 
-    row = await mysql_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT impression FROM ai_user_affection WHERE user_id = %s",
         (user_id,),
         connection=connection,
@@ -486,9 +486,9 @@ async def upsert_affection(user_id: int, affection: int, *, connection=None) -> 
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO ai_user_affection (user_id, affection) VALUES (%s, %s) "
-        "ON DUPLICATE KEY UPDATE affection = VALUES(affection)",
+        "ON CONFLICT (user_id) DO UPDATE SET affection = EXCLUDED.affection, updated_at = CURRENT_TIMESTAMP",
         (user_id, affection),
         connection=connection,
     )
@@ -503,9 +503,9 @@ async def upsert_impression(user_id: int, impression: str, *, connection=None) -
     @return None / None.
     """
 
-    await mysql_connection.execute(
+    await db_connection.execute(
         "INSERT INTO ai_user_affection (user_id, affection, impression) VALUES (%s, %s, %s) "
-        "ON DUPLICATE KEY UPDATE impression = VALUES(impression)",
+        "ON CONFLICT (user_id) DO UPDATE SET impression = EXCLUDED.impression, updated_at = CURRENT_TIMESTAMP",
         (user_id, 0, impression),
         connection=connection,
     )

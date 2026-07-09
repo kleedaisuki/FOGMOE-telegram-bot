@@ -1,6 +1,6 @@
 import asyncio
 import re
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.application.economy import process_user
 from fogmoe_bot.infrastructure.database.repositories import crypto_repository
 from telegram import Update
@@ -166,7 +166,7 @@ async def swap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         try:
-            async with mysql_connection.transaction() as connection:
+            async with db_connection.transaction() as connection:
                 account = await process_user.get_user_account(
                     user_id,
                     connection=connection,

@@ -1,6 +1,6 @@
 python-telegram-bot[job-queue]
 SQLAlchemy>=2.0
-asyncmy
+asyncpg
 alembic
 litellm>=1.80.5
 pydantic>=2

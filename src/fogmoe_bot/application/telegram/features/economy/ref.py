@@ -4,7 +4,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
 
 from fogmoe_bot.infrastructure import config
-from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import economy_repository, user_repository
 from fogmoe_bot.application.economy import process_user
 import asyncio
@@ -296,7 +296,7 @@ async def add_invitation_record(invited_user_id, referrer_id, invited_user_name)
 
     try:
         is_new_user = False
-        async with mysql_connection.transaction() as connection:
+        async with db_connection.transaction() as connection:
             # 检查被邀请用户是否已经有邀请记录
             row = await economy_repository.fetch_invitation_referrer(
                 invited_user_id,
