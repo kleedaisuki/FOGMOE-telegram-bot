@@ -1,7 +1,7 @@
 import pytest
 
-from core import config
-from features.ai import provider_resolver, task_runner
+from fogmoe_bot.infrastructure import config
+from fogmoe_bot.application.ai import provider_resolver, task_runner
 
 
 def test_get_provider_order_for_chat_returns_configured_order_copy(monkeypatch):

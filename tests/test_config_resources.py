@@ -1,4 +1,4 @@
-from core import config
+from fogmoe_bot.infrastructure import config
 
 
 def test_text_resources_are_loaded_verbatim():

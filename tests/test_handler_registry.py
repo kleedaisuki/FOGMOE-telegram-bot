@@ -5,7 +5,7 @@ from telegram.ext import (
     MessageHandler,
 )
 
-from app.handler_registry import REGISTRATION_STEPS, register_handlers
+from fogmoe_bot.presentation.telegram.handler_registry import REGISTRATION_STEPS, register_handlers
 
 
 class FakeJobQueue:
@@ -72,7 +72,7 @@ def test_registration_steps_are_grouped_by_app_assembly_boundary():
     assert [step.__name__ for step in REGISTRATION_STEPS] == [
         "register_error_handlers",
         "register_conversation_handlers",
-        "register_core_command_handlers",
+        "register_basic_command_handlers",
         "register_monitoring_handlers",
         "register_interactive_feature_handlers",
         "register_membership_handlers",

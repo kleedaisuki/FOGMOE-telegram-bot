@@ -107,8 +107,7 @@ alembic upgrade head
 
 ```bash
 # 方式一：直接运行
-cd modules
-python3 main.py
+PYTHONPATH=src python3 -m fogmoe_bot
 
 # 方式二：使用脚本（后台运行）
 chmod +x runBot.sh
@@ -187,7 +186,7 @@ venv\Scripts\activate
 
    如果服务器上的 Docker 需要 root 权限，把 `docker` 改成 `sudo docker` 即可。
 
-> 默认镜像基于 `python:3.11-slim`，入口命令为 `python -u modules/main.py`，仅依赖外部 MySQL。
+> 默认镜像基于 `python:3.11-slim`，入口命令为 `python -u -m fogmoe_bot`，仅依赖外部 MySQL。
 
 
 ### 使用的主要技术

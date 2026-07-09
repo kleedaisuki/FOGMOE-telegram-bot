@@ -3,8 +3,8 @@ import logging
 
 import telegram.error
 
-from core import telegram_utils
-from features.ai import generated_image_sender
+from fogmoe_bot.infrastructure.telegram import telegram_utils
+from fogmoe_bot.application.ai import generated_image_sender
 
 
 def test_send_generated_image_uses_prompt_filename(monkeypatch, tmp_path):

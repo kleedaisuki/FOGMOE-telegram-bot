@@ -5,8 +5,8 @@ from typing import Iterable
 
 import pytest
 
-from core import config
-from features.ai.litellm_client import create_chat_completion
+from fogmoe_bot.infrastructure import config
+from fogmoe_bot.infrastructure.ai.litellm_client import create_chat_completion
 
 
 TRUTHY_VALUES = {"1", "true", "yes", "on"}

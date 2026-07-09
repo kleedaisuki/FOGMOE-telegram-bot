@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from features.ai import router
+from fogmoe_bot.application.ai import router
 
 
 @pytest.fixture(autouse=True)

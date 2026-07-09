@@ -1,8 +1,8 @@
 import pytest
 from pydantic import ValidationError
 
-from features.ai.tools import image_tools
-from features.ai.tools.models import GenerateImageArgs, parameters_schema
+from fogmoe_bot.application.ai.tools import image_tools
+from fogmoe_bot.application.ai.tools.models import GenerateImageArgs, parameters_schema
 
 
 def test_generate_image_timeout_schema_is_optional_and_bounded():

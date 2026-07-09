@@ -1,4 +1,4 @@
-from features.ai.tool_history import tool_logs_to_record_entries
+from fogmoe_bot.application.ai.tool_history import tool_logs_to_record_entries
 
 
 def test_tool_logs_to_record_entries_deduplicates_visible_tool_call_content():

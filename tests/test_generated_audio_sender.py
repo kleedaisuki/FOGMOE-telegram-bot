@@ -3,8 +3,8 @@ import logging
 
 import telegram.error
 
-from core import telegram_utils
-from features.ai import generated_audio_sender
+from fogmoe_bot.infrastructure.telegram import telegram_utils
+from fogmoe_bot.application.ai import generated_audio_sender
 
 
 def test_send_with_retry_prefers_telegram_voice(monkeypatch, tmp_path):

@@ -11,10 +11,12 @@
 
 ## 分层约定
 
-- `modules/main.py` 只作为进程入口，不写单元测试。
-- `modules/app/` 是应用组装和 Telegram handler 注册层，测试重点放在较稳定的组装边界，避免启动真实 bot。
-- `modules/core/` 放跨功能共享逻辑，适合写小型单元测试。
-- `modules/features/` 放业务功能。优先把可测试的纯逻辑拆到独立函数或小模块，再让 Telegram handler 调用它们。
+- `src/fogmoe_bot/main.py` 只作为进程入口，不写单元测试。
+- `src/presentation/telegram/` 是应用组装和 Telegram handler 注册层，测试重点放在较稳定的组装边界，避免启动真实 bot。
+- `src/domain/` 放纯领域规则，适合写小型单元测试。
+- `src/application/` 放用例编排和应用服务，优先把可测试逻辑拆到独立函数或小模块。
+- `src/infrastructure/` 放数据库、外部 API、Telegram 发送、AI provider 等基础设施适配。
+- `src/presentation/telegram/features/` 放 Telegram 命令和 callback 入口。
 - 外部服务调用、数据库读写、Telegram API 交互默认用替身对象或小范围集成测试，不在普通单元测试里访问真实网络或真实数据库。
 
 ## 测试选择标准

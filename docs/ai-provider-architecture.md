@@ -4,8 +4,8 @@
 
 项目已接入 LiteLLM SDK 作为统一 provider 调用层：
 
-- `modules/features/ai/litellm_client.py` 负责将 `openai`、`gemini`、`azure`、`zhipu` 映射到 LiteLLM 的模型前缀和认证参数。
-- `modules/features/ai/task_runner.py` 负责按任务选择 provider/model/fallback。
+- `src/application/ai/litellm_client.py` 负责将 `openai`、`gemini`、`azure`、`zhipu` 映射到 LiteLLM 的模型前缀和认证参数。
+- `src/application/ai/task_runner.py` 负责按任务选择 provider/model/fallback。
 - 主聊天仍通过 `router.py` 按 `AI_CHAT_ORDER` 顺序 fallback。
 - summary、translate、vision、classifier 已改为通过 `run_ai_task()` 调用，不再直接创建具体 provider client。
 - 当前 `.env` 使用显式任务级配置，不再兼容旧变量名，例如 `GEMINI_MODEL`、`ZHIPUAI_API_KEY`、`AZURE_OPENAI_MODEL`。
@@ -450,7 +450,7 @@ AI_VISION_FALLBACK_PROVIDER=zhipu
 建议新增或调整以下文件：
 
 ```text
-modules/features/ai/
+src/application/ai/
   adapters/
     __init__.py
     base.py

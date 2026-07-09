@@ -1,9 +1,9 @@
 import pytest
 from pydantic import ValidationError
 
-from features.ai import tool_runner
-from features.ai.tools import voice_tools
-from features.ai.tools.models import GenerateVoiceArgs, parameters_schema
+from fogmoe_bot.application.ai import tool_runner
+from fogmoe_bot.application.ai.tools import voice_tools
+from fogmoe_bot.application.ai.tools.models import GenerateVoiceArgs, parameters_schema
 
 
 def test_generate_voice_schema_requires_bounded_text():

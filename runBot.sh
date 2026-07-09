@@ -3,7 +3,7 @@
 # 获取脚本所在目录的绝对路径
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BOT_DIR="$SCRIPT_DIR"
-MODULES_DIR="$BOT_DIR/modules"
+SRC_DIR="$BOT_DIR/src"
 LOG_DIR="$BOT_DIR/logs"
 LOG_FILE="$LOG_DIR/tgbot.log"
 VENV_DIR="$BOT_DIR/venv"
@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 
 # 获取bot进程ID
 get_bot_pid() {
-    ps -ef | grep "[p]ython3.*modules/main.py" | awk '{print $2}'
+    ps -ef | grep "[p]ython3.*-m fogmoe_bot" | awk '{print $2}'
 }
 
 # 检查并创建虚拟环境
@@ -124,15 +124,15 @@ start_bot() {
         exit 1
     fi
 
-    # 确保 modules 目录存在
-    if [ ! -d "$MODULES_DIR" ]; then
-        echo -e "${RED}错误: modules 目录不存在: $MODULES_DIR${NC}"
+    # 确保 src 目录存在
+    if [ ! -d "$SRC_DIR" ]; then
+        echo -e "${RED}错误: src 目录不存在: $SRC_DIR${NC}"
         exit 1
     fi
 
     # 确保 main.py 存在
-    if [ ! -f "$MODULES_DIR/main.py" ]; then
-        echo -e "${RED}错误: main.py 不存在: $MODULES_DIR/main.py${NC}"
+    if [ ! -f "$SRC_DIR/main.py" ]; then
+        echo -e "${RED}错误: main.py 不存在: $SRC_DIR/main.py${NC}"
         exit 1
     fi
 
@@ -163,14 +163,15 @@ start_bot() {
         exit 1
     fi
 
-    # 切换到 modules 目录
-    cd $MODULES_DIR
+    # 切换到项目根目录，使用 src layout 启动入口
+    cd "$BOT_DIR"
 
     # 启动bot并记录日志
     echo "正在启动bot..."
     mkdir -p "$LOG_DIR"
     echo "日志文件: $LOG_FILE"
-    nohup python3 -u main.py > "$LOG_FILE" 2>&1 &
+    PYTHONPATH="$SRC_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        nohup python3 -u -m fogmoe_bot > "$LOG_FILE" 2>&1 &
 
     # 获取新进程PID
     NEW_PID=$!

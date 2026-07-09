@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import telegram.error
 
-from core import telegram_utils
-from features.ai import sticker_sender
+from fogmoe_bot.infrastructure.telegram import telegram_utils
+from fogmoe_bot.application.ai import sticker_sender
 
 
 def test_send_ai_reply_with_stickers_retries_sticker_timeout(monkeypatch):

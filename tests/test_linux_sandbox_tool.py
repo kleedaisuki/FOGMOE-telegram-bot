@@ -3,8 +3,8 @@ import types
 
 import pytest
 
-from features.ai.tools import sandbox_tools
-from features.ai.tools.context import clear_tool_request_context, set_tool_request_context
+from fogmoe_bot.application.ai.tools import sandbox_tools
+from fogmoe_bot.application.ai.tools.context import clear_tool_request_context, set_tool_request_context
 
 
 class _FakeCommandResult:

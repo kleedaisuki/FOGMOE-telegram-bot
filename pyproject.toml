@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fogmoe-telegram-bot"
+version = "0.1.0"
+description = "FogMoe Telegram bot"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+dependencies = [
+    "python-telegram-bot[job-queue]",
+    "SQLAlchemy>=2.0",
+    "asyncmy",
+    "alembic",
+    "litellm>=1.80.5",
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "binance-futures-connector",
+    "aiohttp",
+    "telegramify-markdown",
+    "python-dotenv",
+    "e2b",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[project.scripts]
+fogmoe-bot = "fogmoe_bot.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
