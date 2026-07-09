@@ -67,6 +67,37 @@ def _assistant_tool_call_ids(message: dict) -> list[str]:
     return call_ids
 
 
+def _decode_json_value(value: Any) -> Any:
+    """@brief 解码数据库 JSON 值 / Decode a database JSON value.
+
+    @param value 数据库返回值 / Database value.
+    @return 解码后的 Python 值 / Decoded Python value.
+    @note PostgreSQL JSONB 可能已由 driver 解码为 list/dict / PostgreSQL JSONB may already be decoded by the driver into list/dict.
+    """
+
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+def _decode_json_list(value: Any) -> list:
+    """@brief 解码 JSON 列表 / Decode a JSON list.
+
+    @param value JSON 文本、bytes 或已解码列表 / JSON text, bytes, or decoded list.
+    @return 列表；无法解码或不是列表时返回空列表 / List, or empty list when invalid.
+    """
+
+    try:
+        decoded = _decode_json_value(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if isinstance(decoded, list):
+        return decoded
+    return []
+
+
 def _sanitize_messages_with_tool_pairs(
     messages: list[Any],
     *,
@@ -307,13 +338,10 @@ async def prune_permanent_records(
             summary_text = summary_text.decode("utf-8")
 
         snapshot_value = snapshot_text
-        if isinstance(snapshot_value, bytes):
-            snapshot_value = snapshot_value.decode("utf-8")
-        if isinstance(snapshot_value, str):
-            try:
-                snapshot_value = json.loads(snapshot_value)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                pass
+        try:
+            snapshot_value = _decode_json_value(snapshot_value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
 
         records.append(
             {
@@ -435,9 +463,7 @@ async def insert_chat_records(
         raw_messages = None
         if row:
             raw_messages = row[0]
-            if isinstance(raw_messages, bytes):
-                raw_messages = raw_messages.decode("utf-8")
-            messages = json.loads(raw_messages)
+            messages = _decode_json_list(raw_messages)
         else:
             messages = []
 
@@ -626,14 +652,8 @@ async def get_chat_history(conversation_id):
     if not row:
         return []
 
-    raw_messages = row[0]
-    if isinstance(raw_messages, bytes):
-        raw_messages = raw_messages.decode("utf-8")
-    try:
-        messages = json.loads(raw_messages)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return []
-    if not isinstance(messages, list):
+    messages = _decode_json_list(row[0])
+    if not messages:
         return []
 
     sanitized, _ = _sanitize_messages_with_tool_pairs(messages)
@@ -658,15 +678,8 @@ async def async_update_latest_history_state_summary(
     if not row or not row[0]:
         return False
 
-    raw_messages = row[0]
-    if isinstance(raw_messages, bytes):
-        raw_messages = raw_messages.decode("utf-8")
-    try:
-        messages = json.loads(raw_messages)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False
-
-    if not isinstance(messages, list):
+    messages = _decode_json_list(row[0])
+    if not messages:
         return False
 
     updated = False

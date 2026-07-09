@@ -105,8 +105,8 @@ async def exec_sql(
     statement, bind_params = _prepare_statement(sql, params)
     if connection is None:
         async with connect() as connection:
-            return await db_connection.execute(statement, bind_params)
-    return await db_connection.execute(statement, bind_params)
+            return await connection.execute(statement, bind_params)
+    return await connection.execute(statement, bind_params)
 
 
 def _prepare_statement(
