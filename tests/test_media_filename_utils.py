@@ -1,4 +1,4 @@
-from fogmoe_bot.application.ai.tools.filename_utils import (
+from fogmoe_bot.application.assistant.tools.filename_utils import (
     MAX_MEDIA_FILENAME_CHARS,
     prompt_to_filename,
 )

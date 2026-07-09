@@ -1,4 +1,4 @@
-from fogmoe_bot.application.ai import tool_runner
+from fogmoe_bot.application.assistant import tool_runner
 
 
 class _Message:

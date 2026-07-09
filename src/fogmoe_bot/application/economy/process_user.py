@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database.repositories import user_repository
 
 USER_PLAN_FREE = "free"
 USER_PLAN_PAID = "paid"
@@ -19,32 +20,76 @@ lottery_locks = {}
 
 
 async def get_user_last_lottery_date(user_id):
-    row = await mysql_connection.fetch_one(
-        "SELECT last_lottery_date FROM user_lottery WHERE user_id = %s",
-        (user_id,),
-    )
-    return row[0] if row else None
+    return await user_repository.fetch_lottery_date(user_id)
 
 
 async def update_user_lottery_date(user_id):
-    await mysql_connection.execute(
-        "INSERT INTO user_lottery (user_id, last_lottery_date) VALUES (%s, %s) "
-        "ON DUPLICATE KEY UPDATE last_lottery_date = VALUES(last_lottery_date)",
-        (user_id, datetime.now()),
+    await user_repository.upsert_lottery_date(user_id, datetime.now())
+
+
+async def get_user_account(
+    user_id: int,
+    *,
+    connection=None,
+    for_update: bool = False,
+) -> user_repository.UserAccount | None:
+    """@brief 读取用户账户快照 / Fetch a user account snapshot.
+
+    @param user_id Telegram 用户 ID / Telegram user ID.
+    @param connection 可选数据库连接 / Optional database connection.
+    @param for_update 是否加行锁 / Whether to lock the row.
+    @return 用户账户快照；不存在时返回 None / User account snapshot, or None when missing.
+    """
+
+    return await user_repository.fetch_user_account(
+        user_id,
+        connection=connection,
+        for_update=for_update,
     )
+
+
+async def register_telegram_user(
+    user_id: int,
+    user_name: str,
+    initial_coins: int,
+    *,
+    connection=None,
+) -> user_repository.UserAccount | None:
+    """@brief 注册或刷新 Telegram 用户 / Register or refresh a Telegram user.
+
+    @param user_id Telegram 用户 ID / Telegram user ID.
+    @param user_name Telegram 用户名 / Telegram username.
+    @param initial_coins 新用户初始硬币 / Initial coins for new users.
+    @param connection 可选数据库连接 / Optional database connection.
+    @return 用户账户快照；不存在时返回 None / User account snapshot, or None when missing.
+    """
+
+    await user_repository.upsert_telegram_user(
+        user_id,
+        user_name,
+        initial_coins,
+        connection=connection,
+    )
+    account = await get_user_account(user_id, connection=connection)
+    if not account:
+        return None
+
+    resolved_plan = resolve_user_plan(user_id, account.coins_paid)
+    if account.user_plan != resolved_plan:
+        await user_repository.set_user_plan(
+            user_id,
+            resolved_plan,
+            connection=connection,
+        )
+        account = await get_user_account(user_id, connection=connection)
+    return account
 
 
 async def get_user_coin_balances(user_id, *, connection=None) -> tuple[int, int]:
-    row = await mysql_connection.fetch_one(
-        "SELECT coins, coins_paid FROM user WHERE id = %s",
-        (user_id,),
-        connection=connection,
-    )
-    if not row:
+    account = await get_user_account(user_id, connection=connection)
+    if not account:
         return 0, 0
-    coins_free = row[0] or 0
-    coins_paid = row[1] or 0
-    return coins_free, coins_paid
+    return account.coins, account.coins_paid
 
 
 async def get_user_total_coins(user_id, *, connection=None) -> int:
@@ -59,11 +104,7 @@ async def add_free_coins(user_id, coins, *, connection=None) -> int:
     coins = int(coins)
     if coins <= 0:
         return 0
-    await mysql_connection.execute(
-        "UPDATE user SET coins = coins + %s WHERE id = %s",
-        (coins, user_id),
-        connection=connection,
-    )
+    await user_repository.add_free_coins(user_id, coins, connection=connection)
     return coins
 
 
@@ -72,9 +113,10 @@ async def add_paid_coins(user_id, coins, *, connection=None) -> int:
     if coins <= 0:
         return 0
     plan = resolve_user_plan(user_id, coins_paid=1)
-    await mysql_connection.execute(
-        "UPDATE user SET coins_paid = coins_paid + %s, user_plan = %s WHERE id = %s",
-        (coins, plan, user_id),
+    await user_repository.add_paid_coins_and_plan(
+        user_id,
+        coins,
+        plan,
         connection=connection,
     )
     return coins
@@ -88,15 +130,15 @@ async def spend_user_coins(user_id, amount, *, connection=None) -> bool:
         async with mysql_connection.transaction() as connection:
             return await spend_user_coins(user_id, amount, connection=connection)
 
-    row = await mysql_connection.fetch_one(
-        "SELECT coins, coins_paid FROM user WHERE id = %s FOR UPDATE",
-        (user_id,),
+    account = await get_user_account(
+        user_id,
         connection=connection,
+        for_update=True,
     )
-    if not row:
+    if not account:
         return False
-    coins_free = row[0] or 0
-    coins_paid = row[1] or 0
+    coins_free = account.coins
+    coins_paid = account.coins_paid
     total = coins_free + coins_paid
     if total < amount:
         return False
@@ -109,9 +151,12 @@ async def spend_user_coins(user_id, amount, *, connection=None) -> bool:
         new_free = 0
         new_paid = coins_paid - remaining
     plan = resolve_user_plan(user_id, new_paid)
-    await connection.exec_driver_sql(
-        "UPDATE user SET coins = %s, coins_paid = %s, user_plan = %s WHERE id = %s",
-        (new_free, new_paid, plan, user_id),
+    await user_repository.set_coin_balances_and_plan(
+        user_id,
+        new_free,
+        new_paid,
+        plan,
+        connection=connection,
     )
     return True
 
@@ -124,11 +169,7 @@ async def update_user_coins(user_id, coins, *, connection=None):
 
 
 async def user_exists(user_id):
-    row = await mysql_connection.fetch_one(
-        "SELECT id FROM user WHERE id = %s",
-        (user_id,),
-    )
-    return row is not None
+    return await user_repository.user_exists(user_id)
 
 
 def user_exists_sync(user_id):
@@ -185,13 +226,10 @@ async def async_lottery(user_id):
 
 
 async def get_user_personal_info(user_id: int) -> str:
-    row = await mysql_connection.fetch_one(
-        "SELECT info FROM user WHERE id = %s",
-        (user_id,),
-    )
-    if not row or row[0] is None or row[0] == "":
+    account = await get_user_account(user_id)
+    if not account or account.info == "":
         return ""
-    return str(row[0])
+    return account.info
 
 
 def get_user_personal_info_sync(user_id: int) -> str:
@@ -215,11 +253,8 @@ async def async_get_user_coins(user_id: int) -> int:
 
 
 async def get_user_affection(user_id: int) -> int:
-    row = await mysql_connection.fetch_one(
-        "SELECT affection FROM ai_user_affection WHERE user_id = %s",
-        (user_id,),
-    )
-    return row[0] if row else 0
+    affection = await user_repository.fetch_affection(user_id)
+    return affection if affection is not None else 0
 
 
 def get_user_affection_sync(user_id: int) -> int:
@@ -234,24 +269,19 @@ async def update_user_affection(user_id: int, delta: int) -> int:
         delta = -10
 
     async with mysql_connection.transaction() as connection:
-        row = await mysql_connection.fetch_one(
-            "SELECT affection FROM ai_user_affection WHERE user_id = %s FOR UPDATE",
-            (user_id,),
+        current = await user_repository.fetch_affection(
+            user_id,
+            connection=connection,
+            for_update=True,
+        )
+        if current is None:
+            current = 0
+        updated = max(-100, min(100, current + delta))
+        await user_repository.upsert_affection(
+            user_id,
+            updated,
             connection=connection,
         )
-        current = row[0] if row else 0
-        updated = max(-100, min(100, current + delta))
-
-        if row:
-            await connection.exec_driver_sql(
-                "UPDATE ai_user_affection SET affection = %s WHERE user_id = %s",
-                (updated, user_id),
-            )
-        else:
-            await connection.exec_driver_sql(
-                "INSERT INTO ai_user_affection (user_id, affection) VALUES (%s, %s)",
-                (user_id, updated),
-            )
 
     return updated
 
@@ -269,11 +299,8 @@ async def async_update_user_affection(user_id: int, delta: int) -> int:
 
 
 async def get_user_permission(user_id: int) -> int:
-    row = await mysql_connection.fetch_one(
-        "SELECT permission FROM user WHERE id = %s",
-        (user_id,),
-    )
-    return row[0] if row else 0
+    account = await get_user_account(user_id)
+    return account.permission if account else 0
 
 
 def get_user_permission_sync(user_id: int) -> int:
@@ -289,13 +316,7 @@ async def async_update_user_coins(user_id: int, amount: int) -> None:
 
 
 async def get_user_impression(user_id: int) -> str:
-    row = await mysql_connection.fetch_one(
-        "SELECT impression FROM ai_user_affection WHERE user_id = %s",
-        (user_id,),
-    )
-    if row and row[0] is not None:
-        return row[0]
-    return ""
+    return await user_repository.fetch_impression(user_id)
 
 
 def get_user_impression_sync(user_id: int) -> str:
@@ -305,22 +326,24 @@ def get_user_impression_sync(user_id: int) -> str:
 async def update_user_impression(user_id: int, impression: str) -> str:
     text = (impression or "").strip()
     async with mysql_connection.transaction() as connection:
-        row = await mysql_connection.fetch_one(
-            "SELECT impression FROM ai_user_affection WHERE user_id = %s",
-            (user_id,),
+        await user_repository.upsert_impression(
+            user_id,
+            text,
             connection=connection,
         )
-        if row:
-            await connection.exec_driver_sql(
-                "UPDATE ai_user_affection SET impression = %s WHERE user_id = %s",
-                (text, user_id),
-            )
-        else:
-            await connection.exec_driver_sql(
-                "INSERT INTO ai_user_affection (user_id, affection, impression) VALUES (%s, %s, %s)",
-                (user_id, 0, text),
-            )
     return text
+
+
+async def update_user_personal_info(user_id: int, info: str, *, connection=None) -> None:
+    """@brief 更新用户个人信息 / Update user personal information.
+
+    @param user_id Telegram 用户 ID / Telegram user ID.
+    @param info 个人信息文本 / Personal information text.
+    @param connection 可选数据库连接 / Optional database connection.
+    @return None / None.
+    """
+
+    await user_repository.set_info(user_id, info, connection=connection)
 
 
 def update_user_impression_sync(user_id: int, impression: str) -> str:
@@ -333,3 +356,40 @@ async def async_get_user_impression(user_id: int) -> str:
 
 async def async_update_user_impression(user_id: int, impression: str) -> str:
     return await update_user_impression(user_id, impression)
+
+
+async def set_user_permission(user_id: int, permission: int, *, connection=None) -> None:
+    """@brief 设置用户权限等级 / Set a user's permission level.
+
+    @param user_id Telegram 用户 ID / Telegram user ID.
+    @param permission 新权限等级 / New permission level.
+    @param connection 可选数据库连接 / Optional database connection.
+    @return None / None.
+    """
+
+    await user_repository.set_permission(
+        user_id,
+        int(permission),
+        connection=connection,
+    )
+
+
+async def increase_user_permanent_records_limit(
+    user_id: int,
+    delta: int = 1,
+    *,
+    connection=None,
+) -> int:
+    """@brief 增加用户永久记忆上限 / Increase a user's permanent memory limit.
+
+    @param user_id Telegram 用户 ID / Telegram user ID.
+    @param delta 增加量 / Increment amount.
+    @param connection 可选数据库连接 / Optional database connection.
+    @return 更新后的永久记忆上限 / Updated permanent memory limit.
+    """
+
+    return await user_repository.increment_permanent_records_limit(
+        user_id,
+        int(delta),
+        connection=connection,
+    )

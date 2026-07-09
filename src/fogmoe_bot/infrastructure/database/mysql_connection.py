@@ -4,10 +4,10 @@ from typing import Any, Iterable, Optional
 
 from sqlalchemy.engine import Result
 
-from fogmoe_bot.domain.ai.prompt_utils import format_metadata_attrs, xml_escape
-from fogmoe_bot.domain.ai.token_estimator import estimate_conversation_tokens
+from fogmoe_bot.domain.conversation.prompt_utils import format_metadata_attrs, xml_escape
+from fogmoe_bot.domain.conversation.token_estimator import estimate_conversation_tokens
 from fogmoe_bot.infrastructure import config
-from fogmoe_bot.infrastructure.ai.litellm_models import litellm_model_name
+from fogmoe_bot.infrastructure.llm.litellm_models import litellm_model_name
 from fogmoe_bot.infrastructure.database import db
 
 

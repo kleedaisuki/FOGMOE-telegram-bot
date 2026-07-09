@@ -16,7 +16,7 @@
 - `src/domain/` 放纯领域规则，适合写小型单元测试。
 - `src/application/` 放用例编排和应用服务，优先把可测试逻辑拆到独立函数或小模块。
 - `src/infrastructure/` 放数据库、外部 API、Telegram 发送、AI provider 等基础设施适配。
-- `src/presentation/telegram/features/` 放 Telegram 命令和 callback 入口。
+- `src/application/telegram/features/` 放 Telegram 命令和 callback 入口。
 - 外部服务调用、数据库读写、Telegram API 交互默认用替身对象或小范围集成测试，不在普通单元测试里访问真实网络或真实数据库。
 
 ## 测试选择标准

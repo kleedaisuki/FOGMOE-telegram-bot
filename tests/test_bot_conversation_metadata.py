@@ -1,4 +1,4 @@
-from fogmoe_bot.presentation.telegram import bot_conversation
+from fogmoe_bot.application.telegram import bot_conversation
 
 
 def test_format_xml_message_includes_current_message_id():

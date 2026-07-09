@@ -1,6 +1,6 @@
-from fogmoe_bot.domain.ai import token_estimator
+from fogmoe_bot.domain.conversation import token_estimator
 from fogmoe_bot.infrastructure.database import mysql_connection
-from fogmoe_bot.domain.ai.token_estimator import (
+from fogmoe_bot.domain.conversation.token_estimator import (
     DEFAULT_MESSAGE_OVERHEAD,
     estimate_conversation_tokens,
     estimate_message_tokens,

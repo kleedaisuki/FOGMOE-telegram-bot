@@ -1,9 +1,9 @@
 import pytest
 
 from fogmoe_bot.infrastructure import config
-from fogmoe_bot.infrastructure.ai import litellm_client
-from fogmoe_bot.infrastructure.ai.litellm_message_sanitizer import sanitize_message_for_provider
-from fogmoe_bot.infrastructure.ai.litellm_provider_config import (
+from fogmoe_bot.infrastructure.llm import litellm_client
+from fogmoe_bot.infrastructure.llm.litellm_message_sanitizer import sanitize_message_for_provider
+from fogmoe_bot.infrastructure.llm.litellm_provider_config import (
     azure_api_base,
     gemini_native_api_base,
     openai_compatible_api_base,

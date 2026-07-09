@@ -1,4 +1,4 @@
-from fogmoe_bot.application.ai.message_content import (
+from fogmoe_bot.application.assistant.message_content import (
     content_to_text,
     messages_have_images,
     strip_image_content,

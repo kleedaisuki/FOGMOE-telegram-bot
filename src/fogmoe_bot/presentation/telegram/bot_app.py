@@ -3,7 +3,7 @@ import logging
 from telegram.ext import ApplicationBuilder
 
 from fogmoe_bot.infrastructure import config
-from fogmoe_bot.presentation.telegram.bot_conversation import post_init
+from fogmoe_bot.application.telegram.bot_conversation import post_init
 
 from .handler_registry import register_handlers
 

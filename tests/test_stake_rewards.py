@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from fogmoe_bot.presentation.telegram.features.economy import stake_coin
+from fogmoe_bot.application.telegram.features.economy import stake_coin
 
 
 def _stake(amount, stake_time, last_reward_time=None):

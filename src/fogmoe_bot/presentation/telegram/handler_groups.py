@@ -6,7 +6,7 @@ from telegram.ext import (
     filters,
 )
 
-from fogmoe_bot.presentation.telegram.bot_commands import (
+from fogmoe_bot.application.telegram.bot_commands import (
     admin_announce,
     clear_command,
     error_handler,
@@ -21,12 +21,12 @@ from fogmoe_bot.presentation.telegram.bot_commands import (
     start,
     tl_command,
 )
-from fogmoe_bot.presentation.telegram.bot_conversation import reply
-from fogmoe_bot.presentation.telegram.bot_monitoring import start_monitor, stop_monitor
-from fogmoe_bot.presentation.telegram.features.admin import developer
-from fogmoe_bot.application.ai import scheduler
-from fogmoe_bot.presentation.telegram.features.crypto import chart, crypto_predict, swap_fogmoe_solana_token
-from fogmoe_bot.presentation.telegram.features.economy import (
+from fogmoe_bot.application.telegram.bot_conversation import reply
+from fogmoe_bot.application.telegram.bot_monitoring import start_monitor, stop_monitor
+from fogmoe_bot.application.telegram.features.admin import developer
+from fogmoe_bot.application.assistant import scheduler
+from fogmoe_bot.application.telegram.features.crypto import chart, crypto_predict, swap_fogmoe_solana_token
+from fogmoe_bot.application.telegram.features.economy import (
     bribe,
     charge_coin,
     checkin,
@@ -36,9 +36,9 @@ from fogmoe_bot.presentation.telegram.features.economy import (
     task,
     web_password,
 )
-from fogmoe_bot.presentation.telegram.features.games import gamble, omikuji, rockpaperscissors_game, rpg, sicbo
-from fogmoe_bot.presentation.telegram.features.media import music, pic
-from fogmoe_bot.presentation.telegram.features.moderation import keyword_handler, member_verify, report, spam_control
+from fogmoe_bot.application.telegram.features.games import gamble, omikuji, rockpaperscissors_game, rpg, sicbo
+from fogmoe_bot.application.telegram.features.media import music, pic
+from fogmoe_bot.application.telegram.features.moderation import keyword_handler, member_verify, report, spam_control
 
 
 def register_error_handlers(application) -> None:

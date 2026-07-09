@@ -1,6 +1,7 @@
 from decimal import Decimal, ROUND_DOWN
 
 from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database.repositories import economy_repository
 
 POOL_ROW_ID = 1
 POOL_RATE = Decimal("0.2")
@@ -23,27 +24,22 @@ def calculate_pool_add(cost: int) -> Decimal:
 
 
 async def _ensure_pool_row(*, connection=None) -> None:
-    await mysql_connection.execute(
-        "INSERT INTO stake_reward_pool (id, balance) VALUES (%s, 0) "
-        "ON DUPLICATE KEY UPDATE balance = balance",
-        (POOL_ROW_ID,),
+    await economy_repository.ensure_stake_reward_pool(
+        POOL_ROW_ID,
         connection=connection,
     )
 
 
 async def get_pool_balance(*, connection=None, for_update: bool = False) -> Decimal:
     await _ensure_pool_row(connection=connection)
-    sql = "SELECT balance FROM stake_reward_pool WHERE id = %s"
-    if for_update:
-        sql += " FOR UPDATE"
-    row = await mysql_connection.fetch_one(
-        sql,
-        (POOL_ROW_ID,),
+    balance = await economy_repository.fetch_stake_reward_pool_balance(
+        POOL_ROW_ID,
         connection=connection,
+        for_update=for_update,
     )
-    if not row or row[0] is None:
+    if balance is None:
         return Decimal("0")
-    return Decimal(str(row[0]))
+    return Decimal(str(balance))
 
 
 async def add_to_pool(amount, *, connection=None) -> Decimal:
@@ -54,9 +50,9 @@ async def add_to_pool(amount, *, connection=None) -> Decimal:
         async with mysql_connection.transaction() as connection:
             return await add_to_pool(amount, connection=connection)
     await _ensure_pool_row(connection=connection)
-    await mysql_connection.execute(
-        "UPDATE stake_reward_pool SET balance = balance + %s WHERE id = %s",
-        (amount, POOL_ROW_ID),
+    await economy_repository.add_stake_reward_pool_balance(
+        POOL_ROW_ID,
+        amount,
         connection=connection,
     )
     return amount
@@ -70,9 +66,9 @@ async def subtract_from_pool(amount, *, connection=None) -> Decimal:
         async with mysql_connection.transaction() as connection:
             return await subtract_from_pool(amount, connection=connection)
     await _ensure_pool_row(connection=connection)
-    await mysql_connection.execute(
-        "UPDATE stake_reward_pool SET balance = balance - %s WHERE id = %s",
-        (amount, POOL_ROW_ID),
+    await economy_repository.subtract_stake_reward_pool_balance(
+        POOL_ROW_ID,
+        amount,
         connection=connection,
     )
     return amount

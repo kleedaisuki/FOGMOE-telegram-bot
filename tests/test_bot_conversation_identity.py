@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import telegram.error
 
-from fogmoe_bot.presentation.telegram import bot_conversation
+from fogmoe_bot.application.telegram import bot_conversation
 
 
 def test_post_init_continues_when_bot_identity_fetch_has_network_error(monkeypatch):

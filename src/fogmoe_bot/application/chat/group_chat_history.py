@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy.exc import OperationalError
 
 from fogmoe_bot.infrastructure.database import mysql_connection
+from fogmoe_bot.infrastructure.database.repositories import conversation_repository
 
 _bot_user_id: Optional[int] = None
 _bot_display_name: str = "FogMoeBot"
@@ -93,13 +94,14 @@ async def _log_group_message(record: Tuple[int, int, int, str, str, datetime]) -
 
     try:
         async with mysql_connection.transaction() as connection:
-            insert_sql = (
-                "INSERT INTO chat_records_group (group_id, message_id, user_id, message_type, content, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s)"
-            )
-            await connection.exec_driver_sql(
-                insert_sql,
-                (group_id, message_id, user_id, message_type, content, created_at),
+            await conversation_repository.insert_group_message(
+                group_id,
+                message_id,
+                user_id,
+                message_type,
+                content,
+                created_at,
+                connection=connection,
             )
     except Exception as exc:
         logging.error("Failed to log group message: %s", exc)
@@ -125,22 +127,13 @@ def _is_lock_error(exc: OperationalError) -> bool:
 
 
 async def _cleanup_group_history(group_id: int, retries: int = 3) -> None:
-    cleanup_sql = (
-        "DELETE FROM chat_records_group "
-        "WHERE group_id = %s AND id NOT IN ("
-        "  SELECT id FROM ("
-        "    SELECT id FROM chat_records_group "
-        "    WHERE group_id = %s "
-        "    ORDER BY created_at DESC, id DESC "
-        "    LIMIT 100"
-        "  ) AS recent"
-        ")"
-    )
-
     for attempt in range(retries):
         try:
             async with mysql_connection.transaction() as connection:
-                await connection.exec_driver_sql(cleanup_sql, (group_id, group_id))
+                await conversation_repository.prune_group_history(
+                    group_id,
+                    connection=connection,
+                )
             return
         except OperationalError as exc:
             if _is_lock_error(exc) and attempt < retries - 1:
@@ -178,42 +171,12 @@ async def _get_group_context(
 ) -> List[Dict[str, object]]:
     async with mysql_connection.connect() as connection:
         try:
-            if around_message_id:
-                before = await mysql_connection.fetch_all(
-                    "SELECT cr.id, cr.message_id, cr.user_id, cr.message_type, cr.content, cr.created_at, u.name AS username "
-                    "FROM chat_records_group cr "
-                    "LEFT JOIN user u ON u.id = cr.user_id "
-                    "WHERE group_id = %s AND message_id <= %s "
-                    "ORDER BY created_at DESC, id DESC LIMIT %s",
-                    (group_id, around_message_id, window_size),
-                    mapping=True,
-                    connection=connection,
-                )
-
-                after = await mysql_connection.fetch_all(
-                    "SELECT cr.id, cr.message_id, cr.user_id, cr.message_type, cr.content, cr.created_at, u.name AS username "
-                    "FROM chat_records_group cr "
-                    "LEFT JOIN user u ON u.id = cr.user_id "
-                    "WHERE group_id = %s AND message_id > %s "
-                    "ORDER BY created_at ASC, id ASC LIMIT %s",
-                    (group_id, around_message_id, window_size),
-                    mapping=True,
-                    connection=connection,
-                )
-
-                records = list(reversed(before)) + list(after)
-            else:
-                records = await mysql_connection.fetch_all(
-                    "SELECT cr.id, cr.message_id, cr.user_id, cr.message_type, cr.content, cr.created_at, u.name AS username "
-                    "FROM chat_records_group cr "
-                    "LEFT JOIN user u ON u.id = cr.user_id "
-                    "WHERE group_id = %s "
-                    "ORDER BY created_at DESC, id DESC LIMIT %s",
-                    (group_id, window_size),
-                    mapping=True,
-                    connection=connection,
-                )
-                records = list(reversed(records))
+            records = await conversation_repository.fetch_group_context_rows(
+                group_id,
+                around_message_id,
+                window_size,
+                connection=connection,
+            )
 
             return [
                 {

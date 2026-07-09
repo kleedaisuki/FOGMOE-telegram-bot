@@ -1,4 +1,4 @@
-from fogmoe_bot.application.ai.reply_filter import normalize_ai_reply_text
+from fogmoe_bot.application.assistant.reply_filter import normalize_ai_reply_text
 
 
 def test_no_response_sentinel_returns_empty_text():
