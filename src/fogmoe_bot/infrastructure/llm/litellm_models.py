@@ -3,9 +3,10 @@ from __future__ import annotations
 from fogmoe_bot.infrastructure import config
 
 
-LITELLM_PREFIXES = ("openai/", "azure/", "gemini/", "zai/")
+LITELLM_PREFIXES = ("openai/", "openrouter/", "azure/", "gemini/", "zai/")
 PROVIDER_ALIASES = {
     "openai": "openai",
+    "openrouter": "openrouter",
     "azure": "azure",
     "gemini": "gemini",
     "siliconflow": "siliconflow",

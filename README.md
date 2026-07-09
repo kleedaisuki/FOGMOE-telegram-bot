@@ -15,7 +15,7 @@
 ## ✨ 功能特性
 
 ### 🤖 AI 智能聊天
-- **多模型支持**：通过 LiteLLM 集成 OpenAI、Google Gemini、Azure OpenAI、智谱 AI
+- **多模型支持**：通过 LiteLLM 集成 OpenAI、OpenRouter、Google Gemini、Azure OpenAI、智谱 AI
 - **个性化对话**：可爱、中二、傲娇的"雾萌娘"人设
 - **上下文记忆**：支持长期对话记忆和个性化印象
 - **好感度系统**：根据互动调整回复风格
@@ -83,7 +83,7 @@ nano .env
 AI 调用统一通过 LiteLLM SDK，provider 和模型需要在 `.env` 中显式配置。示例：
 
 ```env
-AI_CHAT_ORDER=openai,siliconflow,azure,zhipu,gemini
+AI_CHAT_ORDER=openai,openrouter,siliconflow,azure,zhipu,gemini
 AI_SUMMARY_PROVIDER=openai
 AI_TRANSLATE_PROVIDER=openai
 AI_VISION_PROVIDER=openai

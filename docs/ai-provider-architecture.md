@@ -4,7 +4,7 @@
 
 项目已接入 LiteLLM SDK 作为统一 provider 调用层：
 
-- `src/application/assistant/litellm_client.py` 负责将 `openai`、`gemini`、`azure`、`zhipu` 映射到 LiteLLM 的模型前缀和认证参数。
+- `src/application/assistant/litellm_client.py` 负责将 `openai`、`openrouter`、`gemini`、`azure`、`zhipu` 映射到 LiteLLM 的模型前缀和认证参数。
 - `src/application/assistant/task_runner.py` 负责按任务选择 provider/model/fallback。
 - 主聊天仍通过 `router.py` 按 `AI_CHAT_ORDER` 顺序 fallback。
 - summary、translate、vision、classifier 已改为通过 `run_ai_task()` 调用，不再直接创建具体 provider client。
@@ -257,7 +257,7 @@ def get_model_for_task(provider: str, task: str) -> str:
 
 ```env
 # 主聊天 fallback 顺序
-AI_CHAT_ORDER=openai,azure,zhipu,gemini
+AI_CHAT_ORDER=openai,openrouter,azure,zhipu,gemini
 
 # 子任务 provider
 AI_SUMMARY_PROVIDER=openai
@@ -280,6 +280,18 @@ OPENAI_SUMMARY_MODEL=gpt-4.1-mini
 OPENAI_TRANSLATE_MODEL=gpt-4.1-mini
 OPENAI_VISION_MODEL=gpt-4.1
 OPENAI_CLASSIFIER_MODEL=gpt-4.1-nano
+```
+
+OpenRouter 配置：
+
+```env
+OPENROUTER_API_KEY=...
+OPENROUTER_API_BASE=https://openrouter.ai/api/v1
+OPENROUTER_CHAT_MODEL=anthropic/claude-sonnet-4.5
+OPENROUTER_SUMMARY_MODEL=openai/gpt-4o-mini
+OPENROUTER_TRANSLATE_MODEL=openai/gpt-4o-mini
+OPENROUTER_VISION_MODEL=openai/gpt-4o
+OPENROUTER_CLASSIFIER_MODEL=openai/gpt-4o-mini
 ```
 
 SiliconFlow 配置（OpenAI-compatible）：

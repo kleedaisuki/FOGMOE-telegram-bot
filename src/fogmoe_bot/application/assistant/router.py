@@ -9,12 +9,13 @@ from .chat_capabilities import chat_model_for_service, chat_service_supports_vis
 from .message_content import messages_have_images, strip_image_content
 from .tools import clear_tool_request_context, cleanup_linux_sandbox, set_tool_request_context
 from .errors import SafetyBlockError
-from .providers import azure, gemini, openai, siliconflow, zhipu
+from .providers import azure, gemini, openai, openrouter, siliconflow, zhipu
 from .runtime import EXECUTOR
 from .types import AIResponse, PartialAIResponseError, VisibleContentHandler
 
 AI_SERVICE_MAP = {
     "openai": openai.get_ai_response,
+    "openrouter": openrouter.get_ai_response,
     "gemini": gemini.get_ai_response,
     "azure": azure.get_ai_response,
     "siliconflow": siliconflow.get_ai_response,

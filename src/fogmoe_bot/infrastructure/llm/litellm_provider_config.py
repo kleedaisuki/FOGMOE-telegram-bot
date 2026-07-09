@@ -43,6 +43,17 @@ def _openai_params() -> Dict[str, Any]:
     return params
 
 
+def _openrouter_params() -> Dict[str, Any]:
+    """@brief 构建 OpenRouter 参数 / Build OpenRouter parameters."""
+    if not config.OPENROUTER_API_KEY:
+        raise RuntimeError("Missing OPENROUTER_API_KEY configuration.")
+
+    params: Dict[str, Any] = {"api_key": config.OPENROUTER_API_KEY}
+    if config.OPENROUTER_API_BASE:
+        params["api_base"] = openai_compatible_api_base(config.OPENROUTER_API_BASE)
+    return params
+
+
 def _gemini_params() -> Dict[str, Any]:
     if not config.GEMINI_API_KEY:
         raise RuntimeError("Missing GEMINI_API_KEY configuration.")
@@ -96,6 +107,7 @@ def _azure_params() -> Dict[str, Any]:
 
 PROVIDER_PARAM_BUILDERS = {
     "openai": _openai_params,
+    "openrouter": _openrouter_params,
     "gemini": _gemini_params,
     "zai": _zai_params,
     "siliconflow": _siliconflow_params,

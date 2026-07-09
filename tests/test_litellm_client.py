@@ -65,6 +65,27 @@ def test_provider_params_requires_openai_key_or_base(monkeypatch):
         provider_params("openai")
 
 
+def test_provider_params_builds_openrouter_params(monkeypatch):
+    monkeypatch.setattr(config, "OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.setattr(
+        config,
+        "OPENROUTER_API_BASE",
+        "https://openrouter.test/api/v1/chat/completions",
+    )
+
+    assert provider_params("openrouter") == {
+        "api_key": "openrouter-key",
+        "api_base": "https://openrouter.test/api/v1",
+    }
+
+
+def test_provider_params_requires_openrouter_key(monkeypatch):
+    monkeypatch.setattr(config, "OPENROUTER_API_KEY", None)
+
+    with pytest.raises(RuntimeError, match="Missing OPENROUTER_API_KEY"):
+        provider_params("openrouter")
+
+
 def test_provider_params_requires_gemini_base_for_openai_compatible_mode(monkeypatch):
     monkeypatch.setattr(config, "GEMINI_API_KEY", "gemini-key")
     monkeypatch.setattr(config, "GEMINI_OPENAI_COMPATIBLE", True)
@@ -194,6 +215,36 @@ def test_create_chat_completion_normalizes_provider_and_filters_none_kwargs(
             "api_key": "zai-key",
             "api_base": "https://zai.test/v4",
             "max_tokens": 128,
+            "drop_params": True,
+        }
+    ]
+
+
+def test_create_chat_completion_uses_openrouter_provider_prefix(monkeypatch):
+    calls = []
+    messages = [{"role": "user", "content": "hello"}]
+    monkeypatch.setattr(config, "OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.setattr(config, "OPENROUTER_API_BASE", None)
+
+    def fake_completion(**kwargs):
+        calls.append(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(litellm_client.litellm, "completion", fake_completion)
+
+    assert (
+        litellm_client.create_chat_completion(
+            "openrouter",
+            "anthropic/claude-sonnet-4.5",
+            messages,
+        )
+        == "ok"
+    )
+    assert calls == [
+        {
+            "model": "openrouter/anthropic/claude-sonnet-4.5",
+            "messages": messages,
+            "api_key": "openrouter-key",
             "drop_params": True,
         }
     ]

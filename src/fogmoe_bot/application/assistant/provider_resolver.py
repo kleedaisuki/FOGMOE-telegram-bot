@@ -15,6 +15,7 @@ TASK_PROVIDER_CONFIG_PREFIXES = {
 
 PROVIDER_MODEL_CONFIG_PATTERNS = {
     "openai": "OPENAI_{task}_MODEL",
+    "openrouter": "OPENROUTER_{task}_MODEL",
     "siliconflow": "SILICONFLOW_{task}_MODEL",
     "gemini": "GEMINI_{task}_MODEL",
     "zai": "ZHIPU_{task}_MODEL",

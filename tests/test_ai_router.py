@@ -158,6 +158,11 @@ def test_vision_capable_chat_provider_keeps_multimodal_messages(monkeypatch):
     assert calls == [image_messages]
 
 
+def test_openrouter_is_registered_as_chat_provider():
+    assert "openrouter" in router.AI_SERVICE_MAP
+    assert callable(router.AI_SERVICE_MAP["openrouter"])
+
+
 def test_provider_circuit_opens_after_three_consecutive_failures_in_window():
     router._record_provider_failure("gemini", now=100.0)
     router._record_provider_failure("gemini", now=200.0)

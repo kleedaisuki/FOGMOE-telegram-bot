@@ -23,3 +23,16 @@ def test_chat_model_for_service_uses_chat_task_model_config(monkeypatch):
     monkeypatch.setattr(config, "SILICONFLOW_CHAT_MODEL", "deepseek-ai/model")
 
     assert chat_capabilities.chat_model_for_service("siliconflow") == "deepseek-ai/model"
+
+
+def test_chat_model_for_service_supports_openrouter(monkeypatch):
+    monkeypatch.setattr(
+        config,
+        "OPENROUTER_CHAT_MODEL",
+        "anthropic/claude-sonnet-4.5",
+    )
+
+    assert (
+        chat_capabilities.chat_model_for_service("openrouter")
+        == "anthropic/claude-sonnet-4.5"
+    )
