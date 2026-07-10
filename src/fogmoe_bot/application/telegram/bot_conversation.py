@@ -1,10 +1,9 @@
 import asyncio
 import base64
-import json
-import logging
 import time
-from collections import deque
+import logging
 from dataclasses import dataclass, field
+from enum import Enum, auto
 
 import telegram
 from telegram import Update
@@ -39,7 +38,6 @@ from fogmoe_bot.application.assistant.reply_filter import normalize_ai_reply_tex
 from fogmoe_bot.application.assistant.inference.service import ASSISTANT_INFERENCE_SERVICE
 from fogmoe_bot.application.telegram.sticker_sender import normalize_sticker_directives, send_ai_reply_with_stickers
 from fogmoe_bot.application.telegram.assistant_visible_sender import TelegramVisibleContentHandler
-from fogmoe_bot.application.assistant.inference.task_runner import INFERENCE_TASK_RUNNER
 from fogmoe_bot.application.assistant.tasks.vision import analyze_image
 from fogmoe_bot.domain.agent_runtime.history import tool_logs_to_record_entries
 
@@ -101,25 +99,6 @@ async def _refresh_bot_identity(bot, *, source: str) -> bool:
 async def post_init(application) -> None:
     db.set_main_loop(asyncio.get_running_loop())
     await _refresh_bot_identity(application.bot, source="post_init")
-
-
-class RateLimiter:
-    def __init__(self, max_calls: int, time_window: float):
-        self.max_calls = max_calls
-        self.time_window = time_window
-        self.calls = deque()
-
-    def consume(self) -> bool:
-        now = time.time()
-        while self.calls and now - self.calls[0] > self.time_window:
-            self.calls.popleft()
-        if len(self.calls) < self.max_calls:
-            self.calls.append(now)
-            return True
-        return False
-
-
-_classifier_allowance = RateLimiter(max_calls=10, time_window=60.0)
 
 
 # 添加一个帮助函数来获取实际的消息对象
@@ -268,51 +247,6 @@ def _build_multimodal_user_message(
     }
 
 
-async def should_trigger_ai_response(message_text: str) -> bool:
-    """
-    使用配置的 classifier AI 模型判断群聊消息是否需要调用主 AI 回复。
-    仅返回布尔结果，出现异常时默认不触发回复。
-    """
-    if not message_text:
-        return False
-
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None,
-        lambda: _sync_should_trigger_ai_response(message_text)
-    )
-
-
-def _sync_should_trigger_ai_response(message_text: str) -> bool:
-    if not _classifier_allowance.consume():
-        logging.debug("AI classifier rate limiter blocked a request.")
-        return False
-    try:
-        response = INFERENCE_TASK_RUNNER.run(
-            "classifier",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你是一个简洁的分类器。判断给定消息是否需要雾萌娘机器人主动回复。"
-                        "仅在遇到相关问题必要时才回复，例如和AI聊天、寻求帮助、提问或请求信息等。"
-                        "如果需要回复，请只回答 YES；如果不需要，请只回答 NO。"
-                        "不要输出任何额外解释。"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": message_text,
-                },
-            ],
-        )
-        content = response.choices[0].message.content.strip().lower()
-        return content.startswith("yes") or content.startswith("是")
-    except Exception as exc:
-        logging.error("AI 检测是否应回复失败: %s", exc)
-        return False
-
-
 def _message_batch_key(update: Update) -> tuple[int, int] | None:
     chat = update.effective_chat
     user = update.effective_user
@@ -383,90 +317,804 @@ async def _reply_unlocked(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await _reply_batch_unlocked([_QueuedUpdate(update=update, context=context)])
 
 
-async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
-    if not batch_items:
-        return
+class ConversationSessionState(Enum):
+    """@brief 对话轮次状态 / Conversation-turn state.
 
-    valid_items = []
-    for item in batch_items:
-        message = get_effective_message(item.update)
-        if not message:
-            logging.warning("收到无效的消息更新，忽略处理")
-            continue
-        valid_items.append((item, message))
+    每个非终态都对应一个已完成的业务里程碑，避免通过零散局部变量推断请求进度。
+    / Each non-terminal state represents a completed business milestone, avoiding
+    implicit progress inferred from scattered local variables.
+    """
 
-    if not valid_items:
-        return
-    valid_items.sort(key=_batch_item_sort_key)
+    BATCHED = auto()
+    VALIDATED = auto()
+    GATED = auto()
+    PRICED = auto()
+    CHARGED = auto()
+    PREPARED = auto()
+    USER_PERSISTED = auto()
+    INFERRED = auto()
+    OUTPUT_PERSISTED = auto()
+    DELIVERED = auto()
+    COMPLETED = auto()
+    IGNORED = auto()
+    REJECTED = auto()
+    FAILED = auto()
 
-    update = valid_items[-1][0].update
-    context = valid_items[-1][0].context
-    effective_message = valid_items[-1][1]
-    if not effective_message:
-        logging.warning("收到无效的消息更新，忽略处理")
-        return
 
-    # 如果聊天是群组，则只对包含触发词时进行回复，
-    if update.effective_chat.type in ("group", "supergroup"):
-        if _BOT_ID is None:
-            await _refresh_bot_identity(context.bot, source="group message handling")
-        # 记录群聊上下文
-        should_process_group_batch = False
-        for _, message in valid_items:
-            await group_chat_history.log_group_message(message, update.effective_chat.id)
-            reply_from_user = getattr(
-                getattr(message.reply_to_message, "from_user", None),
-                "id",
-                None,
+@dataclass
+class _ConversationMessageJob:
+    """@brief 单条待处理消息的计费与媒体标记 / Billing and media flags for one message."""
+
+    message: object
+    coin_cost: int
+    is_media: bool
+    is_edited: bool
+
+
+@dataclass
+class ConversationTurnSession:
+    """@brief 单次对话状态机 / State machine for one frozen conversation batch.
+
+    该对象只存活于一批消息的处理期间。消息聚合与用户级互斥仍由 ``reply``
+    的外层协调器负责；长期聊天历史仍由数据库负责。
+    / This object lives only while a frozen batch is processed. ``reply`` keeps
+    ownership of message batching and per-user locking, while the database owns
+    durable chat history.
+
+    @param batch_items 已冻结的 Telegram 更新 / Frozen Telegram updates.
+    """
+
+    batch_items: list[_QueuedUpdate]
+    state: ConversationSessionState = ConversationSessionState.BATCHED
+    valid_items: list[tuple[_QueuedUpdate, object]] = field(default_factory=list)
+    update: Update | None = None
+    context: ContextTypes.DEFAULT_TYPE | None = None
+    effective_message: object | None = None
+    message_jobs: list[_ConversationMessageJob] = field(default_factory=list)
+    total_coin_cost: int = 0
+    user_id: int | None = None
+    user_name: str = "EmptyUsername"
+    conversation_id: int | None = None
+    account: object | None = None
+    user_coins: object | None = None
+    user_plan: object | None = None
+    user_state: object | None = None
+    user_state_prompt: str = ""
+    chat_type: str = "private"
+    group_title: str = ""
+    user_record_entries: list[tuple[str, str]] = field(default_factory=list)
+    runtime_replacements: list[object] = field(default_factory=list)
+    chat_history: list[dict] = field(default_factory=list)
+    assistant_message: str = ""
+    tool_logs: list[dict] = field(default_factory=list)
+    sent_messages: list[object] = field(default_factory=list)
+    pending_history_warning: str | None = None
+
+    _ALLOWED_TRANSITIONS = {
+        ConversationSessionState.BATCHED: {
+            ConversationSessionState.VALIDATED,
+            ConversationSessionState.IGNORED,
+        },
+        ConversationSessionState.VALIDATED: {
+            ConversationSessionState.GATED,
+            ConversationSessionState.IGNORED,
+        },
+        ConversationSessionState.GATED: {
+            ConversationSessionState.PRICED,
+            ConversationSessionState.IGNORED,
+        },
+        ConversationSessionState.PRICED: {
+            ConversationSessionState.CHARGED,
+            ConversationSessionState.REJECTED,
+            ConversationSessionState.IGNORED,
+        },
+        ConversationSessionState.CHARGED: {
+            ConversationSessionState.PREPARED,
+            ConversationSessionState.FAILED,
+        },
+        ConversationSessionState.PREPARED: {
+            ConversationSessionState.USER_PERSISTED,
+            ConversationSessionState.FAILED,
+        },
+        ConversationSessionState.USER_PERSISTED: {
+            ConversationSessionState.INFERRED,
+            ConversationSessionState.FAILED,
+        },
+        ConversationSessionState.INFERRED: {
+            ConversationSessionState.OUTPUT_PERSISTED,
+            ConversationSessionState.FAILED,
+        },
+        ConversationSessionState.OUTPUT_PERSISTED: {
+            ConversationSessionState.DELIVERED,
+            ConversationSessionState.FAILED,
+        },
+        ConversationSessionState.DELIVERED: {
+            ConversationSessionState.COMPLETED,
+            ConversationSessionState.FAILED,
+        },
+    }
+    _TERMINAL_STATES = {
+        ConversationSessionState.COMPLETED,
+        ConversationSessionState.IGNORED,
+        ConversationSessionState.REJECTED,
+        ConversationSessionState.FAILED,
+    }
+
+    async def run(self) -> None:
+        """@brief 驱动一次对话至终态 / Drive one conversation turn to a terminal state.
+
+        @return 无返回值；副作用为扣费、历史写入、AI 推理和 Telegram 投递 /
+        No return value; effects include billing, persistence, inference, and delivery.
+        """
+        try:
+            if not self._validate_batch():
+                return
+            if not await self._pass_gates():
+                return
+            if not await self._price_messages():
+                return
+            if not await self._charge_and_load_user_state():
+                return
+            if not await self._prepare_user_records():
+                return
+            await self._persist_user_records()
+            await self._infer()
+            await self._persist_inference_outputs()
+            await self._deliver_outputs()
+            self._transition(ConversationSessionState.COMPLETED)
+        except BaseException:
+            self._fail()
+            raise
+
+    def _transition(self, target: ConversationSessionState) -> None:
+        """@brief 校验并推进状态 / Validate and advance the session state.
+
+        @param target 目标状态 / Target state.
+        @return 无返回值 / No return value.
+        @note 只允许已定义的单向业务迁移 / Only defined forward business transitions are allowed.
+        """
+        if target not in self._ALLOWED_TRANSITIONS.get(self.state, set()):
+            raise RuntimeError(
+                f"Invalid conversation session transition: {self.state.name} -> {target.name}"
             )
-            if (
-                message.reply_to_message
-                and _BOT_ID is not None
-                and reply_from_user == _BOT_ID
-            ):
-                should_process_group_batch = True
+        self.state = target
+
+    def _ignore(self) -> None:
+        """@brief 结束为静默忽略 / Finish as a silent ignore."""
+        if self.state not in self._TERMINAL_STATES:
+            self.state = ConversationSessionState.IGNORED
+
+    def _reject(self) -> None:
+        """@brief 结束为用户可见拒绝 / Finish as a user-visible rejection."""
+        if self.state not in self._TERMINAL_STATES:
+            self.state = ConversationSessionState.REJECTED
+
+    def _fail(self) -> None:
+        """@brief 标记失败而不吞掉异常 / Mark failure without swallowing the exception."""
+        if self.state not in self._TERMINAL_STATES:
+            self.state = ConversationSessionState.FAILED
+
+    def _validate_batch(self) -> bool:
+        """@brief 提取并排序有效消息 / Extract and sort valid messages.
+
+        @return 是否存在可处理消息 / Whether processable messages exist.
+        """
+        if not self.batch_items:
+            self._ignore()
+            return False
+
+        for item in self.batch_items:
+            message = get_effective_message(item.update)
+            if not message:
+                logging.warning("收到无效的消息更新，忽略处理")
                 continue
+            self.valid_items.append((item, message))
 
-            text = message.text if message.text else ""
+        if not self.valid_items:
+            self._ignore()
+            return False
+
+        self.valid_items.sort(key=_batch_item_sort_key)
+        latest_item, self.effective_message = self.valid_items[-1]
+        self.update = latest_item.update
+        self.context = latest_item.context
+        if not self.effective_message:
+            logging.warning("收到无效的消息更新，忽略处理")
+            self._ignore()
+            return False
+
+        self._transition(ConversationSessionState.VALIDATED)
+        return True
+
+    async def _pass_gates(self) -> bool:
+        """@brief 处理群聊触发与冷却 / Apply group-trigger and cooldown gates.
+
+        @return 是否允许进入计费阶段 / Whether billing may proceed.
+        """
+        assert self.update is not None
+        assert self.context is not None
+
+        if self.update.effective_chat.type in ("group", "supergroup"):
+            if _BOT_ID is None:
+                await _refresh_bot_identity(
+                    self.context.bot,
+                    source="group message handling",
+                )
+
+            should_process_group_batch = False
+            for _, message in self.valid_items:
+                await group_chat_history.log_group_message(
+                    message,
+                    self.update.effective_chat.id,
+                )
+                reply_from_user = getattr(
+                    getattr(message.reply_to_message, "from_user", None),
+                    "id",
+                    None,
+                )
+                if (
+                    message.reply_to_message
+                    and _BOT_ID is not None
+                    and reply_from_user == _BOT_ID
+                ):
+                    should_process_group_batch = True
+                    continue
+
+                text = message.text if message.text else ""
+                if (
+                    "/fogmoebot" in text
+                    or "@FogMoeBot" in text
+                    or "雾萌" in text
+                    or "fog moe" in text.lower()
+                    or "萌娘" in text
+                    or "fogmoe" in text.lower()
+                ):
+                    should_process_group_batch = True
+
+            if not should_process_group_batch:
+                self._ignore()
+                return False
+
+        from fogmoe_bot.application.telegram.command_cooldown import check_chat_cooldown
+
+        if not await check_chat_cooldown(self.update):
+            self._ignore()
+            return False
+
+        self._transition(ConversationSessionState.GATED)
+        return True
+
+    async def _price_messages(self) -> bool:
+        """@brief 计算本批消息费用 / Calculate the cost of the frozen batch.
+
+        @return 是否存在可计费消息 / Whether billable messages exist.
+        """
+        for item, message in self.valid_items:
+            if message.photo or message.sticker:
+                coin_cost = 5
+                is_media = True
+            else:
+                user_message = message.text
+                if not user_message:
+                    logging.warning("收到没有文本内容的消息，忽略处理")
+                    continue
+                if len(user_message) > 4096:
+                    await message.reply_text(
+                        "消息过长，无法处理。请缩短消息长度！\n"
+                        "The message is too long to process. Please shorten the message."
+                    )
+                    self._reject()
+                    return False
+                if len(user_message) > 2000:
+                    coin_cost = 5
+                elif len(user_message) > 1000:
+                    coin_cost = 4
+                elif len(user_message) > 500:
+                    coin_cost = 3
+                elif len(user_message) > 100:
+                    coin_cost = 2
+                else:
+                    coin_cost = 1
+                is_media = False
+
+            self.message_jobs.append(
+                _ConversationMessageJob(
+                    message=message,
+                    coin_cost=coin_cost,
+                    is_media=is_media,
+                    is_edited=item.update.edited_message is message,
+                )
+            )
+            self.total_coin_cost += coin_cost
+
+        if not self.message_jobs:
+            self._ignore()
+            return False
+
+        self._transition(ConversationSessionState.PRICED)
+        return True
+
+    async def _charge_and_load_user_state(self) -> bool:
+        """@brief 原子扣费并加载用户状态 / Charge atomically and load user state.
+
+        @return 是否成功构建用户状态 / Whether user state was built successfully.
+        """
+        assert self.update is not None
+        assert self.effective_message is not None
+
+        self.user_id = self.update.effective_user.id
+        self.user_name = self.update.effective_user.username or "EmptyUsername"
+        self.conversation_id = self.user_id
+
+        async with db_connection.transaction() as connection:
+            self.account = await process_user.get_user_account(
+                self.user_id,
+                connection=connection,
+                for_update=True,
+            )
+            if not self.account:
+                await self.effective_message.reply_text(
+                    "请先使用 /me 命令注册个人信息后再聊天。\n"
+                    "Please register first using the /me command before chatting."
+                )
+                self._reject()
+                return False
+
+            user_coins_free = self.account.coins
+            user_coins_paid = self.account.coins_paid
+            available_coins = self.account.total_coins
+            if available_coins < self.total_coin_cost:
+                await self.effective_message.reply_text(
+                    f"您的硬币不足，无法与雾萌娘连接，需要{self.total_coin_cost}个硬币。试试通过 /lottery 抽奖吧！\n"
+                    f"You don't have enough coins (need {self.total_coin_cost}), I don't want to talk to you. "
+                    "Try using /lottery to get some coins!"
+                )
+                self._reject()
+                return False
+
+            await process_user.spend_user_coins(
+                self.user_id,
+                self.total_coin_cost,
+                connection=connection,
+            )
+            pool_add = stake_reward_pool.calculate_pool_add(self.total_coin_cost)
+            if pool_add > 0:
+                await stake_reward_pool.add_to_pool(pool_add, connection=connection)
+            if user_coins_free >= self.total_coin_cost:
+                new_free = user_coins_free - self.total_coin_cost
+                new_paid = user_coins_paid
+            else:
+                remaining = self.total_coin_cost - user_coins_free
+                new_free = 0
+                new_paid = max(user_coins_paid - remaining, 0)
+            self.user_coins = new_free + new_paid
+            self.user_plan = process_user.resolve_user_plan(self.user_id, new_paid)
+
+        self._transition(ConversationSessionState.CHARGED)
+        self.user_state = await load_user_state(
+            self.user_id,
+            account=self.account,
+            coins=self.user_coins,
+            plan=self.user_plan,
+        )
+        if self.user_state is None:
+            logger.warning(
+                "User disappeared while building AI context: user_id=%s",
+                self.user_id,
+            )
+            self._fail()
+            return False
+        self.user_state_prompt = render_user_state(self.user_state)
+        return True
+
+    async def _prepare_user_records(self) -> bool:
+        """@brief 规范化文本与媒体输入 / Normalize text and media input.
+
+        @return 是否成功生成持久化记录 / Whether persisted records were prepared.
+        """
+        assert self.update is not None
+
+        self.chat_type = self.update.effective_chat.type or "private"
+        self.group_title = (
+            (self.update.effective_chat.title or "").strip()
+            if self.update.effective_chat
+            else ""
+        )
+
+        for job in self.message_jobs:
+            message = job.message
+            current_message_time = _format_message_timestamp(message.date) or time.strftime(
+                '%Y-%m-%d %H:%M:%S'
+            )
+            message_metadata_kwargs = {
+                "message_id": getattr(message, "message_id", None),
+                "edited": job.is_edited,
+                "edited_at": (
+                    _format_message_timestamp(getattr(message, "edit_date", None))
+                    if job.is_edited
+                    else None
+                ),
+            }
+            forward_kwargs = _build_forward_format_kwargs(message)
+            reply_kwargs = (
+                _build_reply_format_kwargs(message.reply_to_message)
+                if message.reply_to_message
+                else {}
+            )
+
+            if job.is_media:
+                formatted_message = await self._prepare_media_record(
+                    message,
+                    current_message_time,
+                    message_metadata_kwargs,
+                    forward_kwargs,
+                    reply_kwargs,
+                )
+                if formatted_message is None:
+                    self._fail()
+                    return False
+            else:
+                formatted_message = _format_xml_message(
+                    chat_type=self.chat_type,
+                    chat_title=self.group_title or None,
+                    timestamp=current_message_time,
+                    user_name=self.user_name,
+                    message_text=message.text or "",
+                    **message_metadata_kwargs,
+                    **forward_kwargs,
+                    **reply_kwargs,
+                )
+
+            self.user_record_entries.append(("user", formatted_message))
+
+        if not self.user_record_entries:
+            self._fail()
+            return False
+        self._transition(ConversationSessionState.PREPARED)
+        return True
+
+    async def _prepare_media_record(
+        self,
+        message,
+        current_message_time: str,
+        message_metadata_kwargs: dict[str, object],
+        forward_kwargs: dict[str, str | None],
+        reply_kwargs: dict[str, str | None],
+    ) -> str | None:
+        """@brief 下载并分析一条媒体消息 / Download and analyse one media message.
+
+        @param message Telegram 媒体消息 / Telegram media message.
+        @param current_message_time 消息时间字符串 / Formatted message timestamp.
+        @param message_metadata_kwargs 消息元数据 / Message metadata.
+        @param forward_kwargs 转发元数据 / Forward metadata.
+        @param reply_kwargs 引用元数据 / Reply metadata.
+        @return 供持久化的规范化消息；失败时返回 ``None`` /
+        Persisted normalized message, or ``None`` on failure.
+        """
+        try:
+            if message.photo:
+                media_type = "photo"
+                file = await message.photo[-1].get_file()
+                media_emoji = None
+            else:
+                media_type = "sticker"
+                file = await message.sticker.get_file()
+                media_emoji = getattr(message.sticker, "emoji", None)
+
+            caption = message.caption if message.caption else ""
+            file_size = getattr(file, "file_size", None)
+            if file_size and file_size > MAX_MEDIA_DOWNLOAD_BYTES:
+                await message.reply_text(
+                    "图片太大啦，请压缩后再发送。\n"
+                    "The image is too large. Please compress it and try again."
+                )
+                return None
+
+            file_bytes = await file.download_as_bytearray()
+            if len(file_bytes) > MAX_MEDIA_DOWNLOAD_BYTES:
+                await message.reply_text(
+                    "图片太大啦，请压缩后再发送。\n"
+                    "The image is too large. Please compress it and try again."
+                )
+                return None
+
+            base64_str = base64.b64encode(file_bytes).decode('utf-8')
+            image_description = await analyze_image(base64_str)
+            message_text = caption if caption else f"[{media_type}]"
+            formatted_message = _format_xml_message(
+                chat_type=self.chat_type,
+                chat_title=self.group_title or None,
+                timestamp=current_message_time,
+                user_name=self.user_name,
+                message_text=message_text,
+                **message_metadata_kwargs,
+                **forward_kwargs,
+                **reply_kwargs,
+                media_type=media_type,
+                media_description=image_description,
+                media_emoji=media_emoji,
+            )
+            runtime_formatted_message = _format_xml_message(
+                chat_type=self.chat_type,
+                chat_title=self.group_title or None,
+                timestamp=current_message_time,
+                user_name=self.user_name,
+                message_text=message_text,
+                **message_metadata_kwargs,
+                **forward_kwargs,
+                **reply_kwargs,
+                media_type=media_type,
+                media_emoji=media_emoji,
+            )
+            runtime_user_message = _build_multimodal_user_message(
+                runtime_formatted_message,
+                base64_str=base64_str,
+                mime_type=_media_mime_type(media_type, message),
+            )
+            runtime_replacement = create_runtime_replacement(
+                persisted_content=formatted_message,
+                runtime_message=runtime_user_message,
+            )
+            if runtime_replacement:
+                self.runtime_replacements.append(runtime_replacement)
+            return formatted_message
+        except Exception as exc:
+            logging.error("处理媒体消息时出错: %s", exc)
+            await message.reply_text(
+                "抱歉呢，雾萌娘暂时无法处理您发送的媒体，请稍后再试试看喵~\n"
+                "Sorry, I'm having trouble processing your image/sticker right now. Please try again later, meow!"
+            )
+            return None
+
+    async def _persist_user_records(self) -> None:
+        """@brief 写入用户记录并处理历史生命周期 / Persist user records and manage history lifecycle."""
+        assert self.context is not None
+        assert self.user_id is not None
+        assert self.conversation_id is not None
+
+        (
+            user_snapshot_created,
+            user_storage_warning,
+            user_archived_records,
+        ) = await db_connection.async_insert_chat_records(
+            self.conversation_id,
+            self.user_record_entries,
+            system_prompt_extra=self.user_state_prompt,
+        )
+        if user_archived_records:
+            await send_permanent_records_archive(
+                self.context.bot,
+                self.user_id,
+                user_archived_records,
+                logger=logger,
+            )
+        self._remember_history_warning(user_storage_warning)
+        await self._handle_overflow_summary(user_storage_warning)
+        if user_snapshot_created and user_storage_warning != "overflow":
+            summary.schedule_summary_generation(self.conversation_id)
+
+        self.chat_history = await db_connection.async_get_chat_history(
+            self.conversation_id
+        )
+        self._transition(ConversationSessionState.USER_PERSISTED)
+
+    async def _infer(self) -> None:
+        """@brief 构建上下文并执行 AI 推理 / Build context and execute AI inference."""
+        assert self.context is not None
+        assert self.update is not None
+        assert self.effective_message is not None
+        assert self.user_id is not None
+        assert self.user_state is not None
+
+        try:
+            await self.context.bot.send_chat_action(
+                chat_id=self.update.effective_chat.id,
+                action="typing",
+            )
+        except Exception:
+            logger.debug("Failed to send typing action before AI request")
+
+        is_group_chat = self.update.effective_chat.type in ("group", "supergroup")
+        context_state = build_context_state(
+            system_prompt=config.SYSTEM_PROMPT,
+            history_messages=self.chat_history,
+            scope=ConversationScope(
+                user_id=self.user_id,
+                is_group=is_group_chat,
+                group_id=self.update.effective_chat.id if is_group_chat else None,
+                message_id=getattr(self.effective_message, "message_id", None),
+            ),
+            user_state=self.user_state,
+            runtime_replacements=self.runtime_replacements,
+            text_fallback_messages=self.chat_history,
+        )
+        fallback_send = partial_send(
+            self.context.bot.send_message,
+            self.update.effective_chat.id,
+        )
+        visible_content_handler = TelegramVisibleContentHandler(
+            loop=asyncio.get_running_loop(),
+            bot=self.context.bot,
+            chat_id=self.update.effective_chat.id,
+            first_text_send=self.effective_message.reply_text,
+            fallback_send=fallback_send,
+            logger=logger,
+            reply_to_message_id=getattr(self.effective_message, "message_id", None),
+        )
+
+        self.assistant_message, self.tool_logs = await ASSISTANT_INFERENCE_SERVICE.infer(
+            context_state,
+            visible_content_sink=visible_content_handler,
+        )
+        self.sent_messages.extend(visible_content_handler.sent_messages)
+        self.assistant_message = normalize_ai_reply_text(self.assistant_message)
+        if self.assistant_message.strip():
+            self.assistant_message = await normalize_sticker_directives(
+                self.assistant_message,
+                logger=logger,
+            )
+        self._transition(ConversationSessionState.INFERRED)
+
+    async def _persist_inference_outputs(self) -> None:
+        """@brief 写入工具与助手输出 / Persist tool and assistant output."""
+        assert self.context is not None
+        assert self.user_id is not None
+        assert self.conversation_id is not None
+
+        tool_record_entries = tool_logs_to_record_entries(self.tool_logs)
+        if tool_record_entries:
+            (
+                tool_snapshot_created,
+                tool_storage_warning,
+                tool_archived_records,
+            ) = await db_connection.async_insert_chat_records(
+                self.conversation_id,
+                tool_record_entries,
+            )
+            if tool_archived_records:
+                await send_permanent_records_archive(
+                    self.context.bot,
+                    self.user_id,
+                    tool_archived_records,
+                    logger=logger,
+                )
+            self._remember_history_warning(tool_storage_warning)
+            await self._handle_overflow_summary(tool_storage_warning)
+            if tool_snapshot_created and tool_storage_warning != "overflow":
+                summary.schedule_summary_generation(self.conversation_id)
+
+        if self.assistant_message.strip():
+            (
+                assistant_snapshot_created,
+                assistant_storage_warning,
+                assistant_archived_records,
+            ) = await db_connection.async_insert_chat_record(
+                self.conversation_id,
+                "assistant",
+                self.assistant_message,
+            )
+            if assistant_archived_records:
+                await send_permanent_records_archive(
+                    self.context.bot,
+                    self.user_id,
+                    assistant_archived_records,
+                    logger=logger,
+                )
+            self._remember_history_warning(assistant_storage_warning)
+            await self._handle_overflow_summary(assistant_storage_warning)
             if (
-                "/fogmoebot" in text
-                or "@FogMoeBot" in text
-                or "雾萌" in text
-                or "fog moe" in text.lower()
-                or "萌娘" in text
-                or "fogmoe" in text.lower()
+                assistant_snapshot_created
+                and assistant_storage_warning != "overflow"
             ):
-                should_process_group_batch = True
+                summary.schedule_summary_generation(self.conversation_id)
 
-        if not should_process_group_batch:
-            return
+        self._transition(ConversationSessionState.OUTPUT_PERSISTED)
 
-    # 添加：检查用户是否在聊天冷却期内
-    from fogmoe_bot.application.telegram.command_cooldown import check_chat_cooldown
-    if not await check_chat_cooldown(update):
-        return  # 用户在冷却期内，直接返回
+    async def _deliver_outputs(self) -> None:
+        """@brief 投递最终回复和工具媒体 / Deliver final reply and tool media."""
+        assert self.context is not None
+        assert self.update is not None
+        assert self.effective_message is not None
+        assert self.user_id is not None
+        assert self.conversation_id is not None
 
-    user_id = update.effective_user.id
-    user_name = update.effective_user.username or "EmptyUsername"  # 提供默认值，防止None值导致格式化错误
-    conversation_id = user_id
+        if self.pending_history_warning:
+            await self._notify_history_warning(self.pending_history_warning)
 
-    pending_history_warning = None
+        fallback_send = partial_send(
+            self.context.bot.send_message,
+            self.update.effective_chat.id,
+        )
+        if self.assistant_message.strip():
+            has_visible_message = bool(self.sent_messages)
+            try:
+                await self.context.bot.send_chat_action(
+                    chat_id=self.update.effective_chat.id,
+                    action="typing",
+                )
+            except Exception:
+                logger.debug("Failed to send typing action before final AI reply")
+            self.sent_messages.extend(
+                await send_ai_reply_with_stickers(
+                    bot=self.context.bot,
+                    chat_id=self.update.effective_chat.id,
+                    text=self.assistant_message,
+                    first_text_send=(
+                        fallback_send
+                        if has_visible_message
+                        else self.effective_message.reply_text
+                    ),
+                    fallback_send=fallback_send,
+                    logger=logger,
+                    reply_to_message_id=(
+                        None
+                        if has_visible_message
+                        else getattr(self.effective_message, "message_id", None)
+                    ),
+                )
+            )
+        self.sent_messages.extend(
+            await send_generated_audio_from_tool_logs(
+                bot=self.context.bot,
+                chat_id=self.update.effective_chat.id,
+                tool_logs=self.tool_logs,
+                logger=logger,
+            )
+        )
+        self.sent_messages.extend(
+            await send_generated_images_from_tool_logs(
+                bot=self.context.bot,
+                chat_id=self.update.effective_chat.id,
+                tool_logs=self.tool_logs,
+                logger=logger,
+            )
+        )
+        if not self.sent_messages and not self.assistant_message.strip():
+            tool_log_types = [
+                str(tool_log.get("type", "tool_result"))
+                for tool_log in self.tool_logs
+                if isinstance(tool_log, dict)
+            ]
+            logger.info(
+                "AI produced empty response; no Telegram message sent: "
+                "user_id=%s conversation_id=%s tool_log_types=%s",
+                self.user_id,
+                self.conversation_id,
+                tool_log_types,
+            )
+        if self.update.effective_chat.type in ("group", "supergroup"):
+            for sent_message in self.sent_messages:
+                if sent_message is None:
+                    continue
+                await group_chat_history.log_group_message(
+                    sent_message,
+                    self.update.effective_chat.id,
+                )
 
-    def remember_history_warning(level):
-        nonlocal pending_history_warning
-        if not level:
-            return
-        if pending_history_warning == "overflow":
+        self._transition(ConversationSessionState.DELIVERED)
+
+    def _remember_history_warning(self, level: str | None) -> None:
+        """@brief 聚合历史容量警告 / Aggregate history-capacity warnings.
+
+        @param level 本次写入返回的警告等级 / Warning level from this persistence write.
+        @return 无返回值 / No return value.
+        """
+        if not level or self.pending_history_warning == "overflow":
             return
         if level == "overflow":
-            pending_history_warning = "overflow"
-            return
-        if pending_history_warning is None:
-            pending_history_warning = level
+            self.pending_history_warning = "overflow"
+        elif self.pending_history_warning is None:
+            self.pending_history_warning = level
 
-    async def notify_history_warning(level):
-        if not level:
-            return
+    async def _notify_history_warning(self, level: str) -> None:
+        """@brief 发送历史容量提醒 / Send history-capacity notification.
+
+        @param level 警告等级 / Warning level.
+        @return 无返回值 / No return value.
+        """
+        assert self.context is not None
+        assert self.update is not None
+
         if level == "near_limit":
             warning_text = (
                 "提醒：当前会话历史记录已接近系统容量上限。雾萌娘可能会在稍后自动压缩较早的消息以保持体验顺畅。"
@@ -480,411 +1128,37 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
 
         await safe_send_markdown(
             partial_send(
-                context.bot.send_message,
-                update.effective_chat.id,
+                self.context.bot.send_message,
+                self.update.effective_chat.id,
             ),
             warning_text,
             logger=logger,
         )
 
-    async def handle_overflow_summary(level: str | None) -> None:
+    async def _handle_overflow_summary(self, level: str | None) -> None:
+        """@brief 处理历史溢出的即时摘要 / Handle immediate summary for history overflow.
+
+        @param level 本次写入返回的警告等级 / Warning level from this persistence write.
+        @return 无返回值 / No return value.
+        """
         if level != "overflow":
             return
-        summary_text = await summary.generate_summary_immediately(conversation_id)
+        assert self.conversation_id is not None
+
+        summary_text = await summary.generate_summary_immediately(self.conversation_id)
         if summary_text:
             await db_connection.async_update_latest_history_state_summary(
-                conversation_id,
+                self.conversation_id,
                 summary_text,
             )
         else:
-            summary.schedule_summary_generation(conversation_id)
+            summary.schedule_summary_generation(self.conversation_id)
 
-    message_jobs = []
-    total_coin_cost = 0
-    for item, message in valid_items:
-        # 如果是媒体消息（图片或贴纸），固定硬币消耗5
-        if message.photo or message.sticker:
-            coin_cost = 5
-            is_media = True
-        else:
-            # 按文字消息长度阶梯计费
-            user_message = message.text
-            if not user_message:
-                logging.warning("收到没有文本内容的消息，忽略处理")
-                continue
-            if len(user_message) > 4096:
-                await message.reply_text("消息过长，无法处理。请缩短消息长度！\nThe message is too long to process. Please shorten the message.")
-                return
-            elif len(user_message) > 2000:
-                coin_cost = 5
-            elif len(user_message) > 1000:
-                coin_cost = 4
-            elif len(user_message) > 500:
-                coin_cost = 3
-            elif len(user_message) > 100:
-                coin_cost = 2
-            else:
-                coin_cost = 1
-            is_media = False
 
-        message_jobs.append(
-            {
-                "message": message,
-                "coin_cost": coin_cost,
-                "is_media": is_media,
-                "is_edited": item.update.edited_message is message,
-            }
-        )
-        total_coin_cost += coin_cost
+async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
+    """@brief 处理已解锁批次 / Process one batch after its caller acquired the lock.
 
-    if not message_jobs:
-        return
-
-    async with db_connection.transaction() as connection:
-        account = await process_user.get_user_account(
-            user_id,
-            connection=connection,
-            for_update=True,
-        )
-        if not account:
-            await effective_message.reply_text(
-                "请先使用 /me 命令注册个人信息后再聊天。\n"
-                "Please register first using the /me command before chatting."
-            )
-            return
-        user_coins_free = account.coins
-        user_coins_paid = account.coins_paid
-        user_coins = account.total_coins
-
-        if user_coins < total_coin_cost:
-            await effective_message.reply_text(
-                f"您的硬币不足，无法与雾萌娘连接，需要{total_coin_cost}个硬币。试试通过 /lottery 抽奖吧！\n"
-                f"You don't have enough coins (need {total_coin_cost}), I don't want to talk to you. "
-                f"Try using /lottery to get some coins!")
-            return
-
-        await process_user.spend_user_coins(
-            user_id,
-            total_coin_cost,
-            connection=connection,
-        )
-        pool_add = stake_reward_pool.calculate_pool_add(total_coin_cost)
-        if pool_add > 0:
-            await stake_reward_pool.add_to_pool(pool_add, connection=connection)
-        if user_coins_free >= total_coin_cost:
-            new_free = user_coins_free - total_coin_cost
-            new_paid = user_coins_paid
-        else:
-            remaining = total_coin_cost - user_coins_free
-            new_free = 0
-            new_paid = max(user_coins_paid - remaining, 0)
-        user_coins = new_free + new_paid
-        user_plan = process_user.resolve_user_plan(user_id, new_paid)
-
-    user_state = await load_user_state(
-        user_id,
-        account=account,
-        coins=user_coins,
-        plan=user_plan,
-    )
-    if user_state is None:
-        logger.warning("User disappeared while building AI context: user_id=%s", user_id)
-        return
-    user_state_prompt = render_user_state(user_state)
-
-    chat_type = update.effective_chat.type or "private"
-    group_title = (update.effective_chat.title or "").strip() if update.effective_chat else ""
-    user_record_entries = []
-    runtime_replacements = []
-
-    for job in message_jobs:
-        message = job["message"]
-        current_message_time = _format_message_timestamp(message.date) or time.strftime(
-            '%Y-%m-%d %H:%M:%S'
-        )
-        is_edited = bool(job.get("is_edited"))
-        message_metadata_kwargs = {
-            "message_id": getattr(message, "message_id", None),
-            "edited": is_edited,
-            "edited_at": (
-                _format_message_timestamp(getattr(message, "edit_date", None))
-                if is_edited
-                else None
-            ),
-        }
-        forward_kwargs = _build_forward_format_kwargs(message)
-        reply_kwargs = (
-            _build_reply_format_kwargs(message.reply_to_message)
-            if message.reply_to_message
-            else {}
-        )
-
-        # 如果是媒体消息，进行下载、AI分析、格式化描述
-        if job["is_media"]:
-            try:
-                if message.photo:
-                    media_type = "photo"
-                    file = await message.photo[-1].get_file()
-                    media_emoji = None
-                else:
-                    media_type = "sticker"
-                    file = await message.sticker.get_file()
-                    media_emoji = getattr(message.sticker, "emoji", None)
-
-                # 检查是否有文本说明
-                caption = message.caption if message.caption else ""
-
-                file_size = getattr(file, "file_size", None)
-                if file_size and file_size > MAX_MEDIA_DOWNLOAD_BYTES:
-                    await message.reply_text(
-                        "图片太大啦，请压缩后再发送。\n"
-                        "The image is too large. Please compress it and try again."
-                    )
-                    return
-
-                # 直接下载到内存，避免把用户图片落盘。
-                file_bytes = await file.download_as_bytearray()
-                if len(file_bytes) > MAX_MEDIA_DOWNLOAD_BYTES:
-                    await message.reply_text(
-                        "图片太大啦，请压缩后再发送。\n"
-                        "The image is too large. Please compress it and try again."
-                    )
-                    return
-
-                base64_str = base64.b64encode(file_bytes).decode('utf-8')
-
-                # 异步调用图像分析AI
-                image_description = await analyze_image(base64_str)
-
-                # 组合图片描述和用户文本说明
-                message_text = caption if caption else f"[{media_type}]"
-                formatted_message = _format_xml_message(
-                    chat_type=chat_type,
-                    chat_title=group_title or None,
-                    timestamp=current_message_time,
-                    user_name=user_name,
-                    message_text=message_text,
-                    **message_metadata_kwargs,
-                    **forward_kwargs,
-                    **reply_kwargs,
-                    media_type=media_type,
-                    media_description=image_description,
-                    media_emoji=media_emoji,
-                )
-                runtime_formatted_message = _format_xml_message(
-                    chat_type=chat_type,
-                    chat_title=group_title or None,
-                    timestamp=current_message_time,
-                    user_name=user_name,
-                    message_text=message_text,
-                    **message_metadata_kwargs,
-                    **forward_kwargs,
-                    **reply_kwargs,
-                    media_type=media_type,
-                    media_emoji=media_emoji,
-                )
-                runtime_user_message = _build_multimodal_user_message(
-                    runtime_formatted_message,
-                    base64_str=base64_str,
-                    mime_type=_media_mime_type(media_type, message),
-                )
-                runtime_replacement = create_runtime_replacement(
-                    persisted_content=formatted_message,
-                    runtime_message=runtime_user_message,
-                )
-                if runtime_replacement:
-                    runtime_replacements.append(runtime_replacement)
-
-            except Exception as e:
-                logging.error(f"处理媒体消息时出错: {str(e)}")
-                await message.reply_text(
-                    "抱歉呢，雾萌娘暂时无法处理您发送的媒体，请稍后再试试看喵~\n"
-                    "Sorry, I'm having trouble processing your image/sticker right now. Please try again later, meow!")
-                return
-        else:
-            # 保留原有文本处理逻辑，处理文本消息
-            user_message = message.text or ""
-            formatted_message = _format_xml_message(
-                chat_type=chat_type,
-                chat_title=group_title or None,
-                timestamp=current_message_time,
-                user_name=user_name,
-                message_text=user_message,
-                **message_metadata_kwargs,
-                **forward_kwargs,
-                **reply_kwargs,
-            )
-
-        user_record_entries.append(("user", formatted_message))
-
-    if not user_record_entries:
-        return
-
-    # 异步插入用户消息
-    user_snapshot_created, user_storage_warning, user_archived_records = await db_connection.async_insert_chat_records(
-        conversation_id,
-        user_record_entries,
-        system_prompt_extra=user_state_prompt,
-    )
-    if user_archived_records:
-        await send_permanent_records_archive(
-            context.bot,
-            user_id,
-            user_archived_records,
-            logger=logger,
-        )
-    if user_storage_warning:
-        remember_history_warning(user_storage_warning)
-    await handle_overflow_summary(user_storage_warning)
-    if user_snapshot_created and user_storage_warning != "overflow":
-        summary.schedule_summary_generation(conversation_id)
-
-    # 立即获取最新历史记录，以便AI能看到刚刚插入的消息
-    chat_history = await db_connection.async_get_chat_history(conversation_id)
-
-    # 异步发送"正在输入"状态
-    try:
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    except Exception:
-        logger.debug("Failed to send typing action before AI request")
-
-    # 异步获取AI回复
-    is_group_chat = update.effective_chat.type in ("group", "supergroup")
-    context_state = build_context_state(
-        system_prompt=config.SYSTEM_PROMPT,
-        history_messages=chat_history,
-        scope=ConversationScope(
-            user_id=user_id,
-            is_group=is_group_chat,
-            group_id=update.effective_chat.id if is_group_chat else None,
-            message_id=getattr(effective_message, "message_id", None),
-        ),
-        user_state=user_state,
-        runtime_replacements=runtime_replacements,
-        text_fallback_messages=chat_history,
-    )
-    sent_messages = []
-    fallback_send = partial_send(
-        context.bot.send_message,
-        update.effective_chat.id,
-    )
-    visible_content_handler = TelegramVisibleContentHandler(
-        loop=asyncio.get_running_loop(),
-        bot=context.bot,
-        chat_id=update.effective_chat.id,
-        first_text_send=effective_message.reply_text,
-        fallback_send=fallback_send,
-        logger=logger,
-        reply_to_message_id=getattr(effective_message, "message_id", None),
-    )
-
-    assistant_message, tool_logs = await ASSISTANT_INFERENCE_SERVICE.infer(
-        context_state,
-        visible_content_sink=visible_content_handler,
-    )
-    sent_messages.extend(visible_content_handler.sent_messages)
-    assistant_message = normalize_ai_reply_text(assistant_message)
-    if assistant_message.strip():
-        assistant_message = await normalize_sticker_directives(
-            assistant_message,
-            logger=logger,
-        )
-
-    tool_record_entries = tool_logs_to_record_entries(tool_logs)
-
-    if tool_record_entries:
-        tool_snapshot_created, tool_storage_warning, tool_archived_records = await db_connection.async_insert_chat_records(
-            conversation_id,
-            tool_record_entries,
-        )
-        if tool_archived_records:
-            await send_permanent_records_archive(
-                context.bot,
-                user_id,
-                tool_archived_records,
-                logger=logger,
-            )
-        if tool_storage_warning:
-            remember_history_warning(tool_storage_warning)
-        await handle_overflow_summary(tool_storage_warning)
-        if tool_snapshot_created and tool_storage_warning != "overflow":
-            summary.schedule_summary_generation(conversation_id)
-
-    if assistant_message.strip():
-        # 异步插入AI回复到聊天记录
-        (
-            assistant_snapshot_created,
-            assistant_storage_warning,
-            assistant_archived_records,
-        ) = await db_connection.async_insert_chat_record(
-            conversation_id,
-            "assistant",
-            assistant_message,
-        )
-        if assistant_archived_records:
-            await send_permanent_records_archive(
-                context.bot,
-                user_id,
-                assistant_archived_records,
-                logger=logger,
-            )
-        if assistant_storage_warning:
-            remember_history_warning(assistant_storage_warning)
-        await handle_overflow_summary(assistant_storage_warning)
-        if assistant_snapshot_created and assistant_storage_warning != "overflow":
-            summary.schedule_summary_generation(conversation_id)
-
-    if pending_history_warning:
-        await notify_history_warning(pending_history_warning)
-
-    # 发送未通过可见循环即时发送的最终回复
-    if assistant_message.strip():
-        has_visible_message = bool(sent_messages)
-        try:
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        except Exception:
-            logger.debug("Failed to send typing action before final AI reply")
-        sent_messages.extend(
-            await send_ai_reply_with_stickers(
-                bot=context.bot,
-                chat_id=update.effective_chat.id,
-                text=assistant_message,
-                first_text_send=fallback_send if has_visible_message else effective_message.reply_text,
-                fallback_send=fallback_send,
-                logger=logger,
-                reply_to_message_id=None if has_visible_message else getattr(effective_message, "message_id", None),
-            )
-        )
-    sent_messages.extend(
-        await send_generated_audio_from_tool_logs(
-            bot=context.bot,
-            chat_id=update.effective_chat.id,
-            tool_logs=tool_logs,
-            logger=logger,
-        )
-    )
-    sent_messages.extend(
-        await send_generated_images_from_tool_logs(
-            bot=context.bot,
-            chat_id=update.effective_chat.id,
-            tool_logs=tool_logs,
-            logger=logger,
-        )
-    )
-    if not sent_messages and not assistant_message.strip():
-        tool_log_types = [
-            str(tool_log.get("type", "tool_result"))
-            for tool_log in tool_logs
-            if isinstance(tool_log, dict)
-        ]
-        logger.info(
-            "AI produced empty response; no Telegram message sent: user_id=%s conversation_id=%s tool_log_types=%s",
-            user_id,
-            conversation_id,
-            tool_log_types,
-        )
-    if update.effective_chat.type in ("group", "supergroup"):
-        for sent_message in sent_messages:
-            if sent_message is None:
-                continue
-            await group_chat_history.log_group_message(sent_message, update.effective_chat.id)
+    @param batch_items 已冻结的 Telegram 更新 / Frozen Telegram updates.
+    @return 无返回值 / No return value.
+    """
+    await ConversationTurnSession(batch_items=batch_items).run()
