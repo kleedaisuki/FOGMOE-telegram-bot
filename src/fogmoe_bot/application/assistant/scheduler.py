@@ -6,10 +6,14 @@ from typing import Optional
 from telegram.ext import ContextTypes
 
 from fogmoe_bot.infrastructure.database import connection as db_connection
-from fogmoe_bot.infrastructure.database.repositories import ai_schedule_repository, conversation_repository
-from fogmoe_bot.application.economy import process_user
+from fogmoe_bot.infrastructure.database.repositories import ai_schedule_repository
 from fogmoe_bot.application.telegram.archive_utils import send_permanent_records_archive
-from fogmoe_bot.domain.conversation.prompt_utils import format_metadata_attrs, format_user_state_prompt, xml_escape
+from fogmoe_bot.application.assistant.context_state import load_user_state
+from fogmoe_bot.domain.context import (
+    DEFAULT_CONTEXT_BUILDER,
+    ConversationScope,
+    ScheduledTaskContext,
+)
 from fogmoe_bot.infrastructure.telegram.telegram_utils import partial_send
 from fogmoe_bot.application.assistant import summary
 from fogmoe_bot.application.assistant.conversation_locks import get_conversation_lock
@@ -58,14 +62,6 @@ def _calculate_next_run_at(
     return next_run_at
 
 
-def _format_timestamp(value: Optional[datetime]) -> str:
-    if not value:
-        return ""
-    if value.tzinfo is not None:
-        value = value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value.strftime("%Y-%m-%d %H:%M:%S")
-
-
 def _format_scheduled_message(
     *,
     timestamp: datetime,
@@ -75,59 +71,17 @@ def _format_scheduled_message(
     context_text: Optional[str],
     instruction: str,
 ) -> str:
-    attrs = [
-        ("type", "scheduler"),
-        ("timestamp", _format_timestamp(timestamp)),
-        ("origin", "scheduled_task"),
-    ]
-    if scheduled_at:
-        attrs.append(("scheduled_at", _format_timestamp(scheduled_at)))
-    if scheduled_for:
-        attrs.append(("scheduled_for", _format_timestamp(scheduled_for)))
+    """@brief 兼容旧调用的定时任务渲染薄封装 / Thin compatibility wrapper for scheduled task rendering."""
 
-    attr_text = format_metadata_attrs(attrs)
-    lines = [f"<metadata {attr_text}>"]
-    lines.append(f"  <trigger>{xml_escape(trigger_reason)}</trigger>")
-    if context_text:
-        lines.append(f"  <context>{xml_escape(context_text)}</context>")
-    lines.append(f"  <instruction>{xml_escape(instruction)}</instruction>")
-    lines.append("</metadata>")
-    return "\n".join(lines)
-
-
-async def _build_user_state_prompt(user_id: int) -> Optional[str]:
-    account = await process_user.get_user_account(user_id)
-    if not account:
-        return None
-
-    user_permission = account.permission
-    user_info_raw = account.info
-    user_coins = account.total_coins
-    user_plan = process_user.resolve_user_plan(user_id, account.coins_paid)
-
-    user_impression_raw = await process_user.async_get_user_impression(user_id)
-
-    impression_display = (user_impression_raw or "").strip()
-    if impression_display:
-        impression_display = impression_display.replace("\r", " ").replace("\n", " ")
-        if len(impression_display) > 500:
-            impression_display = impression_display[:497] + "..."
-    else:
-        impression_display = "Not recorded"
-
-    personal_info_display = (user_info_raw or "").strip()
-    if personal_info_display and len(personal_info_display) > 500:
-        personal_info_display = personal_info_display[:500]
-
-    diary_exists = await conversation_repository.user_diary_exists(user_id)
-
-    return format_user_state_prompt(
-        user_coins=user_coins,
-        user_plan=user_plan,
-        user_permission=user_permission,
-        impression=impression_display,
-        personal_info=personal_info_display,
-        diary_exists=diary_exists,
+    return DEFAULT_CONTEXT_BUILDER.render_scheduled_task(
+        ScheduledTaskContext(
+            timestamp=timestamp,
+            scheduled_at=scheduled_at,
+            scheduled_for=scheduled_for,
+            trigger_reason=trigger_reason,
+            context_text=context_text,
+            instruction=instruction,
+        )
     )
 
 
@@ -235,14 +189,15 @@ async def _process_schedule_task_locked(
         recurrence_interval = 1
 
     try:
-        user_state_prompt = await _build_user_state_prompt(user_id)
-        if user_state_prompt is None:
+        user_state = await load_user_state(user_id)
+        if user_state is None:
             await _mark_schedule_status(
                 schedule_id,
                 "failed",
                 error="user not found",
             )
             return
+        user_state_prompt = DEFAULT_CONTEXT_BUILDER.render_user_state(user_state)
 
         now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
         scheduled_message = _format_scheduled_message(
@@ -272,13 +227,11 @@ async def _process_schedule_task_locked(
             summary.schedule_summary_generation(user_id)
 
         chat_history = await db_connection.async_get_chat_history(user_id)
-        tool_context = {
-            "is_group": False,
-            "group_id": None,
-            "message_id": None,
-            "user_id": user_id,
-            "user_state_prompt": user_state_prompt,
-        }
+        model_query = DEFAULT_CONTEXT_BUILDER.build_model_query(
+            history_messages=chat_history,
+            scope=ConversationScope(user_id=user_id),
+            user_state_prompt=user_state_prompt,
+        )
 
         try:
             await context.bot.send_chat_action(chat_id=user_id, action="typing")
@@ -297,9 +250,10 @@ async def _process_schedule_task_locked(
         )
 
         assistant_message, tool_logs = await get_ai_response(
-            list(chat_history),
+            model_query.messages,
             user_id,
-            tool_context=tool_context,
+            tool_context=model_query.tool_context,
+            text_fallback_messages=model_query.text_fallback_messages,
             visible_content_handler=visible_content_handler,
         )
         sent_messages.extend(visible_content_handler.sent_messages)

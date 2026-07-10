@@ -13,10 +13,14 @@ from telegram.ext import ContextTypes
 from fogmoe_bot.application.telegram.archive_utils import send_permanent_records_archive
 from fogmoe_bot.application.chat import group_chat_history
 from fogmoe_bot.application.economy import process_user, stake_reward_pool
-from fogmoe_bot.domain.conversation.prompt_utils import format_metadata_attrs, format_user_state_prompt, xml_escape
+from fogmoe_bot.application.assistant.context_state import load_user_state
+from fogmoe_bot.domain.context import (
+    DEFAULT_CONTEXT_BUILDER,
+    ChatMessageContext,
+    ConversationScope,
+)
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import db, connection as db_connection
-from fogmoe_bot.infrastructure.database.repositories import conversation_repository
 from fogmoe_bot.infrastructure.telegram.telegram_utils import (
     describe_forward_for_context,
     describe_message_for_context,
@@ -128,12 +132,6 @@ def _format_message_timestamp(value) -> str | None:
     return str(value)
 
 
-def _format_xml_attrs(attrs: list[tuple[str, str | None]]) -> str:
-    return " ".join(
-        f'{key}="{xml_escape(value)}"' for key, value in attrs if value
-    )
-
-
 def _format_xml_message(
     *,
     chat_type: str,
@@ -161,66 +159,36 @@ def _format_xml_message(
     media_description: str | None = None,
     media_emoji: str | None = None,
 ) -> str:
-    attrs = [
-        ("type", chat_type),
-        ("timestamp", timestamp),
-        ("user", f"@{user_name}"),
-        ("message_id", str(message_id) if message_id is not None else None),
-        ("edited", "true" if edited else None),
-        ("edited_at", edited_at if edited else None),
-    ]
-    if chat_type in ("group", "supergroup") and chat_title:
-        attrs.insert(1, ("title", chat_title))
-    attr_text = format_metadata_attrs(attrs)
-    lines = [f"<metadata {attr_text}>"]
-    if forward_type:
-        forward_attr_text = _format_xml_attrs(
-            [
-                ("type", forward_type),
-                ("origin_timestamp", forward_origin_timestamp),
-                ("user", forward_user),
-                ("name", forward_name),
-                ("chat", forward_chat),
-                ("message_id", forward_message_id),
-                ("author_signature", forward_author_signature),
-            ]
+    """@brief 兼容旧调用的消息渲染薄封装 / Thin compatibility wrapper for message rendering."""
+
+    return DEFAULT_CONTEXT_BUILDER.render_chat_message(
+        ChatMessageContext(
+            chat_type=chat_type,
+            chat_title=chat_title,
+            timestamp=timestamp,
+            user_name=user_name,
+            message_text=message_text,
+            message_id=message_id,
+            edited=edited,
+            edited_at=edited_at,
+            forward_type=forward_type,
+            forward_origin_timestamp=forward_origin_timestamp,
+            forward_user=forward_user,
+            forward_name=forward_name,
+            forward_chat=forward_chat,
+            forward_message_id=forward_message_id,
+            forward_author_signature=forward_author_signature,
+            reply_user=reply_user,
+            reply_text=reply_text,
+            reply_type=reply_type,
+            reply_caption=reply_caption,
+            reply_summary=reply_summary,
+            reply_emoji=reply_emoji,
+            media_type=media_type,
+            media_description=media_description,
+            media_emoji=media_emoji,
         )
-        lines.append(f"  <forward {forward_attr_text} />")
-    if reply_type:
-        reply_user_value = f"@{reply_user}" if reply_user else ""
-        reply_attr_text = _format_xml_attrs(
-            [
-                ("user", reply_user_value),
-                ("type", reply_type),
-                ("emoji", reply_emoji),
-            ]
-        )
-        lines.append(f"  <reply {reply_attr_text}>")
-        if reply_text:
-            lines.append(f"    <text>{xml_escape(reply_text)}</text>")
-        if reply_caption:
-            lines.append(f"    <caption>{xml_escape(reply_caption)}</caption>")
-        if reply_summary:
-            lines.append(f"    <summary>{xml_escape(reply_summary)}</summary>")
-        lines.append("  </reply>")
-    elif reply_user or reply_text:
-        reply_user_value = f"@{reply_user}" if reply_user else ""
-        reply_attr = f' user="{xml_escape(reply_user_value)}"' if reply_user_value else ""
-        lines.append(f"  <reply{reply_attr}>{xml_escape(reply_text or '')}</reply>")
-    if media_type:
-        media_attrs = [("type", media_type)]
-        if media_emoji:
-            media_attrs.append(("emoji", media_emoji))
-        media_attr_text = _format_xml_attrs(media_attrs)
-        lines.append(f"  <media {media_attr_text}>")
-        if media_description:
-            lines.append(
-                f"    <description>{xml_escape(media_description)}</description>"
-            )
-        lines.append("  </media>")
-    lines.append("</metadata>")
-    lines.append(f"<message>{xml_escape(message_text)}</message>")
-    return "\n".join(lines)
+    )
 
 
 def _media_mime_type(media_type: str, effective_message) -> str | None:
@@ -294,31 +262,6 @@ def _build_multimodal_user_message(
             },
         ],
     }
-
-
-def _replace_user_messages_for_ai(
-    messages: list,
-    replacements: list[tuple[str, dict]],
-) -> list:
-    if not replacements:
-        return list(messages)
-
-    messages_for_ai = list(messages)
-    search_end = len(messages_for_ai) - 1
-    for persisted_content, runtime_message in reversed(replacements):
-        for index in range(search_end, -1, -1):
-            message = messages_for_ai[index]
-            if not isinstance(message, dict):
-                continue
-            if (
-                message.get("role") == "user"
-                and message.get("content") == persisted_content
-            ):
-                messages_for_ai[index] = runtime_message
-                search_end = index - 1
-                break
-
-    return messages_for_ai
 
 
 async def should_trigger_ai_response(message_text: str) -> bool:
@@ -605,10 +548,8 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
                 "Please register first using the /me command before chatting."
             )
             return
-        user_permission = account.permission
         user_coins_free = account.coins
         user_coins_paid = account.coins_paid
-        user_info_raw = account.info
         user_coins = account.total_coins
 
         if user_coins < total_coin_cost:
@@ -636,30 +577,16 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
         user_coins = new_free + new_paid
         user_plan = process_user.resolve_user_plan(user_id, new_paid)
 
-    user_impression_raw = await process_user.async_get_user_impression(user_id)
-    impression_display = (user_impression_raw or "").strip()
-    if impression_display:
-        impression_display = impression_display.replace("\r", " ").replace("\n", " ")
-        if len(impression_display) > 500:
-            impression_display = impression_display[:497] + "..."
-    else:
-        impression_display = "Not recorded"
-
-    personal_info_display = (user_info_raw or "").strip()
-    if personal_info_display:
-        if len(personal_info_display) > 500:
-            personal_info_display = personal_info_display[:500]
-
-    diary_exists = await conversation_repository.user_diary_exists(user_id)
-
-    user_state_prompt = format_user_state_prompt(
-        user_coins=user_coins,
-        user_plan=user_plan,
-        user_permission=user_permission,
-        impression=impression_display,
-        personal_info=personal_info_display,
-        diary_exists=diary_exists,
+    user_state = await load_user_state(
+        user_id,
+        account=account,
+        coins=user_coins,
+        plan=user_plan,
     )
+    if user_state is None:
+        logger.warning("User disappeared while building AI context: user_id=%s", user_id)
+        return
+    user_state_prompt = DEFAULT_CONTEXT_BUILDER.render_user_state(user_state)
 
     chat_type = update.effective_chat.type or "private"
     group_title = (update.effective_chat.title or "").strip() if update.effective_chat else ""
@@ -757,10 +684,12 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
                     base64_str=base64_str,
                     mime_type=_media_mime_type(media_type, message),
                 )
-                if runtime_user_message:
-                    runtime_replacements.append(
-                        (formatted_message, runtime_user_message)
-                    )
+                runtime_replacement = DEFAULT_CONTEXT_BUILDER.create_runtime_replacement(
+                    persisted_content=formatted_message,
+                    runtime_message=runtime_user_message,
+                )
+                if runtime_replacement:
+                    runtime_replacements.append(runtime_replacement)
 
             except Exception as e:
                 logging.error(f"处理媒体消息时出错: {str(e)}")
@@ -809,11 +738,6 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
     # 立即获取最新历史记录，以便AI能看到刚刚插入的消息
     chat_history = await db_connection.async_get_chat_history(conversation_id)
 
-    chat_history_for_ai = _replace_user_messages_for_ai(
-        chat_history,
-        runtime_replacements,
-    )
-
     # 异步发送"正在输入"状态
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -821,13 +745,19 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
         logger.debug("Failed to send typing action before AI request")
 
     # 异步获取AI回复
-    tool_context = {
-        "is_group": update.effective_chat.type in ("group", "supergroup"),
-        "group_id": update.effective_chat.id if update.effective_chat.type in ("group", "supergroup") else None,
-        "message_id": getattr(effective_message, "message_id", None),
-        "user_id": user_id,
-        "user_state_prompt": user_state_prompt,
-    }
+    is_group_chat = update.effective_chat.type in ("group", "supergroup")
+    model_query = DEFAULT_CONTEXT_BUILDER.build_model_query(
+        history_messages=chat_history,
+        scope=ConversationScope(
+            user_id=user_id,
+            is_group=is_group_chat,
+            group_id=update.effective_chat.id if is_group_chat else None,
+            message_id=getattr(effective_message, "message_id", None),
+        ),
+        user_state_prompt=user_state_prompt,
+        runtime_replacements=runtime_replacements,
+        text_fallback_messages=chat_history,
+    )
     sent_messages = []
     fallback_send = partial_send(
         context.bot.send_message,
@@ -844,10 +774,10 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
     )
 
     assistant_message, tool_logs = await get_ai_response(
-        chat_history_for_ai,
+        model_query.messages,
         user_id,
-        tool_context=tool_context,
-        text_fallback_messages=chat_history,
+        tool_context=model_query.tool_context,
+        text_fallback_messages=model_query.text_fallback_messages,
         visible_content_handler=visible_content_handler,
     )
     sent_messages.extend(visible_content_handler.sent_messages)
