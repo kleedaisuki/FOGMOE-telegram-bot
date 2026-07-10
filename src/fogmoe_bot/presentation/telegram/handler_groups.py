@@ -85,12 +85,6 @@ def register_interactive_feature_handlers(application) -> None:
 
     application.add_handler(CommandHandler("shop", shop.shop_command))
     application.add_handler(CallbackQueryHandler(shop.shop_callback, pattern=r"^shop_"))
-    application.job_queue.run_repeating(
-        shop.cleanup_message_records_job,
-        interval=3600,
-        first=10,
-    )
-
     application.add_handler(CommandHandler("task", task.task_command))
     application.add_handler(CallbackQueryHandler(task.task_callback, pattern=r"^task_"))
 

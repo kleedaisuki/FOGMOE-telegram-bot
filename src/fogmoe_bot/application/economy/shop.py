@@ -545,7 +545,7 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 await query.answer("购买欢乐彩时出错，请稍后再试。", show_alert=True)
 
-# 修改清理函数以适配JobQueue使用
+# 兼容旧调用点的清理入口；周期调度由 application.scheduling 管理。
 async def cleanup_message_records_job(context: ContextTypes.DEFAULT_TYPE):
     """清理旧的消息记录，每小时运行一次"""
     current_time = time.time()

@@ -83,10 +83,10 @@ def test_dispatcher_executes_and_finalizes_one_shot_job() -> None:
         clock=_FixedClock(now),
     )
 
-    report = asyncio.run(dispatcher.tick())
+    claims = asyncio.run(dispatcher.claim_due())
+    results = [asyncio.run(dispatcher.execute_claim(claim)) for claim in claims]
 
-    assert report.claimed == report.succeeded == 1
-    assert report.failed == 0
+    assert results == [True]
     assert handler.handled == [1]
     assert repository.executed == [1]
     assert repository.recovered == 1
@@ -103,9 +103,10 @@ def test_dispatcher_fails_job_without_registered_handler() -> None:
         clock=_FixedClock(now),
     )
 
-    report = asyncio.run(dispatcher.tick())
+    claims = asyncio.run(dispatcher.claim_due())
+    results = [asyncio.run(dispatcher.execute_claim(claim)) for claim in claims]
 
-    assert report.failed == 1
+    assert results == [False]
     assert repository.failed == [
         (2, "No handler registered for scheduled job kind: missing.job")
     ]

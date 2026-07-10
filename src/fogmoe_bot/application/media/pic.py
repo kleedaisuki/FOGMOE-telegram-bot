@@ -772,16 +772,6 @@ def setup_pic_handlers(application):
     # 添加回调查询处理器，处理高清图片按钮
     application.add_handler(CallbackQueryHandler(hd_pic_callback, pattern=r"^pic_hd_"))
     
-    # 添加定期刷新缓存的任务，每30分钟执行一次
-    application.job_queue.run_repeating(refresh_cache_job, interval=1800, first=10)
-    
-    # 添加定期清理过期图片请求记录的任务
-    application.job_queue.run_repeating(
-        lambda ctx: asyncio.create_task(clean_expired_requests(ctx)), 
-        interval=3600,  # 每小时运行一次
-        first=1800      # 首次运行在30分钟后
-    )
-    
     # 日志记录
     logger.info("图片系统已初始化")
 

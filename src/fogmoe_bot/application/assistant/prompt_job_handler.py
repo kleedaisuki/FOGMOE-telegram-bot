@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from concurrent.futures import Executor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -35,13 +36,15 @@ logger = logging.getLogger(__name__)
 class PromptJobHandler:
     """@brief 将 Assistant 定时载荷执行为一次完整回合 / Execute an Assistant payload as a complete turn."""
 
-    def __init__(self, bot: Any) -> None:
+    def __init__(self, bot: Any, *, inference_executor: Executor | None = None) -> None:
         """@brief 创建处理器 / Create the handler.
 
         @param bot Telegram Bot 投递端口实现 / Telegram Bot delivery implementation.
+        @param inference_executor 定时任务专属同步 Agent worker 池 / Dedicated synchronous Agent worker pool for scheduled jobs.
         """
 
         self._bot = bot
+        self._inference_executor = inference_executor
 
     @property
     def kind(self) -> JobKind:
@@ -134,6 +137,7 @@ class PromptJobHandler:
         assistant_message, tool_logs = await ASSISTANT_INFERENCE_SERVICE.infer(
             context_state,
             visible_content_sink=visible_content_handler,
+            executor=self._inference_executor,
         )
         sent_messages = list(visible_content_handler.sent_messages)
         assistant_message = normalize_ai_reply_text(assistant_message)

@@ -661,7 +661,4 @@ def setup_music_handlers(application):
     application.add_handler(CommandHandler("music", music_command))
     application.add_handler(CallbackQueryHandler(music_platform_callback, pattern=r"^music_"))
     
-    # 添加定期清理任务，每5分钟执行一次
-    application.job_queue.run_repeating(clean_expired_requests_job, interval=300, first=10)
-    
     logger.info("音乐搜索命令 (/music) 处理器已设置")

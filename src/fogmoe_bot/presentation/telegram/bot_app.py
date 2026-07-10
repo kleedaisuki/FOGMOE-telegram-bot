@@ -6,6 +6,7 @@ from telegram.ext import ApplicationBuilder
 
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.application.moderation.member_verify import restore_verification_tasks
+from fogmoe_bot.application.scheduling import SchedulingRuntime
 from fogmoe_bot.application.telegram.bot_conversation import post_init as conversation_post_init
 
 from .handler_registry import register_handlers
@@ -90,30 +91,35 @@ def run() -> None:
     recovers transient bootstrap failures by rebuilding the Application.
     """
 
-    attempt = 0
-    while True:
-        application = create_application()
-        try:
-            application.run_polling(
-                timeout=config.TELEGRAM_GET_UPDATES_TIMEOUT,
-                bootstrap_retries=0,
-            )
-            return
-        except KeyboardInterrupt:
-            logger.info("Bot shutdown requested by keyboard interrupt.")
-            return
-        except Exception as exc:
-            if not _is_recoverable_polling_error(exc):
-                raise
+    runtime = SchedulingRuntime()
+    runtime.start()
+    try:
+        attempt = 0
+        while True:
+            application = create_application()
+            try:
+                application.run_polling(
+                    timeout=config.TELEGRAM_GET_UPDATES_TIMEOUT,
+                    bootstrap_retries=0,
+                )
+                return
+            except KeyboardInterrupt:
+                logger.info("Bot shutdown requested by keyboard interrupt.")
+                return
+            except Exception as exc:
+                if not _is_recoverable_polling_error(exc):
+                    raise
 
-            attempt += 1
-            delay = _polling_retry_delay(attempt)
-            logger.warning(
-                "Telegram polling bootstrap failed with a transient network error; "
-                "rebuilding the application in %.1f seconds (attempt %s): %s",
-                delay,
-                attempt,
-                exc,
-                exc_info=True,
-            )
-            time.sleep(delay)
+                attempt += 1
+                delay = _polling_retry_delay(attempt)
+                logger.warning(
+                    "Telegram polling bootstrap failed with a transient network error; "
+                    "rebuilding the application in %.1f seconds (attempt %s): %s",
+                    delay,
+                    attempt,
+                    exc,
+                    exc_info=True,
+                )
+                time.sleep(delay)
+    finally:
+        runtime.stop()

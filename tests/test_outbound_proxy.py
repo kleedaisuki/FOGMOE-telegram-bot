@@ -99,13 +99,41 @@ class _PollingApplication:
             raise self.outcome
 
 
+class _SchedulingRuntime:
+    """@brief 独立 scheduling 生命周期测试替身 / Test double for independent scheduling lifecycle."""
+
+    started = 0
+    stopped = 0
+
+    def start(self) -> None:
+        """@brief 记录启动 / Record startup.
+
+        @return None / None.
+        """
+
+        type(self).started += 1
+
+    def stop(self) -> None:
+        """@brief 记录停止 / Record shutdown.
+
+        @return None / None.
+        """
+
+        type(self).stopped += 1
+
+
+
+
 def test_run_rebuilds_application_after_transient_polling_failure(monkeypatch):
     """@brief 临时网络错误后退避并重建轮询应用 / Rebuild polling application after transient network error."""
     first = _PollingApplication(telegram.error.NetworkError("proxy unavailable"))
     second = _PollingApplication(None)
     applications = iter([first, second])
     delays: list[float] = []
+    _SchedulingRuntime.started = 0
+    _SchedulingRuntime.stopped = 0
     monkeypatch.setattr(bot_app, "create_application", lambda: next(applications))
+    monkeypatch.setattr(bot_app, "SchedulingRuntime", _SchedulingRuntime)
     monkeypatch.setattr(bot_app.time, "sleep", delays.append)
     monkeypatch.setattr(config, "TELEGRAM_POLLING_RETRY_INITIAL_DELAY", 1.0)
     monkeypatch.setattr(config, "TELEGRAM_POLLING_RETRY_MAX_DELAY", 30.0)
@@ -120,15 +148,22 @@ def test_run_rebuilds_application_after_transient_polling_failure(monkeypatch):
         }
     ]
     assert second.calls == first.calls
+    assert (_SchedulingRuntime.started, _SchedulingRuntime.stopped) == (1, 1)
 
 
 def test_run_propagates_nonrecoverable_polling_failure(monkeypatch):
     """@brief 无效 token 等永久错误不应无限重试 / Permanent errors such as bad tokens must not retry forever."""
     application = _PollingApplication(telegram.error.InvalidToken("bad token"))
     monkeypatch.setattr(bot_app, "create_application", lambda: application)
+    monkeypatch.setattr(bot_app, "SchedulingRuntime", _SchedulingRuntime)
+
+    _SchedulingRuntime.started = 0
+    _SchedulingRuntime.stopped = 0
 
     with pytest.raises(telegram.error.InvalidToken):
         bot_app.run()
+
+    assert (_SchedulingRuntime.started, _SchedulingRuntime.stopped) == (1, 1)
 
 
 def test_requests_session_uses_configured_socks_proxy(monkeypatch):

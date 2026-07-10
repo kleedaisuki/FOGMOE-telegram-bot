@@ -368,5 +368,4 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 def setup_sicbo_handlers(application):
     application.add_handler(CommandHandler("sicbo", sicbo_command))
     application.add_handler(CallbackQueryHandler(handle_callback, pattern=r"^sicbo_"))
-    application.job_queue.run_repeating(cleanup_expired_games, interval=300)
     logging.info("已加载骰宝游戏处理器")

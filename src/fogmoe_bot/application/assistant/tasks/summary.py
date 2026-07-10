@@ -1,6 +1,7 @@
 """Background conversation summarization using LiteLLM providers."""
 
 import asyncio
+import contextvars
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -29,7 +30,8 @@ def schedule_summary_generation(user_id: int) -> None:
 
     if user_id is None:
         return
-    _SUMMARY_EXECUTOR.submit(_process_summary_for_user, user_id)
+    context = contextvars.copy_context()
+    _SUMMARY_EXECUTOR.submit(context.run, _process_summary_for_user, user_id)
 
 
 def _generate_and_store_summary(user_id: int) -> Optional[str]:
@@ -49,8 +51,10 @@ def _generate_and_store_summary(user_id: int) -> Optional[str]:
 
 async def generate_summary_immediately(user_id: int) -> Optional[str]:
     loop = asyncio.get_running_loop()
+    context = contextvars.copy_context()
     return await loop.run_in_executor(
         _SUMMARY_EXECUTOR,
+        context.run,
         _generate_and_store_summary,
         user_id,
     )

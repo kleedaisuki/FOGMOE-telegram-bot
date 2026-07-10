@@ -88,7 +88,6 @@ def test_registration_steps_are_grouped_by_app_assembly_boundary():
         "register_media_and_chart_handlers",
         "register_rpg_handlers",
         "register_admin_handlers",
-        "register_scheduling_daemon",
     ]
 
 
@@ -165,16 +164,4 @@ def test_register_handlers_preserves_handler_and_job_registration_order():
         ("CommandHandler", 0, "logs", "view_logs"),
         ("CommandHandler", 0, "webpassword", "webpassword_command"),
     ]
-    assert [_job_signature(job) for job in application.job_queue.jobs] == [
-        ("cleanup_message_records_job", 3600, 10),
-        ("cleanup_expired_games", 300, None),
-        ("refresh_cache_job", 1800, 10),
-        ("<lambda>", 3600, 1800),
-        ("clean_expired_requests_job", 300, 10),
-        ("run_scheduling_daemon_tick", 60, 5),
-    ]
-    assert application.job_queue.jobs[-1]["job_kwargs"] == {
-        "misfire_grace_time": 60,
-        "coalesce": True,
-        "max_instances": 1,
-    }
+    assert [_job_signature(job) for job in application.job_queue.jobs] == []

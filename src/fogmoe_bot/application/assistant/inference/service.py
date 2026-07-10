@@ -1,7 +1,9 @@
 """@brief 状态化 Agent 推理服务 / Stateful Agent inference service."""
 
 import asyncio
+import contextvars
 import logging
+from concurrent.futures import Executor
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -86,16 +88,19 @@ class AssistantInferenceService:
         context_state: ContextState,
         *,
         visible_content_sink: VisibleContentSink | None = None,
+        executor: Executor | None = None,
     ) -> AgentResponse:
         """@brief 执行一次可回退的 Agent 推理 / Run one fallback-capable Agent inference.
 
         @param context_state 本回合完整领域上下文 / Complete domain context for this turn.
         @param visible_content_sink 用户可见输出端口 / User-visible output sink.
+        @param executor 可选的同步 Agent worker 池 / Optional worker pool for synchronous Agent execution.
         @return 最终 Agent 响应 / Final Agent response.
         """
         response, last_error = await self._try_routes(
             context_state,
             visible_content_sink=visible_content_sink,
+            executor=executor,
         )
         if response is not None:
             return response
@@ -111,6 +116,7 @@ class AssistantInferenceService:
                 context_state,
                 messages=fallback_messages,
                 visible_content_sink=visible_content_sink,
+                executor=executor,
             )
             if response is not None:
                 return response
@@ -128,6 +134,7 @@ class AssistantInferenceService:
         *,
         messages: list[dict[str, Any]] | None = None,
         visible_content_sink: VisibleContentSink | None,
+        executor: Executor | None,
     ) -> tuple[AgentResponse | None, Exception | None]:
         last_error: Exception | None = None
         loop = asyncio.get_running_loop()
@@ -152,8 +159,10 @@ class AssistantInferenceService:
                 text_fallback_messages=context_state.text_fallback_messages,
             )
             try:
+                context = contextvars.copy_context()
                 response = await loop.run_in_executor(
-                    EXECUTOR,
+                    executor if executor is not None else EXECUTOR,
+                    context.run,
                     lambda r=route, c=route_context: self._run_route_with_context(
                         r,
                         c,

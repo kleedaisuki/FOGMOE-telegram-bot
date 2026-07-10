@@ -15,9 +15,6 @@ from .handler_groups import (
     register_staking_and_crypto_handlers,
     register_translation_handlers,
 )
-from fogmoe_bot.application.scheduling import register_scheduling_daemon
-
-
 REGISTRATION_STEPS = (
     register_error_handlers,
     register_conversation_handlers,
@@ -34,7 +31,6 @@ REGISTRATION_STEPS = (
     register_media_and_chart_handlers,
     register_rpg_handlers,
     register_admin_handlers,
-    register_scheduling_daemon,
 )
 
 

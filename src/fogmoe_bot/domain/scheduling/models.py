@@ -61,6 +61,32 @@ PROMPT_JOB_KIND = JobKind("prompt.turn")
 
 
 @dataclass(frozen=True, slots=True)
+class MaintenanceTask:
+    """@brief 进程内周期维护任务定义 / In-process periodic maintenance-task definition.
+
+    @param kind 稳定的维护任务类型 / Stable maintenance-task kind.
+    @param interval 周期执行间隔 / Recurring execution interval.
+    @param initial_delay 进程启动后的首次延迟 / First-run delay after process startup.
+    """
+
+    kind: JobKind
+    interval: timedelta
+    initial_delay: timedelta = timedelta()
+
+    def __post_init__(self) -> None:
+        """@brief 校验维护任务时间边界 / Validate maintenance-task timing boundaries.
+
+        @return None / None.
+        @raise ValueError 周期非正或首次延迟为负时抛出 / Raised for non-positive intervals or negative initial delays.
+        """
+
+        if self.interval <= timedelta():
+            raise ValueError("Maintenance interval must be positive")
+        if self.initial_delay < timedelta():
+            raise ValueError("Maintenance initial delay cannot be negative")
+
+
+@dataclass(frozen=True, slots=True)
 class PromptJobPayload:
     """@brief 定时 Prompt 回合输入 / Scheduled prompt-turn input.
 

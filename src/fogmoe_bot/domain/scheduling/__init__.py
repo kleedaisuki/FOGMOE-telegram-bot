@@ -2,6 +2,7 @@
 
 from .models import (
     JobKind,
+    MaintenanceTask,
     PROMPT_JOB_KIND,
     PromptJobPayload,
     Recurrence,
@@ -17,8 +18,8 @@ from .models import (
 )
 from .service import (
     Clock,
-    DispatchReport,
     ScheduleDispatcher,
+    MaintenanceTaskHandler,
     ScheduledJobHandler,
     ScheduleRepository,
     SystemClock,
@@ -26,6 +27,7 @@ from .service import (
 
 __all__ = [
     "JobKind",
+    "MaintenanceTask",
     "PROMPT_JOB_KIND",
     "PromptJobPayload",
     "Recurrence",
@@ -39,8 +41,8 @@ __all__ = [
     "ensure_utc",
     "to_storage_datetime",
     "Clock",
-    "DispatchReport",
     "ScheduleDispatcher",
+    "MaintenanceTaskHandler",
     "ScheduledJobHandler",
     "ScheduleRepository",
     "SystemClock",

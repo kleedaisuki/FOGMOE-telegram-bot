@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
-from .models import JobKind, ScheduleClaim, ScheduledJob
+from .models import JobKind, MaintenanceTask, ScheduleClaim, ScheduledJob
 
 
 logger = logging.getLogger(__name__)
@@ -83,20 +81,25 @@ class ScheduledJobHandler(Protocol):
         ...
 
 
-@dataclass(frozen=True, slots=True)
-class DispatchReport:
-    """@brief 一次守护 tick 的执行报告 / Execution report for one daemon tick.
+class MaintenanceTaskHandler(Protocol):
+    """@brief 周期维护任务的类型化处理器 / Typed handler for a periodic maintenance task."""
 
-    @param claimed 领取数量 / Number of claimed jobs.
-    @param succeeded 成功数量 / Number of successful jobs.
-    @param failed 失败数量 / Number of failed jobs.
-    @param skipped 是否因上一轮仍运行而跳过 / Whether the tick was skipped because the prior tick is active.
-    """
+    @property
+    def task(self) -> MaintenanceTask:
+        """@brief 返回维护任务定义 / Return the maintenance-task definition.
 
-    claimed: int
-    succeeded: int
-    failed: int
-    skipped: bool = False
+        @return 维护任务定义 / Maintenance-task definition.
+        """
+
+        ...
+
+    async def handle(self) -> None:
+        """@brief 执行一次维护任务 / Execute one maintenance task occurrence.
+
+        @return None / None.
+        """
+
+        ...
 
 
 class SystemClock:
@@ -121,7 +124,6 @@ class ScheduleDispatcher:
         handlers: Sequence[ScheduledJobHandler],
         clock: Clock | None = None,
         batch_size: int = 5,
-        max_concurrency: int = 3,
         stale_after: timedelta = timedelta(minutes=30),
     ) -> None:
         """@brief 创建调度分派器 / Create a schedule dispatcher.
@@ -129,15 +131,12 @@ class ScheduleDispatcher:
         @param repository 调度持久化端口 / Scheduling persistence port.
         @param handlers 按类型注册的任务处理器 / Job handlers registered by kind.
         @param clock 可替换时钟 / Replaceable clock.
-        @param batch_size 每轮最大领取数 / Maximum claims per tick.
-        @param max_concurrency 单轮最大并发执行数 / Maximum concurrent executions per tick.
+        @param batch_size 单次领取的最大任务数 / Maximum jobs in a single claim.
         @param stale_after 执行中任务的崩溃回收阈值 / Recovery threshold for stranded executing jobs.
         """
 
         if batch_size < 1:
             raise ValueError("batch_size must be at least one")
-        if max_concurrency < 1:
-            raise ValueError("max_concurrency must be at least one")
         if stale_after <= timedelta(0):
             raise ValueError("stale_after must be positive")
         handler_map = {handler.kind: handler for handler in handlers}
@@ -147,49 +146,44 @@ class ScheduleDispatcher:
         self._handlers: Mapping[JobKind, ScheduledJobHandler] = handler_map
         self._clock = clock or SystemClock()
         self._batch_size = batch_size
-        self._max_concurrency = max_concurrency
         self._stale_after = stale_after
-        self._tick_lock = asyncio.Lock()
 
-    async def tick(self) -> DispatchReport:
-        """@brief 执行一次短生命周期守护轮询 / Run one bounded daemon polling tick.
+    async def claim_due(
+        self,
+        *,
+        limit: int | None = None,
+    ) -> tuple[ScheduleClaim[Any], ...]:
+        """@brief 快速回收并领取任务，不执行 handler / Recover and claim jobs without running handlers.
 
-        @return 类型化执行报告 / Typed dispatch report.
+        @param limit 可选领取上限 / Optional claim limit.
+        @return 带 fencing token 的领取凭证 / Claims carrying fencing tokens.
+        @note 供独立 worker 使用；调用方必须最终调用 execute_claim /
+        Used by independent workers; callers must eventually invoke execute_claim.
         """
 
-        if self._tick_lock.locked():
-            return DispatchReport(0, 0, 0, skipped=True)
-
-        async with self._tick_lock:
-            now = self._clock.now()
-            recovered = await self._repository.recover_stale(now)
-            if recovered:
-                logger.warning("Recovered %s stale scheduled jobs", recovered)
-            claims = tuple(
-                await self._repository.claim_due(
-                    now=now,
-                    limit=self._batch_size,
-                    lease_for=self._stale_after,
-                )
+        claim_limit = self._batch_size if limit is None else min(self._batch_size, limit)
+        if claim_limit < 1:
+            return ()
+        now = self._clock.now()
+        recovered = await self._repository.recover_stale(now)
+        if recovered:
+            logger.warning("Recovered %s stale scheduled jobs", recovered)
+        return tuple(
+            await self._repository.claim_due(
+                now=now,
+                limit=claim_limit,
+                lease_for=self._stale_after,
             )
-            if not claims:
-                return DispatchReport(0, 0, 0)
+        )
 
-            semaphore = asyncio.Semaphore(self._max_concurrency)
+    async def execute_claim(self, claim: ScheduleClaim[Any]) -> bool:
+        """@brief 执行已领取任务 / Execute a previously claimed job.
 
-            async def execute(claim: ScheduleClaim[Any]) -> bool:
-                """@brief 在并发上限内执行单个任务 / Execute one job under the concurrency limit."""
+        @param claim 带 fencing token 的领取凭证 / Claim carrying a fencing token.
+        @return 成功时返回 True / True on success.
+        """
 
-                async with semaphore:
-                    return await self._execute(claim)
-
-            results = await asyncio.gather(*(execute(claim) for claim in claims))
-            succeeded = sum(results)
-            return DispatchReport(
-                claimed=len(claims),
-                succeeded=succeeded,
-                failed=len(claims) - succeeded,
-            )
+        return await self._execute(claim)
 
     async def _execute(self, claim: ScheduleClaim[Any]) -> bool:
         """@brief 执行并终结一个任务状态 / Execute a job and finalize its state.
