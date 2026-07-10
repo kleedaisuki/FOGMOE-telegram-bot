@@ -23,6 +23,7 @@ from fogmoe_bot.infrastructure.database.repositories import (
 )
 from fogmoe_bot.infrastructure.telegram.telegram_utils import partial_send, safe_send_markdown
 from fogmoe_bot.application.assistant.tasks import summary
+from fogmoe_bot.application.assistant.conversation_context_cache import CONVERSATION_CONTEXT_CACHE
 from fogmoe_bot.application.assistant.tasks.translate import translate_text
 from fogmoe_bot.application.economy import ref
 
@@ -343,6 +344,7 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         user_id,
         conversation_id,
     )
+    CONVERSATION_CONTEXT_CACHE.invalidate(conversation_id)
 
     if snapshot_created:
         summary.schedule_summary_generation(user_id)

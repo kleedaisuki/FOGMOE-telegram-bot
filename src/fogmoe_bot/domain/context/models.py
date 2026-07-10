@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterable, Mapping
+
+from .formatting import format_user_state_prompt, join_prompt_sections
 
 
 @dataclass(frozen=True)
@@ -131,16 +134,17 @@ class RuntimeMessageReplacement:
     runtime_message: dict[str, Any]
 
 
-@dataclass(frozen=True)
+@dataclass
 class ContextState:
-    """@brief 单个 Agent 回合的领域上下文快照 / Domain context snapshot for one Agent turn.
+    """@brief 可递增的会话领域上下文 / Incremental domain context for one conversation.
 
-    ``ContextState`` 是上层交给 Agent 的唯一内容载体。它由已持久化的会话、用户状态和
-    本次消息作用域投影而成；AgentLoop 只消费该快照，不负责读取数据库或拼装 Prompt。
+    ``ContextState`` 是上层交给 Agent 的唯一内容载体，也是会话缓存保存的工作集。
+    调用方必须在会话锁内更新它，并且只能在对应记录成功持久化后把记录加入 ``messages``。
+    AgentLoop 可以在一次执行中追加临时工具消息；失败时调用方应丢弃整个缓存项。
 
     @param scope 本次回合的会话作用域 / Conversation scope for this turn.
     @param user_state 本次回合可见的用户状态 / User state visible to this turn.
-    @param messages 已编译、将发送给模型的消息链 / Compiled messages sent to the model.
+    @param messages 已提交或当前回合临时的模型消息链 / Committed or in-turn model message chain.
     @param tool_context 传给 Agent 工具的显式作用域 / Explicit scope passed to Agent tools.
     @param text_fallback_messages 纯文本模型的降级消息链 / Text-only fallback message chain.
     """
@@ -150,3 +154,108 @@ class ContextState:
     messages: list[dict[str, Any]]
     tool_context: dict[str, Any]
     text_fallback_messages: list[dict[str, Any]] | None = None
+
+    def refresh_turn(
+        self,
+        *,
+        system_prompt: str,
+        scope: ConversationScope,
+        user_state: UserState,
+        runtime_replacements: Iterable[RuntimeMessageReplacement] | None = None,
+    ) -> None:
+        """@brief 刷新缓存会话的本回合投影 / Refresh a cached conversation for one turn.
+
+        @param system_prompt 静态系统策略 / Static system policy.
+        @param scope 当前回合作用域 / Current-turn scope.
+        @param user_state 当前回合用户状态 / Current-turn user state.
+        @param runtime_replacements 仅本次模型调用有效的消息替换 / Replacements valid only for this model call.
+        @return None / None.
+        @note 调用前 ``messages`` 必须仅含已持久化的规范消息。/
+        Before calling, ``messages`` must contain canonical persisted messages only.
+        """
+
+        self.scope = scope
+        self.user_state = user_state
+        self.tool_context = {
+            "is_group": scope.is_group,
+            "group_id": scope.group_id,
+            "message_id": scope.message_id,
+            "user_id": scope.user_id,
+        }
+        system_message = {
+            "role": "system",
+            "content": join_prompt_sections(
+                system_prompt,
+                format_user_state_prompt(
+                    user_coins=user_state.coins,
+                    user_plan=user_state.plan,
+                    user_permission=user_state.permission,
+                    impression=user_state.impression,
+                    personal_info=user_state.personal_info,
+                    diary_exists=user_state.diary_exists,
+                ),
+            ),
+        }
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0] = system_message
+        else:
+            self.messages.insert(0, system_message)
+
+        self.text_fallback_messages = None
+        replacements = list(runtime_replacements or [])
+        if replacements:
+            self.text_fallback_messages = list(self.messages)
+            self.messages = self._apply_runtime_replacements(replacements)
+
+    def append_persisted_records(self, records: Iterable[tuple[str, Any]]) -> None:
+        """@brief 将已提交记录增量加入会话 / Append committed records to the conversation.
+
+        @param records 数据库已成功写入的 `(role, content)` 记录 / Successfully persisted records.
+        @return None / None.
+        @note 仅复制新增记录，以隔离调用方 payload；不复制已有历史。/
+        Only new records are copied to isolate caller payloads; existing history is not copied.
+        """
+
+        for role, content in records:
+            if isinstance(content, Mapping):
+                message = deepcopy(dict(content))
+                message.setdefault("role", role)
+            else:
+                message = {"role": role, "content": content}
+            self.messages.append(message)
+
+    def discard_runtime_messages(self, *, committed_message_count: int) -> None:
+        """@brief 丢弃 Agent 的未提交临时消息 / Discard uncommitted Agent messages.
+
+        @param committed_message_count 保留的规范消息数量 / Number of canonical messages to retain.
+        @return None / None.
+        """
+
+        if self.text_fallback_messages is not None:
+            self.messages = self.text_fallback_messages
+        del self.messages[committed_message_count:]
+        self.text_fallback_messages = None
+
+    def _apply_runtime_replacements(
+        self,
+        replacements: list[RuntimeMessageReplacement],
+    ) -> list[dict[str, Any]]:
+        """@brief 应用本回合消息替换 / Apply current-turn message replacements.
+
+        @param replacements 本回合的多模态替换 / Current-turn multimodal replacements.
+        @return 面向模型的消息链 / Model-facing message chain.
+        """
+
+        messages_for_model = list(self.messages)
+        search_end = len(messages_for_model) - 1
+        for replacement in reversed(replacements):
+            for index in range(search_end, -1, -1):
+                message = messages_for_model[index]
+                if (
+                    message.get("role") == "user"
+                    and message.get("content") == replacement.persisted_content
+                ):
+                    messages_for_model[index] = dict(replacement.runtime_message)
+                    search_end = index - 1
+                    break
+        return messages_for_model

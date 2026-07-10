@@ -17,6 +17,7 @@ from fogmoe_bot.application.accounts.context import load_user_state
 from fogmoe_bot.domain.context import (
     ChatMessageContext,
     ConversationScope,
+    ContextState,
     build_context_state,
     create_runtime_replacement,
     render_chat_message,
@@ -36,6 +37,7 @@ from fogmoe_bot.application.telegram.generated_audio_sender import send_generate
 from fogmoe_bot.application.telegram.generated_image_sender import send_generated_images_from_tool_logs
 from fogmoe_bot.application.assistant.reply_filter import normalize_ai_reply_text
 from fogmoe_bot.application.assistant.inference.service import ASSISTANT_INFERENCE_SERVICE
+from fogmoe_bot.application.assistant.conversation_context_cache import CONVERSATION_CONTEXT_CACHE
 from fogmoe_bot.application.telegram.sticker_sender import normalize_sticker_directives, send_ai_reply_with_stickers
 from fogmoe_bot.application.telegram.assistant_visible_sender import TelegramVisibleContentHandler
 from fogmoe_bot.application.assistant.tasks.vision import analyze_image
@@ -386,7 +388,8 @@ class ConversationTurnSession:
     group_title: str = ""
     user_record_entries: list[tuple[str, str]] = field(default_factory=list)
     runtime_replacements: list[object] = field(default_factory=list)
-    chat_history: list[dict] = field(default_factory=list)
+    context_state: ContextState | None = None
+    committed_message_count: int = 0
     assistant_message: str = ""
     tool_logs: list[dict] = field(default_factory=list)
     sent_messages: list[object] = field(default_factory=list)
@@ -493,6 +496,8 @@ class ConversationTurnSession:
 
     def _fail(self) -> None:
         """@brief 标记失败而不吞掉异常 / Mark failure without swallowing the exception."""
+        if self.conversation_id is not None:
+            CONVERSATION_CONTEXT_CACHE.invalidate(self.conversation_id)
         if self.state not in self._TERMINAL_STATES:
             self.state = ConversationSessionState.FAILED
 
@@ -895,9 +900,36 @@ class ConversationTurnSession:
         if user_snapshot_created and user_storage_warning != "overflow":
             summary.schedule_summary_generation(self.conversation_id)
 
-        self.chat_history = await db_connection.async_get_chat_history(
-            self.conversation_id
+        if user_snapshot_created or user_storage_warning:
+            CONVERSATION_CONTEXT_CACHE.invalidate(self.conversation_id)
+        cached_context = CONVERSATION_CONTEXT_CACHE.get(self.conversation_id)
+        scope = ConversationScope(
+            user_id=self.user_id,
+            is_group=self.update.effective_chat.type in ("group", "supergroup"),
+            group_id=(
+                self.update.effective_chat.id
+                if self.update.effective_chat.type in ("group", "supergroup")
+                else None
+            ),
+            message_id=getattr(self.effective_message, "message_id", None),
         )
+        if cached_context is None:
+            chat_history = await db_connection.async_get_chat_history(self.conversation_id)
+            cached_context = build_context_state(
+                system_prompt=config.SYSTEM_PROMPT,
+                history_messages=chat_history,
+                scope=scope,
+                user_state=self.user_state,
+            )
+        else:
+            cached_context.append_persisted_records(self.user_record_entries)
+        cached_context.refresh_turn(
+            system_prompt=config.SYSTEM_PROMPT,
+            scope=scope,
+            user_state=self.user_state,
+            runtime_replacements=self.runtime_replacements,
+        )
+        self.context_state = cached_context
         self._transition(ConversationSessionState.USER_PERSISTED)
 
     async def _infer(self) -> None:
@@ -907,6 +939,7 @@ class ConversationTurnSession:
         assert self.effective_message is not None
         assert self.user_id is not None
         assert self.user_state is not None
+        assert self.context_state is not None
 
         try:
             await self.context.bot.send_chat_action(
@@ -916,20 +949,7 @@ class ConversationTurnSession:
         except Exception:
             logger.debug("Failed to send typing action before AI request")
 
-        is_group_chat = self.update.effective_chat.type in ("group", "supergroup")
-        context_state = build_context_state(
-            system_prompt=config.SYSTEM_PROMPT,
-            history_messages=self.chat_history,
-            scope=ConversationScope(
-                user_id=self.user_id,
-                is_group=is_group_chat,
-                group_id=self.update.effective_chat.id if is_group_chat else None,
-                message_id=getattr(self.effective_message, "message_id", None),
-            ),
-            user_state=self.user_state,
-            runtime_replacements=self.runtime_replacements,
-            text_fallback_messages=self.chat_history,
-        )
+        self.committed_message_count = len(self.context_state.messages)
         fallback_send = partial_send(
             self.context.bot.send_message,
             self.update.effective_chat.id,
@@ -945,7 +965,7 @@ class ConversationTurnSession:
         )
 
         self.assistant_message, self.tool_logs = await ASSISTANT_INFERENCE_SERVICE.infer(
-            context_state,
+            self.context_state,
             visible_content_sink=visible_content_handler,
         )
         self.sent_messages.extend(visible_content_handler.sent_messages)
@@ -962,6 +982,11 @@ class ConversationTurnSession:
         assert self.context is not None
         assert self.user_id is not None
         assert self.conversation_id is not None
+        assert self.context_state is not None
+
+        self.context_state.discard_runtime_messages(
+            committed_message_count=self.committed_message_count,
+        )
 
         tool_record_entries = tool_logs_to_record_entries(self.tool_logs)
         if tool_record_entries:
@@ -982,6 +1007,10 @@ class ConversationTurnSession:
                 )
             self._remember_history_warning(tool_storage_warning)
             await self._handle_overflow_summary(tool_storage_warning)
+            if tool_snapshot_created or tool_storage_warning:
+                CONVERSATION_CONTEXT_CACHE.invalidate(self.conversation_id)
+            else:
+                self.context_state.append_persisted_records(tool_record_entries)
             if tool_snapshot_created and tool_storage_warning != "overflow":
                 summary.schedule_summary_generation(self.conversation_id)
 
@@ -1004,11 +1033,23 @@ class ConversationTurnSession:
                 )
             self._remember_history_warning(assistant_storage_warning)
             await self._handle_overflow_summary(assistant_storage_warning)
+            if assistant_snapshot_created or assistant_storage_warning:
+                CONVERSATION_CONTEXT_CACHE.invalidate(self.conversation_id)
+            else:
+                self.context_state.append_persisted_records(
+                    [("assistant", self.assistant_message)],
+                )
             if (
                 assistant_snapshot_created
                 and assistant_storage_warning != "overflow"
             ):
                 summary.schedule_summary_generation(self.conversation_id)
+
+        if self.pending_history_warning is None:
+            CONVERSATION_CONTEXT_CACHE.commit(
+                self.conversation_id,
+                self.context_state,
+            )
 
         self._transition(ConversationSessionState.OUTPUT_PERSISTED)
 

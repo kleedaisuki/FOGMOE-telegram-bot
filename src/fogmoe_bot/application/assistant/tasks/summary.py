@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Tuple
 
 from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.application.assistant.conversation_context_cache import CONVERSATION_CONTEXT_CACHE
 from fogmoe_bot.infrastructure.database.repositories import conversation_repository
 from fogmoe_bot.domain.context.token_estimator import estimate_tokens
 from ..inference.task_runner import INFERENCE_TASK_RUNNER
@@ -65,12 +66,14 @@ def _process_summary_for_user(user_id: int) -> None:
         summary_text = _generate_and_store_summary(user_id)
         if summary_text is None:
             return
-        db_connection.run_sync(
+        updated = db_connection.run_sync(
             db_connection.async_update_latest_history_state_summary(
                 user_id,
                 summary_text,
             )
         )
+        if updated:
+            CONVERSATION_CONTEXT_CACHE.invalidate(user_id)
     except Exception as exc:  # pragma: no cover - defensive logging
         logging.exception("Unexpected error while processing summary for user %s: %s", user_id, exc)
 

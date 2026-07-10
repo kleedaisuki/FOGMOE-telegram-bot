@@ -49,6 +49,28 @@ def test_agent_execution_state_separates_context_from_configuration():
     assert state.iteration == 2
 
 
+def test_agent_loop_returns_context_updated_with_final_reply():
+    """@brief AgentLoop 返回含最终回复的可变 ContextState / AgentLoop returns ContextState with final reply."""
+
+    context = _context([{"role": "user", "content": "hello"}])
+    loop = agent_loop.AgentLoop(
+        runtime=agent_loop.DEFAULT_AGENT_RUNTIME,
+        completion_client=lambda *_args, **_kwargs: _Response(_Message("world")),
+    )
+
+    response = loop.run(
+        context,
+        agent_loop.AgentExecutionConfig(
+            provider="test_provider",
+            model="test_model",
+            provider_name="Test",
+        ),
+    )
+
+    assert response.context_state is context
+    assert context.messages[-1] == {"role": "assistant", "content": "world"}
+
+
 def test_agent_loop_does_not_synthesize_tool_result_reply(monkeypatch):
     responses = [
         _Response(

@@ -4,7 +4,7 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple
+from typing import Any, Iterator
 
 from fogmoe_bot.domain.agent_runtime import AgentRuntime, DEFAULT_AGENT_RUNTIME, ToolTask
 from fogmoe_bot.domain.agent_runtime.events import RuntimeEvent
@@ -24,11 +24,56 @@ CompletionClient = Callable[..., Any]
 """@brief 同步模型完成调用 / Synchronous model-completion call."""
 
 
-class AgentResponse(NamedTuple):
+@dataclass
+class AgentResponse:
     """@brief Agent 回合输出 / Agent turn output."""
 
     text: str
     events: list[RuntimeEvent]
+    context_state: ContextState | None = None
+
+    def __iter__(self) -> Iterator[object]:
+        """@brief 保持二元解包兼容 / Preserve two-value unpacking compatibility.
+
+        @return 依次产出文本和事件 / Yield text then events.
+        """
+
+        yield self.text
+        yield self.events
+
+    def __len__(self) -> int:
+        """@brief 保持二元响应长度兼容 / Preserve two-value response length compatibility.
+
+        @return 固定为 2 / Always 2.
+        """
+
+        return 2
+
+    def __getitem__(self, index: int | slice) -> object:
+        """@brief 保持元组式索引兼容 / Preserve tuple-style indexing compatibility.
+
+        @param index 整数或切片索引 / Integer or slice index.
+        @return 对应公开响应字段 / Requested public response field.
+        """
+
+        return (self.text, self.events)[index]
+
+    def __eq__(self, other: object) -> bool:
+        """@brief 兼容旧的二元组比较 / Support legacy two-tuple comparison.
+
+        @param other 比较对象 / Object to compare.
+        @return 是否具有相同公开响应 / Whether public responses are equal.
+        """
+
+        if isinstance(other, tuple) and len(other) == 2:
+            return (self.text, self.events) == other
+        if not isinstance(other, AgentResponse):
+            return NotImplemented
+        return (
+            self.text == other.text
+            and self.events == other.events
+            and self.context_state == other.context_state
+        )
 
 
 @dataclass(frozen=True)
@@ -160,7 +205,7 @@ class AgentLoop:
                 visible_content_handler=visible_content_handler,
             )
             if not completed:
-                return AgentResponse("", state.events)
+                return self._response(state, "")
 
             assistant_model_message = assistant_message_to_plain(
                 assistant_message,
@@ -382,6 +427,26 @@ class AgentLoop:
             return {}
 
     @staticmethod
+    def _response(
+        state: AgentExecutionState,
+        text: str,
+        *,
+        history_content: str | None = None,
+    ) -> AgentResponse:
+        """@brief 返回并提交本轮 Agent 消息 / Return and commit this turn's Agent messages.
+
+        @param state 本轮可变执行状态 / Mutable execution state for this turn.
+        @param text 最终文本 / Final text.
+        @param history_content 应加入上下文的最终文本 / Final text to append to context.
+        @return 携带已更新 ContextState 的 Agent 响应 / Agent response carrying the updated ContextState.
+        """
+
+        if history_content:
+            state.messages.append({"role": "assistant", "content": history_content})
+        state.context.messages = state.messages
+        return AgentResponse(text, state.events, state.context)
+
+    @staticmethod
     def _final_response(
         *,
         config: AgentExecutionConfig,
@@ -405,13 +470,21 @@ class AgentLoop:
                 )
                 if visible_result.content:
                     state.events.append({"type": "assistant_visible", "content": visible_result.content})
-                    return AgentResponse("", state.events)
+                    return AgentLoop._response(
+                        state,
+                        "",
+                        history_content=visible_result.content,
+                    )
                 if not visible_result.completed:
-                    return AgentResponse("", state.events)
-            return AgentResponse(content_text, state.events)
+                    return AgentLoop._response(state, "")
+            return AgentLoop._response(
+                state,
+                content_text,
+                history_content=content_text,
+            )
         if state.events:
             logging.warning("%s 工具调用后最终回复为空。", config.provider_name)
-        return AgentResponse(content_text, state.events)
+        return AgentLoop._response(state, content_text)
 
 
 DEFAULT_AGENT_LOOP = AgentLoop(

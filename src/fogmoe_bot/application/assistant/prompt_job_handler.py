@@ -8,6 +8,7 @@ from typing import Any
 
 from fogmoe_bot.application.accounts.context import load_user_state
 from fogmoe_bot.application.assistant.inference.service import ASSISTANT_INFERENCE_SERVICE
+from fogmoe_bot.application.assistant.conversation_context_cache import CONVERSATION_CONTEXT_CACHE
 from fogmoe_bot.application.assistant.reply_filter import normalize_ai_reply_text
 from fogmoe_bot.application.assistant.tasks import summary
 from fogmoe_bot.application.conversation_lock_manager import CONVERSATION_LOCK_MANAGER
@@ -67,8 +68,12 @@ class PromptJobHandler:
             raise TypeError(
                 f"Expected PromptJobPayload, got {type(job.payload).__name__}"
             )
-        async with CONVERSATION_LOCK_MANAGER.hold(job.owner_id):
-            await self._execute_locked(job, job.payload)
+        try:
+            async with CONVERSATION_LOCK_MANAGER.hold(job.owner_id):
+                await self._execute_locked(job, job.payload)
+        except BaseException:
+            CONVERSATION_CONTEXT_CACHE.invalidate(job.owner_id)
+            raise
 
     async def _execute_locked(
         self,
@@ -116,11 +121,23 @@ class PromptJobHandler:
         if snapshot_created and warning_level != "overflow":
             summary.schedule_summary_generation(job.owner_id)
 
-        chat_history = await db_connection.async_get_chat_history(job.owner_id)
-        context_state = build_context_state(
+        if snapshot_created or warning_level:
+            CONVERSATION_CONTEXT_CACHE.invalidate(job.owner_id)
+        context_state = CONVERSATION_CONTEXT_CACHE.get(job.owner_id)
+        scope = ConversationScope(user_id=job.owner_id)
+        if context_state is None:
+            chat_history = await db_connection.async_get_chat_history(job.owner_id)
+            context_state = build_context_state(
+                system_prompt=config.SYSTEM_PROMPT,
+                history_messages=chat_history,
+                scope=scope,
+                user_state=user_state,
+            )
+        else:
+            context_state.append_persisted_records([("user", scheduled_message)])
+        context_state.refresh_turn(
             system_prompt=config.SYSTEM_PROMPT,
-            history_messages=chat_history,
-            scope=ConversationScope(user_id=job.owner_id),
+            scope=scope,
             user_state=user_state,
         )
         await self._send_chat_action(job.owner_id, "typing")
@@ -134,6 +151,7 @@ class PromptJobHandler:
             fallback_send=send_func,
             logger=logger,
         )
+        committed_message_count = len(context_state.messages)
         assistant_message, tool_logs = await ASSISTANT_INFERENCE_SERVICE.infer(
             context_state,
             visible_content_sink=visible_content_handler,
@@ -147,10 +165,24 @@ class PromptJobHandler:
                 logger=logger,
             )
 
+        context_state.discard_runtime_messages(
+            committed_message_count=committed_message_count,
+        )
+        cache_valid = warning_level is None and not snapshot_created
+
         if tool_logs:
-            await self._persist_tool_logs(job.owner_id, tool_logs)
+            tool_entries, tool_cache_valid = await self._persist_tool_logs(job.owner_id, tool_logs)
+            cache_valid = cache_valid and tool_cache_valid
+            if tool_cache_valid:
+                context_state.append_persisted_records(tool_entries)
         if assistant_message.strip():
-            await self._persist_assistant_reply(job.owner_id, assistant_message)
+            assistant_cache_valid = await self._persist_assistant_reply(
+                job.owner_id,
+                assistant_message,
+            )
+            cache_valid = cache_valid and assistant_cache_valid
+            if assistant_cache_valid:
+                context_state.append_persisted_records([("assistant", assistant_message)])
             await self._send_chat_action(job.owner_id, "typing")
             sent_messages.extend(
                 await send_ai_reply_with_stickers(
@@ -179,6 +211,10 @@ class PromptJobHandler:
                 logger=logger,
             )
         )
+        if cache_valid:
+            CONVERSATION_CONTEXT_CACHE.commit(job.owner_id, context_state)
+        else:
+            CONVERSATION_CONTEXT_CACHE.invalidate(job.owner_id)
         if not sent_messages and not assistant_message.strip():
             tool_log_types = [
                 str(tool_log.get("type", "tool_result"))
@@ -193,12 +229,12 @@ class PromptJobHandler:
                 tool_log_types,
             )
 
-    async def _persist_tool_logs(self, owner_id: int, tool_logs: list[dict]) -> None:
+    async def _persist_tool_logs(self, owner_id: int, tool_logs: list[dict]) -> tuple[list[tuple[str, object]], bool]:
         """@brief 持久化工具事件 / Persist tool events."""
 
         entries = tool_logs_to_record_entries(tool_logs)
         if not entries:
-            return
+            return [], True
         snapshot_created, warning_level, archived_records = (
             await db_connection.async_insert_chat_records(owner_id, entries)
         )
@@ -212,8 +248,9 @@ class PromptJobHandler:
         await self._handle_overflow_summary(owner_id, warning_level)
         if snapshot_created and warning_level != "overflow":
             summary.schedule_summary_generation(owner_id)
+        return entries, not snapshot_created and warning_level is None
 
-    async def _persist_assistant_reply(self, owner_id: int, message: str) -> None:
+    async def _persist_assistant_reply(self, owner_id: int, message: str) -> bool:
         """@brief 持久化 Assistant 最终文本 / Persist final Assistant text."""
 
         snapshot_created, warning_level, archived_records = (
@@ -229,6 +266,7 @@ class PromptJobHandler:
         await self._handle_overflow_summary(owner_id, warning_level)
         if snapshot_created and warning_level != "overflow":
             summary.schedule_summary_generation(owner_id)
+        return not snapshot_created and warning_level is None
 
     async def _handle_overflow_summary(self, owner_id: int, level: str | None) -> None:
         """@brief 在历史溢出时同步生成摘要 / Generate a summary synchronously on history overflow."""
@@ -241,6 +279,7 @@ class PromptJobHandler:
                 owner_id,
                 summary_text,
             )
+            CONVERSATION_CONTEXT_CACHE.invalidate(owner_id)
         else:
             summary.schedule_summary_generation(owner_id)
 

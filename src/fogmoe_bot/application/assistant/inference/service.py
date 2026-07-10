@@ -169,6 +169,14 @@ class AssistantInferenceService:
                         visible_content_sink=visible_content_sink,
                     ),
                 )
+                if response.context_state is not None:
+                    context_state.messages = response.context_state.messages
+                    context_state.text_fallback_messages = response.context_state.text_fallback_messages
+                    response = AgentResponse(
+                        response.text,
+                        response.events,
+                        context_state,
+                    )
                 self._circuit.record_success(service_name)
                 return response, None
             except SafetyBlockError:

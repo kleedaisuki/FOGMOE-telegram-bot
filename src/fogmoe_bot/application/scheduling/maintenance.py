@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from fogmoe_bot.application.economy import shop
 from fogmoe_bot.application.games import sicbo
 from fogmoe_bot.application.media import music, pic
+from fogmoe_bot.application.assistant.conversation_context_cache import CONVERSATION_CONTEXT_CACHE
 from fogmoe_bot.domain.scheduling import JobKind, MaintenanceTask
+
+
+logger = logging.getLogger(__name__)
 
 
 class ShopRecordCleanup:
@@ -100,12 +105,33 @@ class MusicRequestCleanup:
         await music.clean_expired_requests_job(None)
 
 
+class ConversationContextCacheCleanup:
+    """@brief 清理过期会话工作集 / Clean expired conversation working sets."""
+
+    task = MaintenanceTask(
+        kind=JobKind("maintenance.conversation-context-cache-cleanup"),
+        interval=timedelta(minutes=5),
+        initial_delay=timedelta(minutes=5),
+    )
+
+    async def handle(self) -> None:
+        """@brief 回收已过期的 ContextState / Reclaim expired ContextState values.
+
+        @return None / None.
+        """
+
+        removed = CONVERSATION_CONTEXT_CACHE.purge_expired()
+        if removed:
+            logger.info("Purged expired conversation contexts: count=%s", removed)
+
+
 def maintenance_handlers() -> tuple[
     ShopRecordCleanup,
     SicboGameCleanup,
     ImageCacheRefresh,
     ImageRequestCleanup,
     MusicRequestCleanup,
+    ConversationContextCacheCleanup,
 ]:
     """@brief 返回进程级维护任务处理器 / Return process-level maintenance task handlers.
 
@@ -118,4 +144,5 @@ def maintenance_handlers() -> tuple[
         ImageCacheRefresh(),
         ImageRequestCleanup(),
         MusicRequestCleanup(),
+        ConversationContextCacheCleanup(),
     )
