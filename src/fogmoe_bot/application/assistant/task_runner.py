@@ -3,26 +3,10 @@ from typing import Any, Dict, List
 
 from fogmoe_bot.infrastructure.llm.litellm_client import create_chat_completion
 from .provider_resolver import (
-    TASKS,
-    _dedupe,
     completion_kwargs_for_task,
     get_models_for_task,
     get_provider_order_for_task,
-    provider_fallback_model_for_task,
-    provider_model_for_task,
 )
-
-
-def _provider_model(provider: str, task: str) -> str | None:
-    return provider_model_for_task(provider, task)
-
-
-def _provider_fallback_model(provider: str, task: str) -> str | None:
-    return provider_fallback_model_for_task(provider, task)
-
-
-def _provider_completion_kwargs(provider: str, task: str) -> Dict[str, Any]:
-    return completion_kwargs_for_task(provider, task)
 
 
 def run_ai_task(
@@ -40,7 +24,7 @@ def run_ai_task(
         for model in models:
             try:
                 request_kwargs = {
-                    **_provider_completion_kwargs(provider, task),
+                    **completion_kwargs_for_task(provider, task),
                     **kwargs,
                 }
                 return create_chat_completion(provider, model, messages, **request_kwargs)

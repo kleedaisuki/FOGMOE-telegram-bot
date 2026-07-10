@@ -11,6 +11,8 @@ from fogmoe_bot.infrastructure.database.repositories import conversation_reposit
 from fogmoe_bot.domain.conversation.token_estimator import estimate_tokens
 from .task_runner import run_ai_task
 
+import json
+
 SUMMARY_MAX_TOKENS = 2500
 SUMMARY_RETRY_LIMIT = 3
 SUMMARY_SYSTEM_PROMPT = (

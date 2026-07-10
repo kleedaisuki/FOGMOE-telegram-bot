@@ -110,7 +110,7 @@ def test_run_ai_task_uses_resolved_models_with_fallback_and_kwarg_override(monke
     )
     monkeypatch.setattr(
         task_runner,
-        "_provider_completion_kwargs",
+        "completion_kwargs_for_task",
         lambda provider, task: {"reasoning_effort": "high", "temperature": 1},
     )
 

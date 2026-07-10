@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import time
 from typing import Dict, Optional
 
 from fogmoe_bot.infrastructure import config
@@ -11,7 +10,9 @@ from .tools import clear_tool_request_context, cleanup_linux_sandbox, set_tool_r
 from .errors import SafetyBlockError
 from .providers import azure, gemini, openai, openrouter, siliconflow, zhipu
 from .runtime import EXECUTOR
+from .routing.provider_circuit import ProviderCircuit
 from .types import AIResponse, PartialAIResponseError, VisibleContentHandler
+from .delivery.visible_content import visible_content_events, visible_content_was_sent
 
 AI_SERVICE_MAP = {
     "openai": openai.get_ai_response,
@@ -28,8 +29,11 @@ AI_SERVICE_ORDER = config.AI_SERVICE_ORDER
 AI_PROVIDER_CIRCUIT_FAILURE_THRESHOLD = 3
 AI_PROVIDER_CIRCUIT_WINDOW_SECONDS = 5 * 60
 AI_PROVIDER_CIRCUIT_COOLDOWN_SECONDS = 30 * 60
-_provider_failure_streaks: dict[str, list[float]] = {}
-_provider_circuit_open_until: dict[str, float] = {}
+_provider_circuit = ProviderCircuit(
+    failure_threshold=AI_PROVIDER_CIRCUIT_FAILURE_THRESHOLD,
+    window_seconds=AI_PROVIDER_CIRCUIT_WINDOW_SECONDS,
+    cooldown_seconds=AI_PROVIDER_CIRCUIT_COOLDOWN_SECONDS,
+)
 
 PARTIAL_AI_RESPONSE_ERROR_MESSAGE = (
     "看起来对话出现了一些小问题呢。"
@@ -46,48 +50,6 @@ PARTIAL_AI_RESPONSE_ERROR_MESSAGE = (
     "您可以发送给管理员 @ScarletKc 报告此问题。\n"
     "You can report this issue to the admin @ScarletKc."
 )
-
-
-def _provider_circuit_is_open(service_name: str, now: float | None = None) -> bool:
-    current_time = time.monotonic() if now is None else now
-    open_until = _provider_circuit_open_until.get(service_name)
-    if not open_until:
-        return False
-    if current_time < open_until:
-        return True
-
-    _provider_circuit_open_until.pop(service_name, None)
-    _provider_failure_streaks.pop(service_name, None)
-    return False
-
-
-def _record_provider_success(service_name: str) -> None:
-    _provider_failure_streaks.pop(service_name, None)
-    _provider_circuit_open_until.pop(service_name, None)
-
-
-def _record_provider_failure(service_name: str, now: float | None = None) -> None:
-    current_time = time.monotonic() if now is None else now
-    cutoff = current_time - AI_PROVIDER_CIRCUIT_WINDOW_SECONDS
-    recent_failures = [
-        failure_time
-        for failure_time in _provider_failure_streaks.get(service_name, [])
-        if failure_time >= cutoff
-    ]
-    recent_failures.append(current_time)
-    _provider_failure_streaks[service_name] = recent_failures
-
-    if len(recent_failures) >= AI_PROVIDER_CIRCUIT_FAILURE_THRESHOLD:
-        open_until = current_time + AI_PROVIDER_CIRCUIT_COOLDOWN_SECONDS
-        _provider_circuit_open_until[service_name] = open_until
-        _provider_failure_streaks.pop(service_name, None)
-        logging.warning(
-            "%s 熔断 %s 秒：%s 秒内连续失败 %s 次",
-            service_name,
-            AI_PROVIDER_CIRCUIT_COOLDOWN_SECONDS,
-            AI_PROVIDER_CIRCUIT_WINDOW_SECONDS,
-            AI_PROVIDER_CIRCUIT_FAILURE_THRESHOLD,
-        )
 
 
 def _call_service_with_context(
@@ -112,66 +74,6 @@ def _call_service_with_context(
             cleanup_linux_sandbox()
         finally:
             clear_tool_request_context()
-
-
-def _visible_content_was_sent(
-    visible_content_handler: Optional[VisibleContentHandler],
-) -> bool:
-    if visible_content_handler is None:
-        return False
-    try:
-        sent_count = int(getattr(visible_content_handler, "sent_count", 0))
-    except (TypeError, ValueError):
-        sent_count = 0
-    if sent_count > 0:
-        return True
-
-    sent_messages = getattr(visible_content_handler, "sent_messages", [])
-    if isinstance(sent_messages, list) and any(message is not None for message in sent_messages):
-        return True
-
-    contents = getattr(visible_content_handler, "sent_contents", [])
-    if isinstance(contents, list) and any(str(content).strip() for content in contents):
-        return True
-
-    visible_events = getattr(visible_content_handler, "visible_events", None)
-    if callable(visible_events):
-        try:
-            events = visible_events()
-            return isinstance(events, list) and any(
-                isinstance(event, dict) and str(event.get("content") or "").strip()
-                for event in events
-            )
-        except Exception:
-            logging.exception("Failed to read visible content sent state")
-            return False
-    return False
-
-
-def _visible_content_events(
-    visible_content_handler: Optional[VisibleContentHandler],
-) -> list[dict]:
-    if visible_content_handler is None:
-        return []
-    visible_events = getattr(visible_content_handler, "visible_events", None)
-    if callable(visible_events):
-        try:
-            events = visible_events()
-            if isinstance(events, list):
-                return events
-        except Exception:
-            logging.exception("Failed to read visible content events")
-    contents = getattr(visible_content_handler, "sent_contents", [])
-    if not isinstance(contents, list):
-        return []
-    return [
-        {
-            "type": "assistant_visible",
-            "content": str(content),
-        }
-        for content in contents
-        if str(content).strip()
-    ]
 
 
 def _messages_for_service(
@@ -206,7 +108,7 @@ async def _try_ai_services(
     loop = asyncio.get_running_loop()
 
     for service_name in AI_SERVICE_ORDER:
-        if _provider_circuit_is_open(service_name):
+        if _provider_circuit.is_open(service_name):
             logging.warning("%s 当前处于熔断冷却中，跳过调用", service_name)
             continue
 
@@ -226,15 +128,15 @@ async def _try_ai_services(
                     visible_content_handler,
                 ),
             )
-            _record_provider_success(service_name)
+            _provider_circuit.record_success(service_name)
             return response, None
         except SafetyBlockError:
-            if _visible_content_was_sent(visible_content_handler):
+            if visible_content_was_sent(visible_content_handler):
                 logging.warning(
                     "%s triggered safety block after sending visible content; not retrying",
                     service_name,
                 )
-                return ("", _visible_content_events(visible_content_handler)), None
+                return ("", visible_content_events(visible_content_handler)), None
             if service_name == "gemini":
                 logging.warning("Gemini triggered safety block, trying next service")
                 last_error = SafetyBlockError("SafetyBlockError")
@@ -247,20 +149,20 @@ async def _try_ai_services(
                 exc,
                 exc_info=True,
             )
-            if _visible_content_was_sent(visible_content_handler):
+            if visible_content_was_sent(visible_content_handler):
                 return ("", exc.tool_logs), None
             return (PARTIAL_AI_RESPONSE_ERROR_MESSAGE, exc.tool_logs), None
         except Exception as exc:
-            if _visible_content_was_sent(visible_content_handler):
+            if visible_content_was_sent(visible_content_handler):
                 logging.error(
                     "%s failed after sending visible content; not retrying: %s",
                     service_name,
                     exc,
                     exc_info=True,
                 )
-                return ("", _visible_content_events(visible_content_handler)), None
+                return ("", visible_content_events(visible_content_handler)), None
             logging.warning("%s 调用失败: %s", service_name, exc)
-            _record_provider_failure(service_name)
+            _provider_circuit.record_failure(service_name)
             last_error = exc
             continue
 

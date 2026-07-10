@@ -3,15 +3,16 @@ import asyncio
 import pytest
 
 from fogmoe_bot.application.assistant import router
+from fogmoe_bot.application.assistant.delivery.visible_content import visible_content_was_sent
 
 
 @pytest.fixture(autouse=True)
 def clear_provider_circuit_state():
-    router._provider_failure_streaks.clear()
-    router._provider_circuit_open_until.clear()
+    router._provider_circuit.failure_streaks.clear()
+    router._provider_circuit.open_until.clear()
     yield
-    router._provider_failure_streaks.clear()
-    router._provider_circuit_open_until.clear()
+    router._provider_circuit.failure_streaks.clear()
+    router._provider_circuit.open_until.clear()
 
 
 def test_get_ai_response_retries_image_messages_as_text(monkeypatch):
@@ -58,7 +59,7 @@ def test_visible_content_was_sent_counts_media_messages():
         sent_contents = []
         sent_messages = [object()]
 
-    assert router._visible_content_was_sent(_VisibleHandler()) is True
+    assert visible_content_was_sent(_VisibleHandler()) is True
 
 
 def test_text_only_chat_provider_uses_vision_text_fallback_messages(monkeypatch):
@@ -164,49 +165,49 @@ def test_openrouter_is_registered_as_chat_provider():
 
 
 def test_provider_circuit_opens_after_three_consecutive_failures_in_window():
-    router._record_provider_failure("gemini", now=100.0)
-    router._record_provider_failure("gemini", now=200.0)
+    router._provider_circuit.record_failure("gemini", now=100.0)
+    router._provider_circuit.record_failure("gemini", now=200.0)
 
-    assert router._provider_circuit_is_open("gemini", now=250.0) is False
+    assert router._provider_circuit.is_open("gemini", now=250.0) is False
 
-    router._record_provider_failure("gemini", now=300.0)
+    router._provider_circuit.record_failure("gemini", now=300.0)
 
-    assert router._provider_circuit_is_open("gemini", now=300.0) is True
-    assert router._provider_circuit_is_open(
+    assert router._provider_circuit.is_open("gemini", now=300.0) is True
+    assert router._provider_circuit.is_open(
         "gemini",
         now=300.0 + router.AI_PROVIDER_CIRCUIT_COOLDOWN_SECONDS - 1,
     ) is True
-    assert router._provider_circuit_is_open(
+    assert router._provider_circuit.is_open(
         "gemini",
         now=300.0 + router.AI_PROVIDER_CIRCUIT_COOLDOWN_SECONDS,
     ) is False
 
 
 def test_provider_circuit_does_not_count_failures_outside_window():
-    router._record_provider_failure("gemini", now=0.0)
-    router._record_provider_failure(
+    router._provider_circuit.record_failure("gemini", now=0.0)
+    router._provider_circuit.record_failure(
         "gemini",
         now=router.AI_PROVIDER_CIRCUIT_WINDOW_SECONDS + 1,
     )
-    router._record_provider_failure(
+    router._provider_circuit.record_failure(
         "gemini",
         now=router.AI_PROVIDER_CIRCUIT_WINDOW_SECONDS + 2,
     )
 
-    assert router._provider_circuit_is_open(
+    assert router._provider_circuit.is_open(
         "gemini",
         now=router.AI_PROVIDER_CIRCUIT_WINDOW_SECONDS + 2,
     ) is False
 
 
 def test_provider_success_resets_consecutive_failure_streak():
-    router._record_provider_failure("gemini", now=100.0)
-    router._record_provider_failure("gemini", now=200.0)
-    router._record_provider_success("gemini")
-    router._record_provider_failure("gemini", now=300.0)
+    router._provider_circuit.record_failure("gemini", now=100.0)
+    router._provider_circuit.record_failure("gemini", now=200.0)
+    router._provider_circuit.record_success("gemini")
+    router._provider_circuit.record_failure("gemini", now=300.0)
 
-    assert router._provider_circuit_is_open("gemini", now=300.0) is False
-    assert router._provider_failure_streaks["gemini"] == [300.0]
+    assert router._provider_circuit.is_open("gemini", now=300.0) is False
+    assert router._provider_circuit.failure_streaks["gemini"] == [300.0]
 
 
 def test_open_provider_circuit_skips_to_next_service(monkeypatch):
@@ -239,7 +240,7 @@ def test_open_provider_circuit_skips_to_next_service(monkeypatch):
             "siliconflow": fallback_service,
         },
     )
-    monkeypatch.setattr(router, "_provider_circuit_is_open", lambda service_name: service_name == "gemini")
+    monkeypatch.setattr(router._provider_circuit, "is_open", lambda service_name: service_name == "gemini")
 
     response = asyncio.run(router.get_ai_response([], user_id=123))
 
