@@ -4,6 +4,7 @@ import asyncio
 import os
 
 import pytest
+import telegram.error
 
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.network import proxy
@@ -59,6 +60,75 @@ def test_telegram_builder_configures_api_and_polling_proxy(monkeypatch):
 
     assert builder.calls["proxy"] == (proxy_url,)
     assert builder.calls["get_updates_proxy"] == (proxy_url,)
+
+
+def test_telegram_builder_configures_polling_connection_pool(monkeypatch):
+    """@brief 轮询清理请求拥有独立连接槽位 / Polling cleanup has a spare connection slot."""
+    builder = _RecordingApplicationBuilder()
+    monkeypatch.setattr(config, "NETWORK_PROXY_URL", None)
+    monkeypatch.setattr(config, "TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE", 2)
+    monkeypatch.setattr(bot_app, "ApplicationBuilder", lambda: builder)
+    monkeypatch.setattr(bot_app, "register_handlers", lambda application: None)
+
+    bot_app.create_application()
+
+    assert builder.calls["get_updates_connection_pool_size"] == (2,)
+
+
+class _PollingApplication:
+    """@brief 可编排轮询结果的测试应用 / Test application with scripted polling outcomes."""
+
+    def __init__(self, outcome: BaseException | None) -> None:
+        """@brief 保存本次轮询结果 / Store this polling outcome.
+
+        @param outcome 要抛出的异常；None 代表正常停止 / Exception to raise; None means normal stop.
+        """
+
+        self.outcome = outcome
+        self.calls: list[dict[str, object]] = []
+
+    def run_polling(self, **kwargs: object) -> None:
+        """@brief 记录参数并模拟轮询 / Record arguments and simulate polling.
+
+        @param kwargs 传入 PTB 的轮询参数 / Polling arguments passed to PTB.
+        @return None / None.
+        """
+
+        self.calls.append(kwargs)
+        if self.outcome is not None:
+            raise self.outcome
+
+
+def test_run_rebuilds_application_after_transient_polling_failure(monkeypatch):
+    """@brief 临时网络错误后退避并重建轮询应用 / Rebuild polling application after transient network error."""
+    first = _PollingApplication(telegram.error.NetworkError("proxy unavailable"))
+    second = _PollingApplication(None)
+    applications = iter([first, second])
+    delays: list[float] = []
+    monkeypatch.setattr(bot_app, "create_application", lambda: next(applications))
+    monkeypatch.setattr(bot_app.time, "sleep", delays.append)
+    monkeypatch.setattr(config, "TELEGRAM_POLLING_RETRY_INITIAL_DELAY", 1.0)
+    monkeypatch.setattr(config, "TELEGRAM_POLLING_RETRY_MAX_DELAY", 30.0)
+
+    bot_app.run()
+
+    assert delays == [1.0]
+    assert first.calls == [
+        {
+            "timeout": config.TELEGRAM_GET_UPDATES_TIMEOUT,
+            "bootstrap_retries": 0,
+        }
+    ]
+    assert second.calls == first.calls
+
+
+def test_run_propagates_nonrecoverable_polling_failure(monkeypatch):
+    """@brief 无效 token 等永久错误不应无限重试 / Permanent errors such as bad tokens must not retry forever."""
+    application = _PollingApplication(telegram.error.InvalidToken("bad token"))
+    monkeypatch.setattr(bot_app, "create_application", lambda: application)
+
+    with pytest.raises(telegram.error.InvalidToken):
+        bot_app.run()
 
 
 def test_requests_session_uses_configured_socks_proxy(monkeypatch):
