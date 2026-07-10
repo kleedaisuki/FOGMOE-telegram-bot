@@ -1,6 +1,6 @@
 """@brief 经济应用服务 / Economy application services.
 
-仅包含跨用户资金池、奖励分配等经济聚合；账户编排位于 application.accounts。
-/ Contains only economy aggregates such as shared pools and reward distribution;
-account orchestration lives in application.accounts.
+包含金币、质押、商店、任务与推荐等经济应用逻辑；账户编排位于 application.accounts。
+/ Contains coin, staking, shop, task, and referral application logic; account
+orchestration lives in application.accounts.
 """

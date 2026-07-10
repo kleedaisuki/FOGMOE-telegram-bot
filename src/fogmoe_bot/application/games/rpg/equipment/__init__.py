@@ -38,4 +38,4 @@ __all__ = [
     'use_item',
     'item_type_to_chinese',
     'INVENTORY_CAPACITY'
-] 
+]

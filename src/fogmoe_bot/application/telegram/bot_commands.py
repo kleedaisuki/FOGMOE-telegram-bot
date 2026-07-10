@@ -24,7 +24,7 @@ from fogmoe_bot.infrastructure.database.repositories import (
 from fogmoe_bot.infrastructure.telegram.telegram_utils import partial_send, safe_send_markdown
 from fogmoe_bot.application.assistant.tasks import summary
 from fogmoe_bot.application.assistant.tasks.translate import translate_text
-from fogmoe_bot.application.telegram.features.economy import ref
+from fogmoe_bot.application.economy import ref
 
 logger = logging.getLogger(__name__)
 

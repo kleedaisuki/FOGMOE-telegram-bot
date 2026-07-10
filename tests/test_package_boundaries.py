@@ -27,9 +27,13 @@ def test_model_context_owns_prompt_formatting_and_token_budgeting():
     assert not (old_conversation_root / "__init__.py").exists()
 
 
-def test_telegram_features_live_in_application_layer():
+def test_telegram_features_are_flattened_into_application_domains():
     assert not (SRC_ROOT / "presentation" / "telegram" / "features").exists()
-    assert (SRC_ROOT / "application" / "telegram" / "features").is_dir()
+    assert not (SRC_ROOT / "application" / "telegram" / "features").exists()
+    assert not (SRC_ROOT / "application" / "telegram" / "bot_monitoring.py").exists()
+    for domain in ("admin", "crypto", "economy", "games", "media", "moderation"):
+        assert (SRC_ROOT / "application" / domain).is_dir()
+    assert (SRC_ROOT / "application" / "crypto" / "bot_monitoring.py").is_file()
 
 
 def test_telegram_handlers_do_not_return_to_presentation_layer():
