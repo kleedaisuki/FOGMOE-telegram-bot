@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0014_add_verification_token_hash
--- Alembic head: 0014_add_verification_token_hash
+-- Source migrations: 0001_initial through 0015_add_schedule_leases
+-- Alembic head: 0015_add_schedule_leases
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and user-plan backfill) and the
@@ -116,13 +116,17 @@ CREATE TABLE assistant.ai_schedules (
   recurrence_unit TEXT NOT NULL DEFAULT 'none'
     CHECK (recurrence_unit IN ('none','minute','hour','day')),
   recurrence_interval INT NOT NULL DEFAULT 1,
-  last_run_at TIMESTAMP NULL DEFAULT NULL
+  last_run_at TIMESTAMP NULL DEFAULT NULL,
+  claim_token UUID NULL,
+  lease_expires_at TIMESTAMP NULL
 );
 
 CREATE INDEX idx_ai_schedules_user_status
   ON assistant.ai_schedules (user_id, status);
 CREATE INDEX idx_ai_schedules_run
   ON assistant.ai_schedules (status, run_at);
+CREATE INDEX idx_ai_schedules_lease
+  ON assistant.ai_schedules (status, lease_expires_at);
 
 CREATE TABLE economy.user_lottery (
   user_id BIGINT NOT NULL PRIMARY KEY,

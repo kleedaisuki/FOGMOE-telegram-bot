@@ -1,9 +1,9 @@
 import json
 import re
+import base64
 from typing import Dict, Optional
 
 from fogmoe_bot.infrastructure import config
-from fogmoe_bot.application.chat import group_chat_history
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import (
     conversation_repository,
@@ -14,6 +14,22 @@ from .context import get_tool_request_context
 
 MAX_USER_DIARY_PAGE_CHARS = 10000
 MAX_USER_DIARY_PAGES = 100
+_GROUP_CONTEXT_BOT_ID: int | None = None
+_GROUP_CONTEXT_BOT_NAME = "FogMoeBot"
+
+
+def set_group_context_bot_identity(user_id: int, display_name: str | None = None) -> None:
+    """@brief 注册群聊上下文中的 Bot 身份 / Register the bot identity for group context.
+
+    @param user_id Telegram Bot 用户 ID / Telegram bot user identifier.
+    @param display_name 可选显示名 / Optional display name.
+    @return None / None.
+    """
+
+    global _GROUP_CONTEXT_BOT_ID, _GROUP_CONTEXT_BOT_NAME
+    _GROUP_CONTEXT_BOT_ID = user_id
+    if display_name:
+        _GROUP_CONTEXT_BOT_NAME = display_name
 
 
 def get_help_text_tool() -> dict:
@@ -43,17 +59,59 @@ def fetch_group_context_tool(
 
     around_message_id = current_message_id
 
-    context_messages = group_chat_history.get_group_context(
-        target_group_id,
-        around_message_id,
-        window_size,
+    rows = db_connection.run_sync(
+        conversation_repository.fetch_group_context_rows(
+            target_group_id,
+            around_message_id,
+            window_size,
+        )
     )
+    context_messages = [
+        {
+            "message_id": row["message_id"],
+            "user_id": row["user_id"],
+            "message_type": row["message_type"],
+            "username": (
+                _GROUP_CONTEXT_BOT_NAME
+                if _GROUP_CONTEXT_BOT_ID is not None
+                and row["user_id"] == _GROUP_CONTEXT_BOT_ID
+                else row.get("username")
+            ),
+            "content": _decode_group_content(
+                row.get("content", ""),
+                row["message_type"],
+            ),
+            "created_at": (
+                row["created_at"].isoformat(sep=" ")
+                if row.get("created_at")
+                else None
+            ),
+        }
+        for row in rows
+    ]
     return {
         "group_id": target_group_id,
         "around_message_id": around_message_id,
         "window_size": window_size,
         "messages": context_messages,
     }
+
+
+def _decode_group_content(content: object, message_type: str) -> str:
+    """@brief 解码群聊上下文内容 / Decode group-context content.
+
+    @param content 数据库存储内容 / Stored content.
+    @param message_type 消息类型 / Message type.
+    @return 面向 Agent 的可读文本 / Agent-readable text.
+    """
+
+    text = str(content or "")
+    if message_type == "text":
+        return text
+    try:
+        return base64.b64decode(text.encode("ascii")).decode("utf-8")
+    except Exception:
+        return text
 
 
 def fetch_permanent_summaries_tool(

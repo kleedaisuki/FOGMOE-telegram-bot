@@ -6,6 +6,7 @@ from .image_tools import generate_image_tool
 from .memory_tools import (
     fetch_permanent_summaries_tool,
     search_permanent_records_tool,
+    set_group_context_bot_identity,
     user_diary_tool,
 )
 from .schedule_tools import schedule_ai_message_tool
@@ -31,6 +32,7 @@ __all__ = [
     "update_impression_tool",
     "fetch_permanent_summaries_tool",
     "search_permanent_records_tool",
+    "set_group_context_bot_identity",
     "user_diary_tool",
     "schedule_ai_message_tool",
     "list_available_stickers_tool",

@@ -239,3 +239,4 @@ DEFAULT_AGENT_RUNTIME = AgentRuntime(
     arg_models=AI_TOOL_ARG_MODELS,
     handlers=AI_TOOL_HANDLERS,
 )
+"""@brief Domain 管理的默认 Agent 工具运行时 / Domain-managed default Agent tool runtime."""

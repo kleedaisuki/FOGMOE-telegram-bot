@@ -40,6 +40,7 @@ from fogmoe_bot.application.telegram.sticker_sender import normalize_sticker_dir
 from fogmoe_bot.application.telegram.assistant_visible_sender import TelegramVisibleContentHandler
 from fogmoe_bot.application.assistant.tasks.vision import analyze_image
 from fogmoe_bot.domain.agent_runtime.history import tool_logs_to_record_entries
+from fogmoe_bot.domain.agent_runtime.tools import set_group_context_bot_identity
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ def _cache_bot_identity(bot_user: telegram.User) -> None:
     _BOT_ID = bot_user.id
     _BOT_USERNAME = bot_user.username or "FogMoeBot"
     group_chat_history.set_bot_identity(_BOT_ID, _BOT_USERNAME)
+    set_group_context_bot_identity(_BOT_ID, _BOT_USERNAME)
 
 
 async def _refresh_bot_identity(bot, *, source: str) -> bool:

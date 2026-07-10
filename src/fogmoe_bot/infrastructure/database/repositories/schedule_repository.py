@@ -1,24 +1,21 @@
-from dataclasses import dataclass
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
 from typing import Optional
 
+from fogmoe_bot.domain.scheduling import (
+    PROMPT_JOB_KIND,
+    PromptJobPayload,
+    Recurrence,
+    ScheduleClaim,
+    ScheduledJob,
+    ScheduleCreationBlockReason,
+    ScheduleCreationResult,
+    ScheduleSnapshot,
+    ScheduleStatus,
+    ensure_utc,
+    to_storage_datetime,
+)
 from fogmoe_bot.infrastructure.database import connection as db_connection
-
-
-@dataclass(frozen=True)
-class ScheduleCreateResult:
-    """@brief 定时任务创建结果 / Schedule creation result.
-
-    @param schedule_id 定时任务 ID / Schedule ID.
-    @param created_at 创建时间 / Creation timestamp.
-    @param replaced 是否替换了旧任务 / Whether an old schedule was replaced.
-    @param blocked_reason 阻塞原因 / Reason why creation was blocked.
-    """
-
-    schedule_id: int | None
-    created_at: datetime | None
-    replaced: bool
-    blocked_reason: str | None
 
 
 async def count_pending_for_user(user_id: int, *, connection=None) -> int:
@@ -99,10 +96,11 @@ async def replace_schedule(
         "SET run_at = %s, recurrence_unit = %s, recurrence_interval = %s, "
         "trigger_reason = %s, context = %s, prompt = %s, "
         "status = 'pending', created_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, "
-        "executed_at = NULL, last_run_at = NULL, error = NULL "
+        "executed_at = NULL, last_run_at = NULL, error = NULL, "
+        "claim_token = NULL, lease_expires_at = NULL "
         "WHERE id = %s",
         (
-            run_at,
+            to_storage_datetime(run_at),
             recurrence_unit,
             recurrence_interval,
             trigger_reason,
@@ -145,7 +143,7 @@ async def insert_schedule(
         "RETURNING id",
         (
             user_id,
-            run_at,
+            to_storage_datetime(run_at),
             recurrence_unit,
             recurrence_interval,
             trigger_reason,
@@ -170,7 +168,7 @@ async def fetch_created_at(schedule_id: int, *, connection=None) -> datetime | N
         (schedule_id,),
         connection=connection,
     )
-    return row[0] if row else None
+    return ensure_utc(row[0]) if row else None
 
 
 async def create_or_replace_for_user(
@@ -184,7 +182,7 @@ async def create_or_replace_for_user(
     recurrence_interval: int,
     max_pending: int,
     max_total: int,
-) -> ScheduleCreateResult:
+) -> ScheduleCreationResult:
     """@brief 为用户创建或替换定时任务 / Create or replace a schedule for a user.
 
     @param user_id Telegram 用户 ID / Telegram user ID.
@@ -203,14 +201,24 @@ async def create_or_replace_for_user(
     async with db_connection.transaction() as connection:
         pending_count = await count_pending_for_user(user_id, connection=connection)
         if pending_count >= max_pending:
-            return ScheduleCreateResult(None, None, False, "pending_limit")
+            return ScheduleCreationResult(
+                None,
+                None,
+                False,
+                ScheduleCreationBlockReason.PENDING_LIMIT,
+            )
 
         total_count = await count_total_for_user(user_id, connection=connection)
         schedule_id: int | None = None
         if total_count >= max_total:
             schedule_id = await fetch_oldest_non_pending_id(user_id, connection=connection)
             if schedule_id is None:
-                return ScheduleCreateResult(None, None, False, "total_limit")
+                return ScheduleCreationResult(
+                    None,
+                    None,
+                    False,
+                    ScheduleCreationBlockReason.TOTAL_LIMIT,
+                )
             await replace_schedule(
                 schedule_id,
                 run_at=run_at,
@@ -239,10 +247,14 @@ async def create_or_replace_for_user(
         if schedule_id is not None:
             created_at = await fetch_created_at(schedule_id, connection=connection)
 
-    return ScheduleCreateResult(schedule_id, created_at, replaced, None)
+    return ScheduleCreationResult(schedule_id, created_at, replaced, None)
 
 
-async def list_for_user(user_id: int, *, limit: int):
+async def list_for_user(
+    user_id: int,
+    *,
+    limit: int,
+) -> tuple[ScheduleSnapshot[PromptJobPayload], ...]:
     """@brief 列出用户定时任务 / List schedules for a user.
 
     @param user_id Telegram 用户 ID / Telegram user ID.
@@ -250,13 +262,50 @@ async def list_for_user(user_id: int, *, limit: int):
     @return 数据库结果行列表 / Database rows.
     """
 
-    return await db_connection.fetch_all(
+    rows = await db_connection.fetch_all(
         "SELECT id, run_at, recurrence_unit, recurrence_interval, created_at, "
         "executed_at, last_run_at, status, trigger_reason, context, prompt, error "
         "FROM ai_schedules WHERE user_id = %s "
         "ORDER BY created_at DESC, id DESC LIMIT %s",
         (user_id, limit),
     )
+    snapshots = []
+    for row in rows:
+        (
+            schedule_id,
+            run_at,
+            recurrence_unit,
+            recurrence_interval,
+            created_at,
+            executed_at,
+            last_run_at,
+            status,
+            reason,
+            context,
+            prompt,
+            error,
+        ) = row
+        job = ScheduleRepository._map_values(
+            schedule_id=schedule_id,
+            owner_id=user_id,
+            run_at=run_at,
+            created_at=created_at,
+            reason=reason,
+            context=context,
+            prompt=prompt,
+            unit=recurrence_unit,
+            interval=recurrence_interval,
+        )
+        snapshots.append(
+            ScheduleSnapshot(
+                job=job,
+                status=ScheduleStatus(_decode_text(status)),
+                executed_at=ensure_utc(executed_at) if executed_at else None,
+                last_run_at=ensure_utc(last_run_at) if last_run_at else None,
+                error=_decode_optional_text(error),
+            )
+        )
+    return tuple(snapshots)
 
 
 async def cancel_pending_for_user(schedule_id: int, user_id: int) -> bool:
@@ -275,80 +324,161 @@ async def cancel_pending_for_user(schedule_id: int, user_id: int) -> bool:
     return rowcount > 0
 
 
-async def mark_status(schedule_id: int, status: str, *, error: str | None = None) -> None:
-    """@brief 标记任务状态 / Mark schedule status.
+class ScheduleRepository:
+    """@brief 基于 ai_schedules 表的类型化仓储 / Typed repository backed by ai_schedules."""
 
-    @param schedule_id 定时任务 ID / Schedule ID.
-    @param status 新状态 / New status.
-    @param error 可选错误文本 / Optional error text.
-    @return None / None.
-    """
+    async def recover_stale(self, now: datetime) -> int:
+        """@brief 回收超时 executing 任务 / Recover stale executing jobs."""
 
-    if error is not None:
+        return await db_connection.execute(
+            "UPDATE ai_schedules SET status = 'pending', updated_at = CURRENT_TIMESTAMP, "
+            "error = 'recovered stale execution', claim_token = NULL, lease_expires_at = NULL "
+            "WHERE status = 'executing' "
+            "AND (lease_expires_at IS NULL OR lease_expires_at <= %s)",
+            (to_storage_datetime(now),),
+        )
+
+    async def claim_due(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        lease_for: timedelta,
+    ) -> tuple[ScheduleClaim[PromptJobPayload], ...]:
+        """@brief 原子领取并映射到领域对象 / Atomically claim and map due jobs."""
+
+        lease_expires_at = now + lease_for
+        async with db_connection.transaction() as connection:
+            rows = await db_connection.fetch_all(
+                "SELECT id, user_id, run_at, created_at, trigger_reason, context, prompt, "
+                "recurrence_unit, recurrence_interval FROM ai_schedules "
+                "WHERE status = 'pending' AND run_at <= %s "
+                "ORDER BY run_at ASC, id ASC LIMIT %s FOR UPDATE SKIP LOCKED",
+                (to_storage_datetime(now), limit),
+                connection=connection,
+            )
+            if not rows:
+                return ()
+            tokens = tuple(uuid.uuid4() for _ in rows)
+            for row, token in zip(rows, tokens, strict=True):
+                await db_connection.execute(
+                    "UPDATE ai_schedules SET status = 'executing', claim_token = %s, "
+                    "lease_expires_at = %s, updated_at = CURRENT_TIMESTAMP, error = NULL "
+                    "WHERE id = %s AND status = 'pending'",
+                    (token, to_storage_datetime(lease_expires_at), int(row[0])),
+                    connection=connection,
+                )
+
+        return tuple(
+            ScheduleClaim(
+                job=self._map_row(row),
+                token=str(token),
+                lease_expires_at=lease_expires_at,
+            )
+            for row, token in zip(rows, tokens, strict=True)
+        )
+
+    async def mark_executed(self, claim: ScheduleClaim[object]) -> None:
+        """@brief 标记一次性任务完成 / Mark a one-shot job executed."""
+
         await db_connection.execute(
-            "UPDATE ai_schedules SET status = %s, error = %s WHERE id = %s",
-            (status, error, schedule_id),
+            "UPDATE ai_schedules SET status = 'executed', executed_at = CURRENT_TIMESTAMP, "
+            "updated_at = CURRENT_TIMESTAMP, error = NULL, claim_token = NULL, "
+            "lease_expires_at = NULL WHERE id = %s AND status = 'executing' "
+            "AND claim_token = CAST(%s AS uuid)",
+            (claim.job.schedule_id, claim.token),
         )
-        return
 
-    if status == "executed":
+    async def reschedule(
+        self,
+        claim: ScheduleClaim[object],
+        *,
+        last_run_at: datetime,
+        next_run_at: datetime,
+    ) -> None:
+        """@brief 推进周期任务 / Advance a recurring job."""
+
         await db_connection.execute(
-            "UPDATE ai_schedules SET status = %s, executed_at = CURRENT_TIMESTAMP WHERE id = %s",
-            (status, schedule_id),
+            "UPDATE ai_schedules SET status = 'pending', run_at = %s, last_run_at = %s, "
+            "executed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, error = NULL, "
+            "claim_token = NULL, lease_expires_at = NULL "
+            "WHERE id = %s AND status = 'executing' AND claim_token = CAST(%s AS uuid)",
+            (
+                to_storage_datetime(next_run_at),
+                to_storage_datetime(last_run_at),
+                claim.job.schedule_id,
+                claim.token,
+            ),
         )
-        return
 
-    await db_connection.execute(
-        "UPDATE ai_schedules SET status = %s WHERE id = %s",
-        (status, schedule_id),
-    )
+    async def mark_failed(self, claim: ScheduleClaim[object], error: str) -> None:
+        """@brief 标记执行失败 / Mark execution failed."""
 
-
-async def reschedule_recurring(schedule_id: int, *, last_run_at: datetime, next_run_at: datetime) -> None:
-    """@brief 重排循环任务 / Reschedule a recurring schedule.
-
-    @param schedule_id 定时任务 ID / Schedule ID.
-    @param last_run_at 上次执行时间 / Last run timestamp.
-    @param next_run_at 下次执行时间 / Next run timestamp.
-    @return None / None.
-    """
-
-    await db_connection.execute(
-        "UPDATE ai_schedules "
-        "SET status = 'pending', run_at = %s, last_run_at = %s, "
-        "executed_at = CURRENT_TIMESTAMP, error = NULL "
-        "WHERE id = %s",
-        (next_run_at, last_run_at, schedule_id),
-    )
-
-
-async def claim_due(limit: int):
-    """@brief 领取到期任务 / Claim due schedules.
-
-    @param limit 最大领取数量 / Maximum number of schedules to claim.
-    @return 已领取的任务行 / Claimed schedule rows.
-    """
-
-    async with db_connection.transaction() as connection:
-        rows = await db_connection.fetch_all(
-            "SELECT id, user_id, run_at, created_at, trigger_reason, context, prompt, "
-            "recurrence_unit, recurrence_interval "
-            "FROM ai_schedules "
-            "WHERE status = 'pending' AND run_at <= CURRENT_TIMESTAMP "
-            "ORDER BY run_at ASC, id ASC "
-            "LIMIT %s FOR UPDATE SKIP LOCKED",
-            (limit,),
-            connection=connection,
-        )
-        if not rows:
-            return []
-
-        schedule_ids = [row[0] for row in rows]
-        placeholders = ", ".join(["%s"] * len(schedule_ids))
         await db_connection.execute(
-            f"UPDATE ai_schedules SET status = 'executing' WHERE id IN ({placeholders})",
-            tuple(schedule_ids),
-            connection=connection,
+            "UPDATE ai_schedules SET status = 'failed', error = %s, "
+            "updated_at = CURRENT_TIMESTAMP, claim_token = NULL, lease_expires_at = NULL "
+            "WHERE id = %s AND status = 'executing' AND claim_token = CAST(%s AS uuid)",
+            (error[:500], claim.job.schedule_id, claim.token),
         )
 
-    return rows
+    @staticmethod
+    def _map_row(row: tuple) -> ScheduledJob[PromptJobPayload]:
+        """@brief 将仓储私有行转换为领域任务 / Map a repository-private row to a domain job."""
+
+        schedule_id, owner_id, run_at, created_at, reason, context, prompt, unit, interval = row
+        return ScheduleRepository._map_values(
+            schedule_id=schedule_id,
+            owner_id=owner_id,
+            run_at=run_at,
+            created_at=created_at,
+            reason=reason,
+            context=context,
+            prompt=prompt,
+            unit=unit,
+            interval=interval,
+        )
+
+    @staticmethod
+    def _map_values(
+        *,
+        schedule_id: object,
+        owner_id: object,
+        run_at: datetime,
+        created_at: datetime | None,
+        reason: object,
+        context: object,
+        prompt: object,
+        unit: object,
+        interval: object,
+    ) -> ScheduledJob[PromptJobPayload]:
+        """@brief 将字段集合转换为领域任务 / Map stored fields to a domain job."""
+
+        return ScheduledJob(
+            schedule_id=int(schedule_id),
+            owner_id=int(owner_id),
+            kind=PROMPT_JOB_KIND,
+            run_at=ensure_utc(run_at),
+            created_at=ensure_utc(created_at) if created_at is not None else None,
+            recurrence=Recurrence.from_storage(unit, interval),
+            payload=PromptJobPayload(
+                trigger_reason=_decode_text(reason),
+                context_text=_decode_optional_text(context),
+                instruction=_decode_text(prompt),
+            ),
+        )
+
+
+def _decode_text(value: object) -> str:
+    """@brief 严格解码必填文本 / Strictly decode required text."""
+
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="strict")
+    return str(value or "")
+
+
+def _decode_optional_text(value: object) -> str | None:
+    """@brief 解码可选文本 / Decode optional text."""
+
+    if value is None:
+        return None
+    return _decode_text(value)

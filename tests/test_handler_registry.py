@@ -12,12 +12,13 @@ class FakeJobQueue:
     def __init__(self):
         self.jobs = []
 
-    def run_repeating(self, callback, interval, first=None):
+    def run_repeating(self, callback, interval, first=None, job_kwargs=None):
         self.jobs.append(
             {
                 "callback": callback,
                 "interval": interval,
                 "first": first,
+                "job_kwargs": job_kwargs,
             }
         )
 
@@ -27,6 +28,8 @@ class FakeApplication:
         self.handlers = []
         self.error_handlers = []
         self.job_queue = FakeJobQueue()
+        self.bot_data = {}
+        self.bot = object()
 
     def add_handler(self, handler, group=0):
         self.handlers.append(
@@ -85,7 +88,7 @@ def test_registration_steps_are_grouped_by_app_assembly_boundary():
         "register_media_and_chart_handlers",
         "register_rpg_handlers",
         "register_admin_handlers",
-        "register_ai_jobs",
+        "register_scheduling_daemon",
     ]
 
 
@@ -168,5 +171,10 @@ def test_register_handlers_preserves_handler_and_job_registration_order():
         ("refresh_cache_job", 1800, 10),
         ("<lambda>", 3600, 1800),
         ("clean_expired_requests_job", 300, 10),
-        ("run_ai_schedule_job", 60, 5),
+        ("run_scheduling_daemon_tick", 60, 5),
     ]
+    assert application.job_queue.jobs[-1]["job_kwargs"] == {
+        "misfire_grace_time": 60,
+        "coalesce": True,
+        "max_instances": 1,
+    }

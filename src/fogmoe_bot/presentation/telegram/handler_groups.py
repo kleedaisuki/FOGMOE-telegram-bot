@@ -24,7 +24,6 @@ from fogmoe_bot.application.telegram.bot_commands import (
 from fogmoe_bot.application.telegram.bot_conversation import reply
 from fogmoe_bot.application.crypto.bot_monitoring import start_monitor, stop_monitor
 from fogmoe_bot.application.admin import developer
-from fogmoe_bot.application.assistant import scheduler
 from fogmoe_bot.application.crypto import chart, crypto_predict, swap_fogmoe_solana_token
 from fogmoe_bot.application.economy import (
     bribe,
@@ -39,7 +38,6 @@ from fogmoe_bot.application.economy import (
 from fogmoe_bot.application.games import gamble, omikuji, rockpaperscissors_game, rpg, sicbo
 from fogmoe_bot.application.media import music, pic
 from fogmoe_bot.application.moderation import keyword_handler, member_verify, report, spam_control
-
 
 def register_error_handlers(application) -> None:
     application.add_error_handler(error_handler)
@@ -157,11 +155,3 @@ def register_rpg_handlers(application) -> None:
 def register_admin_handlers(application) -> None:
     developer.setup_developer_handlers(application)
     web_password.setup_webpassword_handlers(application)
-
-
-def register_ai_jobs(application) -> None:
-    application.job_queue.run_repeating(
-        scheduler.run_ai_schedule_job,
-        interval=scheduler.SCHEDULE_POLL_INTERVAL,
-        first=5,
-    )

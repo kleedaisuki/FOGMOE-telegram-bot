@@ -1,50 +1,44 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
+from fogmoe_bot.domain.scheduling import (
+    Recurrence,
+    RecurrenceUnit,
+    ScheduleCreationBlockReason,
+    ScheduleStatus,
+    ensure_utc,
+)
 from fogmoe_bot.infrastructure.database import connection as db_connection
-from fogmoe_bot.infrastructure.database.repositories import ai_schedule_repository
+from fogmoe_bot.infrastructure.database.repositories import schedule_repository
 
 from .context import get_tool_request_context
 
 MAX_PENDING_SCHEDULES = 3
 MAX_TOTAL_SCHEDULES = 12
-RECURRENCE_UNITS = {"none", "minute", "hour", "day"}
+RECURRENCE_ALIASES = {
+    "": RecurrenceUnit.NONE,
+    "no": RecurrenceUnit.NONE,
+    "once": RecurrenceUnit.NONE,
+    "one_time": RecurrenceUnit.NONE,
+    "one-time": RecurrenceUnit.NONE,
+    "none": RecurrenceUnit.NONE,
+    "minute": RecurrenceUnit.MINUTE,
+    "minutes": RecurrenceUnit.MINUTE,
+    "mins": RecurrenceUnit.MINUTE,
+    "min": RecurrenceUnit.MINUTE,
+    "hour": RecurrenceUnit.HOUR,
+    "hours": RecurrenceUnit.HOUR,
+    "hourly": RecurrenceUnit.HOUR,
+    "day": RecurrenceUnit.DAY,
+    "days": RecurrenceUnit.DAY,
+    "daily": RecurrenceUnit.DAY,
+}
 
 
-def _normalise_recurrence_unit(value: Optional[str]) -> str:
-    raw = (value or "none").strip().lower()
-    aliases = {
-        "": "none",
-        "no": "none",
-        "once": "none",
-        "one_time": "none",
-        "one-time": "none",
-        "minutes": "minute",
-        "mins": "minute",
-        "min": "minute",
-        "hours": "hour",
-        "hourly": "hour",
-        "days": "day",
-        "daily": "day",
-    }
-    return aliases.get(raw, raw)
+def _normalise_recurrence_unit(value: Optional[str]) -> RecurrenceUnit | None:
+    """@brief 将 Agent 别名归一为领域枚举 / Normalize Agent aliases to a domain enum."""
 
-
-def _recurrence_delta(unit: str, interval: int) -> Optional[timedelta]:
-    if unit == "minute":
-        return timedelta(minutes=interval)
-    if unit == "hour":
-        return timedelta(hours=interval)
-    if unit == "day":
-        return timedelta(days=interval)
-    return None
-
-
-def _default_first_run_at(unit: str, interval: int) -> Optional[datetime]:
-    delta = _recurrence_delta(unit, interval)
-    if delta is None:
-        return None
-    return datetime.utcnow() + delta
+    return RECURRENCE_ALIASES.get((value or "none").strip().lower())
 
 
 def _parse_timestamp_utc(value: str | None) -> Optional[datetime]:
@@ -70,40 +64,13 @@ def _parse_timestamp_utc(value: str | None) -> Optional[datetime]:
         if dt is None:
             return None
 
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
+    return ensure_utc(dt)
 
 
 def _format_timestamp_utc(value: Optional[datetime]) -> Optional[str]:
     if not value:
         return None
-    if value.tzinfo is not None:
-        value = value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-async def _create_or_replace_schedule(
-    user_id: int,
-    run_at: datetime,
-    trigger_reason: str,
-    context_text: Optional[str],
-    instruction_text: str,
-    recurrence_unit: str,
-    recurrence_interval: int,
-) -> tuple[Optional[int], Optional[datetime], bool, Optional[str]]:
-    result = await ai_schedule_repository.create_or_replace_for_user(
-        user_id=user_id,
-        run_at=run_at,
-        trigger_reason=trigger_reason,
-        context_text=context_text,
-        instruction_text=instruction_text,
-        recurrence_unit=recurrence_unit,
-        recurrence_interval=recurrence_interval,
-        max_pending=MAX_PENDING_SCHEDULES,
-        max_total=MAX_TOTAL_SCHEDULES,
-    )
-    return result.schedule_id, result.created_at, result.replaced, result.blocked_reason
+    return ensure_utc(value).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def schedule_ai_message_tool(
@@ -148,45 +115,33 @@ def schedule_ai_message_tool(
         ):
             warnings.append("extra fields ignored for list action")
 
-        rows = db_connection.run_sync(
-            ai_schedule_repository.list_for_user(user_id, limit=MAX_TOTAL_SCHEDULES)
+        snapshots = db_connection.run_sync(
+            schedule_repository.list_for_user(user_id, limit=MAX_TOTAL_SCHEDULES)
         )
         tasks = []
         pending_count = 0
-        for row in rows:
-            (
-                task_id,
-                run_at,
-                task_recurrence_unit,
-                task_recurrence_interval,
-                created_at,
-                executed_at,
-                last_run_at,
-                status,
-                reason,
-                context_text,
-                instruction_text,
-                error_text,
-            ) = row
-            if status == "pending":
+        for snapshot in snapshots:
+            job = snapshot.job
+            payload = job.payload
+            if snapshot.status is ScheduleStatus.PENDING:
                 pending_count += 1
             task = {
-                "schedule_id": task_id,
-                "timestamp_utc": _format_timestamp_utc(run_at),
-                "recurrence_unit": task_recurrence_unit or "none",
-                "recurrence_interval": task_recurrence_interval or 1,
-                "created_at": _format_timestamp_utc(created_at),
-                "status": status,
-                "trigger_reason": reason,
-                "context": context_text,
-                "instruction": instruction_text,
+                "schedule_id": job.schedule_id,
+                "timestamp_utc": _format_timestamp_utc(job.run_at),
+                "recurrence_unit": job.recurrence.unit.value,
+                "recurrence_interval": job.recurrence.interval,
+                "created_at": _format_timestamp_utc(job.created_at),
+                "status": snapshot.status.value,
+                "trigger_reason": payload.trigger_reason,
+                "context": payload.context_text,
+                "instruction": payload.instruction,
             }
-            if executed_at:
-                task["executed_at"] = _format_timestamp_utc(executed_at)
-            if last_run_at:
-                task["last_run_at"] = _format_timestamp_utc(last_run_at)
-            if error_text:
-                task["error"] = error_text
+            if snapshot.executed_at:
+                task["executed_at"] = _format_timestamp_utc(snapshot.executed_at)
+            if snapshot.last_run_at:
+                task["last_run_at"] = _format_timestamp_utc(snapshot.last_run_at)
+            if snapshot.error:
+                task["error"] = snapshot.error
             tasks.append(task)
 
         response = {
@@ -211,7 +166,7 @@ def schedule_ai_message_tool(
             warnings.append("extra fields ignored for cancel action")
 
         cancelled = db_connection.run_sync(
-            ai_schedule_repository.cancel_pending_for_user(schedule_id_value, user_id)
+            schedule_repository.cancel_pending_for_user(schedule_id_value, user_id)
         )
         if not cancelled:
             return {
@@ -228,7 +183,7 @@ def schedule_ai_message_tool(
         return response
 
     recurrence_unit_value = _normalise_recurrence_unit(recurrence_unit)
-    if recurrence_unit_value not in RECURRENCE_UNITS:
+    if recurrence_unit_value is None:
         return {
             "user_id": user_id,
             "error": "Invalid recurrence_unit; expected none, minute, hour, or day",
@@ -242,10 +197,12 @@ def schedule_ai_message_tool(
         return {"user_id": user_id, "error": "Invalid recurrence_interval"}
     if recurrence_interval_value < 1:
         return {"user_id": user_id, "error": "recurrence_interval must be at least 1"}
-    if recurrence_unit_value == "none":
-        recurrence_interval_value = 1
+    try:
+        recurrence = Recurrence(recurrence_unit_value, recurrence_interval_value)
+    except ValueError as exc:
+        return {"user_id": user_id, "error": str(exc)}
 
-    if not timestamp_utc and recurrence_unit_value == "none":
+    if not timestamp_utc and recurrence.unit is RecurrenceUnit.NONE:
         return {"user_id": user_id, "error": "Missing timestamp_utc for create action"}
     if not trigger_reason:
         return {"user_id": user_id, "error": "Missing trigger_reason for create action"}
@@ -257,8 +214,11 @@ def schedule_ai_message_tool(
         run_at = _parse_timestamp_utc(timestamp_utc)
         if run_at is None:
             return {"user_id": user_id, "error": "Invalid timestamp_utc format"}
-    elif recurrence_unit_value != "none":
-        run_at = _default_first_run_at(recurrence_unit_value, recurrence_interval_value)
+    elif recurrence.unit is not RecurrenceUnit.NONE:
+        duration = recurrence.duration()
+        if duration is None:
+            return {"user_id": user_id, "error": "Invalid recurrence"}
+        run_at = datetime.now(timezone.utc) + duration
     else:
         return {"user_id": user_id, "error": "Missing timestamp_utc for create action"}
 
@@ -282,19 +242,21 @@ def schedule_ai_message_tool(
         elif len(context_value) > 1000:
             return {"user_id": user_id, "error": "context exceeds 1000 characters"}
 
-    schedule_id, created_at, replaced, blocked_reason = db_connection.run_sync(
-        _create_or_replace_schedule(
-            user_id,
-            run_at,
-            trigger_reason_value,
-            context_value,
-            instruction_value,
-            recurrence_unit_value,
-            recurrence_interval_value,
+    creation = db_connection.run_sync(
+        schedule_repository.create_or_replace_for_user(
+            user_id=user_id,
+            run_at=run_at,
+            trigger_reason=trigger_reason_value,
+            context_text=context_value,
+            instruction_text=instruction_value,
+            recurrence_unit=recurrence.unit.value,
+            recurrence_interval=recurrence.interval,
+            max_pending=MAX_PENDING_SCHEDULES,
+            max_total=MAX_TOTAL_SCHEDULES,
         )
     )
-    if schedule_id is None:
-        if blocked_reason == "total_limit":
+    if creation.schedule_id is None:
+        if creation.blocked_reason is ScheduleCreationBlockReason.TOTAL_LIMIT:
             return {
                 "user_id": user_id,
                 "error": (
@@ -312,13 +274,13 @@ def schedule_ai_message_tool(
 
     response = {
         "status": "scheduled",
-        "schedule_id": schedule_id,
+        "schedule_id": creation.schedule_id,
         "timestamp_utc": _format_timestamp_utc(run_at),
-        "recurrence_unit": recurrence_unit_value,
-        "recurrence_interval": recurrence_interval_value,
-        "created_at": _format_timestamp_utc(created_at),
+        "recurrence_unit": recurrence.unit.value,
+        "recurrence_interval": recurrence.interval,
+        "created_at": _format_timestamp_utc(creation.created_at),
         "trigger_reason": trigger_reason_value,
-        "replaced_oldest": replaced,
+        "replaced_oldest": creation.replaced,
         "instruction": instruction_value,
     }
     if context_value:
