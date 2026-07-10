@@ -4,19 +4,20 @@ from typing import Dict, Optional
 
 from fogmoe_bot.infrastructure import config
 
+from .agent_response import AgentResponse
 from .chat_capabilities import chat_model_for_service, chat_service_supports_vision
+from .delivery.contracts import VisibleContentSink
+from .delivery.visible_content import visible_content_events, visible_content_was_sent
+from .errors import PartialAgentResponseError, SafetyBlockError
 from .message_content import messages_have_images, strip_image_content
 from fogmoe_bot.domain.agent_runtime.tools import (
     cleanup_linux_sandbox,
     clear_tool_request_context,
     set_tool_request_context,
 )
-from .errors import SafetyBlockError
 from .providers import azure, gemini, openai, openrouter, siliconflow, zhipu
 from fogmoe_bot.domain.agent_runtime.executor import EXECUTOR
 from .routing.provider_circuit import ProviderCircuit
-from .types import AIResponse, PartialAIResponseError, VisibleContentHandler
-from .delivery.visible_content import visible_content_events, visible_content_was_sent
 
 AI_SERVICE_MAP = {
     "openai": openai.get_ai_response,
@@ -61,8 +62,8 @@ def _call_service_with_context(
     messages,
     user_id: int,
     tool_context: Optional[Dict[str, object]],
-    visible_content_handler: Optional[VisibleContentHandler],
-) -> AIResponse:
+    visible_content_handler: Optional[VisibleContentSink],
+) -> AgentResponse:
     request_context = dict(tool_context or {})
     request_context.setdefault("user_id", user_id)
     set_tool_request_context(request_context)
@@ -104,9 +105,9 @@ async def _try_ai_services(
     messages,
     user_id: int,
     tool_context: Optional[Dict[str, object]] = None,
-    visible_content_handler: Optional[VisibleContentHandler] = None,
+    visible_content_handler: Optional[VisibleContentSink] = None,
     text_fallback_messages=None,
-) -> tuple[AIResponse | None, Exception | None]:
+) -> tuple[AgentResponse | None, Exception | None]:
     last_error = None
     loop = asyncio.get_running_loop()
 
@@ -139,13 +140,13 @@ async def _try_ai_services(
                     "%s triggered safety block after sending visible content; not retrying",
                     service_name,
                 )
-                return ("", visible_content_events(visible_content_handler)), None
+                return AgentResponse("", visible_content_events(visible_content_handler)), None
             if service_name == "gemini":
                 logging.warning("Gemini triggered safety block, trying next service")
                 last_error = SafetyBlockError("SafetyBlockError")
                 continue
             raise
-        except PartialAIResponseError as exc:
+        except PartialAgentResponseError as exc:
             logging.error(
                 "%s failed after partial AI response; not retrying: %s",
                 service_name,
@@ -153,8 +154,8 @@ async def _try_ai_services(
                 exc_info=True,
             )
             if visible_content_was_sent(visible_content_handler):
-                return ("", exc.tool_logs), None
-            return (PARTIAL_AI_RESPONSE_ERROR_MESSAGE, exc.tool_logs), None
+                return AgentResponse("", exc.events), None
+            return AgentResponse(PARTIAL_AI_RESPONSE_ERROR_MESSAGE, exc.events), None
         except Exception as exc:
             if visible_content_was_sent(visible_content_handler):
                 logging.error(
@@ -163,7 +164,7 @@ async def _try_ai_services(
                     exc,
                     exc_info=True,
                 )
-                return ("", visible_content_events(visible_content_handler)), None
+                return AgentResponse("", visible_content_events(visible_content_handler)), None
             logging.warning("%s 调用失败: %s", service_name, exc)
             _provider_circuit.record_failure(service_name)
             last_error = exc
@@ -177,8 +178,8 @@ async def get_ai_response(
     user_id: int,
     tool_context: Optional[Dict[str, object]] = None,
     text_fallback_messages=None,
-    visible_content_handler: Optional[VisibleContentHandler] = None,
-) -> AIResponse:
+    visible_content_handler: Optional[VisibleContentSink] = None,
+) -> AgentResponse:
     """
     统一AI响应异步接口，根据配置的顺序依次尝试不同的AI服务
     """
@@ -208,7 +209,7 @@ async def get_ai_response(
             return response
 
     logging.error("所有AI服务均调用失败: %s", last_error)
-    return (
+    return AgentResponse(
         "抱歉喵，雾萌娘在处理你的请求时遇到了一点小问题！现在有点不舒服啦，请稍后再试吧～\n"
         "请联系管理员 @ScarletKc 反馈问题。",
         [],

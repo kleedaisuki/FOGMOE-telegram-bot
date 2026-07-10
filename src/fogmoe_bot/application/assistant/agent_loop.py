@@ -5,23 +5,26 @@ import logging
 from typing import Any, Dict, Iterable, List, Optional
 
 from fogmoe_bot.domain.agent_runtime import DEFAULT_AGENT_RUNTIME, ToolTask
+from fogmoe_bot.domain.agent_runtime.events import RuntimeEvent
 from fogmoe_bot.domain.agent_runtime.protocol import (
     assistant_message_to_plain,
     normalise_tool_calls,
 )
 from fogmoe_bot.infrastructure.llm.litellm_client import create_chat_completion
 
+from .agent_response import AgentResponse
+from .delivery.contracts import VisibleContentSink
 from .delivery.visible_content import emit_visible_content
-from .types import AIResponse, PartialAIResponseError, ToolLog, VisibleContentHandler
+from .errors import PartialAgentResponseError
 
 
 def _return_final_text_response(
     *,
     content_text: str,
-    tool_logs: List[ToolLog],
-    visible_content_handler: Optional[VisibleContentHandler],
+    tool_logs: List[RuntimeEvent],
+    visible_content_handler: Optional[VisibleContentSink],
     provider_name: str,
-) -> AIResponse:
+) -> AgentResponse:
     """@brief 处理 Agent 最终文本 / Handle final Agent text.
 
     @param content_text Agent 最终文本 / Final Agent text.
@@ -39,13 +42,13 @@ def _return_final_text_response(
             )
             if visible_result.content:
                 tool_logs.append({"type": "assistant_visible", "content": visible_result.content})
-                return "", tool_logs
+                return AgentResponse("", tool_logs)
             if not visible_result.completed:
-                return "", tool_logs
-        return content_text, tool_logs
+                return AgentResponse("", tool_logs)
+        return AgentResponse(content_text, tool_logs)
     if tool_logs:
         logging.warning("%s 工具调用后最终回复为空。", provider_name)
-    return content_text, tool_logs
+    return AgentResponse(content_text, tool_logs)
 
 
 def _parse_tool_arguments(raw_args: Any, *, provider_name: str) -> Any:
@@ -75,8 +78,8 @@ def run_agent_loop(
     max_iterations: int = 10,
     skip_tools: Optional[Iterable[str]] = None,
     completion_kwargs: Optional[Dict[str, Any]] = None,
-    visible_content_handler: Optional[VisibleContentHandler] = None,
-) -> AIResponse:
+    visible_content_handler: Optional[VisibleContentSink] = None,
+) -> AgentResponse:
     """@brief 驱动一个 Agent 回合 / Drive an Agent turn.
 
     Agent 只将 provider 的调用意图转换为 ToolTask，随后提交并消费
@@ -98,7 +101,7 @@ def run_agent_loop(
     filtered_messages = [
         message for message in messages if message.get("content") is not None or message.get("tool_calls")
     ]
-    tool_logs: List[ToolLog] = []
+    tool_logs: List[RuntimeEvent] = []
     skip_set = set(skip_tools or [])
 
     for iteration in range(max_iterations):
@@ -114,7 +117,7 @@ def run_agent_loop(
             )
         except Exception as exc:
             if tool_logs:
-                raise PartialAIResponseError(str(exc), tool_logs) from exc
+                raise PartialAgentResponseError(str(exc), tool_logs) from exc
             raise
 
         assistant_message = response.choices[0].message
@@ -142,9 +145,9 @@ def run_agent_loop(
                 assistant_content_for_model = visible_result.content
                 tool_logs.append({"type": "assistant_visible", "content": visible_result.content})
                 if not visible_result.completed:
-                    return "", tool_logs
+                    return AgentResponse("", tool_logs)
             elif not visible_result.completed:
-                return "", tool_logs
+                return AgentResponse("", tool_logs)
 
         assistant_model_message = assistant_message_to_plain(
             assistant_message,
@@ -177,7 +180,7 @@ def run_agent_loop(
                 ),
                 visible_content_handler=visible_content_handler,
             )
-            call_event: ToolLog = {
+            call_event: RuntimeEvent = {
                 "type": "assistant_tool_call",
                 "tool_name": result.name,
                 "arguments": result.logged_arguments,
@@ -198,7 +201,7 @@ def run_agent_loop(
                     "content": json.dumps(result.public_result, ensure_ascii=False),
                 }
             )
-            result_event: ToolLog = {
+            result_event: RuntimeEvent = {
                 "type": "tool_result",
                 "tool_name": result.name,
                 "arguments": result.arguments,
@@ -222,7 +225,7 @@ def run_agent_loop(
         )
     except Exception as exc:
         if tool_logs:
-            raise PartialAIResponseError(str(exc), tool_logs) from exc
+            raise PartialAgentResponseError(str(exc), tool_logs) from exc
         raise
 
     assistant_message = response.choices[0].message

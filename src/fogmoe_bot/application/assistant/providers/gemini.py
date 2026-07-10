@@ -3,21 +3,22 @@ from typing import Optional
 
 from fogmoe_bot.infrastructure import config
 
-from ..errors import SafetyBlockError
+from ..agent_response import AgentResponse
+from ..delivery.contracts import VisibleContentSink
+from ..errors import PartialAgentResponseError, SafetyBlockError
 from ..agent_loop import run_agent_loop
-from ..types import AIResponse, PartialAIResponseError, VisibleContentHandler
 
 
 def get_ai_response(
     messages,
     user_id: int,
-    visible_content_handler: Optional[VisibleContentHandler] = None,
-) -> AIResponse:
+    visible_content_handler: Optional[VisibleContentSink] = None,
+) -> AgentResponse:
     """同步版本的 Google Gemini 响应函数（LiteLLM）。"""
     primary_model = config.GEMINI_CHAT_MODEL
     fallback_model = config.GEMINI_CHAT_FALLBACK_MODEL
 
-    def _run(model_name: str) -> AIResponse:
+    def _run(model_name: str) -> AgentResponse:
         return run_agent_loop(
             "gemini",
             model_name,
@@ -33,7 +34,7 @@ def get_ai_response(
 
     try:
         return _run(primary_model)
-    except PartialAIResponseError:
+    except PartialAgentResponseError:
         raise
     except Exception as exc:
         error_str = str(exc)

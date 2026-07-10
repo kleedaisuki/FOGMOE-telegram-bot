@@ -4,14 +4,15 @@ from typing import Optional
 from fogmoe_bot.infrastructure import config
 
 from ..agent_loop import run_agent_loop
-from ..types import AIResponse, VisibleContentHandler
+from ..agent_response import AgentResponse
+from ..delivery.contracts import VisibleContentSink
 
 
 def get_ai_response(
     messages,
     user_id: int,
-    visible_content_handler: Optional[VisibleContentHandler] = None,
-) -> AIResponse:
+    visible_content_handler: Optional[VisibleContentSink] = None,
+) -> AgentResponse:
     """同步版本的 SiliconFlow 响应函数（OpenAI-compatible API）。"""
     siliconflow_model = config.SILICONFLOW_CHAT_MODEL
     if not siliconflow_model:

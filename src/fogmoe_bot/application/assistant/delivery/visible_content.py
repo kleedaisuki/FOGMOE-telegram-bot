@@ -1,7 +1,7 @@
 import logging
 from typing import NamedTuple
 
-from ..types import VisibleContentHandler
+from .contracts import VisibleContentSink
 
 
 class VisibleContentResult(NamedTuple):
@@ -17,7 +17,7 @@ class VisibleContentResult(NamedTuple):
 
 
 def visible_content_was_sent(
-    visible_content_handler: VisibleContentHandler | None,
+    visible_content_handler: VisibleContentSink | None,
 ) -> bool:
     """@brief 判断是否已有内容发给用户 / Check whether content was sent to user.
 
@@ -45,7 +45,7 @@ def visible_content_was_sent(
 
 
 def visible_content_events(
-    visible_content_handler: VisibleContentHandler | None,
+    visible_content_handler: VisibleContentSink | None,
 ) -> list[dict[str, str]]:
     """@brief 读取已发送可见内容事件 / Read sent visible content events.
 
@@ -82,7 +82,7 @@ def visible_content_events(
     ]
 
 
-def last_visible_content(handler: VisibleContentHandler) -> str:
+def last_visible_content(handler: VisibleContentSink) -> str:
     """@brief 读取最后一段可恢复内容 / Read the last recoverable content.
 
     @param handler 可见内容 handler / Visible content handler.
@@ -97,7 +97,7 @@ def last_visible_content(handler: VisibleContentHandler) -> str:
 
 
 def emit_visible_content(
-    handler: VisibleContentHandler,
+    handler: VisibleContentSink,
     content: str,
     *,
     provider_name: str,

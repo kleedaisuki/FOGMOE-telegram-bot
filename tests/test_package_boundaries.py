@@ -99,6 +99,7 @@ def test_agent_runtime_owns_agent_tooling():
         SRC_ROOT / "application" / "assistant" / "tool_history.py",
         SRC_ROOT / "application" / "assistant" / "generated_image_sender.py",
         SRC_ROOT / "application" / "assistant" / "generated_audio_sender.py",
+        SRC_ROOT / "application" / "assistant" / "types.py",
     ]
 
     assert runtime_root.is_dir()
