@@ -99,7 +99,7 @@ async def archive_and_clear_chat(user_id: int, conversation_id: int) -> tuple[bo
         if snapshot_text:
             await insert_permanent_snapshot(user_id, snapshot_text, connection=connection)
             snapshot_created = True
-            archived_records = await connection.prune_permanent_records(
+            archived_records = await db_connection.prune_permanent_records(
                 user_id,
                 connection=connection,
             )
