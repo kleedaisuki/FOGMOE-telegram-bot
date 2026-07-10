@@ -3,7 +3,7 @@
 from fogmoe_bot.domain.agent_routing import ProviderRoute
 from fogmoe_bot.infrastructure import config
 
-from ..provider_resolver import completion_kwargs_for_task, get_models_for_task
+from .task_profiles import completion_kwargs_for_task, get_models_for_task
 
 
 _DISPLAY_NAMES = {

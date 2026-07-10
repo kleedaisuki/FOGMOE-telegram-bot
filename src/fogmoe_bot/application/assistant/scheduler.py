@@ -16,7 +16,7 @@ from fogmoe_bot.domain.context import (
     ScheduledTaskContext,
 )
 from fogmoe_bot.infrastructure.telegram.telegram_utils import partial_send
-from fogmoe_bot.application.assistant import summary
+from fogmoe_bot.application.assistant.tasks import summary
 from fogmoe_bot.application.conversation_lock_manager import CONVERSATION_LOCK_MANAGER
 from fogmoe_bot.domain.agent_runtime.audio_delivery import send_generated_audio_from_tool_logs
 from fogmoe_bot.domain.agent_runtime.image_delivery import send_generated_images_from_tool_logs

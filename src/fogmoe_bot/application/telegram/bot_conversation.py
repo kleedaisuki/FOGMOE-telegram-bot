@@ -27,7 +27,7 @@ from fogmoe_bot.infrastructure.telegram.telegram_utils import (
     partial_send,
     safe_send_markdown,
 )
-from fogmoe_bot.application.assistant import summary
+from fogmoe_bot.application.assistant.tasks import summary
 from fogmoe_bot.application.conversation_lock_manager import CONVERSATION_LOCK_MANAGER
 from fogmoe_bot.domain.agent_runtime.audio_delivery import send_generated_audio_from_tool_logs
 from fogmoe_bot.domain.agent_runtime.image_delivery import send_generated_images_from_tool_logs
@@ -35,7 +35,7 @@ from fogmoe_bot.application.assistant.reply_filter import normalize_ai_reply_tex
 from fogmoe_bot.application.assistant.inference import ASSISTANT_INFERENCE_SERVICE
 from fogmoe_bot.application.assistant.sticker_sender import normalize_sticker_directives, send_ai_reply_with_stickers
 from fogmoe_bot.application.assistant.telegram_visible_sender import TelegramVisibleContentHandler
-from fogmoe_bot.application.assistant.task_runner import run_ai_task
+from fogmoe_bot.application.assistant.inference.task_runner import INFERENCE_TASK_RUNNER
 from fogmoe_bot.application.assistant.tasks.vision import analyze_image
 from fogmoe_bot.domain.agent_runtime.history import tool_logs_to_record_entries
 
@@ -287,7 +287,7 @@ def _sync_should_trigger_ai_response(message_text: str) -> bool:
         logging.debug("AI classifier rate limiter blocked a request.")
         return False
     try:
-        response = run_ai_task(
+        response = INFERENCE_TASK_RUNNER.run(
             "classifier",
             messages=[
                 {

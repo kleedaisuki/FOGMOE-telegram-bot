@@ -4,7 +4,7 @@ import time
 from collections import deque
 
 from fogmoe_bot.domain.agent_runtime.executor import EXECUTOR
-from ..task_runner import run_ai_task
+from ..inference.task_runner import INFERENCE_TASK_RUNNER
 
 
 class APIRateLimiter:
@@ -45,7 +45,7 @@ async def translate_text(text: str) -> str:
 
 def _sync_translate_text(text: str) -> str:
     """同步版本的翻译函数，供异步函数调用"""
-    response = run_ai_task(
+    response = INFERENCE_TASK_RUNNER.run(
         "translate",
         messages=[
             {

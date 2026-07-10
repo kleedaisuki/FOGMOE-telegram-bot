@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import conversation_repository
 from fogmoe_bot.domain.conversation.token_estimator import estimate_tokens
-from .task_runner import run_ai_task
+from ..inference.task_runner import INFERENCE_TASK_RUNNER
 
 import json
 
@@ -232,7 +232,7 @@ def _generate_summary(user_id: int, snapshot_text: str) -> Optional[str]:
 
     for attempt in range(1, SUMMARY_RETRY_LIMIT + 1):
         try:
-            response = run_ai_task(
+            response = INFERENCE_TASK_RUNNER.run(
                 "summary",
                 messages=messages,
                 max_tokens=SUMMARY_MAX_TOKENS,

@@ -2,7 +2,7 @@ import asyncio
 import logging
 
 from fogmoe_bot.domain.agent_runtime.executor import EXECUTOR
-from ..task_runner import run_ai_task
+from ..inference.task_runner import INFERENCE_TASK_RUNNER
 
 
 async def analyze_image(base64_str):
@@ -32,7 +32,7 @@ async def analyze_image(base64_str):
 
 def _sync_analyze_image(base64_str):
     """同步版本的图像分析函数，供异步函数调用"""
-    response = run_ai_task(
+    response = INFERENCE_TASK_RUNNER.run(
         "vision",
         messages=[
             {
