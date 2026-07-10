@@ -10,9 +10,9 @@ def test_text_resources_are_loaded_verbatim():
     ).read_text(encoding="utf-8")
 
 
-def test_system_prompt_resource_preserves_markdown_line_breaks():
-    assert config.SYSTEM_PROMPT.startswith(
-        "# Character Profile of FogMoeBot\n## Core Identity\n- "
-    )
-    assert "\n# Tool Calling\n## Calling Rules\n- " in config.SYSTEM_PROMPT
-    assert config.SYSTEM_PROMPT.endswith("by themselves\n")
+def test_system_prompt_defines_persona_and_runtime_contract():
+    assert config.SYSTEM_PROMPT.startswith("# Runtime Contract\n\n## Persona\n")
+    assert "Asuhoshi Yume" in config.SYSTEM_PROMPT
+    assert "# Runtime Contract\n" in config.SYSTEM_PROMPT
+    assert config.SYSTEM_PROMPT.endswith("public repository when appropriate.\n")
+    assert "@kleek_RoPL_bot" in config.SYSTEM_PROMPT

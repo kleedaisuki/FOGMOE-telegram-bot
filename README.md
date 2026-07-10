@@ -1,4 +1,4 @@
-# 雾萌娘 - 多功能 Telegram 机器人
+# 雾萌娘（改） - 多功能 Telegram 机器人
 
 <div align="center">
 
@@ -11,6 +11,10 @@
 </div>
 
 ---
+
+## Fork 说明
+
+本项目由 **foemoe** 上游项目 fork 而来，并在此基础上演进。请保留原项目的许可证与署名；当前仓库的改动、配置和部署说明以本 README 为准。
 
 ## ✨ 功能特性
 
@@ -155,7 +159,7 @@ venv\Scripts\activate
 
 ## 📖 使用说明
 
-可参考 [@FogMoeBot](https://t.me/FogMoeBot) 或配置文件中的说明进行使用。
+可参考 [@kleek_RoPL_bot](https://t.me/kleek_RoPL_bot) 或配置文件中的说明进行使用。
 
 
 ## 🐳 Docker 部署（仅 Python，外部 PostgreSQL）

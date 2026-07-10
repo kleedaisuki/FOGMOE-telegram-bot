@@ -304,7 +304,7 @@ def _read_text_resource(relative_path: str) -> str:
 # help 命令的帮助信息
 HELP_TEXT = _read_text_resource("resources/telegram_help.md")
 
-# AI 系统提示词
+# AI 系统提示词：人设与运行契约都由受版本控制的资源文件提供。
 SYSTEM_PROMPT = _read_text_resource("resources/prompts/system_prompt.md")
 
 def _parse_csv_value(raw_value: str | None) -> list[str]:
