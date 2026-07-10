@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0013_add_ai_schedule_recurrence
--- Alembic head: 0013_add_ai_schedule_recurrence
+-- Source migrations: 0001_initial through 0014_add_verification_token_hash
+-- Alembic head: 0014_add_verification_token_hash
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and user-plan backfill) and the
