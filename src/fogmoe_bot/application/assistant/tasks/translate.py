@@ -3,7 +3,7 @@ import logging
 import time
 from collections import deque
 
-from ..runtime import EXECUTOR
+from fogmoe_bot.domain.agent_runtime.executor import EXECUTOR
 from ..task_runner import run_ai_task
 
 
@@ -67,4 +67,3 @@ def _sync_translate_text(text: str) -> str:
         ],
     )
     return response.choices[0].message.content
-

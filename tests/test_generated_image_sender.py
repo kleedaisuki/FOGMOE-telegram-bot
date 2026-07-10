@@ -4,7 +4,7 @@ import logging
 import telegram.error
 
 from fogmoe_bot.infrastructure.telegram import telegram_utils
-from fogmoe_bot.application.assistant import generated_image_sender
+from fogmoe_bot.domain.agent_runtime import image_delivery
 
 
 def test_send_generated_image_uses_prompt_filename(monkeypatch, tmp_path):
@@ -20,14 +20,14 @@ def test_send_generated_image_uses_prompt_filename(monkeypatch, tmp_path):
         return object()
 
     monkeypatch.setattr(
-        generated_image_sender,
+        image_delivery,
         "pop_generated_image_file",
         fake_pop_generated_image_file,
     )
-    monkeypatch.setattr(generated_image_sender, "_send_with_retry", fake_send_with_retry)
+    monkeypatch.setattr(image_delivery, "_send_with_retry", fake_send_with_retry)
 
     sent = asyncio.run(
-        generated_image_sender.send_generated_images_from_tool_result(
+        image_delivery.send_generated_images_from_tool_result(
             bot=object(),
             chat_id=123,
             result={
@@ -65,11 +65,11 @@ def test_send_with_retry_retries_photo_timeout(monkeypatch, tmp_path):
         return object()
 
     monkeypatch.setattr(telegram_utils.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(generated_image_sender, "_send_photo_once", fake_send_photo_once)
-    monkeypatch.setattr(generated_image_sender, "_send_document_once", fake_send_document_once)
+    monkeypatch.setattr(image_delivery, "_send_photo_once", fake_send_photo_once)
+    monkeypatch.setattr(image_delivery, "_send_document_once", fake_send_document_once)
 
     sent = asyncio.run(
-        generated_image_sender._send_with_retry(
+        image_delivery._send_with_retry(
             bot=object(),
             chat_id=123,
             path=path,

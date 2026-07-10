@@ -1,4 +1,4 @@
-from fogmoe_bot.application.assistant.tools import http_tools
+from fogmoe_bot.domain.agent_runtime.tools import http_tools
 
 
 class _FakeResponse:

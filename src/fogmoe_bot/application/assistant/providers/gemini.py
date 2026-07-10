@@ -4,7 +4,7 @@ from typing import Optional
 from fogmoe_bot.infrastructure import config
 
 from ..errors import SafetyBlockError
-from ..tool_runner import run_tool_loop
+from ..agent_loop import run_agent_loop
 from ..types import AIResponse, PartialAIResponseError, VisibleContentHandler
 
 
@@ -18,7 +18,7 @@ def get_ai_response(
     fallback_model = config.GEMINI_CHAT_FALLBACK_MODEL
 
     def _run(model_name: str) -> AIResponse:
-        return run_tool_loop(
+        return run_agent_loop(
             "gemini",
             model_name,
             messages,

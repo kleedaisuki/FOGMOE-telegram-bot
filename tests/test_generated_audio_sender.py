@@ -4,7 +4,7 @@ import logging
 import telegram.error
 
 from fogmoe_bot.infrastructure.telegram import telegram_utils
-from fogmoe_bot.application.assistant import generated_audio_sender
+from fogmoe_bot.domain.agent_runtime import audio_delivery
 
 
 def test_send_with_retry_prefers_telegram_voice(monkeypatch, tmp_path):
@@ -24,12 +24,12 @@ def test_send_with_retry_prefers_telegram_voice(monkeypatch, tmp_path):
         calls.append("document")
         return object()
 
-    monkeypatch.setattr(generated_audio_sender, "_send_voice_once", fake_send_voice_once)
-    monkeypatch.setattr(generated_audio_sender, "_send_audio_once", fake_send_audio_once)
-    monkeypatch.setattr(generated_audio_sender, "_send_document_once", fake_send_document_once)
+    monkeypatch.setattr(audio_delivery, "_send_voice_once", fake_send_voice_once)
+    monkeypatch.setattr(audio_delivery, "_send_audio_once", fake_send_audio_once)
+    monkeypatch.setattr(audio_delivery, "_send_document_once", fake_send_document_once)
 
     sent = asyncio.run(
-        generated_audio_sender._send_with_retry(
+        audio_delivery._send_with_retry(
             bot=object(),
             chat_id=123,
             path=path,
@@ -64,12 +64,12 @@ def test_send_with_retry_falls_back_to_audio_after_voice_timeouts(monkeypatch, t
         return object()
 
     monkeypatch.setattr(telegram_utils.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(generated_audio_sender, "_send_voice_once", fake_send_voice_once)
-    monkeypatch.setattr(generated_audio_sender, "_send_audio_once", fake_send_audio_once)
-    monkeypatch.setattr(generated_audio_sender, "_send_document_once", fake_send_document_once)
+    monkeypatch.setattr(audio_delivery, "_send_voice_once", fake_send_voice_once)
+    monkeypatch.setattr(audio_delivery, "_send_audio_once", fake_send_audio_once)
+    monkeypatch.setattr(audio_delivery, "_send_document_once", fake_send_document_once)
 
     sent = asyncio.run(
-        generated_audio_sender._send_with_retry(
+        audio_delivery._send_with_retry(
             bot=object(),
             chat_id=123,
             path=path,
@@ -104,11 +104,11 @@ def test_send_generated_audio_from_tool_logs_enforces_total_limit(monkeypatch, t
         return object()
 
     monkeypatch.setattr(
-        generated_audio_sender,
+        audio_delivery,
         "pop_generated_audio_file",
         fake_pop_generated_audio_file,
     )
-    monkeypatch.setattr(generated_audio_sender, "_send_with_retry", fake_send_with_retry)
+    monkeypatch.setattr(audio_delivery, "_send_with_retry", fake_send_with_retry)
 
     tool_logs = [
         {
@@ -136,7 +136,7 @@ def test_send_generated_audio_from_tool_logs_enforces_total_limit(monkeypatch, t
     ]
 
     sent = asyncio.run(
-        generated_audio_sender.send_generated_audio_from_tool_logs(
+        audio_delivery.send_generated_audio_from_tool_logs(
             bot=object(),
             chat_id=123,
             tool_logs=tool_logs,
@@ -144,5 +144,5 @@ def test_send_generated_audio_from_tool_logs_enforces_total_limit(monkeypatch, t
         )
     )
 
-    assert len(sent) == generated_audio_sender.MAX_GENERATED_AUDIO_PER_REPLY
+    assert len(sent) == audio_delivery.MAX_GENERATED_AUDIO_PER_REPLY
     assert [path.stem for path in attempted_paths] == ["a1", "a2", "a3"]

@@ -1,5 +1,5 @@
 import logging
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 from ..types import VisibleContentHandler
 
@@ -135,40 +135,3 @@ def emit_visible_content(
     if partial_content:
         return VisibleContentResult(partial_content, False)
     return VisibleContentResult("", True)
-
-
-def send_tool_media(
-    *,
-    visible_content_handler: VisibleContentHandler | None,
-    tool_name: str,
-    tool_result: dict[str, Any],
-    provider_name: str,
-) -> list[Any]:
-    """@brief 立即发送工具生成的媒体 / Send tool-generated media immediately.
-
-    @param visible_content_handler 可见内容 handler / Visible content handler.
-    @param tool_name 工具名称 / Tool name.
-    @param tool_result 工具执行结果 / Tool execution result.
-    @param provider_name provider 名称，用于日志 / Provider name for logging.
-    @return 已发送的 Telegram 消息列表 / Sent Telegram messages.
-    """
-    if visible_content_handler is None:
-        return []
-    if tool_name not in {"generate_image", "generate_voice"}:
-        return []
-    if not isinstance(tool_result, dict) or tool_result.get("status") != "generated":
-        return []
-
-    send_tool_media_func = getattr(visible_content_handler, "send_tool_media", None)
-    if not callable(send_tool_media_func):
-        return []
-
-    try:
-        sent_messages = send_tool_media_func(tool_name, tool_result)
-    except Exception as exc:
-        logging.exception("%s failed to send %s result immediately: %s", provider_name, tool_name, exc)
-        return []
-
-    if not isinstance(sent_messages, list):
-        return []
-    return sent_messages

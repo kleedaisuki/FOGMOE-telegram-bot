@@ -1,6 +1,6 @@
 from copy import deepcopy
 
-from fogmoe_bot.application.assistant import tool_runner
+from fogmoe_bot.application.assistant import agent_loop
 
 
 class _Message:
@@ -19,7 +19,7 @@ class _Response:
         self.choices = [_Choice(message)]
 
 
-def test_run_tool_loop_does_not_synthesize_tool_result_reply(monkeypatch):
+def test_agent_loop_does_not_synthesize_tool_result_reply(monkeypatch):
     responses = [
         _Response(
             _Message(
@@ -46,12 +46,12 @@ def test_run_tool_loop_does_not_synthesize_tool_result_reply(monkeypatch):
         return responses.pop(0)
 
     monkeypatch.setattr(
-        tool_runner,
+        agent_loop,
         "create_chat_completion",
         fake_create_chat_completion,
     )
     monkeypatch.setitem(
-        tool_runner.AI_TOOL_HANDLERS,
+        agent_loop.DEFAULT_AGENT_RUNTIME.handlers,
         "google_search",
         lambda **kwargs: {
             "organic_results": [
@@ -64,7 +64,7 @@ def test_run_tool_loop_does_not_synthesize_tool_result_reply(monkeypatch):
         },
     )
 
-    message, tool_logs = tool_runner.run_tool_loop(
+    message, tool_logs = agent_loop.run_agent_loop(
         "test_provider",
         "test_model",
         [{"role": "user", "content": "search example"}],
@@ -80,7 +80,7 @@ def test_run_tool_loop_does_not_synthesize_tool_result_reply(monkeypatch):
     assert calls[0]["messages"] == [{"role": "user", "content": "search example"}]
 
 
-def test_run_tool_loop_generates_final_reply_after_tool_limit(monkeypatch):
+def test_agent_loop_generates_final_reply_after_tool_limit(monkeypatch):
     responses = [
         _Response(
             _Message(
@@ -106,12 +106,12 @@ def test_run_tool_loop_generates_final_reply_after_tool_limit(monkeypatch):
         return responses.pop(0)
 
     monkeypatch.setattr(
-        tool_runner,
+        agent_loop,
         "create_chat_completion",
         fake_create_chat_completion,
     )
     monkeypatch.setitem(
-        tool_runner.AI_TOOL_HANDLERS,
+        agent_loop.DEFAULT_AGENT_RUNTIME.handlers,
         "google_search",
         lambda **kwargs: {
             "organic_results": [
@@ -124,7 +124,7 @@ def test_run_tool_loop_generates_final_reply_after_tool_limit(monkeypatch):
         },
     )
 
-    message, tool_logs = tool_runner.run_tool_loop(
+    message, tool_logs = agent_loop.run_agent_loop(
         "test_provider",
         "test_model",
         [
@@ -155,7 +155,7 @@ def test_run_tool_loop_generates_final_reply_after_tool_limit(monkeypatch):
     )
 
 
-def test_run_tool_loop_sends_generated_voice_immediately(monkeypatch):
+def test_agent_loop_sends_generated_voice_immediately(monkeypatch):
     responses = [
         _Response(
             _Message(
@@ -182,18 +182,18 @@ def test_run_tool_loop_sends_generated_voice_immediately(monkeypatch):
         def __init__(self):
             self.calls = []
 
-        def send_tool_media(self, tool_name, result):
+        def send_media(self, tool_name, result):
             self.calls.append((tool_name, result))
             return ["sent_message"]
 
     visible_handler = _VisibleHandler()
     monkeypatch.setattr(
-        tool_runner,
+        agent_loop,
         "create_chat_completion",
         fake_create_chat_completion,
     )
     monkeypatch.setitem(
-        tool_runner.AI_TOOL_HANDLERS,
+        agent_loop.DEFAULT_AGENT_RUNTIME.handlers,
         "generate_voice",
         lambda **kwargs: {
             "status": "generated",
@@ -202,7 +202,7 @@ def test_run_tool_loop_sends_generated_voice_immediately(monkeypatch):
         },
     )
 
-    message, tool_logs = tool_runner.run_tool_loop(
+    message, tool_logs = agent_loop.run_agent_loop(
         "test_provider",
         "test_model",
         [{"role": "user", "content": "say hello"}],

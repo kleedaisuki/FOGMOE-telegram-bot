@@ -3,8 +3,8 @@ import types
 
 import pytest
 
-from fogmoe_bot.application.assistant.tools import sandbox_tools
-from fogmoe_bot.application.assistant.tools.context import clear_tool_request_context, set_tool_request_context
+from fogmoe_bot.domain.agent_runtime.tools import sandbox_tools
+from fogmoe_bot.domain.agent_runtime.tools.context import clear_tool_request_context, set_tool_request_context
 
 
 class _FakeCommandResult:

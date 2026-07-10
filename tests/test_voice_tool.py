@@ -1,9 +1,9 @@
 import pytest
 from pydantic import ValidationError
 
-from fogmoe_bot.application.assistant import tool_runner
-from fogmoe_bot.application.assistant.tools import voice_tools
-from fogmoe_bot.application.assistant.tools.models import GenerateVoiceArgs, parameters_schema
+from fogmoe_bot.domain.agent_runtime.runtime import AgentRuntime
+from fogmoe_bot.domain.agent_runtime.tools import voice_tools
+from fogmoe_bot.domain.agent_runtime.tools.models import GenerateVoiceArgs, parameters_schema
 
 
 def test_generate_voice_schema_requires_bounded_text():
@@ -37,12 +37,13 @@ def test_generate_voice_tool_uses_fish_audio_defaults(monkeypatch):
 
 
 def test_generate_voice_public_result_hides_audio_id():
-    result = tool_runner._public_tool_result(
+    result = AgentRuntime._public_result(
         "generate_voice",
         {
             "status": "generated",
             "audios": [{"audio_id": "secret-audio-id"}],
         },
+        media_sent=False,
     )
 
     assert result["status"] == "generated"

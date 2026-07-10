@@ -2,8 +2,8 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
-from .generated_audio_sender import send_generated_audio_from_tool_result
-from .generated_image_sender import send_generated_images_from_tool_result
+from fogmoe_bot.domain.agent_runtime.audio_delivery import send_generated_audio_from_tool_result
+from fogmoe_bot.domain.agent_runtime.image_delivery import send_generated_images_from_tool_result
 from .sticker_sender import (
     PartialAIReplySendError,
     normalize_sticker_directives,
@@ -77,21 +77,21 @@ class TelegramVisibleContentHandler:
         future = asyncio.run_coroutine_threadsafe(self._send(content), self.loop)
         return future.result()
 
-    async def _send_tool_media(self, tool_name: str, result: dict[str, Any]) -> list[Any]:
-        action = "upload_photo" if tool_name == "generate_image" else "upload_voice"
+    async def _send_media(self, media_type: str, result: dict[str, Any]) -> list[Any]:
+        action = "upload_photo" if media_type == "generate_image" else "upload_voice"
         try:
             await self.bot.send_chat_action(chat_id=self.chat_id, action=action)
         except Exception:
             self.logger.debug("Failed to send upload action before generated media")
 
-        if tool_name == "generate_image":
+        if media_type == "generate_image":
             sent_messages = await send_generated_images_from_tool_result(
                 bot=self.bot,
                 chat_id=self.chat_id,
                 result=result,
                 logger=self.logger,
             )
-        elif tool_name == "generate_voice":
+        elif media_type == "generate_voice":
             sent_messages = await send_generated_audio_from_tool_result(
                 bot=self.bot,
                 chat_id=self.chat_id,
@@ -104,9 +104,9 @@ class TelegramVisibleContentHandler:
         self.sent_messages.extend(sent_messages)
         return sent_messages
 
-    def send_tool_media(self, tool_name: str, result: dict[str, Any]) -> list[Any]:
+    def send_media(self, media_type: str, result: dict[str, Any]) -> list[Any]:
         future = asyncio.run_coroutine_threadsafe(
-            self._send_tool_media(tool_name, result),
+            self._send_media(media_type, result),
             self.loop,
         )
         return future.result()

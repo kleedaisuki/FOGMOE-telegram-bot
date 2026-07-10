@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from ..runtime import EXECUTOR
+from fogmoe_bot.domain.agent_runtime.executor import EXECUTOR
 from ..task_runner import run_ai_task
 
 
@@ -56,4 +56,3 @@ def _sync_analyze_image(base64_str):
         ],
     )
     return response.choices[0].message.content
-

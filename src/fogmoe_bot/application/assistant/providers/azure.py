@@ -2,8 +2,9 @@ import logging
 
 from fogmoe_bot.infrastructure import config
 
-from ..tool_runner import run_tool_loop
+from ..agent_loop import run_agent_loop
 from ..types import AIResponse, VisibleContentHandler
+from typing import Optional
 
 
 def get_ai_response(
@@ -17,7 +18,7 @@ def get_ai_response(
         raise RuntimeError("Missing AZURE_OPENAI_CHAT_MODEL configuration.")
 
     try:
-        return run_tool_loop(
+        return run_agent_loop(
             "azure",
             azure_model,
             messages,

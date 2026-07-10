@@ -12,7 +12,10 @@ from fogmoe_bot.infrastructure.telegram.telegram_utils import (
     split_ai_reply,
     telegram_error_summary,
 )
-from .tools.sticker_tools import choose_sticker_file_id, sticker_exists
+from fogmoe_bot.domain.agent_runtime.tools.sticker_tools import (
+    choose_sticker_file_id,
+    sticker_exists,
+)
 
 AsyncSendFunc = Callable[..., Awaitable[Any]]
 MAX_STICKERS_PER_REPLY = 10

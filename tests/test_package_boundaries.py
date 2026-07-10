@@ -89,6 +89,24 @@ def test_unnecessary_assistant_facades_do_not_return():
     assert [path for path in forbidden_files if path.exists()] == []
 
 
+def test_agent_runtime_owns_agent_tooling():
+    runtime_root = SRC_ROOT / "domain" / "agent_runtime"
+    forbidden_paths = [
+        SRC_ROOT / "application" / "assistant" / "tools",
+        SRC_ROOT / "application" / "assistant" / "tool_calling",
+        SRC_ROOT / "application" / "assistant" / "tool_runner.py",
+        SRC_ROOT / "application" / "assistant" / "runtime.py",
+        SRC_ROOT / "application" / "assistant" / "tool_history.py",
+        SRC_ROOT / "application" / "assistant" / "generated_image_sender.py",
+        SRC_ROOT / "application" / "assistant" / "generated_audio_sender.py",
+    ]
+
+    assert runtime_root.is_dir()
+    assert (runtime_root / "runtime.py").is_file()
+    assert (runtime_root / "tools").is_dir()
+    assert [path for path in forbidden_paths if path.exists()] == []
+
+
 def test_database_control_plane_stays_out_of_bot_package():
     assert not (SRC_ROOT / "infrastructure" / "database" / "migrations").exists()
     assert not (SRC_ROOT / "infrastructure" / "database" / "migration_service.py").exists()

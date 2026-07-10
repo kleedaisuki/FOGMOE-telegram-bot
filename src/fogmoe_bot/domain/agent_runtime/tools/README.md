@@ -1,10 +1,10 @@
-# AI 工具
+# AgentRuntime 能力集
 
-该目录包含 AI 聊天层使用的 OpenAI 兼容工具定义与处理函数。
+该目录包含 `domain/agent_runtime` 使用的 OpenAI 兼容能力定义与处理函数。
 
 ## 目录结构
 
-- `context.py`：每次请求的上下文存储（用户/群组/消息元信息）
+- `context.py`：每次 Runtime 请求的上下文存储（用户/群组/消息元信息）
 - `schemas.py`：工具 schema 定义（OpenAI JSON Schema）
 - `registry.py`：工具注册中心（名称 -> 处理函数）
 - `http_tools.py`：外部 HTTP 工具（SerpApi、Jina Reader）

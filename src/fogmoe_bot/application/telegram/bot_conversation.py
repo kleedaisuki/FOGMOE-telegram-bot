@@ -29,15 +29,15 @@ from fogmoe_bot.infrastructure.telegram.telegram_utils import (
 )
 from fogmoe_bot.application.assistant import summary
 from fogmoe_bot.application.assistant.conversation_locks import get_conversation_lock
-from fogmoe_bot.application.assistant.generated_audio_sender import send_generated_audio_from_tool_logs
-from fogmoe_bot.application.assistant.generated_image_sender import send_generated_images_from_tool_logs
+from fogmoe_bot.domain.agent_runtime.audio_delivery import send_generated_audio_from_tool_logs
+from fogmoe_bot.domain.agent_runtime.image_delivery import send_generated_images_from_tool_logs
 from fogmoe_bot.application.assistant.reply_filter import normalize_ai_reply_text
 from fogmoe_bot.application.assistant.router import get_ai_response
 from fogmoe_bot.application.assistant.sticker_sender import normalize_sticker_directives, send_ai_reply_with_stickers
 from fogmoe_bot.application.assistant.telegram_visible_sender import TelegramVisibleContentHandler
 from fogmoe_bot.application.assistant.task_runner import run_ai_task
 from fogmoe_bot.application.assistant.tasks.vision import analyze_image
-from fogmoe_bot.application.assistant.tool_history import tool_logs_to_record_entries
+from fogmoe_bot.domain.agent_runtime.history import tool_logs_to_record_entries
 
 logger = logging.getLogger(__name__)
 
