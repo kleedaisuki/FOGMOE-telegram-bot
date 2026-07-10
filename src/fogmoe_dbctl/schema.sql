@@ -204,6 +204,7 @@ CREATE TABLE moderation.verification_tasks (
   group_id BIGINT NOT NULL,
   message_id BIGINT NOT NULL,
   expire_time TIMESTAMP NOT NULL,
+  token_hash VARCHAR(64),
   PRIMARY KEY (user_id, group_id)
 );
 

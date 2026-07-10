@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters
@@ -8,6 +9,7 @@ import threading
 import html
 from collections import defaultdict
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
+from fogmoe_bot.domain.automation import KeywordReply
 from fogmoe_bot.infrastructure.database.repositories import moderation_repository
 
 # HTML标签白名单
@@ -21,17 +23,25 @@ MAX_RESPONSE_LENGTH = 1000
 
 # 关键词缓存
 # 格式: { group_id: {"keywords": [(keyword, response), ...], "last_updated": timestamp } }
-keyword_cache = {}
+@dataclass(frozen=True, slots=True)
+class _KeywordCacheEntry:
+    """@brief 群组关键词缓存项 / Group keyword cache entry."""
+
+    keywords: tuple[KeywordReply, ...]
+    loaded_at: float
+
+
+keyword_cache: dict[int, _KeywordCacheEntry] = {}
 cache_lock = threading.Lock()  # 用于保护缓存操作的锁
 CACHE_TIMEOUT = 300  # 缓存过期时间：5分钟 = 300秒
 
 # 速率限制器: {chat_id: {last_trigger_times: [时间戳列表]}}
-rate_limiter = defaultdict(lambda: {"last_trigger_times": []})
+rate_limiter: defaultdict[int, list[float]] = defaultdict(list)
 rate_limit_lock = threading.Lock()  # 用于保护速率限制器的锁
 MAX_TRIGGERS_PER_MINUTE = 5  # 每分钟最大触发次数
 
 
-def sanitize_html(html_content):
+def sanitize_html(html_content: str) -> str:
     """净化HTML内容，仅允许白名单中的标签"""
     # 使用正则表达式匹配所有HTML标签
     tags = re.findall(r'</?([a-zA-Z0-9]+)[^>]*>', html_content)
@@ -49,7 +59,7 @@ def sanitize_html(html_content):
     return html_content
 
 
-def is_keyword_match(keyword, message):
+def is_keyword_match(keyword: str, message: str) -> bool:
     """使用更精确的关键词匹配方法"""
     # 单词边界匹配
     pattern = r'\b' + re.escape(keyword) + r'\b'
@@ -64,12 +74,11 @@ def is_keyword_match(keyword, message):
     return False
 
 
-def can_trigger_keyword(chat_id):
+def can_trigger_keyword(chat_id: int) -> bool:
     """检查群组是否可以触发关键词（速率限制）"""
     with rate_limit_lock:
-        now = time.time()
-        group_data = rate_limiter[chat_id]
-        trigger_times = group_data["last_trigger_times"]
+        now = time.monotonic()
+        trigger_times = rate_limiter[chat_id]
         
         # 清理一分钟前的记录
         while trigger_times and now - trigger_times[0] > 60:
@@ -85,25 +94,25 @@ def can_trigger_keyword(chat_id):
 
 
 # 从数据库加载指定群组的关键词
-async def load_keywords_from_db(chat_id):
+async def load_keywords_from_db(chat_id: int) -> tuple[KeywordReply, ...]:
     try:
         keywords = await moderation_repository.fetch_group_keywords(chat_id)
         
         # 线程安全地更新缓存
         with cache_lock:
-            keyword_cache[chat_id] = {
-                "keywords": keywords,
-                "last_updated": time.time()
-            }
+            keyword_cache[chat_id] = _KeywordCacheEntry(
+                keywords=keywords,
+                loaded_at=time.monotonic(),
+            )
         return keywords
     except Exception as e:
         logging.error(f"从数据库加载关键词时出错: {str(e)}")
-        return []
+        return ()
 
 
 # 获取群组关键词（优先使用缓存）
-async def get_group_keywords(chat_id):
-    now = time.time()
+async def get_group_keywords(chat_id: int) -> tuple[KeywordReply, ...]:
+    now = time.monotonic()
     
     # 线程安全地读取缓存
     with cache_lock:
@@ -111,8 +120,8 @@ async def get_group_keywords(chat_id):
         if chat_id in keyword_cache:
             cache_data = keyword_cache[chat_id]
             # 如果缓存未过期，直接返回
-            if now - cache_data["last_updated"] < CACHE_TIMEOUT:
-                return cache_data["keywords"]
+            if now - cache_data.loaded_at < CACHE_TIMEOUT:
+                return cache_data.keywords
     
     # 缓存不存在或已过期，从数据库重新加载
     return await load_keywords_from_db(chat_id)
@@ -187,12 +196,12 @@ async def show_keywords(update: Update, chat_id: int):
             return
             
         message = "当前群组的关键词列表：\n\n"
-        for idx, (keyword, response) in enumerate(keywords, 1):
-            message += f"{idx}. 触发词: '{keyword}'\n"
-            if len(response) > 30:
-                message += f"   回复: '{response[:30]}...'\n\n"
+        for idx, entry in enumerate(keywords, 1):
+            message += f"{idx}. 触发词: '{entry.keyword}'\n"
+            if len(entry.response) > 30:
+                message += f"   回复: '{entry.response[:30]}...'\n\n"
             else:
-                message += f"   回复: '{response}'\n\n"
+                message += f"   回复: '{entry.response}'\n\n"
         
         message += "\n使用 /keyword add <触发关键词> <回复内容> 添加关键词\n"
         message += "使用 /keyword del <触发关键词> 删除关键词"
@@ -223,7 +232,7 @@ async def add_keyword(update: Update, chat_id: int, user_id: int, keyword: str, 
         if not existing_keyword:
             # 优先使用缓存判断关键词数量
             with cache_lock:
-                if chat_id in keyword_cache and len(keyword_cache[chat_id]["keywords"]) >= 10:
+                if chat_id in keyword_cache and len(keyword_cache[chat_id].keywords) >= 10:
                     await update.message.reply_text("每个群组最多只能设置10个关键词，请先删除一些关键词再添加。")
                     return
             
@@ -298,18 +307,18 @@ async def process_group_message(update: Update, context: ContextTypes.DEFAULT_TY
         # 触发过于频繁，静默忽略
         return
         
-    for keyword, response in keywords:
+    for entry in keywords:
         # 使用更精确的匹配方法
-        if is_keyword_match(keyword, message_text):
+        if is_keyword_match(entry.keyword, message_text):
             try:
                 # 发送前再次净化HTML
-                safe_response = sanitize_html(response)
+                safe_response = sanitize_html(entry.response)
                 await effective_message.reply_text(safe_response, parse_mode=ParseMode.HTML)
             except Exception as e:
                 # 如果HTML解析失败，尝试不使用解析模式发送
                 logging.warning(f"HTML解析失败，尝试纯文本: {str(e)}")
                 await effective_message.reply_text(
-                    f"【回复内容HTML格式错误】\n\n{html.escape(response)}"
+                    f"【回复内容HTML格式错误】\n\n{html.escape(entry.response)}"
                 )
             break  # 只触发第一个匹配的关键词
 

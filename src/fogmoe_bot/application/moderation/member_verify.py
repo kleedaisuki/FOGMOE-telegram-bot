@@ -1,297 +1,358 @@
+"""@brief Telegram 群组成员验证用例 / Telegram group member-verification use cases."""
+
+from __future__ import annotations
+
 import asyncio
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
-from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
-from datetime import datetime, timedelta
 import secrets
+from datetime import datetime, timedelta
+
+from telegram import ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
+from fogmoe_bot.domain.moderation import ChatId, MessageId, UserId
+from fogmoe_bot.domain.moderation.verification import (
+    VerificationTask,
+    hash_verification_token,
+)
 from fogmoe_bot.infrastructure.database.repositories import moderation_repository
 
-logger = logging.getLogger(__name__)
 
-# 在开启验证功能前详细检查必要权限
-async def check_bot_permissions(bot, chat_id):
+logger = logging.getLogger(__name__)
+"""@brief 模块日志器 / Module logger."""
+
+VERIFICATION_TIMEOUT = timedelta(minutes=5)
+"""@brief 新成员验证有效期 / New-member verification lifetime."""
+
+_verification_locks: dict[tuple[int, int], asyncio.Lock] = {}
+"""@brief 进程内任务竞争锁 / In-process verification race locks."""
+
+
+def _task_name(chat_id: int, user_id: int) -> str:
+    """@brief 构造 JobQueue 任务名 / Build a JobQueue task name.
+
+    @param chat_id Telegram 群组 ID / Telegram chat ID.
+    @param user_id Telegram 用户 ID / Telegram user ID.
+    @return 稳定任务名 / Stable task name.
+    """
+
+    return f"member-verification:{chat_id}:{user_id}"
+
+
+def _lock_for(chat_id: int, user_id: int) -> asyncio.Lock:
+    """@brief 获取单用户验证锁 / Get a per-member verification lock.
+
+    @param chat_id Telegram 群组 ID / Telegram chat ID.
+    @param user_id Telegram 用户 ID / Telegram user ID.
+    @return 异步锁 / Async lock.
+    """
+
+    return _verification_locks.setdefault((chat_id, user_id), asyncio.Lock())
+
+
+def _cancel_scheduled_job(job_queue, chat_id: int, user_id: int) -> None:
+    """@brief 取消指定成员的超时任务 / Cancel a member's timeout jobs.
+
+    @param job_queue PTB JobQueue / PTB JobQueue.
+    @param chat_id Telegram 群组 ID / Telegram chat ID.
+    @param user_id Telegram 用户 ID / Telegram user ID.
+    @return None / None.
+    """
+
+    if job_queue is None:
+        return
+    for job in job_queue.get_jobs_by_name(_task_name(chat_id, user_id)):
+        job.schedule_removal()
+
+
+def _schedule_task(job_queue, task: VerificationTask, when) -> None:
+    """@brief 调度类型化验证超时任务 / Schedule a typed verification timeout.
+
+    @param job_queue PTB JobQueue / PTB JobQueue.
+    @param task 验证任务 / Verification task.
+    @param when PTB run_once 时间参数 / PTB run_once time argument.
+    @return None / None.
+    """
+
+    if job_queue is None:
+        raise RuntimeError("JobQueue is required for member verification")
+    _cancel_scheduled_job(job_queue, int(task.chat_id), int(task.user_id))
+    job_queue.run_once(
+        verification_timeout,
+        when,
+        data=task,
+        name=_task_name(int(task.chat_id), int(task.user_id)),
+        chat_id=int(task.chat_id),
+        user_id=int(task.user_id),
+    )
+
+
+async def check_bot_permissions(bot, chat_id: int) -> tuple[bool, str]:
+    """@brief 检查成员限制权限 / Check member-restriction permissions.
+
+    @param bot Telegram Bot / Telegram Bot.
+    @param chat_id Telegram 群组 ID / Telegram chat ID.
+    @return 是否满足及说明 / Success flag and explanation.
+    """
+
     bot_member = await bot.get_chat_member(chat_id, bot.id)
-    if (bot_member.status not in ["administrator", "creator"]):
+    if bot_member.status not in {"administrator", "creator"}:
         return False, "机器人需要管理员权限"
-    
-    # 检查具体权限
-    required_permissions = {
-        "can_restrict_members": "限制成员",
-    }
-    
-    missing_permissions = []
-    for perm, desc in required_permissions.items():
-        if not getattr(bot_member, perm, False):
-            missing_permissions.append(desc)
-    
-    if missing_permissions:
-        return False, f"机器人缺少以下权限: {', '.join(missing_permissions)}"
-    
+    if not getattr(bot_member, "can_restrict_members", False):
+        return False, "机器人缺少以下权限: 限制成员"
     return True, "权限检查通过"
 
-# /verify 命令：开启新成员验证功能
-@cooldown
-async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    # 查询数据库判断当前群组是否已开启接管验证
-    record = await moderation_repository.verification_group_exists(chat_id)
 
-    if record:
-        # 若记录存在，则只有群组管理员才能取消接管
-        sender_member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
-        if sender_member.status not in ["administrator", "creator"]:
-            await update.message.reply_text("只有群组管理员才能取消接管。")
-            return
-        context.chat_data["enable_verify"] = False
+async def _restore_member_permissions(bot, chat_id: int, user_id: int) -> None:
+    """@brief 按群默认权限解除成员限制 / Restore a member to the chat defaults.
+
+    @param bot Telegram Bot / Telegram Bot.
+    @param chat_id Telegram 群组 ID / Telegram chat ID.
+    @param user_id Telegram 用户 ID / Telegram user ID.
+    @return None / None.
+    """
+
+    chat = await bot.get_chat(chat_id)
+    permissions = chat.permissions or ChatPermissions.all_permissions()
+    await bot.restrict_chat_member(chat_id, user_id, permissions)
+
+
+@cooldown
+async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """@brief 开启或关闭新成员验证 / Toggle new-member verification."""
+
+    if update.effective_chat is None or update.effective_user is None or update.message is None:
+        return
+    if update.effective_chat.type not in {"group", "supergroup"}:
+        await update.message.reply_text("此命令只能在群组中使用。")
+        return
+
+    chat_id = update.effective_chat.id
+    sender = await context.bot.get_chat_member(chat_id, update.effective_user.id)
+    if sender.status not in {"administrator", "creator"}:
+        await update.message.reply_text("只有群组管理员才能使用该命令。")
+        return
+
+    if await moderation_repository.verification_group_exists(chat_id):
         await moderation_repository.disable_group_verification(chat_id)
         await update.message.reply_text("验证接管已取消。")
         return
 
-    # 仅允许群组管理员调用
-    sender_member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
-    if sender_member.status not in ["administrator", "creator"]:
-        await update.message.reply_text("只有群组管理员才能使用该命令。")
-        return
-    # 检查机器人是否具备管理员权限
-    has_permissions, message = await check_bot_permissions(context.bot, chat_id)
+    has_permissions, reason = await check_bot_permissions(context.bot, chat_id)
     if not has_permissions:
-        await update.message.reply_text(f"机器人缺少必要权限，无法开启验证功能：{message}")
+        await update.message.reply_text(
+            f"机器人缺少必要权限，无法开启验证功能：{reason}"
+        )
         return
-    # 启用接管验证，并将当前群组信息存储到数据库中
-    context.chat_data["enable_verify"] = True
-    group_name = update.effective_chat.title if update.effective_chat.title else "未知群组"
-    await moderation_repository.enable_group_verification(chat_id, group_name)
-    await update.message.reply_text("新成员验证功能已开启。新成员加入时将被禁言并要求点击【验证】按钮验证，5分钟内有效。")
 
-# 新成员加入事件处理
-async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    
-    # 从数据库直接查询群组是否开启了验证功能
-    verification_enabled = await moderation_repository.verification_group_exists(chat_id)
-    
-    # 若未开启验证功能，则直接返回
-    if not verification_enabled:
+    group_name = update.effective_chat.title or "未知群组"
+    await moderation_repository.enable_group_verification(chat_id, group_name)
+    await update.message.reply_text(
+        "新成员验证功能已开启。新成员加入时将被禁言并要求点击【验证】按钮验证，5分钟内有效。"
+    )
+
+
+async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """@brief 为新成员创建持久化验证任务 / Create persisted verification tasks for new members."""
+
+    if update.effective_chat is None or update.message is None:
         return
-    
-    # 同步内存状态变量（可选，为了保持一致性）
-    context.chat_data["enable_verify"] = True
-    
+    chat_id = update.effective_chat.id
+    if not await moderation_repository.verification_group_exists(chat_id):
+        return
+
     for new_member in update.message.new_chat_members:
-        user_id = new_member.id
-        
-        # 跳过机器人验证
         if new_member.is_bot:
-            logger.info("跳过机器人 %s(%s) 的验证", new_member.full_name, user_id)
+            logger.info("跳过机器人验证: user=%s", new_member.id)
             continue
-            
+        user_id = new_member.id
         try:
-            # 禁言新成员（禁止发送消息）
             await context.bot.restrict_chat_member(
                 chat_id,
                 user_id,
-                ChatPermissions(can_send_messages=False,
-                                can_send_polls=False,
-                                can_send_other_messages=False,
-                                can_add_web_page_previews=False,
-                                can_change_info=False,
-                                can_invite_users=False,
-                                can_pin_messages=False,
-                                can_manage_topics=False,
-                                can_send_audios=False,
-                                can_send_documents=False,
-                                can_send_photos=False,
-                                can_send_videos=False,
-                                can_send_video_notes=False,
-                                can_send_voice_notes=False)
+                ChatPermissions.no_permissions(),
             )
-        except Exception as e:
-            error_str = str(e)
-            logger.warning("限制成员 %s 失败: %s", user_id, error_str)
-            if "httpx.ConnectError" in error_str or "Not enough rights" in error_str:
-                await context.bot.send_message(
-                    chat_id,
-                    f"验证错误: 无法限制成员 {new_member.full_name}({user_id})：{error_str}"
-                )
+        except Exception as exc:
+            logger.warning("限制新成员失败: chat=%s user=%s error=%s", chat_id, user_id, exc)
+            await context.bot.send_message(
+                chat_id,
+                f"验证错误：无法限制成员 {new_member.full_name}({user_id})。",
+            )
             continue
 
-        # 生成验证令牌
         token = secrets.token_hex(8)
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("点击验证", callback_data=f"verify_{user_id}_{token}")]
-        ])
-
-        # 发送欢迎信息，包含验证按钮
-        welcome_msg = await update.message.reply_text(
+        welcome_message = await update.message.reply_text(
             f"欢迎 {new_member.mention_html()} 加入群组！请点击【验证】按钮进行验证（5分钟内有效）。",
-            reply_markup=keyboard,
-            parse_mode="HTML"
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("点击验证", callback_data=f"verify_{user_id}_{token}")]]
+            ),
+            parse_mode="HTML",
         )
-        # 保存任务信息：包含欢迎消息ID及定时任务
-        if "verify_tasks" not in context.chat_data:
-            context.chat_data["verify_tasks"] = {}
-        context.chat_data["verify_tasks"][user_id] = {
-            "message_id": welcome_msg.message_id,
-            "timer": asyncio.create_task(verification_timeout(context, chat_id, user_id, welcome_msg.message_id))
-        }
-
-        # 在发送欢迎信息后保存验证任务到数据库
-        expire_time = datetime.now() + timedelta(minutes=5)
-        await moderation_repository.upsert_verification_task(
-            user_id,
-            chat_id,
-            welcome_msg.message_id,
-            expire_time,
+        task = VerificationTask(
+            chat_id=ChatId(chat_id),
+            user_id=UserId(user_id),
+            message_id=MessageId(welcome_message.message_id),
+            token_hash=hash_verification_token(token),
+            expires_at=datetime.now() + VERIFICATION_TIMEOUT,
         )
-
-# 定时任务：等待5分钟后若未验证，则移出群组并编辑欢迎消息
-async def verification_timeout(context: ContextTypes.DEFAULT_TYPE, chat_id, user_id, message_id):
-    await asyncio.sleep(300)  # 等待5分钟
-    verify_tasks = context.chat_data.get("verify_tasks", {})
-    task_info = verify_tasks.get(user_id)
-    if task_info:
         try:
-            # 将 kick_chat_member 替换为 ban_chat_member
+            await moderation_repository.upsert_verification_task(
+                user_id,
+                chat_id,
+                welcome_message.message_id,
+                task.expires_at,
+                task.token_hash,
+            )
+            _schedule_task(context.job_queue, task, VERIFICATION_TIMEOUT)
+        except Exception as exc:
+            logger.error(
+                "创建成员验证任务失败并回滚限制: chat=%s user=%s error=%s",
+                chat_id,
+                user_id,
+                exc,
+            )
+            await moderation_repository.delete_verification_task(user_id, chat_id)
+            try:
+                await _restore_member_permissions(context.bot, chat_id, user_id)
+                await welcome_message.edit_text("验证服务暂时不可用，已解除成员限制。")
+            except Exception as rollback_exc:
+                logger.error(
+                    "回滚成员验证限制失败: chat=%s user=%s error=%s",
+                    chat_id,
+                    user_id,
+                    rollback_exc,
+                )
+
+
+async def verification_timeout(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """@brief 处理 JobQueue 成员验证超时 / Handle a JobQueue verification timeout."""
+
+    if context.job is None or not isinstance(context.job.data, VerificationTask):
+        logger.error("验证超时任务缺少类型化 data")
+        return
+    scheduled = context.job.data
+    chat_id = int(scheduled.chat_id)
+    user_id = int(scheduled.user_id)
+    async with _lock_for(chat_id, user_id):
+        current = await moderation_repository.fetch_verification_task(user_id, chat_id)
+        if (
+            current is None
+            or current.message_id != scheduled.message_id
+            or current.token_hash != scheduled.token_hash
+        ):
+            return
+        try:
             await context.bot.ban_chat_member(chat_id, user_id)
-            # 可选择解禁以便记录：这里立即解禁防止永久封禁
             await context.bot.unban_chat_member(chat_id, user_id)
-        except Exception as e:
-            logger.warning("踢出成员 %s 时出错: %s", user_id, e)
+        except Exception as exc:
+            logger.warning("移出验证超时成员失败: chat=%s user=%s error=%s", chat_id, user_id, exc)
+            return
+
+        await moderation_repository.delete_verification_task(user_id, chat_id)
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
-                message_id=message_id,
-                text="验证超时，您已被移出群组。"
+                message_id=int(current.message_id),
+                text="验证超时，您已被移出群组。",
             )
-        except Exception as e:
-            logger.warning("编辑消息 %s 时出错: %s", message_id, e)
-        # 清除任务记录
-        verify_tasks.pop(user_id, None)
-        # 在清除任务记录时同时从数据库删除
-        await moderation_repository.delete_verification_task(user_id, chat_id)
+        except Exception as exc:
+            logger.warning("更新验证超时消息失败: message=%s error=%s", current.message_id, exc)
 
-# 回调查询处理：点击验证按钮时解除禁言并更新消息
-async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """@brief 校验 token 并解除成员限制 / Validate a token and unrestrict the member."""
+
     query = update.callback_query
-    user_id = query.from_user.id
-    
-    # 解析回调数据
-    callback_parts = query.data.split("_")
-    if len(callback_parts) != 3 or callback_parts[0] != "verify" or callback_parts[1] != str(user_id):
+    if query is None or update.effective_chat is None:
+        return
+    callback_parts = (query.data or "").split("_", maxsplit=2)
+    if (
+        len(callback_parts) != 3
+        or callback_parts[0] != "verify"
+        or callback_parts[1] != str(query.from_user.id)
+    ):
         await query.answer("这不是为您准备的验证按钮。", show_alert=True)
         return
-    
-    verify_tasks = context.chat_data.get("verify_tasks", {})
-    task_info = verify_tasks.get(user_id)
-    if task_info:
-        timer_task = task_info.get("timer")
-        if timer_task and not timer_task.done():
-            timer_task.cancel()
-        message_id = task_info["message_id"]
-        verify_tasks.pop(user_id, None)
-        try:
-            # 解除禁言（恢复发送消息权限）
-            await context.bot.restrict_chat_member(
-                update.effective_chat.id,
-                user_id,
-                ChatPermissions(can_send_messages=True,
-                                can_send_polls=True,
-                                can_send_other_messages=True,
-                                can_add_web_page_previews=True,
-                                can_change_info=True,
-                                can_invite_users=True,
-                                can_pin_messages=True,
-                                can_manage_topics=True,
-                                can_send_audios=True,
-                                can_send_documents=True,
-                                can_send_photos=True,
-                                can_send_videos=True,
-                                can_send_video_notes=True,
-                                can_send_voice_notes=True,)
-            )
-            await query.edit_message_text("验证通过，欢迎加入群组！")
-            await query.answer("验证成功！", show_alert=True)
-            
-            # 从数据库中删除验证任务记录
-            await moderation_repository.delete_verification_task(
-                user_id,
-                update.effective_chat.id,
-            )
-        except Exception as e:
-            error_str = str(e)
-            if "httpx.ConnectError" in error_str or "Not enough rights" in error_str:
-                await context.bot.send_message(
-                    update.effective_chat.id,
-                    f"验证错误: 无法解除禁言成员({user_id})：{error_str}"
-                )
-            await query.answer("验证时出现错误，请稍后再试。", show_alert=True)
-    else:
-        await query.answer("验证已失效或已处理。", show_alert=True)
-        try:
-            # 删除验证消息
-            await query.delete_message()
-        except Exception as e:
-            logger.warning("删除验证消息时出错: %s", e)
 
-# 在启动时恢复验证任务
-async def restore_verification_tasks(dispatcher):
-    """从数据库恢复所有未完成的验证任务"""
-    # 查询未过期的验证任务
-    now = datetime.now()
-    tasks = await moderation_repository.fetch_active_verification_tasks(now)
-
-    for user_id, chat_id, message_id, expire_time in tasks:
-        # 计算剩余时间
-        remaining_time = (expire_time - now).total_seconds()
-        if remaining_time > 0:
-            # 重建超时任务
-            asyncio.create_task(
-                verification_timeout(dispatcher.application, chat_id, user_id, message_id)
-            )
-
-# 处理成员离开群组的事件（合并处理机器人和普通用户）
-async def handle_member_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    user_id = query.from_user.id
+    token = callback_parts[2]
+    async with _lock_for(chat_id, user_id):
+        task = await moderation_repository.fetch_verification_task(user_id, chat_id)
+        if task is None or not task.accepts(token, datetime.now()):
+            await query.answer("验证已失效或 token 不正确。", show_alert=True)
+            return
+
+        try:
+            await _restore_member_permissions(context.bot, chat_id, user_id)
+        except Exception as exc:
+            logger.warning("解除成员限制失败: chat=%s user=%s error=%s", chat_id, user_id, exc)
+            await query.answer("验证时出现错误，请稍后再试。", show_alert=True)
+            return
+
+        await moderation_repository.delete_verification_task(user_id, chat_id)
+        _cancel_scheduled_job(context.job_queue, chat_id, user_id)
+        await query.edit_message_text("验证通过，欢迎加入群组！")
+        await query.answer("验证成功！", show_alert=True)
+
+
+async def restore_verification_tasks(application) -> None:
+    """@brief 启动时恢复持久化验证任务 / Restore persisted verification tasks at startup."""
+
+    now = datetime.now()
+    tasks = await moderation_repository.fetch_pending_verification_tasks()
+    for task in tasks:
+        remaining = max((task.expires_at - now).total_seconds(), 0.0)
+        _schedule_task(application.job_queue, task, remaining)
+    if tasks:
+        logger.info("已恢复 %s 个成员验证任务", len(tasks))
+
+
+async def handle_member_left(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """@brief 清理离群成员或机器人自身的验证状态 / Clean verification state after a member leaves."""
+
+    if update.effective_chat is None or update.message is None:
+        return
     user = update.message.left_chat_member
+    if user is None:
+        return
+    chat_id = update.effective_chat.id
     bot = await context.bot.get_me()
-    
-    # 如果是机器人自己被踢出
     if user.id == bot.id:
-        # 清理数据库中的验证配置
         await moderation_repository.disable_group_verification(chat_id)
         return
-    
-    # 如果是普通成员离开，检查是否有未完成的验证任务
-    user_id = user.id
-    verify_tasks = context.chat_data.get("verify_tasks", {})
-    task_info = verify_tasks.get(user_id)
-    
-    if task_info:
-        # 取消定时任务
-        timer_task = task_info.get("timer")
-        if timer_task and not timer_task.done():
-            timer_task.cancel()
-            
-        # 尝试编辑欢迎消息
+
+    async with _lock_for(chat_id, user.id):
+        task = await moderation_repository.fetch_verification_task(user.id, chat_id)
+        if task is None:
+            return
+        _cancel_scheduled_job(context.job_queue, chat_id, user.id)
+        await moderation_repository.delete_verification_task(user.id, chat_id)
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
-                message_id=task_info["message_id"],
-                text=f"用户 {user.full_name} 在验证前离开了群组。"
+                message_id=int(task.message_id),
+                text=f"用户 {user.full_name} 在验证前离开了群组。",
             )
-        except Exception as e:
-            logger.warning("编辑验证消息时出错: %s", e)
-            
-        # 从内存中删除验证任务
-        verify_tasks.pop(user_id, None)
-        
-        # 从数据库中删除验证任务
-        await moderation_repository.delete_verification_task(user_id, chat_id)
+        except Exception as exc:
+            logger.warning("更新离群验证消息失败: message=%s error=%s", task.message_id, exc)
 
-# 注册该模块的处理器
-def setup_member_verification(dispatcher):
+
+def setup_member_verification(dispatcher) -> None:
+    """@brief 注册成员验证 handlers / Register member-verification handlers."""
+
     dispatcher.add_handler(CommandHandler("verify", verify_command))
-    dispatcher.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_handler))
+    dispatcher.add_handler(
+        MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_handler)
+    )
     dispatcher.add_handler(CallbackQueryHandler(verify_callback, pattern=r"^verify_"))
-    dispatcher.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, handle_member_left))
+    dispatcher.add_handler(
+        MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, handle_member_left)
+    )

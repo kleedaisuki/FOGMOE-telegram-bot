@@ -1,18 +1,37 @@
+from fogmoe_bot.domain.automation import KeywordReply
+from fogmoe_bot.domain.moderation import (
+    ChatId,
+    GroupModerationPolicy,
+    ModerationRule,
+    RuleKind,
+    RuleScope,
+    MessageId,
+    UserId,
+    VerificationTask,
+)
 from fogmoe_bot.infrastructure.database import connection as db_connection
 
 
-async def fetch_group_keywords(group_id: int, *, connection=None):
+async def fetch_group_keywords(
+    group_id: int,
+    *,
+    connection=None,
+) -> tuple[KeywordReply, ...]:
     """@brief 读取群组关键词回复 / Fetch group keyword responses.
 
     @param group_id Telegram 群组 ID / Telegram group ID.
     @param connection 可选数据库连接 / Optional database connection.
-    @return `(keyword, response)` 行列表 / Rows of `(keyword, response)`.
+    @return 类型化关键词自动回复 / Typed keyword replies.
     """
 
-    return await db_connection.fetch_all(
+    rows = await db_connection.fetch_all(
         "SELECT keyword, response FROM group_keywords WHERE group_id = %s",
         (group_id,),
         connection=connection,
+    )
+    return tuple(
+        KeywordReply(keyword=str(keyword), response=str(response))
+        for keyword, response in rows
     )
 
 
@@ -93,18 +112,30 @@ async def delete_group_keyword(group_id: int, keyword: str, *, connection=None) 
     )
 
 
-async def fetch_spam_control(group_id: int, *, connection=None):
+async def fetch_spam_control(
+    group_id: int,
+    *,
+    connection=None,
+) -> GroupModerationPolicy | None:
     """@brief 读取垃圾控制配置 / Fetch spam control settings.
 
     @param group_id Telegram 群组 ID / Telegram group ID.
     @param connection 可选数据库连接 / Optional database connection.
-    @return `(enabled, block_links, block_mentions)`；不存在时返回 None / Settings row, or None.
+    @return 类型化群组审核策略；不存在时返回 None / Typed policy, or None.
     """
 
-    return await db_connection.fetch_one(
+    row = await db_connection.fetch_one(
         "SELECT enabled, block_links, block_mentions FROM group_spam_control WHERE group_id = %s",
         (group_id,),
         connection=connection,
+    )
+    if not row:
+        return None
+    return GroupModerationPolicy(
+        chat_id=ChatId(group_id),
+        enabled=bool(row[0]),
+        block_links=bool(row[1]),
+        block_mentions=bool(row[2]),
     )
 
 
@@ -174,18 +205,30 @@ async def set_spam_mention_blocking(group_id: int, enabled: bool, *, connection=
     )
 
 
-async def fetch_group_spam_keywords(group_id: int, *, connection=None):
+async def fetch_group_spam_keywords(
+    group_id: int,
+    *,
+    connection=None,
+) -> tuple[ModerationRule, ...]:
     """@brief 读取群组自定义垃圾词 / Fetch group spam keywords.
 
     @param group_id Telegram 群组 ID / Telegram group ID.
     @param connection 可选数据库连接 / Optional database connection.
-    @return `(keyword, is_regex)` 行列表 / Rows of `(keyword, is_regex)`.
+    @return 类型化群组审核规则 / Typed group moderation rules.
     """
 
-    return await db_connection.fetch_all(
+    rows = await db_connection.fetch_all(
         "SELECT keyword, is_regex FROM group_spam_keywords WHERE group_id = %s",
         (group_id,),
         connection=connection,
+    )
+    return tuple(
+        ModerationRule(
+            pattern=str(keyword),
+            kind=RuleKind.REGEX if bool(is_regex) else RuleKind.LITERAL,
+            scope=RuleScope.GROUP,
+        )
+        for keyword, is_regex in rows
     )
 
 
@@ -319,6 +362,7 @@ async def upsert_verification_task(
     group_id: int,
     message_id: int,
     expire_time,
+    token_hash: str,
     *,
     connection=None,
 ) -> None:
@@ -328,16 +372,18 @@ async def upsert_verification_task(
     @param group_id Telegram 群组 ID / Telegram group ID.
     @param message_id 验证消息 ID / Verification message ID.
     @param expire_time 过期时间 / Expiry time.
+    @param token_hash 验证 token 摘要 / Verification-token digest.
     @param connection 可选数据库连接 / Optional database connection.
     @return None / None.
     """
 
     await db_connection.execute(
-        "INSERT INTO verification_tasks (user_id, group_id, message_id, expire_time) "
-        "VALUES (%s, %s, %s, %s) "
+        "INSERT INTO verification_tasks (user_id, group_id, message_id, expire_time, token_hash) "
+        "VALUES (%s, %s, %s, %s, %s) "
         "ON CONFLICT (user_id, group_id) DO UPDATE SET "
-        "message_id = EXCLUDED.message_id, expire_time = EXCLUDED.expire_time",
-        (user_id, group_id, message_id, expire_time),
+        "message_id = EXCLUDED.message_id, expire_time = EXCLUDED.expire_time, "
+        "token_hash = EXCLUDED.token_hash",
+        (user_id, group_id, message_id, expire_time, token_hash),
         connection=connection,
     )
 
@@ -358,18 +404,91 @@ async def delete_verification_task(user_id: int, group_id: int, *, connection=No
     )
 
 
-async def fetch_active_verification_tasks(now, *, connection=None):
+async def fetch_verification_task(
+    user_id: int,
+    group_id: int,
+    *,
+    connection=None,
+) -> VerificationTask | None:
+    """@brief 读取单项成员验证任务 / Fetch one member-verification task.
+
+    @param user_id Telegram 用户 ID / Telegram user ID.
+    @param group_id Telegram 群组 ID / Telegram chat ID.
+    @param connection 可选数据库连接 / Optional database connection.
+    @return 验证任务；不存在返回 None / Verification task, or None.
+    """
+
+    row = await db_connection.fetch_one(
+        "SELECT message_id, expire_time, token_hash FROM verification_tasks "
+        "WHERE user_id = %s AND group_id = %s",
+        (user_id, group_id),
+        connection=connection,
+    )
+    if not row:
+        return None
+    return VerificationTask(
+        chat_id=ChatId(group_id),
+        user_id=UserId(user_id),
+        message_id=MessageId(int(row[0])),
+        expires_at=row[1],
+        token_hash=str(row[2] or ""),
+    )
+
+
+async def fetch_active_verification_tasks(
+    now,
+    *,
+    connection=None,
+) -> tuple[VerificationTask, ...]:
     """@brief 读取未过期验证任务 / Fetch active verification tasks.
 
     @param now 当前时间 / Current time.
     @param connection 可选数据库连接 / Optional database connection.
-    @return `(user_id, group_id, message_id, expire_time)` 行列表 / Active task rows.
+    @return 类型化未过期验证任务 / Typed active verification tasks.
     """
 
-    return await db_connection.fetch_all(
-        "SELECT user_id, group_id, message_id, expire_time FROM verification_tasks WHERE expire_time > %s",
+    rows = await db_connection.fetch_all(
+        "SELECT user_id, group_id, message_id, expire_time, token_hash "
+        "FROM verification_tasks WHERE expire_time > %s",
         (now,),
         connection=connection,
+    )
+    return tuple(
+        VerificationTask(
+            user_id=UserId(int(user_id)),
+            chat_id=ChatId(int(group_id)),
+            message_id=MessageId(int(message_id)),
+            expires_at=expire_time,
+            token_hash=str(token_hash or ""),
+        )
+        for user_id, group_id, message_id, expire_time, token_hash in rows
+    )
+
+
+async def fetch_pending_verification_tasks(
+    *,
+    connection=None,
+) -> tuple[VerificationTask, ...]:
+    """@brief 读取所有待恢复验证任务 / Fetch every verification task for recovery.
+
+    @param connection 可选数据库连接 / Optional database connection.
+    @return 类型化验证任务，包括已到期但未处置的任务 / Typed tasks, including overdue tasks.
+    """
+
+    rows = await db_connection.fetch_all(
+        "SELECT user_id, group_id, message_id, expire_time, token_hash "
+        "FROM verification_tasks",
+        connection=connection,
+    )
+    return tuple(
+        VerificationTask(
+            user_id=UserId(int(user_id)),
+            chat_id=ChatId(int(group_id)),
+            message_id=MessageId(int(message_id)),
+            expires_at=expire_time,
+            token_hash=str(token_hash or ""),
+        )
+        for user_id, group_id, message_id, expire_time, token_hash in rows
     )
 
 

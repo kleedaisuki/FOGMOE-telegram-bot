@@ -1,50 +1,73 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode
-from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters, CallbackQueryHandler
-import asyncio
+import html
 import logging
-import os
 import re
-import time
 import threading
+import time
 from collections import defaultdict
+from dataclasses import replace
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    ApplicationHandlerStop,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+from fogmoe_bot.application.moderation.service import ModerationService
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
-from pathlib import Path
+from fogmoe_bot.domain.moderation import (
+    ActorRole,
+    ChatId,
+    ContentKind,
+    EnforcementFailureMode,
+    EnforcementResult,
+    GroupModerationPolicy,
+    MessageId,
+    ModerationDecision,
+    ModerationRequest,
+    RuleKind,
+    UserId,
+    Verdict,
+)
+from fogmoe_bot.domain.moderation.engine import MENTION_PATTERN, URL_PATTERN
 from fogmoe_bot.infrastructure.config import BASE_DIR
 from fogmoe_bot.infrastructure.database.repositories import moderation_repository
+from fogmoe_bot.infrastructure.moderation import (
+    CachedModerationConfigurationProvider,
+    FileModerationRuleProvider,
+)
 
 SPAM_FILE_PATH = BASE_DIR / "resources" / "spam_words.txt"
-# 垃圾信息过滤缓存 {group_id: enabled}
-spam_filter_cache = {}
-cache_lock = threading.Lock()  # 缓存操作锁
-CACHE_TIMEOUT = 300  # 缓存过期时间：5分钟
+"""@brief 全局审核规则文件路径 / Global moderation-rule file path."""
 
-# 垃圾词列表缓存
-spam_words = set()
-spam_patterns = []
-last_spam_file_update = 0
-SPAM_FILE_UPDATE_INTERVAL = 600  # 垃圾词文件检查更新间隔：10分钟
+MODERATION_CONFIGURATION = CachedModerationConfigurationProvider(ttl_seconds=300.0)
+"""@brief 群组审核配置 provider / Group moderation-configuration provider."""
 
-# 自定义垃圾词缓存 {group_id: {"keywords": [关键词列表], "patterns": [正则列表], "last_updated": timestamp}}
-custom_spam_words_cache = {}
-custom_cache_lock = threading.Lock()  # 自定义垃圾词缓存操作锁
-custom_loading_groups = set()
+GLOBAL_RULES = FileModerationRuleProvider(SPAM_FILE_PATH)
+"""@brief 文件型全局规则 provider / File-backed global rule provider."""
+
+MODERATION_SERVICE = ModerationService(
+    MODERATION_CONFIGURATION,
+    MODERATION_CONFIGURATION,
+    GLOBAL_RULES,
+)
+"""@brief 内容审核应用服务 / Content-moderation application service."""
 
 # 速率限制器 {chat_id: {user_id: count}}
-warning_rate_limiter = defaultdict(lambda: defaultdict(int))
+warning_rate_limiter: defaultdict[int, defaultdict[int, int]] = defaultdict(
+    lambda: defaultdict(int)
+)
 rate_limit_lock = threading.Lock()
 WARNING_RESET_INTERVAL = 3600  # 警告计数重置时间：1小时
 
 # 添加全局防抖字典，记录用户最后点击时间
-callback_cooldown = {}
+callback_cooldown: dict[str, float] = {}
 callback_lock = threading.Lock()
 CALLBACK_COOLDOWN_TIME = 3  # 按钮冷却时间（秒）
-
-# URL检测正则表达式 - 匹配大多数常见的URL格式
-URL_PATTERN = re.compile(r'https?://\S+|www\.\S+|t\.me/\S+|\S+\.\S*|\S+\.(com|org|net|io|co|ru|cn|me|app|xyz|gov|edu)\b', re.IGNORECASE)
-
-# @mention检测正则表达式 - 匹配Telegram的@username格式
-MENTION_PATTERN = re.compile(r'@[a-zA-Z0-9_]+')
 
 # 统一的帮助文本，在多处复用
 SPAM_CONTROL_HELP_TEXT = (
@@ -86,265 +109,111 @@ SPAM_CONTROL_HELP_TEXT_PLAIN = (
     "/spam del <词> - 删除垃圾词\n"
 )
 
-# 从数据库加载群组的垃圾信息过滤状态
-async def load_spam_control_status(group_id):
-    """从数据库加载群组的垃圾信息过滤状态"""
-    try:
-        result = await moderation_repository.fetch_spam_control(group_id)
-        
-        with cache_lock:
-            if result:
-                spam_filter_cache[group_id] = {
-                    "enabled": result[0],
-                    "block_links": result[1],
-                    "block_mentions": result[2],
-                    "last_updated": time.time()
-                }
-                return result[0], result[1], result[2]
-            else:
-                spam_filter_cache[group_id] = {
-                    "enabled": False,
-                    "block_links": False,
-                    "block_mentions": False,
-                    "last_updated": time.time()
-                }
-                return False, False, False
-    except Exception as e:
-        logging.error(f"加载垃圾信息过滤状态时出错: {e}")
-        # 继续抛出异常，以便调用者处理
-        raise
+async def load_spam_control_status(group_id: int) -> tuple[bool, bool, bool]:
+    """@brief 兼容旧调用并读取类型化策略 / Read a typed policy for legacy callers.
 
-async def is_spam_control_enabled(group_id):
-    """检查群组是否启用垃圾信息过滤"""
-    now = time.time()
-    
-    with cache_lock:
-        if group_id in spam_filter_cache:
-            cache_data = spam_filter_cache[group_id]
-            if now - cache_data["last_updated"] < CACHE_TIMEOUT:
-                return cache_data["enabled"]
-    
-    # 缓存不存在或已过期，从数据库加载
-    enabled, _, _ = await load_spam_control_status(group_id)
-    return enabled
+    @param group_id Telegram 群组 ID / Telegram chat ID.
+    @return 启用、链接过滤、提及过滤三元组 / Enabled, link, and mention flags.
+    """
 
-async def is_link_blocking_enabled(group_id):
-    """检查群组是否启用链接过滤"""
-    now = time.time()
-    
-    with cache_lock:
-        if group_id in spam_filter_cache:
-            cache_data = spam_filter_cache[group_id]
-            if now - cache_data["last_updated"] < CACHE_TIMEOUT:
-                return cache_data.get("block_links", False)
-    
-    # 缓存不存在或已过期，从数据库加载
-    _, block_links, _ = await load_spam_control_status(group_id)
-    return block_links
+    MODERATION_CONFIGURATION.invalidate_policy(ChatId(group_id))
+    policy = await MODERATION_CONFIGURATION.get_policy(ChatId(group_id))
+    return policy.enabled, policy.block_links, policy.block_mentions
 
-async def is_mention_blocking_enabled(group_id):
-    """检查群组是否启用@mention过滤"""
-    now = time.time()
-    
-    with cache_lock:
-        if group_id in spam_filter_cache:
-            cache_data = spam_filter_cache[group_id]
-            if now - cache_data["last_updated"] < CACHE_TIMEOUT:
-                return cache_data.get("block_mentions", False)
-    
-    # 缓存不存在或已过期，从数据库加载
-    _, _, block_mentions = await load_spam_control_status(group_id)
-    return block_mentions
 
-def contains_url(text):
-    """检查文本是否包含URL"""
+async def is_spam_control_enabled(group_id: int) -> bool:
+    """@brief 判断群组是否启用审核 / Check whether moderation is enabled."""
+
+    return (await MODERATION_CONFIGURATION.get_policy(ChatId(group_id))).enabled
+
+
+async def is_link_blocking_enabled(group_id: int) -> bool:
+    """@brief 判断群组是否拦截链接 / Check whether links are blocked."""
+
+    return (await MODERATION_CONFIGURATION.get_policy(ChatId(group_id))).block_links
+
+
+async def is_mention_blocking_enabled(group_id: int) -> bool:
+    """@brief 判断群组是否拦截提及 / Check whether mentions are blocked."""
+
+    return (await MODERATION_CONFIGURATION.get_policy(ChatId(group_id))).block_mentions
+
+
+def contains_url(text: str) -> tuple[bool, str | None]:
+    """@brief 兼容旧调用并检查链接 / Check links for legacy callers."""
+
     if not text:
         return False, None
-    
     match = URL_PATTERN.search(text)
-    if match:
-        return True, match.group(0)
-    return False, None
+    return (True, match.group(0)) if match else (False, None)
 
-def contains_mention(text):
-    """检查文本是否包含@mention"""
+
+def contains_mention(text: str) -> tuple[bool, str | None]:
+    """@brief 兼容旧调用并检查提及 / Check mentions for legacy callers."""
+
     if not text:
         return False, None
-    
     match = MENTION_PATTERN.search(text)
-    if match:
-        return True, match.group(0)
-    return False, None
+    return (True, match.group(0)) if match else (False, None)
 
-def load_spam_words():
-    """从文件加载垃圾词列表"""
-    global spam_words, spam_patterns, last_spam_file_update
-    
-    # 检查文件是否存在
-    if not os.path.exists(SPAM_FILE_PATH):
-        logging.warning(f"垃圾词列表文件未找到: {SPAM_FILE_PATH}")
-        SPAM_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(SPAM_FILE_PATH, 'w', encoding='utf-8') as f:
-            f.write("# 垃圾词列表，一行一个词语\n")
-            f.write("博彩\n发财\n")
-            f.write("# 使用//开头的行表示正则表达式匹配模式\n")
-            f.write("//\\d+\\s*[元块]\\s*[充值提现]\n")
-        logging.info(f"已创建默认垃圾词列表文件: {SPAM_FILE_PATH}")
-    
-    # 检查文件是否需要更新
-    file_mtime = os.path.getmtime(SPAM_FILE_PATH)
-    if file_mtime <= last_spam_file_update:
-        return  # 文件未更新，无需重新加载
-        
-    try:
-        new_spam_words = set()
-        new_patterns = []
-        
-        with open(SPAM_FILE_PATH, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                
-                # 处理正则表达式模式
-                if line.startswith('//'):
-                    pattern = line[2:].strip()  # 修复拼写错误：trip -> strip
-                    try:
-                        compiled = re.compile(pattern, re.IGNORECASE)
-                        new_patterns.append(compiled)
-                    except re.error:
-                        logging.error(f"无效的正则表达式: {pattern}")
-                else:
-                    new_spam_words.add(line.lower())
-                    
-        # 更新全局变量
-        spam_words = new_spam_words
-        spam_patterns = new_patterns
-        last_spam_file_update = file_mtime
-        logging.info(f"已加载 {len(spam_words)} 个垃圾词和 {len(spam_patterns)} 个正则表达式模式")
-    except Exception as e:
-        logging.error(f"加载垃圾词列表时出错: {e}")
 
-async def load_custom_spam_keywords(group_id):
-    """从数据库加载群组的自定义垃圾词"""
-    try:
-        results = await moderation_repository.fetch_group_spam_keywords(group_id)
-        
-        keywords = []
-        patterns = []
-        
-        for keyword, is_regex in results:
-            if is_regex:
-                try:
-                    compiled = re.compile(keyword, re.IGNORECASE)
-                    patterns.append(compiled)
-                except re.error:
-                    logging.error(f"无效的自定义正则表达式: {keyword}")
-            else:
-                keywords.append(keyword.lower())
-        
-        with custom_cache_lock:
-            custom_spam_words_cache[group_id] = {
-                "keywords": keywords,
-                "patterns": patterns,
-                "last_updated": time.time()
-            }
-        
-        return keywords, patterns
-    except Exception as e:
-        logging.error(f"加载自定义垃圾词时出错: {e}")
-        return [], []
+def load_spam_words() -> None:
+    """@brief 兼容旧初始化入口并刷新全局规则 / Refresh global rules for legacy setup."""
 
-async def get_custom_spam_keywords(group_id):
-    """获取群组的自定义垃圾词，优先使用缓存，优化数据库访问"""
-    now = time.time()
-    
-    # 首先检查缓存是否存在且未过期
-    with custom_cache_lock:
-        if group_id in custom_spam_words_cache:
-            cache_data = custom_spam_words_cache[group_id]
-            # 如果缓存未过期，直接返回
-            if now - cache_data["last_updated"] < CACHE_TIMEOUT:
-                return cache_data["keywords"], cache_data["patterns"]
-    
-    # 二次检查：如果此群组正在被另一个协程加载，等待一小段时间后再次检查缓存
-    with custom_cache_lock:
-        is_loading = group_id in custom_loading_groups
+    GLOBAL_RULES.refresh(force=True)
 
-    if is_loading:
-        await asyncio.sleep(0.1)
-        with custom_cache_lock:
-            if group_id in custom_spam_words_cache:
-                cache_data = custom_spam_words_cache[group_id]
-                if now - cache_data["last_updated"] < CACHE_TIMEOUT:
-                    return cache_data["keywords"], cache_data["patterns"]
-    
-    # 标记该群组为"正在加载"状态
-    with custom_cache_lock:
-        custom_loading_groups.add(group_id)
-    
-    try:
-        # 从数据库加载
-        keywords, patterns = await load_custom_spam_keywords(group_id)
-        return keywords, patterns
-    finally:
-        # 无论加载成功与否，都移除"正在加载"标记
-        with custom_cache_lock:
-            custom_loading_groups.discard(group_id)
 
-async def has_custom_spam_keywords(group_id):
-    """检查群组是否有自定义垃圾词"""
-    keywords, patterns = await get_custom_spam_keywords(group_id)
-    return len(keywords) > 0 or len(patterns) > 0
+async def load_custom_spam_keywords(
+    group_id: int,
+) -> tuple[list[str], list[re.Pattern[str]]]:
+    """@brief 兼容旧调用并刷新群组规则 / Refresh group rules for legacy callers."""
 
-async def is_spam_message(message_text, group_id):
-    """检查消息是否为垃圾信息，返回(是否垃圾信息, 触发的关键词)"""
-    if not message_text:
-        return False, None
+    rules = await MODERATION_CONFIGURATION.refresh_group_rules(ChatId(group_id))
+    keywords = [rule.pattern.lower() for rule in rules if rule.kind is RuleKind.LITERAL]
+    patterns = [
+        re.compile(rule.pattern, re.IGNORECASE)
+        for rule in rules
+        if rule.kind is RuleKind.REGEX
+    ]
+    return keywords, patterns
 
-    # 检查群组是否有自定义垃圾词，有则优先使用
-    custom_keywords, custom_patterns = await get_custom_spam_keywords(group_id)
-    
-    # 如果有自定义垃圾词，就只用自定义的
-    if custom_keywords or custom_patterns:
-        # 检查自定义垃圾词
-        text_lower = message_text.lower()
-        for word in custom_keywords:
-            if word in text_lower:
-                return True, word
-        
-        # 检查自定义正则表达式
-        for pattern in custom_patterns:
-            match = pattern.search(message_text)
-            if match:
-                matched_text = match.group(0) if match.group(0) else pattern.pattern
-                return True, matched_text
-        
-        return False, None
-    
-    # 无自定义垃圾词，使用全局垃圾词列表
-    # 检查文件是否需要更新
-    now = time.time()
-    if now - last_spam_file_update > SPAM_FILE_UPDATE_INTERVAL:
-        load_spam_words()
-    
-    # 转为小写进行匹配
-    text_lower = message_text.lower()
-    
-    # 检查垃圾词
-    for word in spam_words:
-        if word in text_lower:
-            return True, word
-    
-    # 检查正则表达式模式
-    for pattern in spam_patterns:
-        match = pattern.search(message_text)
-        if match:
-            # 尝试返回匹配到的实际文本，如果无法获取则返回模式
-            matched_text = match.group(0) if match.group(0) else pattern.pattern
-            return True, matched_text
-            
-    return False, None
+
+async def get_custom_spam_keywords(
+    group_id: int,
+) -> tuple[list[str], list[re.Pattern[str]]]:
+    """@brief 兼容旧调用并读取群组规则 / Read group rules for legacy callers."""
+
+    rules = await MODERATION_CONFIGURATION.get_group_rules(ChatId(group_id))
+    keywords = [rule.pattern.lower() for rule in rules if rule.kind is RuleKind.LITERAL]
+    patterns = [
+        re.compile(rule.pattern, re.IGNORECASE)
+        for rule in rules
+        if rule.kind is RuleKind.REGEX
+    ]
+    return keywords, patterns
+
+
+async def has_custom_spam_keywords(group_id: int) -> bool:
+    """@brief 判断群组是否有自定义规则 / Check for group-specific rules."""
+
+    return bool(await MODERATION_CONFIGURATION.get_group_rules(ChatId(group_id)))
+
+
+async def is_spam_message(message_text: str, group_id: int) -> tuple[bool, str | None]:
+    """@brief 兼容旧调用并返回审核命中 / Moderate text for legacy callers."""
+
+    decision = await MODERATION_SERVICE.moderate(
+        ModerationRequest(
+            chat_id=ChatId(group_id),
+            user_id=UserId(0),
+            message_id=MessageId(0),
+            content=message_text,
+            content_kind=ContentKind.TEXT,
+            actor_role=ActorRole.MEMBER,
+        )
+    )
+    match = decision.primary_match
+    return decision.verdict is Verdict.BLOCK, match.matched_text if match else None
 
 def update_warning_count(chat_id, user_id):
     """更新用户警告次数，返回当前警告次数"""
@@ -473,36 +342,20 @@ async def toggle_spam_control(update: Update, context: ContextTypes.DEFAULT_TYPE
     new_status = not current_status
     
     try:
-        result = await moderation_repository.fetch_spam_control(chat_id)
-        block_links = False
-        block_mentions = False
-        
-        if result:
-            block_links = result[1]
-            block_mentions = result[2]
+        current_policy = await moderation_repository.fetch_spam_control(chat_id)
+        if current_policy is None:
+            current_policy = GroupModerationPolicy(chat_id=ChatId(chat_id))
         
         await moderation_repository.upsert_spam_enabled(
             chat_id,
             new_status,
-            block_links,
-            block_mentions,
+            current_policy.block_links,
+            current_policy.block_mentions,
             user_id,
         )
-        
-        # 更新缓存，保留所有设置
-        with cache_lock:
-            if chat_id in spam_filter_cache:
-                spam_filter_cache[chat_id].update({
-                    "enabled": new_status,
-                    "last_updated": time.time()
-                })
-            else:
-                spam_filter_cache[chat_id] = {
-                    "enabled": new_status,
-                    "block_links": block_links,
-                    "block_mentions": block_mentions,
-                    "last_updated": time.time()
-                }
+        MODERATION_CONFIGURATION.put_policy(
+            replace(current_policy, enabled=new_status)
+        )
         
         if new_status:
             # 只对管理员显示"查看更多功能"按钮
@@ -547,12 +400,8 @@ async def toggle_link_blocking(update: Update, chat_id: int, user_id: int, enabl
     
     try:
         await moderation_repository.set_spam_link_blocking(chat_id, enable)
-        
-        # 更新缓存
-        with cache_lock:
-            if chat_id in spam_filter_cache:
-                spam_filter_cache[chat_id]["block_links"] = enable
-                spam_filter_cache[chat_id]["last_updated"] = time.time()
+        policy = await MODERATION_CONFIGURATION.get_policy(ChatId(chat_id))
+        MODERATION_CONFIGURATION.put_policy(replace(policy, block_links=enable))
         
         status_text = "开启" if enable else "关闭"
         await update.message.reply_text(
@@ -584,12 +433,8 @@ async def toggle_mention_blocking(update: Update, chat_id: int, user_id: int, en
     
     try:
         await moderation_repository.set_spam_mention_blocking(chat_id, enable)
-        
-        # 更新缓存
-        with cache_lock:
-            if chat_id in spam_filter_cache:
-                spam_filter_cache[chat_id]["block_mentions"] = enable
-                spam_filter_cache[chat_id]["last_updated"] = time.time()
+        policy = await MODERATION_CONFIGURATION.get_policy(ChatId(chat_id))
+        MODERATION_CONFIGURATION.put_policy(replace(policy, block_mentions=enable))
         
         status_text = "开启" if enable else "关闭"
         await update.message.reply_text(
@@ -681,11 +526,11 @@ async def list_custom_spam_keywords(update: Update, chat_id: int):
             return
             
         message = "当前群组的自定义垃圾词列表：\n\n"
-        for idx, (keyword, is_regex) in enumerate(keywords, 1):
-            if is_regex:
-                message += f"{idx}. 正则: '//{keyword}'\n"
+        for idx, rule in enumerate(keywords, 1):
+            if rule.kind is RuleKind.REGEX:
+                message += f"{idx}. 正则: '//{rule.pattern}'\n"
             else:
-                message += f"{idx}. 关键词: '{keyword}'\n"
+                message += f"{idx}. 关键词: '{rule.pattern}'\n"
                 
         message += "\n使用 /spam add <垃圾词> 添加垃圾词\n"
         message += "使用 /spam del <垃圾词> 删除垃圾词"
@@ -762,161 +607,181 @@ async def spam_help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 text=SPAM_CONTROL_HELP_TEXT_PLAIN
             )
 
-# 添加帮助函数获取有效消息
 def get_effective_message(update: Update):
-    """获取有效的消息对象，无论是普通消息还是编辑后的消息"""
+    """@brief 获取普通或编辑后的消息 / Get a normal or edited message."""
+
     return update.message or update.edited_message
 
-async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理消息并检查是否为垃圾信息"""
-    # 获取有效消息
-    effective_message = get_effective_message(update)
-    
-    # 提前检查消息是否为空或是否为文本消息
-    if not effective_message or not effective_message.text:
-        return
-        
-    # 仅在群组中处理消息
-    if update.effective_chat.type not in ["group", "supergroup"]:
-        return
+async def _resolve_actor_role(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int,
+) -> ActorRole:
+    """@brief 读取并短期缓存消息发送者角色 / Resolve and cache the author role.
+
+    @param context Telegram handler 上下文 / Telegram handler context.
+    @param chat_id Telegram 群组 ID / Telegram chat ID.
+    @param user_id Telegram 用户 ID / Telegram user ID.
+    @return 类型化发送者角色 / Typed author role.
+    """
+
+    cache_key = f"moderation_role:{chat_id}:{user_id}"
+    cached = context.chat_data.get(cache_key)
+    expires_at = context.chat_data.get(f"{cache_key}:expires_at", 0.0)
+    if isinstance(cached, ActorRole) and time.time() <= expires_at:
+        return cached
+
+    try:
+        chat_member = await context.bot.get_chat_member(chat_id, user_id)
+        if chat_member.status == "creator":
+            role = ActorRole.OWNER
+        elif chat_member.status == "administrator":
+            role = ActorRole.ADMINISTRATOR
+        else:
+            role = ActorRole.MEMBER
+    except Exception as exc:
+        logging.error("获取审核用户角色失败: %s", exc)
+        role = ActorRole.MEMBER
+
+    context.chat_data[cache_key] = role
+    context.chat_data[f"{cache_key}:expires_at"] = time.time() + 300
+    return role
+
+
+async def enforce_moderation_decision(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    decision: ModerationDecision,
+    policy: GroupModerationPolicy,
+) -> EnforcementResult:
+    """@brief 执行删除和警告副作用 / Execute deletion and warning effects.
+
+    @param update Telegram 更新 / Telegram update.
+    @param context Telegram handler 上下文 / Telegram handler context.
+    @param decision 审核判决 / Moderation decision.
+    @param policy 作出判决的群组策略 / Policy used for the decision.
+    @return 类型化处置结果 / Typed enforcement result.
+    """
+
+    message = get_effective_message(update)
+    match = decision.primary_match
+    if message is None or match is None or update.effective_user is None:
+        return EnforcementResult(
+            decision=decision,
+            message_deleted=False,
+            warning_sent=False,
+            downstream_stopped=policy.failure_mode is EnforcementFailureMode.FAIL_CLOSED,
+            error="missing Telegram message or moderation evidence",
+        )
 
     chat_id = update.effective_chat.id
-    message_text = effective_message.text
-    
-    # 性能优化：对于很短的消息可以跳过复杂的检测
-    if len(message_text) < 2:
+    user_id = update.effective_user.id
+    try:
+        await context.bot.delete_message(
+            chat_id=chat_id,
+            message_id=message.message_id,
+        )
+    except Exception as exc:
+        logging.error("执行审核删除失败: chat=%s user=%s error=%s", chat_id, user_id, exc)
+        return EnforcementResult(
+            decision=decision,
+            message_deleted=False,
+            warning_sent=False,
+            downstream_stopped=policy.failure_mode is EnforcementFailureMode.FAIL_CLOSED,
+            error=str(exc),
+        )
+
+    warning_count = update_warning_count(chat_id, user_id)
+    if match.rule.kind is RuleKind.LINK:
+        category = "链接"
+        policy_text = "本群组禁止发送链接。"
+    elif match.rule.kind is RuleKind.MENTION:
+        category = "@提及"
+        policy_text = "本群组禁止@提及用户。"
+    else:
+        category = "垃圾内容"
+        policy_text = "持续发送垃圾信息可能导致被禁言或移出群组。"
+
+    warning_sent = False
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"⚠️ 注意: {update.effective_user.mention_html()} 发送的消息包含{category} "
+                f"<tg-spoiler>{html.escape(match.matched_text)}</tg-spoiler>，已被自动删除。\n"
+                f"{policy_text}这是第 {warning_count} 次警告。"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+        warning_sent = True
+    except Exception as exc:
+        logging.error("发送审核警告失败: chat=%s user=%s error=%s", chat_id, user_id, exc)
+
+    logging.info(
+        "审核处置完成: chat=%s user=%s kind=%s match=%r",
+        chat_id,
+        user_id,
+        match.rule.kind.name,
+        match.matched_text,
+    )
+    return EnforcementResult(
+        decision=decision,
+        message_deleted=True,
+        warning_sent=warning_sent,
+        downstream_stopped=decision.stop_downstream,
+    )
+
+
+async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """@brief 将 Telegram 消息映射、审核并处置 / Map, moderate, and enforce a Telegram message."""
+
+    message = get_effective_message(update)
+    if (
+        message is None
+        or update.effective_chat is None
+        or update.effective_chat.type not in {"group", "supergroup"}
+        or update.effective_user is None
+    ):
         return
-    
-    # 提前检查群组是否启用了垃圾信息过滤（性能优化）
-    if not await is_spam_control_enabled(chat_id):
+
+    content = message.text or message.caption or ""
+    if not content:
         return
-    
-    user_id = effective_message.from_user.id
-    
-    # 添加缓存检查，减少管理员权限检查次数
-    is_admin_cache_key = f"is_admin:{chat_id}:{user_id}"
-    is_admin = context.chat_data.get(is_admin_cache_key, None)
-    
-    if is_admin is None:
-        try:
-            chat_member = await context.bot.get_chat_member(chat_id, user_id)
-            is_admin = chat_member.status in ["administrator", "creator"]
-            # 缓存结果5分钟
-            context.chat_data[is_admin_cache_key] = is_admin
-            context.chat_data[f"{is_admin_cache_key}_expire"] = time.time() + 300
-        except Exception as e:
-            logging.error(f"获取用户权限时出错: {e}")
-            is_admin = False  # 如果出错，假设不是管理员（安全第一）
-    # 检查缓存是否过期
-    elif time.time() > context.chat_data.get(f"{is_admin_cache_key}_expire", 0):
-        try:
-            chat_member = await context.bot.get_chat_member(chat_id, user_id)
-            is_admin = chat_member.status in ["administrator", "creator"]
-            # 更新缓存
-            context.chat_data[is_admin_cache_key] = is_admin
-            context.chat_data[f"{is_admin_cache_key}_expire"] = time.time() + 300
-        except Exception as e:
-            logging.error(f"刷新用户权限缓存时出错: {e}")
-            # 保留旧的缓存值
-    
-    if is_admin:
-        return  # 跳过对管理员消息的检测
-    
-    # 首先检查链接过滤设置
-    if await is_link_blocking_enabled(chat_id):
-        has_url, found_url = contains_url(message_text)
-        if has_url:
-            user_mention = effective_message.from_user.mention_html()
-            warning_count = update_warning_count(chat_id, user_id)
-            
-            try:
-                # 删除包含链接的消息
-                await context.bot.delete_message(
-                    chat_id=chat_id,
-                    message_id=effective_message.message_id
-                )
-                
-                # 发送警告，使用隐藏文字格式
-                warning_message = (
-                    f"⚠️ 注意: {user_mention} 发送的消息包含链接 <tg-spoiler>{found_url}</tg-spoiler>，已被自动删除。\n"
-                    f"本群组禁止发送链接。这是第 {warning_count} 次警告。"
-                )
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=warning_message,
-                    parse_mode='HTML'
-                )
-                
-                # 记录日志
-                logging.info(f"已删除链接消息 - 群组: {chat_id}, 用户: {user_id}, 链接: {found_url}, 内容: {message_text[:50]}...")
-                
-                return  # 已删除消息，不需要继续检查
-                
-            except Exception as e:
-                logging.error(f"处理链接消息时出错: {e}")
-    
-    # 检查@mention过滤设置
-    if await is_mention_blocking_enabled(chat_id):
-        has_mention, found_mention = contains_mention(message_text)
-        if has_mention:
-            user_mention = effective_message.from_user.mention_html()
-            warning_count = update_warning_count(chat_id, user_id)
-            
-            try:
-                # 删除包含@mention的消息
-                await context.bot.delete_message(
-                    chat_id=chat_id,
-                    message_id=effective_message.message_id
-                )
-                
-                # 发送警告，使用隐藏文字格式
-                warning_message = (
-                    f"⚠️ 注意: {user_mention} 发送的消息包含@提及 <tg-spoiler>{found_mention}</tg-spoiler>，已被自动删除。\n"
-                    f"本群组禁止@提及用户。这是第 {warning_count} 次警告。"
-                )
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=warning_message,
-                    parse_mode='HTML'
-                )
-                
-                # 记录日志
-                logging.info(f"已删除@mention消息 - 群组: {chat_id}, 用户: {user_id}, 提及: {found_mention}, 内容: {message_text[:50]}...")
-                
-                return  # 已删除消息，不需要继续检查
-                
-            except Exception as e:
-                logging.error(f"处理@mention消息时出错: {e}")
-    
-    # 继续检查是否为垃圾信息
-    is_spam, trigger_word = await is_spam_message(message_text, chat_id)
-    if is_spam:
-        user_mention = effective_message.from_user.mention_html()
-        warning_count = update_warning_count(chat_id, user_id)
-        
-        try:
-            # 删除垃圾消息
-            await context.bot.delete_message(
-                chat_id=chat_id,
-                message_id=effective_message.message_id
-            )
-            
-            # 发送警告，包含触发的关键词（使用隐藏文字格式）
-            warning_message = (
-                f"⚠️ 注意: {user_mention} 发送的消息包含垃圾内容 <tg-spoiler>{trigger_word}</tg-spoiler>，已被自动删除。\n"
-                f"这是第 {warning_count} 次警告。持续发送垃圾信息可能导致被禁言或移出群组。"
-            )
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=warning_message,
-                parse_mode='HTML'
-            )
-            
-            # 记录日志
-            logging.info(f"已删除垃圾消息 - 群组: {chat_id}, 用户: {user_id}, 触发词: {trigger_word}, 内容: {message_text[:50]}...")
-            
-        except Exception as e:
-            logging.error(f"处理垃圾消息时出错: {e}")
+
+    chat_id = ChatId(update.effective_chat.id)
+    policy = await MODERATION_CONFIGURATION.get_policy(chat_id)
+    if not policy.enabled:
+        return
+
+    actor_role = await _resolve_actor_role(
+        context,
+        int(chat_id),
+        update.effective_user.id,
+    )
+    if message.caption is not None and message.text is None:
+        content_kind = ContentKind.CAPTION
+    elif content.startswith("/"):
+        content_kind = ContentKind.COMMAND
+    else:
+        content_kind = ContentKind.TEXT
+
+    decision = await MODERATION_SERVICE.moderate(
+        ModerationRequest(
+            chat_id=chat_id,
+            user_id=UserId(update.effective_user.id),
+            message_id=MessageId(message.message_id),
+            content=content,
+            content_kind=content_kind,
+            actor_role=actor_role,
+            is_edited=update.edited_message is message,
+        )
+    )
+    if decision.verdict is Verdict.ALLOW:
+        return
+
+    result = await enforce_moderation_decision(update, context, decision, policy)
+    if result.downstream_stopped:
+        raise ApplicationHandlerStop
 
 def setup_spam_control_handlers(dispatcher):
     """注册垃圾信息过滤处理器，不再尝试创建数据库表"""
@@ -929,15 +794,15 @@ def setup_spam_control_handlers(dispatcher):
     # 添加回调查询处理器
     dispatcher.add_handler(CallbackQueryHandler(spam_help_callback, pattern=r"^spam_help$"))
     
-    # 添加消息处理器，优先级较高以便在其他处理前先过滤垃圾信息
+    # 在默认 group=0 的 AI 对话处理器之前运行；命中并成功删除后会停止后续传播。
     # 修改过滤器以包含编辑后的消息
     dispatcher.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS & 
+            (filters.TEXT | filters.CAPTION) & filters.ChatType.GROUPS &
             (filters.UpdateType.MESSAGE | filters.UpdateType.EDITED_MESSAGE),
             process_message
         ),
-        group=5  # 优先级高于关键词处理
+        group=-10,
     )
     
     # 定期清理警告计数器

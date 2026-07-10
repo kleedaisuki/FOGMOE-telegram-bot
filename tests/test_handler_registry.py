@@ -136,7 +136,7 @@ def test_register_handlers_preserves_handler_and_job_registration_order():
         ("MessageHandler", 10, "_MergedFilter", "process_group_message"),
         ("CommandHandler", 0, "spam", "toggle_spam_control"),
         ("CallbackQueryHandler", 0, "^spam_help$", "spam_help_callback"),
-        ("MessageHandler", 5, "_MergedFilter", "process_message"),
+        ("MessageHandler", -10, "_MergedFilter", "process_message"),
         ("CommandHandler", 0, "omikuji", "omikuji_command"),
         ("CallbackQueryHandler", 0, "^omikuji_", "omikuji_callback"),
         ("CommandHandler", 0, "rps_game", "rps_game_command"),
