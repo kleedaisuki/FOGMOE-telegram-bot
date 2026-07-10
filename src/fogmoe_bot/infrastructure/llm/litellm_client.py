@@ -5,6 +5,7 @@ import litellm
 
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.llm.litellm_models import litellm_model_name, normalize_provider
+from fogmoe_bot.infrastructure.network.proxy import configure_litellm_proxy
 from fogmoe_bot.infrastructure.llm.litellm_message_sanitizer import (
     PROVIDER_SPECIFIC_KEYS,
     sanitize_message_for_provider,
@@ -62,6 +63,7 @@ def create_chat_completion(
     messages: List[Dict[str, Any]],
     **kwargs: Any,
 ) -> Any:
+    configure_litellm_proxy(litellm)
     litellm_provider = normalize_provider(provider)
     history_provider = (
         "openai"

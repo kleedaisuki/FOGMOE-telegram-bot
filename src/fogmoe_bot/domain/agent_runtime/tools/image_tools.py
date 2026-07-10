@@ -12,6 +12,7 @@ from typing import Any, Optional
 import requests
 
 from fogmoe_bot.infrastructure import config
+from fogmoe_bot.infrastructure.network.proxy import create_requests_session
 from .context import get_tool_request_context
 from .filename_utils import prompt_to_filename
 
@@ -179,7 +180,7 @@ def _cleanup_expired_generated_images() -> None:
 def _get_session() -> requests.Session:
     session = getattr(_SESSION_LOCAL, "session", None)
     if session is None:
-        session = requests.Session()
+        session = create_requests_session()
         _SESSION_LOCAL.session = session
     return session
 

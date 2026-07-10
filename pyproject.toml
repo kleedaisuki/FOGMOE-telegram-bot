@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "AGPL-3.0-or-later" }
 dependencies = [
-    "python-telegram-bot[job-queue]",
+    "python-telegram-bot[job-queue,socks]",
     "SQLAlchemy>=2.0",
     "asyncpg",
     "alembic",
@@ -19,6 +19,8 @@ dependencies = [
     "pydantic-settings>=2",
     "binance-futures-connector",
     "aiohttp",
+    "aiohttp-socks>=0.10",
+    "requests[socks]",
     "telegramify-markdown",
     "python-dotenv",
     "e2b",

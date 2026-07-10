@@ -6,6 +6,7 @@ from typing import Dict, Optional
 import requests
 
 from fogmoe_bot.infrastructure import config
+from fogmoe_bot.infrastructure.network.proxy import create_requests_session
 
 JUDGE0_API_URL = getattr(config, "JUDGE0_API_URL", "")
 JUDGE0_API_KEY = getattr(config, "JUDGE0_API_KEY", "")
@@ -15,7 +16,7 @@ _SESSION_LOCAL = threading.local()
 def _get_session() -> requests.Session:
     session = getattr(_SESSION_LOCAL, "session", None)
     if session is None:
-        session = requests.Session()
+        session = create_requests_session()
         _SESSION_LOCAL.session = session
     return session
 

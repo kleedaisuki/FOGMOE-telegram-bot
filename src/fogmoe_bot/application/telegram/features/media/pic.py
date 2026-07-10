@@ -12,6 +12,7 @@ from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.application.accounts import service as process_user
 from fogmoe_bot.application.economy import stake_reward_pool
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
+from fogmoe_bot.infrastructure.network.proxy import create_aiohttp_session
 
 # 创建一个日志记录器
 logger = logging.getLogger(__name__)
@@ -494,7 +495,7 @@ async def hd_pic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # 更严格的超时控制，采用更可靠的下载方式
         try:
             # 使用更短的超时时间进行图片下载
-            async with aiohttp.ClientSession() as session:
+            async with create_aiohttp_session() as session:
                 # 设置总超时时间（包括连接、读取等）- 较大图片给予足够但有限的时间
                 timeout = aiohttp.ClientTimeout(total=30)  # 30秒总超时
                 
@@ -610,7 +611,7 @@ async def fetch_and_cache_images(is_nsfw=False, max_retries=3):
                 try:
                     logger.info(f"尝试从 {api_url} 获取{'NSFW' if is_nsfw else '普通'}图片")
                     
-                    async with aiohttp.ClientSession() as session:
+                    async with create_aiohttp_session() as session:
                         async with session.get(api_url, params=params, headers=HEADERS, timeout=10) as response:
                             if response.status == 200:
                                 data = await response.json()

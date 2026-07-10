@@ -6,6 +6,7 @@ from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 from fogmoe_bot.application.accounts import service as process_user
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
+from fogmoe_bot.infrastructure.network.proxy import create_aiohttp_session
 
 # 创建一个日志记录器
 logger = logging.getLogger(__name__)
@@ -125,7 +126,7 @@ async def check_share_link(share_url):
     }
     
     try:
-        async with aiohttp.ClientSession() as session:
+        async with create_aiohttp_session() as session:
             async with session.post(SHARE_LEAK_API_URL, json=params, headers=HEADERS, timeout=10) as response:
                 if response.status == 200:
                     data = await response.json()

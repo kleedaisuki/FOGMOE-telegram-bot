@@ -7,6 +7,7 @@ from urllib.parse import quote
 import requests
 
 from fogmoe_bot.infrastructure import config
+from fogmoe_bot.infrastructure.network.proxy import create_requests_session
 
 SERPAPI_API_KEY = getattr(config, "SERPAPI_API_KEY", "")
 _SESSION_LOCAL = threading.local()
@@ -15,7 +16,7 @@ _SESSION_LOCAL = threading.local()
 def _get_session() -> requests.Session:
     session = getattr(_SESSION_LOCAL, "session", None)
     if session is None:
-        session = requests.Session()
+        session = create_requests_session()
         _SESSION_LOCAL.session = session
     return session
 

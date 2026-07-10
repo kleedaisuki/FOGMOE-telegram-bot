@@ -8,6 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, ContextTypes, CallbackQueryHandler
 from fogmoe_bot.application.accounts import service as process_user
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
+from fogmoe_bot.infrastructure.network.proxy import create_aiohttp_session
 from collections import defaultdict
 
 # 创建一个日志记录器
@@ -613,7 +614,7 @@ async def search_music(song_name, music_type="wy", page=1, limit=10):
     
     try:
         # 使用超时控制防止长时间等待
-        async with aiohttp.ClientSession() as session:
+        async with create_aiohttp_session() as session:
             async with session.get(MUSIC_API_URL, params=params, headers=HEADERS, timeout=10) as response:
                 if response.status == 200:
                     data = await response.json()

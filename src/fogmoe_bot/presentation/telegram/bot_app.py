@@ -9,7 +9,7 @@ from .handler_registry import register_handlers
 
 
 def create_application():
-    application = (
+    builder = (
         ApplicationBuilder()
         .token(config.TELEGRAM_BOT_TOKEN)
         .connect_timeout(config.TELEGRAM_CONNECT_TIMEOUT)
@@ -22,8 +22,11 @@ def create_application():
         .get_updates_pool_timeout(config.TELEGRAM_GET_UPDATES_POOL_TIMEOUT)
         .concurrent_updates(True)
         .post_init(post_init)
-        .build()
     )
+    proxy_url = config.NETWORK_PROXY_URL
+    if proxy_url:
+        builder = builder.proxy(proxy_url).get_updates_proxy(proxy_url)
+    application = builder.build()
 
     register_handlers(application)
     return application

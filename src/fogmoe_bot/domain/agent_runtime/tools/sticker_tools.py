@@ -3,12 +3,13 @@ import logging
 import random
 import threading
 import time
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any
 
+import requests
+
 from fogmoe_bot.infrastructure import config
+from fogmoe_bot.infrastructure.network.proxy import create_requests_session
 
 logger = logging.getLogger(__name__)
 
@@ -54,15 +55,15 @@ def _fetch_sticker_set(pack_name: str) -> dict[str, Any]:
     if not token:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN configuration.")
 
-    query = urllib.parse.urlencode({"name": pack_name})
-    url = f"https://api.telegram.org/bot{token}/getStickerSet?{query}"
-    request = urllib.request.Request(
+    url = f"https://api.telegram.org/bot{token}/getStickerSet"
+    response = create_requests_session().get(
         url,
+        params={"name": pack_name},
         headers={"User-Agent": "FogMoeBot/ai-sticker-tool"},
+        timeout=20,
     )
-
-    with urllib.request.urlopen(request, timeout=20) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    response.raise_for_status()
+    payload = response.json()
 
     if not payload.get("ok"):
         description = payload.get("description") or "Telegram getStickerSet failed"
