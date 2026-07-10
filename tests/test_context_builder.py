@@ -5,8 +5,8 @@ from fogmoe_bot.application.assistant.context_state import (
     normalize_user_impression,
 )
 from fogmoe_bot.domain.context import (
-    DEFAULT_CONTEXT_BUILDER,
     ChatMessageContext,
+    ContextBuilder,
     ConversationScope,
     RuntimeMessageReplacement,
     ScheduledTaskContext,
@@ -14,8 +14,11 @@ from fogmoe_bot.domain.context import (
 )
 
 
+CONTEXT_BUILDER = ContextBuilder("base system policy")
+
+
 def test_context_builder_renders_chat_message_metadata_and_escapes_content():
-    result = DEFAULT_CONTEXT_BUILDER.render_chat_message(
+    result = CONTEXT_BUILDER.render_chat_message(
         ChatMessageContext(
             chat_type="supergroup",
             chat_title="Fog <Lab>",
@@ -42,7 +45,7 @@ def test_context_builder_renders_chat_message_metadata_and_escapes_content():
 def test_context_builder_renders_scheduled_task_with_utc_timestamps():
     scheduled_for = datetime(2026, 7, 10, 12, 30, tzinfo=timezone(timedelta(hours=8)))
 
-    result = DEFAULT_CONTEXT_BUILDER.render_scheduled_task(
+    result = CONTEXT_BUILDER.render_scheduled_task(
         ScheduledTaskContext(
             timestamp=datetime(2026, 7, 10, 4, 30, tzinfo=timezone.utc),
             scheduled_at=None,
@@ -63,7 +66,7 @@ def test_context_builder_renders_scheduled_task_with_utc_timestamps():
 
 
 def test_context_builder_renders_user_state_and_tool_context():
-    user_state_prompt = DEFAULT_CONTEXT_BUILDER.render_user_state(
+    user_state_prompt = CONTEXT_BUILDER.render_user_state(
         UserState(
             coins=7,
             plan="paid",
@@ -74,9 +77,8 @@ def test_context_builder_renders_user_state_and_tool_context():
         )
     )
 
-    tool_context = DEFAULT_CONTEXT_BUILDER.build_tool_context(
+    tool_context = CONTEXT_BUILDER.build_tool_context(
         ConversationScope(user_id=42, is_group=True, group_id=-100, message_id=12),
-        user_state_prompt=user_state_prompt,
     )
 
     assert '<user_state coins="7" user_plan="paid" permission="2"' in user_state_prompt
@@ -87,7 +89,6 @@ def test_context_builder_renders_user_state_and_tool_context():
         "group_id": -100,
         "message_id": 12,
         "user_id": 42,
-        "user_state_prompt": user_state_prompt,
     }
 
 
@@ -105,7 +106,7 @@ def test_context_builder_builds_model_query_with_runtime_replacements():
         {"role": "user", "content": persisted_content},
     ]
 
-    query = DEFAULT_CONTEXT_BUILDER.build_model_query(
+    query = CONTEXT_BUILDER.build_model_query(
         history_messages=history,
         scope=ConversationScope(user_id=42, is_group=True, group_id=-100, message_id=12),
         user_state_prompt="<user_state />",
@@ -119,21 +120,24 @@ def test_context_builder_builds_model_query_with_runtime_replacements():
     )
 
     assert query.messages == [
+        {"role": "system", "content": "base system policy\n\n<user_state />"},
         {"role": "user", "content": "older"},
         runtime_message,
     ]
-    assert query.text_fallback_messages == history
+    assert query.text_fallback_messages == [
+        {"role": "system", "content": "base system policy\n\n<user_state />"},
+        *history,
+    ]
     assert query.tool_context == {
         "is_group": True,
         "group_id": -100,
         "message_id": 12,
         "user_id": 42,
-        "user_state_prompt": "<user_state />",
     }
 
 
 def test_context_builder_create_runtime_replacement_ignores_empty_runtime_message():
-    assert DEFAULT_CONTEXT_BUILDER.create_runtime_replacement(
+    assert CONTEXT_BUILDER.create_runtime_replacement(
         persisted_content="persisted",
         runtime_message=None,
     ) is None

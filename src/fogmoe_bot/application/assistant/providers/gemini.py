@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Optional
+from typing import Optional
 
 from fogmoe_bot.infrastructure import config
 
@@ -11,7 +11,6 @@ from ..types import AIResponse, PartialAIResponseError, VisibleContentHandler
 def get_ai_response(
     messages,
     user_id: int,
-    tool_context: Optional[Dict[str, object]] = None,
     visible_content_handler: Optional[VisibleContentHandler] = None,
 ) -> AIResponse:
     """同步版本的 Google Gemini 响应函数（LiteLLM）。"""
@@ -23,7 +22,6 @@ def get_ai_response(
             "gemini",
             model_name,
             messages,
-            tool_context,
             provider_name="Gemini",
             completion_kwargs=(
                 {"reasoning_effort": "high"}
@@ -52,4 +50,3 @@ def get_ai_response(
 
         logging.error("Google Gemini 请求失败: %s", error_str)
         raise
-

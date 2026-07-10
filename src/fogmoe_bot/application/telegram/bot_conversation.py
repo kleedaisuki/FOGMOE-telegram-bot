@@ -13,9 +13,9 @@ from telegram.ext import ContextTypes
 from fogmoe_bot.application.telegram.archive_utils import send_permanent_records_archive
 from fogmoe_bot.application.chat import group_chat_history
 from fogmoe_bot.application.economy import process_user, stake_reward_pool
+from fogmoe_bot.application.assistant.conversation_context import CHAT_CONTEXT_BUILDER
 from fogmoe_bot.application.assistant.context_state import load_user_state
 from fogmoe_bot.domain.context import (
-    DEFAULT_CONTEXT_BUILDER,
     ChatMessageContext,
     ConversationScope,
 )
@@ -161,7 +161,7 @@ def _format_xml_message(
 ) -> str:
     """@brief 兼容旧调用的消息渲染薄封装 / Thin compatibility wrapper for message rendering."""
 
-    return DEFAULT_CONTEXT_BUILDER.render_chat_message(
+    return CHAT_CONTEXT_BUILDER.render_chat_message(
         ChatMessageContext(
             chat_type=chat_type,
             chat_title=chat_title,
@@ -586,7 +586,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
     if user_state is None:
         logger.warning("User disappeared while building AI context: user_id=%s", user_id)
         return
-    user_state_prompt = DEFAULT_CONTEXT_BUILDER.render_user_state(user_state)
+    user_state_prompt = CHAT_CONTEXT_BUILDER.render_user_state(user_state)
 
     chat_type = update.effective_chat.type or "private"
     group_title = (update.effective_chat.title or "").strip() if update.effective_chat else ""
@@ -684,7 +684,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
                     base64_str=base64_str,
                     mime_type=_media_mime_type(media_type, message),
                 )
-                runtime_replacement = DEFAULT_CONTEXT_BUILDER.create_runtime_replacement(
+                runtime_replacement = CHAT_CONTEXT_BUILDER.create_runtime_replacement(
                     persisted_content=formatted_message,
                     runtime_message=runtime_user_message,
                 )
@@ -746,7 +746,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
 
     # 异步获取AI回复
     is_group_chat = update.effective_chat.type in ("group", "supergroup")
-    model_query = DEFAULT_CONTEXT_BUILDER.build_model_query(
+    model_query = CHAT_CONTEXT_BUILDER.build_model_query(
         history_messages=chat_history,
         scope=ConversationScope(
             user_id=user_id,

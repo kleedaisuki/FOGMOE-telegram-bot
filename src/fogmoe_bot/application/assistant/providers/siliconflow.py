@@ -1,5 +1,4 @@
 import logging
-from typing import Dict, Optional
 
 from fogmoe_bot.infrastructure import config
 
@@ -10,7 +9,6 @@ from ..types import AIResponse, VisibleContentHandler
 def get_ai_response(
     messages,
     user_id: int,
-    tool_context: Optional[Dict[str, object]] = None,
     visible_content_handler: Optional[VisibleContentHandler] = None,
 ) -> AIResponse:
     """同步版本的 SiliconFlow 响应函数（OpenAI-compatible API）。"""
@@ -23,7 +21,6 @@ def get_ai_response(
             "siliconflow",
             siliconflow_model,
             messages,
-            tool_context,
             provider_name="SiliconFlow",
             visible_content_handler=visible_content_handler,
         )

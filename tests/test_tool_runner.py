@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from fogmoe_bot.application.assistant import tool_runner
 
 
@@ -37,7 +39,10 @@ def test_run_tool_loop_does_not_synthesize_tool_result_reply(monkeypatch):
         _Response(_Message("", None)),
     ]
 
+    calls = []
+
     def fake_create_chat_completion(*args, **kwargs):
+        calls.append(deepcopy(kwargs))
         return responses.pop(0)
 
     monkeypatch.setattr(
@@ -72,6 +77,7 @@ def test_run_tool_loop_does_not_synthesize_tool_result_reply(monkeypatch):
         and log.get("tool_name") == "google_search"
         for log in tool_logs
     )
+    assert calls[0]["messages"] == [{"role": "user", "content": "search example"}]
 
 
 def test_run_tool_loop_generates_final_reply_after_tool_limit(monkeypatch):
@@ -121,7 +127,13 @@ def test_run_tool_loop_generates_final_reply_after_tool_limit(monkeypatch):
     message, tool_logs = tool_runner.run_tool_loop(
         "test_provider",
         "test_model",
-        [{"role": "user", "content": "search example"}],
+        [
+            {
+                "role": "system",
+                "content": "at most 10 tool-calling rounds",
+            },
+            {"role": "user", "content": "search example"},
+        ],
         provider_name="Test",
         max_iterations=1,
     )

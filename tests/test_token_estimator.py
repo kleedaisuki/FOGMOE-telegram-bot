@@ -113,7 +113,7 @@ def test_estimate_conversation_tokens_counts_system_prompt_with_litellm(monkeypa
         guard_ratio=None,
     ) == 9
 
-    assert recorded["messages"][0] == {"role": "system", "content": "baseextra"}
+    assert recorded["messages"][0] == {"role": "system", "content": "base\n\nextra"}
     assert "tool_calls" not in recorded["messages"][1]
 
 

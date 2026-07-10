@@ -7,6 +7,8 @@ from typing import Any, Iterable, Mapping, Tuple
 
 import litellm
 
+from .prompt_utils import join_prompt_sections
+
 DEFAULT_GUARD_RATIO = 1.15
 DEFAULT_MESSAGE_OVERHEAD = 4.0
 
@@ -153,7 +155,7 @@ def _prepare_messages_for_litellm(
     include_tool_calls: bool = True,
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    system_content = f"{system_prompt or ''}{system_prompt_extra or ''}"
+    system_content = join_prompt_sections(system_prompt, system_prompt_extra)
     if system_content:
         result.append({"role": "system", "content": system_content})
 

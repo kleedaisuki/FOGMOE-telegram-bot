@@ -6,6 +6,7 @@ from typing import Any, Iterable, Mapping
 from fogmoe_bot.domain.conversation.prompt_utils import (
     format_metadata_attrs,
     format_user_state_prompt,
+    join_prompt_sections,
     xml_escape,
 )
 
@@ -25,6 +26,28 @@ class ContextBuilder:
     @note 该类只处理纯领域渲染和模型 query 组装，不访问 Telegram、数据库或 LLM provider。
     / This class only renders domain context and assembles model queries; it does not access Telegram, databases, or LLM providers.
     """
+
+    _system_prompt: str
+    """@brief 注入的静态系统策略资源 / Injected static system-policy resource."""
+
+    def __init__(self, system_prompt: str) -> None:
+        """@brief 初始化上下文构造器 / Initialize context builder.
+
+        @param system_prompt 静态系统策略资源 / Static system-policy resource.
+        @note 资源由应用组装层注入，保持领域层不依赖配置或文件系统。
+        / The application composition layer injects the resource, keeping the domain layer independent from configuration and the filesystem.
+        """
+
+        self._system_prompt = system_prompt
+
+    def compose_system_prompt(self, user_state_prompt: str) -> str:
+        """@brief 组合系统提示词 / Compose system prompt.
+
+        @param user_state_prompt 当前用户状态片段 / Current user-state fragment.
+        @return 静态策略与运行时状态组成的系统提示词 / System prompt composed from static policy and runtime state.
+        """
+
+        return join_prompt_sections(self._system_prompt, user_state_prompt)
 
     def render_user_state(self, user_state: UserState) -> str:
         """@brief 渲染用户状态提示词 / Render user state prompt.
@@ -134,20 +157,22 @@ class ContextBuilder:
 
         history = [dict(message) for message in history_messages if isinstance(message, Mapping)]
         replacements = list(runtime_replacements or [])
-        query_messages = self._apply_runtime_replacements(history, replacements)
+        query_history = self._apply_runtime_replacements(history, replacements)
+        system_message = self._build_system_message(user_state_prompt)
+        query_messages = [system_message, *query_history]
         fallback = None
         if text_fallback_messages is not None:
-            fallback = [
+            fallback_history = [
                 dict(message)
                 for message in text_fallback_messages
                 if isinstance(message, Mapping)
             ]
+            fallback = [dict(system_message), *fallback_history]
 
         return ModelQuery(
             messages=query_messages,
             tool_context=self.build_tool_context(
                 scope,
-                user_state_prompt=user_state_prompt,
             ),
             text_fallback_messages=fallback,
         )
@@ -155,13 +180,10 @@ class ContextBuilder:
     def build_tool_context(
         self,
         scope: ConversationScope,
-        *,
-        user_state_prompt: str,
     ) -> dict[str, Any]:
         """@brief 构造工具请求上下文 / Build tool request context.
 
         @param scope 对话作用域 / Conversation scope.
-        @param user_state_prompt 用户状态提示词 / User state prompt.
         @return 工具上下文字典 / Tool context dictionary.
         """
 
@@ -170,7 +192,18 @@ class ContextBuilder:
             "group_id": scope.group_id,
             "message_id": scope.message_id,
             "user_id": scope.user_id,
-            "user_state_prompt": user_state_prompt,
+        }
+
+    def _build_system_message(self, user_state_prompt: str) -> dict[str, str]:
+        """@brief 创建系统消息 / Build system message.
+
+        @param user_state_prompt 当前用户状态提示词 / Current user-state prompt.
+        @return OpenAI 格式的系统消息 / OpenAI-format system message.
+        """
+
+        return {
+            "role": "system",
+            "content": self.compose_system_prompt(user_state_prompt),
         }
 
     def _apply_runtime_replacements(
@@ -298,6 +331,3 @@ class ContextBuilder:
         if value.tzinfo is not None:
             value = value.astimezone(timezone.utc).replace(tzinfo=None)
         return value.strftime("%Y-%m-%d %H:%M:%S")
-
-
-DEFAULT_CONTEXT_BUILDER = ContextBuilder()

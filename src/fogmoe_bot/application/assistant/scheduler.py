@@ -8,9 +8,9 @@ from telegram.ext import ContextTypes
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import ai_schedule_repository
 from fogmoe_bot.application.telegram.archive_utils import send_permanent_records_archive
+from fogmoe_bot.application.assistant.conversation_context import CHAT_CONTEXT_BUILDER
 from fogmoe_bot.application.assistant.context_state import load_user_state
 from fogmoe_bot.domain.context import (
-    DEFAULT_CONTEXT_BUILDER,
     ConversationScope,
     ScheduledTaskContext,
 )
@@ -73,7 +73,7 @@ def _format_scheduled_message(
 ) -> str:
     """@brief 兼容旧调用的定时任务渲染薄封装 / Thin compatibility wrapper for scheduled task rendering."""
 
-    return DEFAULT_CONTEXT_BUILDER.render_scheduled_task(
+    return CHAT_CONTEXT_BUILDER.render_scheduled_task(
         ScheduledTaskContext(
             timestamp=timestamp,
             scheduled_at=scheduled_at,
@@ -197,7 +197,7 @@ async def _process_schedule_task_locked(
                 error="user not found",
             )
             return
-        user_state_prompt = DEFAULT_CONTEXT_BUILDER.render_user_state(user_state)
+        user_state_prompt = CHAT_CONTEXT_BUILDER.render_user_state(user_state)
 
         now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
         scheduled_message = _format_scheduled_message(
@@ -227,7 +227,7 @@ async def _process_schedule_task_locked(
             summary.schedule_summary_generation(user_id)
 
         chat_history = await db_connection.async_get_chat_history(user_id)
-        model_query = DEFAULT_CONTEXT_BUILDER.build_model_query(
+        model_query = CHAT_CONTEXT_BUILDER.build_model_query(
             history_messages=chat_history,
             scope=ConversationScope(user_id=user_id),
             user_state_prompt=user_state_prompt,

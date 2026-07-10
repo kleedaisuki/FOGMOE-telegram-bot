@@ -9,7 +9,6 @@ from .tool_calling.protocol import (
     normalise_tool_calls,
 )
 from .tools import OPENAI_TOOLS, AI_TOOL_ARG_MODELS, AI_TOOL_HANDLERS
-from .prompts import compose_system_prompt
 from fogmoe_bot.infrastructure.llm.litellm_client import create_chat_completion
 from .types import AIResponse, PartialAIResponseError, ToolLog, VisibleContentHandler
 
@@ -160,7 +159,6 @@ def run_tool_loop(
     provider: str,
     model: str,
     messages: List[Dict[str, Any]],
-    tool_context: Optional[Dict[str, object]] = None,
     *,
     provider_name: str = "AI",
     tool_choice: str | Dict[str, object] = "auto",
@@ -172,15 +170,9 @@ def run_tool_loop(
 ) -> AIResponse:
     """Run a tool-calling loop through LiteLLM using OpenAI-format tools."""
     tools = OPENAI_TOOLS
-    system_message = {
-        "role": "system",
-        "content": compose_system_prompt(tool_context),
-    }
-
     filtered_messages = [
         msg for msg in messages if msg.get("content") is not None or msg.get("tool_calls")
     ]
-    filtered_messages.insert(0, system_message)
 
     tool_logs: List[ToolLog] = []
     skip_set = set(skip_tools or [])

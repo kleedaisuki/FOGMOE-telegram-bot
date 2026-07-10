@@ -136,7 +136,7 @@ class ModelQuery:
     """@brief 模型推理查询 / Model inference query.
 
     @param messages 发给模型的消息链 / Message chain sent to the model.
-    @param tool_context 工具与系统提示词上下文 / Tool and system-prompt context.
+    @param tool_context 工具请求上下文 / Tool request context.
     @param text_fallback_messages 纯文本降级消息链 / Text-only fallback message chain.
     """
 

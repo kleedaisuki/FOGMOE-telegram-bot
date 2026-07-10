@@ -66,7 +66,6 @@ def _call_service_with_context(
         return AI_SERVICE_MAP[service_name](
             messages,
             user_id,
-            tool_context,
             visible_content_handler=visible_content_handler,
         )
     finally:

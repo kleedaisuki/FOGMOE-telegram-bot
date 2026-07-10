@@ -1,4 +1,4 @@
-from typing import Iterable, Optional
+from typing import Iterable
 
 
 def xml_escape(value: str) -> str:
@@ -11,6 +11,22 @@ def xml_escape(value: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
         .replace("'", "&apos;")
+    )
+
+
+def join_prompt_sections(*sections: object) -> str:
+    """@brief 组合提示词段落 / Join prompt sections.
+
+    @param sections 按优先级排列的提示词段落 / Prompt sections ordered by priority.
+    @return 以空行分隔、且不含首尾空白的提示词 / Prompt with blank-line separators and no outer whitespace.
+    @note 空段落会被忽略，以避免依赖资源文件是否自带换行。
+    / Empty sections are ignored so callers do not depend on resource-file trailing newlines.
+    """
+
+    return "\n\n".join(
+        text
+        for section in sections
+        if (text := str(section or "").strip())
     )
 
 
