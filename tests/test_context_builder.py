@@ -10,7 +10,7 @@ from fogmoe_bot.domain.context import (
     RuntimeMessageReplacement,
     ScheduledTaskContext,
     UserState,
-    build_model_query,
+    build_context_state,
     build_tool_context,
     create_runtime_replacement,
     render_chat_message,
@@ -94,7 +94,7 @@ def test_context_tools_render_user_state_and_tool_context():
     }
 
 
-def test_context_tools_build_model_query_with_runtime_replacements():
+def test_context_state_builds_model_messages_with_runtime_replacements():
     persisted_content = "<message>[photo]</message>"
     runtime_message = {
         "role": "user",
@@ -108,11 +108,17 @@ def test_context_tools_build_model_query_with_runtime_replacements():
         {"role": "user", "content": persisted_content},
     ]
 
-    query = build_model_query(
+    user_state = UserState(
+        coins=7,
+        plan="paid",
+        permission=2,
+        impression="likes CS",
+    )
+    context_state = build_context_state(
         system_prompt="base system policy",
         history_messages=history,
         scope=ConversationScope(user_id=42, is_group=True, group_id=-100, message_id=12),
-        user_state_prompt="<user_state />",
+        user_state=user_state,
         runtime_replacements=[
             RuntimeMessageReplacement(
                 persisted_content=persisted_content,
@@ -122,21 +128,29 @@ def test_context_tools_build_model_query_with_runtime_replacements():
         text_fallback_messages=history,
     )
 
-    assert query.messages == [
-        {"role": "system", "content": "base system policy\n\n<user_state />"},
+    assert context_state.messages == [
+        {
+            "role": "system",
+            "content": "base system policy\n\n"
+            '<user_state coins="7" user_plan="paid" permission="2" '
+            'permission_label="Premium" diary_exists="false" />\n'
+            "<user_profile>\n  <impression>likes CS</impression>\n</user_profile>",
+        },
         {"role": "user", "content": "older"},
         runtime_message,
     ]
-    assert query.text_fallback_messages == [
-        {"role": "system", "content": "base system policy\n\n<user_state />"},
+    assert context_state.text_fallback_messages == [
+        context_state.messages[0],
         *history,
     ]
-    assert query.tool_context == {
+    assert context_state.tool_context == {
         "is_group": True,
         "group_id": -100,
         "message_id": 12,
         "user_id": 42,
     }
+    assert context_state.scope.user_id == 42
+    assert context_state.user_state is user_state
 
 
 def test_context_tools_ignore_empty_runtime_replacement():

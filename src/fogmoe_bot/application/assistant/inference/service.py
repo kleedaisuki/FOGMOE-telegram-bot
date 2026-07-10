@@ -7,6 +7,7 @@ from typing import Any
 
 from fogmoe_bot.domain.agent_routing import ProviderCircuit, ProviderRoute, model_supports_vision
 from fogmoe_bot.domain.agent_runtime.executor import EXECUTOR
+from fogmoe_bot.domain.context import ContextState
 from fogmoe_bot.domain.agent_runtime.tools import (
     cleanup_linux_sandbox,
     clear_tool_request_context,
@@ -14,7 +15,7 @@ from fogmoe_bot.domain.agent_runtime.tools import (
 )
 from fogmoe_bot.infrastructure import config
 
-from ..agent_loop import AgentLoop, AgentResponse, AgentRunRequest, DEFAULT_AGENT_LOOP
+from ..agent_loop import AgentExecutionConfig, AgentLoop, AgentResponse, DEFAULT_AGENT_LOOP
 from .output import VisibleContentSink
 from .visible_output import visible_content_events, visible_content_was_sent
 from ..errors import PartialAgentResponseError, SafetyBlockError
@@ -82,45 +83,33 @@ class AssistantInferenceService:
 
     async def infer(
         self,
-        messages: list[dict[str, Any]],
+        context_state: ContextState,
         *,
-        user_id: int,
-        tool_context: dict[str, object] | None = None,
-        text_fallback_messages: list[dict[str, Any]] | None = None,
         visible_content_sink: VisibleContentSink | None = None,
     ) -> AgentResponse:
         """@brief 执行一次可回退的 Agent 推理 / Run one fallback-capable Agent inference.
 
-        @param messages 初始模型消息 / Initial model messages.
-        @param user_id 用户标识 / User identifier.
-        @param tool_context Runtime 工具上下文 / Runtime tool context.
-        @param text_fallback_messages 多模态失败时的文本降级消息 / Text fallback for multimodal failure.
+        @param context_state 本回合完整领域上下文 / Complete domain context for this turn.
         @param visible_content_sink 用户可见输出端口 / User-visible output sink.
         @return 最终 Agent 响应 / Final Agent response.
         """
-        request_context = dict(tool_context or {})
-        request_context.setdefault("user_id", user_id)
         response, last_error = await self._try_routes(
-            messages,
-            user_id=user_id,
-            tool_context=request_context,
-            text_fallback_messages=text_fallback_messages,
+            context_state,
             visible_content_sink=visible_content_sink,
         )
         if response is not None:
             return response
 
-        if messages_have_images(messages):
+        if messages_have_images(context_state.messages):
             logging.warning("多模态 AI 调用全部失败，降级为纯文本图片描述重试: %s", last_error)
             fallback_messages = (
-                list(text_fallback_messages)
-                if text_fallback_messages is not None
-                else strip_image_content(messages)
+                list(context_state.text_fallback_messages)
+                if context_state.text_fallback_messages is not None
+                else strip_image_content(context_state.messages)
             )
             response, _ = await self._try_routes(
-                fallback_messages,
-                user_id=user_id,
-                tool_context=request_context,
+                context_state,
+                messages=fallback_messages,
                 visible_content_sink=visible_content_sink,
             )
             if response is not None:
@@ -135,11 +124,9 @@ class AssistantInferenceService:
 
     async def _try_routes(
         self,
-        messages: list[dict[str, Any]],
+        context_state: ContextState,
         *,
-        user_id: int,
-        tool_context: dict[str, object] | None,
-        text_fallback_messages: list[dict[str, Any]] | None = None,
+        messages: list[dict[str, Any]] | None = None,
         visible_content_sink: VisibleContentSink | None,
     ) -> tuple[AgentResponse | None, Exception | None]:
         last_error: Exception | None = None
@@ -152,14 +139,24 @@ class AssistantInferenceService:
             if self._circuit.is_open(service_name):
                 logging.warning("%s 当前处于熔断冷却中，跳过调用", service_name)
                 continue
-            service_messages = self._messages_for_route(route, messages, text_fallback_messages)
+            service_messages = self._messages_for_route(
+                route,
+                messages or context_state.messages,
+                context_state.text_fallback_messages,
+            )
+            route_context = ContextState(
+                scope=context_state.scope,
+                user_state=context_state.user_state,
+                messages=service_messages,
+                tool_context=context_state.tool_context,
+                text_fallback_messages=context_state.text_fallback_messages,
+            )
             try:
                 response = await loop.run_in_executor(
                     EXECUTOR,
-                    lambda r=route, m=service_messages: self._run_route_with_context(
+                    lambda r=route, c=route_context: self._run_route_with_context(
                         r,
-                        m,
-                        tool_context=tool_context,
+                        c,
                         visible_content_sink=visible_content_sink,
                     ),
                 )
@@ -191,22 +188,20 @@ class AssistantInferenceService:
     def _run_route_with_context(
         self,
         route: ProviderRoute,
-        messages: list[dict[str, Any]],
+        context_state: ContextState,
         *,
-        tool_context: dict[str, object] | None,
         visible_content_sink: VisibleContentSink | None,
     ) -> AgentResponse:
         """@brief 在 Runtime 上下文中运行 route / Run a route inside Runtime context.
 
         @param route 要执行的 route / Route to execute.
-        @param messages route 输入消息 / Route input messages.
-        @param tool_context Runtime 工具上下文 / Runtime tool context.
+        @param context_state route 的领域上下文 / Domain context for the route.
         @param visible_content_sink 用户可见输出端口 / User-visible output sink.
         @return Agent 响应 / Agent response.
         """
-        set_tool_request_context(dict(tool_context or {}))
+        set_tool_request_context(dict(context_state.tool_context))
         try:
-            return self._run_route(route, messages, visible_content_sink)
+            return self._run_route(route, context_state, visible_content_sink)
         finally:
             try:
                 cleanup_linux_sandbox()
@@ -216,13 +211,13 @@ class AssistantInferenceService:
     def _run_route(
         self,
         route: ProviderRoute,
-        messages: list[dict[str, Any]],
+        context_state: ContextState,
         visible_content_sink: VisibleContentSink | None,
     ) -> AgentResponse:
         """@brief 执行 route 的模型回退链 / Execute a route's model fallback chain.
 
         @param route 要执行的 route / Route to execute.
-        @param messages 模型消息 / Model messages.
+        @param context_state route 的领域上下文 / Domain context for the route.
         @param visible_content_sink 用户可见输出端口 / User-visible output sink.
         @return Agent 响应 / Agent response.
         """
@@ -232,15 +227,15 @@ class AssistantInferenceService:
         for model in route.models:
             try:
                 return self._agent_loop.run(
-                    AgentRunRequest(
+                    context_state,
+                    AgentExecutionConfig(
                         provider=route.provider_name,
                         model=model or "",
-                        messages=list(messages),
                         provider_name=route.display_name,
                         skip_tools=frozenset(route.skip_tools),
                         completion_kwargs=route.completion_kwargs or None,
-                        visible_content_handler=visible_content_sink,
-                    )
+                    ),
+                    visible_content_handler=visible_content_sink,
                 )
             except PartialAgentResponseError:
                 raise

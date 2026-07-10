@@ -12,7 +12,7 @@ from fogmoe_bot.application.accounts.context import load_user_state
 from fogmoe_bot.domain.context import (
     ConversationScope,
     ScheduledTaskContext,
-    build_model_query,
+    build_context_state,
     render_scheduled_task,
     render_user_state,
 )
@@ -230,11 +230,11 @@ async def _process_schedule_task_locked(
             summary.schedule_summary_generation(user_id)
 
         chat_history = await db_connection.async_get_chat_history(user_id)
-        model_query = build_model_query(
+        context_state = build_context_state(
             system_prompt=config.SYSTEM_PROMPT,
             history_messages=chat_history,
             scope=ConversationScope(user_id=user_id),
-            user_state_prompt=user_state_prompt,
+            user_state=user_state,
         )
 
         try:
@@ -254,10 +254,7 @@ async def _process_schedule_task_locked(
         )
 
         assistant_message, tool_logs = await ASSISTANT_INFERENCE_SERVICE.infer(
-            model_query.messages,
-            user_id=user_id,
-            tool_context=model_query.tool_context,
-            text_fallback_messages=model_query.text_fallback_messages,
+            context_state,
             visible_content_sink=visible_content_handler,
         )
         sent_messages.extend(visible_content_handler.sent_messages)

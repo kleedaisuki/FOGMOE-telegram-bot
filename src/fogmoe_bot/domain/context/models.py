@@ -132,14 +132,21 @@ class RuntimeMessageReplacement:
 
 
 @dataclass(frozen=True)
-class ModelQuery:
-    """@brief 模型推理查询 / Model inference query.
+class ContextState:
+    """@brief 单个 Agent 回合的领域上下文快照 / Domain context snapshot for one Agent turn.
 
-    @param messages 发给模型的消息链 / Message chain sent to the model.
-    @param tool_context 工具请求上下文 / Tool request context.
-    @param text_fallback_messages 纯文本降级消息链 / Text-only fallback message chain.
+    ``ContextState`` 是上层交给 Agent 的唯一内容载体。它由已持久化的会话、用户状态和
+    本次消息作用域投影而成；AgentLoop 只消费该快照，不负责读取数据库或拼装 Prompt。
+
+    @param scope 本次回合的会话作用域 / Conversation scope for this turn.
+    @param user_state 本次回合可见的用户状态 / User state visible to this turn.
+    @param messages 已编译、将发送给模型的消息链 / Compiled messages sent to the model.
+    @param tool_context 传给 Agent 工具的显式作用域 / Explicit scope passed to Agent tools.
+    @param text_fallback_messages 纯文本模型的降级消息链 / Text-only fallback message chain.
     """
 
+    scope: ConversationScope
+    user_state: UserState
     messages: list[dict[str, Any]]
     tool_context: dict[str, Any]
     text_fallback_messages: list[dict[str, Any]] | None = None

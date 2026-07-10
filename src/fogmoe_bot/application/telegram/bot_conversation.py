@@ -18,7 +18,7 @@ from fogmoe_bot.application.accounts.context import load_user_state
 from fogmoe_bot.domain.context import (
     ChatMessageContext,
     ConversationScope,
-    build_model_query,
+    build_context_state,
     create_runtime_replacement,
     render_chat_message,
     render_user_state,
@@ -750,7 +750,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
 
     # 异步获取AI回复
     is_group_chat = update.effective_chat.type in ("group", "supergroup")
-    model_query = build_model_query(
+    context_state = build_context_state(
         system_prompt=config.SYSTEM_PROMPT,
         history_messages=chat_history,
         scope=ConversationScope(
@@ -759,7 +759,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
             group_id=update.effective_chat.id if is_group_chat else None,
             message_id=getattr(effective_message, "message_id", None),
         ),
-        user_state_prompt=user_state_prompt,
+        user_state=user_state,
         runtime_replacements=runtime_replacements,
         text_fallback_messages=chat_history,
     )
@@ -779,10 +779,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
     )
 
     assistant_message, tool_logs = await ASSISTANT_INFERENCE_SERVICE.infer(
-        model_query.messages,
-        user_id=user_id,
-        tool_context=model_query.tool_context,
-        text_fallback_messages=model_query.text_fallback_messages,
+        context_state,
         visible_content_sink=visible_content_handler,
     )
     sent_messages.extend(visible_content_handler.sent_messages)

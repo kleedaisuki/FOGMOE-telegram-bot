@@ -2,6 +2,7 @@ import asyncio
 
 from fogmoe_bot.application.assistant.agent_loop import AgentResponse
 from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
+from fogmoe_bot.domain.context import ContextState, ConversationScope, UserState
 from fogmoe_bot.domain.agent_routing import ProviderCircuit, ProviderRoute
 
 
@@ -21,15 +22,15 @@ def _route(
 
 def _service(*, order, profiles, runner, text_only_patterns=()):
     class _AgentLoop:
-        def run(self, request):
+        def run(self, context, config, *, visible_content_handler=None):
             return runner(
-                request.provider,
-                request.model,
-                request.messages,
-                provider_name=request.provider_name,
-                skip_tools=request.skip_tools,
-                completion_kwargs=request.completion_kwargs,
-                visible_content_handler=request.visible_content_handler,
+                config.provider,
+                config.model,
+                context.messages,
+                provider_name=config.provider_name,
+                skip_tools=config.skip_tools,
+                completion_kwargs=config.completion_kwargs,
+                visible_content_handler=visible_content_handler,
             )
 
     return AssistantInferenceService(
@@ -42,6 +43,16 @@ def _service(*, order, profiles, runner, text_only_patterns=()):
         ),
         text_only_model_patterns=text_only_patterns,
         agent_loop=_AgentLoop(),
+    )
+
+
+def _context(messages, *, text_fallback_messages=None):
+    return ContextState(
+        scope=ConversationScope(user_id=123),
+        user_state=UserState(coins=10, plan="free", permission=0, impression="Not recorded"),
+        messages=messages,
+        tool_context={"user_id": 123, "is_group": False, "group_id": None, "message_id": None},
+        text_fallback_messages=text_fallback_messages,
     )
 
 
@@ -65,7 +76,7 @@ def test_inference_retries_image_messages_as_text_after_all_routes_fail():
 
     service = _service(order=("openai",), profiles={"openai": _route("openai")}, runner=runner)
 
-    response = asyncio.run(service.infer(image_messages, user_id=123))
+    response = asyncio.run(service.infer(_context(image_messages)))
 
     assert response == ("text fallback response", [])
     assert calls == [
@@ -99,11 +110,7 @@ def test_text_only_route_uses_vision_text_fallback_messages():
     )
 
     assert asyncio.run(
-        service.infer(
-            image_messages,
-            user_id=123,
-            text_fallback_messages=text_fallback_messages,
-        )
+        service.infer(_context(image_messages, text_fallback_messages=text_fallback_messages))
     ) == ("ok", [])
     assert calls == [text_fallback_messages]
 
@@ -118,7 +125,7 @@ def test_vision_capable_route_keeps_multimodal_messages():
 
     service = _service(order=("openai",), profiles={"openai": _route("openai", model="gpt-4o")}, runner=runner)
 
-    assert asyncio.run(service.infer(image_messages, user_id=123)) == ("ok", [])
+    assert asyncio.run(service.infer(_context(image_messages))) == ("ok", [])
     assert calls == [image_messages]
 
 
@@ -153,5 +160,5 @@ def test_open_circuit_skips_to_next_route(monkeypatch):
     )
     monkeypatch.setattr(service.circuit, "is_open", lambda name: name == "gemini")
 
-    assert asyncio.run(service.infer([], user_id=123)) == ("ok", [])
+    assert asyncio.run(service.infer(_context([]))) == ("ok", [])
     assert calls == ["siliconflow"]

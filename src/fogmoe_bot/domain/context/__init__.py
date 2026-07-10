@@ -1,7 +1,7 @@
 """@brief 上下文领域模型 / Context domain model."""
 
 from .builder import (
-    build_model_query,
+    build_context_state,
     build_tool_context,
     compose_system_prompt,
     create_runtime_replacement,
@@ -12,7 +12,7 @@ from .builder import (
 from .models import (
     ChatMessageContext,
     ConversationScope,
-    ModelQuery,
+    ContextState,
     RuntimeMessageReplacement,
     ScheduledTaskContext,
     UserState,
@@ -21,11 +21,11 @@ from .models import (
 __all__ = [
     "ChatMessageContext",
     "ConversationScope",
-    "ModelQuery",
+    "ContextState",
     "RuntimeMessageReplacement",
     "ScheduledTaskContext",
     "UserState",
-    "build_model_query",
+    "build_context_state",
     "build_tool_context",
     "compose_system_prompt",
     "create_runtime_replacement",

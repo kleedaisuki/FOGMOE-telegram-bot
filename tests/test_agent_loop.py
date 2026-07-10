@@ -1,7 +1,7 @@
 from copy import deepcopy
-import json
 
 from fogmoe_bot.application.assistant import agent_loop
+from fogmoe_bot.domain.context import ContextState, ConversationScope, UserState
 
 
 class _Message:
@@ -20,31 +20,33 @@ class _Response:
         self.choices = [_Choice(message)]
 
 
-def test_agent_run_state_round_trips_as_json_checkpoint():
-    def visible_handler(*args, **kwargs):
-        return None
+def _context(messages):
+    return ContextState(
+        scope=ConversationScope(user_id=42),
+        user_state=UserState(coins=10, plan="free", permission=0, impression="Not recorded"),
+        messages=messages,
+        tool_context={"user_id": 42, "is_group": False, "group_id": None, "message_id": None},
+    )
 
-    request = agent_loop.AgentRunRequest(
+
+def test_agent_execution_state_separates_context_from_configuration():
+    context = _context([{"role": "user", "content": "search example"}])
+    config = agent_loop.AgentExecutionConfig(
         provider="test_provider",
         model="test_model",
-        messages=[{"role": "user", "content": "search example"}],
         provider_name="Test",
         skip_tools=frozenset({"generate_image"}),
         completion_kwargs={"temperature": 0.2},
-        visible_content_handler=visible_handler,
     )
-    state = agent_loop.AgentRunState.from_request(request)
+    state = agent_loop.AgentExecutionState.from_context(context, config)
     state.events.append({"type": "tool_result", "tool_name": "google_search", "result": {"count": 1}})
     state.iteration = 2
 
-    restored = agent_loop.AgentRunState.from_dict(json.loads(json.dumps(state.to_dict())))
-
-    assert restored.iteration == 2
-    assert restored.messages == [{"role": "user", "content": "search example"}]
-    assert restored.events == state.events
-    assert restored.request.skip_tools == frozenset({"generate_image"})
-    assert restored.request.completion_kwargs == {"temperature": 0.2}
-    assert restored.request.visible_content_handler is None
+    assert state.context is context
+    assert state.config is config
+    assert state.messages == [{"role": "user", "content": "search example"}]
+    assert state.events[0]["tool_name"] == "google_search"
+    assert state.iteration == 2
 
 
 def test_agent_loop_does_not_synthesize_tool_result_reply(monkeypatch):
@@ -92,10 +94,10 @@ def test_agent_loop_does_not_synthesize_tool_result_reply(monkeypatch):
         completion_client=fake_create_chat_completion,
     )
     message, tool_logs = loop.run(
-        agent_loop.AgentRunRequest(
+        _context([{"role": "user", "content": "search example"}]),
+        agent_loop.AgentExecutionConfig(
             provider="test_provider",
             model="test_model",
-            messages=[{"role": "user", "content": "search example"}],
             provider_name="Test",
         )
     )
@@ -153,16 +155,16 @@ def test_agent_loop_generates_final_reply_after_tool_limit(monkeypatch):
         completion_client=fake_create_chat_completion,
     )
     message, tool_logs = loop.run(
-        agent_loop.AgentRunRequest(
+        _context([
+            {
+                "role": "system",
+                "content": "at most 10 tool-calling rounds",
+            },
+            {"role": "user", "content": "search example"},
+        ]),
+        agent_loop.AgentExecutionConfig(
             provider="test_provider",
             model="test_model",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "at most 10 tool-calling rounds",
-                },
-                {"role": "user", "content": "search example"},
-            ],
             provider_name="Test",
             max_iterations=1,
         )
@@ -232,13 +234,13 @@ def test_agent_loop_sends_generated_voice_immediately(monkeypatch):
         completion_client=fake_create_chat_completion,
     )
     message, tool_logs = loop.run(
-        agent_loop.AgentRunRequest(
+        _context([{"role": "user", "content": "say hello"}]),
+        agent_loop.AgentExecutionConfig(
             provider="test_provider",
             model="test_model",
-            messages=[{"role": "user", "content": "say hello"}],
             provider_name="Test",
-            visible_content_handler=visible_handler,
-        )
+        ),
+        visible_content_handler=visible_handler,
     )
 
     voice_results = [

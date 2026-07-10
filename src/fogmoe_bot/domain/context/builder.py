@@ -15,7 +15,7 @@ from .formatting import (
 from .models import (
     ChatMessageContext,
     ConversationScope,
-    ModelQuery,
+    ContextState,
     RuntimeMessageReplacement,
     ScheduledTaskContext,
     UserState,
@@ -118,24 +118,24 @@ def create_runtime_replacement(
     )
 
 
-def build_model_query(
+def build_context_state(
     *,
     system_prompt: str,
     history_messages: Iterable[Mapping[str, Any]],
     scope: ConversationScope,
-    user_state_prompt: str,
+    user_state: UserState,
     runtime_replacements: Iterable[RuntimeMessageReplacement] | None = None,
     text_fallback_messages: Iterable[Mapping[str, Any]] | None = None,
-) -> ModelQuery:
-    """@brief 构造模型推理查询 / Build a model inference query.
+) -> ContextState:
+    """@brief 构造 Agent 上下文状态 / Build Agent context state.
 
     @param system_prompt 静态系统策略 / Static system policy.
     @param history_messages 当前会话历史 / Current conversation history.
     @param scope 对话作用域 / Conversation scope.
-    @param user_state_prompt 用户状态提示词 / User-state prompt.
+    @param user_state 本回合用户状态 / User state for this turn.
     @param runtime_replacements 运行时消息替换 / Runtime message replacements.
     @param text_fallback_messages 纯文本降级历史 / Text-only fallback history.
-    @return 可直接交给模型 router 的查询 / Query ready for model routing.
+    @return 可直接交给 AgentLoop 的领域上下文快照 / Domain context snapshot ready for AgentLoop.
     """
     history = [dict(message) for message in history_messages if isinstance(message, Mapping)]
     query_history = _apply_runtime_replacements(history, list(runtime_replacements or []))
@@ -143,7 +143,7 @@ def build_model_query(
         "role": "system",
         "content": compose_system_prompt(
             system_prompt=system_prompt,
-            user_state_prompt=user_state_prompt,
+            user_state_prompt=render_user_state(user_state),
         ),
     }
     fallback = None
@@ -155,7 +155,9 @@ def build_model_query(
         ]
         fallback = [dict(system_message), *fallback_history]
 
-    return ModelQuery(
+    return ContextState(
+        scope=scope,
+        user_state=user_state,
         messages=[system_message, *query_history],
         tool_context=build_tool_context(scope),
         text_fallback_messages=fallback,
