@@ -12,8 +12,6 @@ from fogmoe_bot.domain.agent_runtime.protocol import (
     assistant_message_to_plain,
     normalise_tool_calls,
 )
-from fogmoe_bot.domain.context import ContextBuilder
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.llm.litellm_client import create_chat_completion
 
 from .errors import PartialAgentResponseError
@@ -164,25 +162,14 @@ class AgentLoop:
         *,
         runtime: AgentRuntime,
         completion_client: CompletionClient,
-        context_builder: ContextBuilder,
     ) -> None:
         """@brief 初始化 Agent Loop / Initialize the Agent Loop.
 
         @param runtime AgentRuntime 任务执行环境 / AgentRuntime task execution environment.
         @param completion_client 同步模型调用依赖 / Synchronous model-call dependency.
-        @param context_builder 对话上下文构造器 / Conversation context builder.
         """
         self._runtime = runtime
         self._completion_client = completion_client
-        self._context_builder = context_builder
-
-    @property
-    def context_builder(self) -> ContextBuilder:
-        """@brief 读取对话上下文构造器 / Read the conversation context builder.
-
-        @return 共享上下文构造器 / Shared context builder.
-        """
-        return self._context_builder
 
     def run(self, request: AgentRunRequest, *, state: AgentRunState | None = None) -> AgentResponse:
         """@brief 驱动一个 Agent 回合 / Drive an Agent turn.
@@ -465,6 +452,5 @@ class AgentLoop:
 DEFAULT_AGENT_LOOP = AgentLoop(
     runtime=DEFAULT_AGENT_RUNTIME,
     completion_client=create_chat_completion,
-    context_builder=ContextBuilder(config.SYSTEM_PROMPT),
 )
 """@brief 进程共享 Agent Loop / Process-shared Agent Loop."""

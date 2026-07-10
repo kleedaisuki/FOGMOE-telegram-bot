@@ -2,7 +2,6 @@ from copy import deepcopy
 import json
 
 from fogmoe_bot.application.assistant import agent_loop
-from fogmoe_bot.domain.context import ContextBuilder
 
 
 class _Message:
@@ -91,7 +90,6 @@ def test_agent_loop_does_not_synthesize_tool_result_reply(monkeypatch):
     loop = agent_loop.AgentLoop(
         runtime=agent_loop.DEFAULT_AGENT_RUNTIME,
         completion_client=fake_create_chat_completion,
-        context_builder=ContextBuilder("test prompt"),
     )
     message, tool_logs = loop.run(
         agent_loop.AgentRunRequest(
@@ -153,7 +151,6 @@ def test_agent_loop_generates_final_reply_after_tool_limit(monkeypatch):
     loop = agent_loop.AgentLoop(
         runtime=agent_loop.DEFAULT_AGENT_RUNTIME,
         completion_client=fake_create_chat_completion,
-        context_builder=ContextBuilder("test prompt"),
     )
     message, tool_logs = loop.run(
         agent_loop.AgentRunRequest(
@@ -233,7 +230,6 @@ def test_agent_loop_sends_generated_voice_immediately(monkeypatch):
     loop = agent_loop.AgentLoop(
         runtime=agent_loop.DEFAULT_AGENT_RUNTIME,
         completion_client=fake_create_chat_completion,
-        context_builder=ContextBuilder("test prompt"),
     )
     message, tool_logs = loop.run(
         agent_loop.AgentRunRequest(

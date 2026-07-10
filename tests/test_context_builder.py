@@ -6,19 +6,21 @@ from fogmoe_bot.application.accounts.context import (
 )
 from fogmoe_bot.domain.context import (
     ChatMessageContext,
-    ContextBuilder,
     ConversationScope,
     RuntimeMessageReplacement,
     ScheduledTaskContext,
     UserState,
+    build_model_query,
+    build_tool_context,
+    create_runtime_replacement,
+    render_chat_message,
+    render_scheduled_task,
+    render_user_state,
 )
 
 
-CONTEXT_BUILDER = ContextBuilder("base system policy")
-
-
-def test_context_builder_renders_chat_message_metadata_and_escapes_content():
-    result = CONTEXT_BUILDER.render_chat_message(
+def test_context_tools_render_chat_message_metadata_and_escape_content():
+    result = render_chat_message(
         ChatMessageContext(
             chat_type="supergroup",
             chat_title="Fog <Lab>",
@@ -42,10 +44,10 @@ def test_context_builder_renders_chat_message_metadata_and_escapes_content():
     assert '<message>hello &lt;Klee&gt; &amp; &quot;world&quot;</message>' in result
 
 
-def test_context_builder_renders_scheduled_task_with_utc_timestamps():
+def test_context_tools_render_scheduled_task_with_utc_timestamps():
     scheduled_for = datetime(2026, 7, 10, 12, 30, tzinfo=timezone(timedelta(hours=8)))
 
-    result = CONTEXT_BUILDER.render_scheduled_task(
+    result = render_scheduled_task(
         ScheduledTaskContext(
             timestamp=datetime(2026, 7, 10, 4, 30, tzinfo=timezone.utc),
             scheduled_at=None,
@@ -65,8 +67,8 @@ def test_context_builder_renders_scheduled_task_with_utc_timestamps():
     assert "<instruction>say hi</instruction>" in result
 
 
-def test_context_builder_renders_user_state_and_tool_context():
-    user_state_prompt = CONTEXT_BUILDER.render_user_state(
+def test_context_tools_render_user_state_and_tool_context():
+    user_state_prompt = render_user_state(
         UserState(
             coins=7,
             plan="paid",
@@ -77,7 +79,7 @@ def test_context_builder_renders_user_state_and_tool_context():
         )
     )
 
-    tool_context = CONTEXT_BUILDER.build_tool_context(
+    tool_context = build_tool_context(
         ConversationScope(user_id=42, is_group=True, group_id=-100, message_id=12),
     )
 
@@ -92,7 +94,7 @@ def test_context_builder_renders_user_state_and_tool_context():
     }
 
 
-def test_context_builder_builds_model_query_with_runtime_replacements():
+def test_context_tools_build_model_query_with_runtime_replacements():
     persisted_content = "<message>[photo]</message>"
     runtime_message = {
         "role": "user",
@@ -106,7 +108,8 @@ def test_context_builder_builds_model_query_with_runtime_replacements():
         {"role": "user", "content": persisted_content},
     ]
 
-    query = CONTEXT_BUILDER.build_model_query(
+    query = build_model_query(
+        system_prompt="base system policy",
         history_messages=history,
         scope=ConversationScope(user_id=42, is_group=True, group_id=-100, message_id=12),
         user_state_prompt="<user_state />",
@@ -136,8 +139,8 @@ def test_context_builder_builds_model_query_with_runtime_replacements():
     }
 
 
-def test_context_builder_create_runtime_replacement_ignores_empty_runtime_message():
-    assert CONTEXT_BUILDER.create_runtime_replacement(
+def test_context_tools_ignore_empty_runtime_replacement():
+    assert create_runtime_replacement(
         persisted_content="persisted",
         runtime_message=None,
     ) is None
