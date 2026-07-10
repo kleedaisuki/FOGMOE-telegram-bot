@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
-from fogmoe_bot.domain.conversation.prompt_utils import (
+from .formatting import (
     format_metadata_attrs,
     format_user_state_prompt,
     join_prompt_sections,

@@ -7,7 +7,7 @@ from typing import Any, Iterable, Mapping, Tuple
 
 import litellm
 
-from .prompt_utils import join_prompt_sections
+from .formatting import join_prompt_sections
 
 DEFAULT_GUARD_RATIO = 1.15
 DEFAULT_MESSAGE_OVERHEAD = 4.0

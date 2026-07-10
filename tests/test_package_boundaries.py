@@ -17,6 +17,16 @@ def test_old_ai_package_names_do_not_return():
     assert [path for path in forbidden_paths if path.exists()] == []
 
 
+def test_model_context_owns_prompt_formatting_and_token_budgeting():
+    """@brief 验证模型上下文边界 / Verify model-context ownership boundary."""
+    context_root = SRC_ROOT / "domain" / "context"
+    old_conversation_root = SRC_ROOT / "domain" / "conversation"
+
+    assert (context_root / "formatting.py").is_file()
+    assert (context_root / "token_estimator.py").is_file()
+    assert not (old_conversation_root / "__init__.py").exists()
+
+
 def test_telegram_features_live_in_application_layer():
     assert not (SRC_ROOT / "presentation" / "telegram" / "features").exists()
     assert (SRC_ROOT / "application" / "telegram" / "features").is_dir()

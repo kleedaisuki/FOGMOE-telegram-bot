@@ -1,3 +1,5 @@
+"""@brief 模型上下文格式化工具 / Model context formatting utilities."""
+
 from typing import Iterable
 
 

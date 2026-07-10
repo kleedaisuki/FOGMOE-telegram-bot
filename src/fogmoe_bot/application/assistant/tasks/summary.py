@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import conversation_repository
-from fogmoe_bot.domain.conversation.token_estimator import estimate_tokens
+from fogmoe_bot.domain.context.token_estimator import estimate_tokens
 from ..inference.task_runner import INFERENCE_TASK_RUNNER
 
 import json
