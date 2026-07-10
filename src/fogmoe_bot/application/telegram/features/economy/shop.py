@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import random
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.application.accounts import service as process_user
@@ -7,6 +8,8 @@ from telegram.ext import ContextTypes
 from datetime import datetime, date, timedelta
 import time
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
+
+logger = logging.getLogger(__name__)
 
 # 定义全局锁，确保购买过程的原子性
 lock = asyncio.Lock()
@@ -552,7 +555,7 @@ async def cleanup_message_records_job(context: ContextTypes.DEFAULT_TYPE):
     for key in expired_keys:
         if key in last_lottery_messages:
             del last_lottery_messages[key]
-    print(f"清理了{len(expired_keys)}条过期抽奖消息记录")
+    logger.info("清理了 %s 条过期抽奖消息记录", len(expired_keys))
 
 # 保留原始函数以保持兼容性
 async def cleanup_message_records():

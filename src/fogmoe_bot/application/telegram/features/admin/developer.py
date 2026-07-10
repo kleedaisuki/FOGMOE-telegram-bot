@@ -5,6 +5,7 @@ from telegram.ext import ContextTypes, CommandHandler
 from sqlalchemy.exc import SQLAlchemyError
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database.repositories import moderation_repository
+from fogmoe_bot.infrastructure.logging.bot_logging import current_log_file_path
 import tempfile
 from fogmoe_bot.application.telegram.command_cooldown import cooldown # 导入冷却装饰器
 
@@ -88,7 +89,7 @@ async def view_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines = min(int(context.args[0]), 200)  # 限制最多显示200行
         
         # 读取日志文件的最后N行
-        log_path = config.LOG_FILE_PATH
+        log_path = current_log_file_path()
         if not os.path.exists(log_path):
             await update.message.reply_text("日志文件不存在")
             return

@@ -1,6 +1,10 @@
 import logging
 from typing import Any, Dict, List
 
+from fogmoe_bot.infrastructure.logging.bot_logging import prepare_litellm_logging
+
+prepare_litellm_logging()
+
 import litellm
 
 from fogmoe_bot.infrastructure import config

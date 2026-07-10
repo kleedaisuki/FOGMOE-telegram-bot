@@ -1,10 +1,13 @@
 import asyncio
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from datetime import datetime, timedelta
 import secrets
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
 from fogmoe_bot.infrastructure.database.repositories import moderation_repository
+
+logger = logging.getLogger(__name__)
 
 # 在开启验证功能前详细检查必要权限
 async def check_bot_permissions(bot, chat_id):
@@ -80,7 +83,7 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         # 跳过机器人验证
         if new_member.is_bot:
-            print(f"跳过机器人 {new_member.full_name}({user_id}) 的验证")
+            logger.info("跳过机器人 %s(%s) 的验证", new_member.full_name, user_id)
             continue
             
         try:
@@ -105,7 +108,7 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
         except Exception as e:
             error_str = str(e)
-            print(f"限制成员 {user_id} 失败: {error_str}")
+            logger.warning("限制成员 %s 失败: %s", user_id, error_str)
             if "httpx.ConnectError" in error_str or "Not enough rights" in error_str:
                 await context.bot.send_message(
                     chat_id,
@@ -154,7 +157,7 @@ async def verification_timeout(context: ContextTypes.DEFAULT_TYPE, chat_id, user
             # 可选择解禁以便记录：这里立即解禁防止永久封禁
             await context.bot.unban_chat_member(chat_id, user_id)
         except Exception as e:
-            print(f"踢出成员 {user_id} 时出错: {e}")
+            logger.warning("踢出成员 %s 时出错: %s", user_id, e)
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
@@ -162,7 +165,7 @@ async def verification_timeout(context: ContextTypes.DEFAULT_TYPE, chat_id, user
                 text="验证超时，您已被移出群组。"
             )
         except Exception as e:
-            print(f"编辑消息 {message_id} 出错: {e}")
+            logger.warning("编辑消息 %s 时出错: %s", message_id, e)
         # 清除任务记录
         verify_tasks.pop(user_id, None)
         # 在清除任务记录时同时从数据库删除
@@ -229,7 +232,7 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 删除验证消息
             await query.delete_message()
         except Exception as e:
-            print(f"删除验证消息时出错: {e}")
+            logger.warning("删除验证消息时出错: %s", e)
 
 # 在启动时恢复验证任务
 async def restore_verification_tasks(dispatcher):
@@ -278,7 +281,7 @@ async def handle_member_left(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 text=f"用户 {user.full_name} 在验证前离开了群组。"
             )
         except Exception as e:
-            print(f"编辑消息出错: {e}")
+            logger.warning("编辑验证消息时出错: %s", e)
             
         # 从内存中删除验证任务
         verify_tasks.pop(user_id, None)

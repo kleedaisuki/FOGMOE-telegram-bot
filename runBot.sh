@@ -5,7 +5,6 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BOT_DIR="$SCRIPT_DIR"
 SRC_DIR="$BOT_DIR/src"
 LOG_DIR="$BOT_DIR/logs"
-LOG_FILE="$LOG_DIR/tgbot.log"
 VENV_DIR="$BOT_DIR/venv"
 PYPROJECT_FILE="$BOT_DIR/pyproject.toml"
 
@@ -18,6 +17,14 @@ NC='\033[0m' # No Color
 # 获取bot进程ID
 get_bot_pid() {
     ps -ef | grep -E "[f]ogmoe-bot|[p]ython3.*-m fogmoe_bot" | awk '{print $2}'
+}
+
+# 获取当前或最近一次应用日志；应用进程会以时间戳文件名写入。
+get_latest_log_file() {
+    find "$LOG_DIR" -maxdepth 1 -type f -name 'tgbot_*.log' -printf '%T@ %p\n' 2>/dev/null \
+        | sort -nr \
+        | head -n 1 \
+        | cut -d' ' -f2-
 }
 
 # 检查并创建虚拟环境
@@ -169,9 +176,11 @@ start_bot() {
     # 启动bot并记录日志
     echo "正在启动bot..."
     mkdir -p "$LOG_DIR"
-    echo "日志文件: $LOG_FILE"
+    START_TIMESTAMP=$(date '+%Y%m%dT%H%M%S')
+    STDOUT_LOG_FILE="$LOG_DIR/stdout_${START_TIMESTAMP}.log"
+    echo "标准输出日志: $STDOUT_LOG_FILE"
     PYTHONPATH="$SRC_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-        nohup "$VENV_DIR/bin/fogmoe-bot" > "$LOG_FILE" 2>&1 &
+        nohup "$VENV_DIR/bin/fogmoe-bot" > "$STDOUT_LOG_FILE" 2>&1 &
 
     # 获取新进程PID
     NEW_PID=$!
@@ -180,14 +189,18 @@ start_bot() {
     # 检查进程是否成功启动
     sleep 2
     if ps -p $NEW_PID > /dev/null; then
+        LOG_FILE=$(get_latest_log_file)
         echo -e "${GREEN}✓ Bot运行正常${NC}"
         echo ""
-        echo "查看日志: tail -f $LOG_FILE"
+        if [ -n "$LOG_FILE" ]; then
+            echo "应用日志: $LOG_FILE"
+            echo "查看日志: tail -f $LOG_FILE"
+        fi
         echo "停止bot: $0 stop"
         echo "查看状态: $0 status"
     else
         echo -e "${RED}✗ 错误: Bot启动失败${NC}"
-        echo "请查看日志文件: $LOG_FILE"
+        echo "请查看标准输出日志: $STDOUT_LOG_FILE"
         exit 1
     fi
 }
@@ -227,7 +240,8 @@ stop_bot() {
         echo -e "${GREEN}✓ Bot已成功停止${NC}"
 
         # 显示最后几行日志
-        if [ -f "$LOG_FILE" ]; then
+        LOG_FILE=$(get_latest_log_file)
+        if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
             echo ""
             echo "=== 最后10行日志 ==="
             tail -n 10 "$LOG_FILE"
@@ -269,7 +283,8 @@ status_bot() {
         fi
 
         # 显示最后几行日志
-        if [ -f "$LOG_FILE" ]; then
+        LOG_FILE=$(get_latest_log_file)
+        if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
             echo ""
             echo "=== 最后10行日志 ==="
             tail -n 10 "$LOG_FILE"

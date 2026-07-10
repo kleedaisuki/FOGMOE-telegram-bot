@@ -128,6 +128,10 @@ class AppSettings(BaseSettings):
     DATABASE_URL: str | None = None
 
     LOG_LEVEL: str = "INFO"
+    LOG_FILE_MAX_BYTES: int = 1 * 1024 * 1024
+    LOG_FILE_BACKUP_COUNT: int = 5
+    LOG_QUEUE_MAX_SIZE: int = 10_000
+    LITELLM_LOG_LEVEL: str = "WARNING"
 
     @field_validator("GEMINI_OPENAI_COMPATIBLE", mode="before")
     @classmethod
@@ -286,7 +290,12 @@ SQLALCHEMY_DATABASE_URI = SETTINGS.DATABASE_URL or _build_postgres_dsn()
 # 日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)
 LOG_LEVEL = SETTINGS.LOG_LEVEL
 LOG_DIR = BASE_DIR / "logs"
+# 兼容旧调用；应用启动后会替换为带时间戳的实际日志路径。
 LOG_FILE_PATH = LOG_DIR / "tgbot.log"
+LOG_FILE_MAX_BYTES = SETTINGS.LOG_FILE_MAX_BYTES
+LOG_FILE_BACKUP_COUNT = SETTINGS.LOG_FILE_BACKUP_COUNT
+LOG_QUEUE_MAX_SIZE = SETTINGS.LOG_QUEUE_MAX_SIZE
+LITELLM_LOG_LEVEL = SETTINGS.LITELLM_LOG_LEVEL
 
 
 def _read_text_resource(relative_path: str) -> str:
