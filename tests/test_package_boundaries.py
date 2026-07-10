@@ -162,6 +162,11 @@ def test_database_control_plane_stays_out_of_bot_package():
     assert not (SRC_ROOT / "infrastructure" / "database" / "migrations").exists()
     assert not (SRC_ROOT / "infrastructure" / "database" / "migration_service.py").exists()
     assert (DBCTL_ROOT / "cli.py").is_file()
+    assert (DBCTL_ROOT / "commands" / "bootstrap.py").is_file()
+    assert (DBCTL_ROOT / "commands" / "migrate.py").is_file()
+    assert (DBCTL_ROOT / "postgres.py").is_file()
+    assert not (DBCTL_ROOT / "bootstrap_postgres.py").exists()
+    assert not (DBCTL_ROOT / "migrate_as_role.py").exists()
     assert MIGRATIONS_ROOT.is_dir()
 
 

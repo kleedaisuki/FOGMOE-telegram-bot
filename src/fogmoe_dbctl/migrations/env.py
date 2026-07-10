@@ -32,6 +32,11 @@ def configure_import_path() -> None:
         sys.path.insert(0, src_root)
 
 
+configure_import_path()
+
+from fogmoe_dbctl.postgres import quote_identifier  # noqa: E402
+
+
 def configure_logging() -> None:
     """@brief 配置 Alembic 日志 / Configure Alembic logging.
 
@@ -48,19 +53,13 @@ def get_url() -> str:
     @return 数据库连接 URL / Database connection URL.
     """
 
+    injected_url = config.attributes.get("database_url")
+    if injected_url:
+        return str(injected_url)
+
     from fogmoe_dbctl import config as dbctl_config
 
     return dbctl_config.sqlalchemy_database_uri()
-
-
-def quote_identifier(identifier: str) -> str:
-    """@brief 引用 PostgreSQL 标识符 / Quote a PostgreSQL identifier.
-
-    @param identifier 标识符 / Identifier.
-    @return 双引号引用后的标识符 / Double-quoted identifier.
-    """
-
-    return '"' + identifier.replace('"', '""') + '"'
 
 
 def get_migration_schema() -> str:
@@ -186,7 +185,6 @@ async def run_migrations_online() -> None:
     await connectable.dispose()
 
 
-configure_import_path()
 configure_logging()
 
 if context.is_offline_mode():

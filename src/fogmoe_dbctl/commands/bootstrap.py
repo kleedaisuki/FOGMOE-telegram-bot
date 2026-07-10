@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-"""Bootstrap local PostgreSQL roles and psql service files."""
+"""初始化 PostgreSQL 子命令 / PostgreSQL bootstrap subcommand."""
 
 from __future__ import annotations
 
@@ -8,40 +7,34 @@ import os
 import secrets
 import stat
 import subprocess
-import sys
-from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+from fogmoe_dbctl.config import DEFAULT_CONFIG_DIR
+from fogmoe_dbctl.postgres import (
+    RoleSecret,
+    escape_pgpass_field,
+    find_pgpass_password,
+    quote_identifier,
+    quote_literal,
+)
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_DIR = PROJECT_ROOT / "var" / "psql"
+def configure_parser(subparsers: Any) -> None:
+    """@brief 注册初始化子命令 / Register the bootstrap subcommand.
 
-
-@dataclass(frozen=True)
-class RoleSecret:
-    """@brief 数据库角色密码 / Database role password.
-
-    @param role PostgreSQL 角色名 / PostgreSQL role name.
-    @param password PostgreSQL 登录密码 / PostgreSQL login password.
+    @param subparsers argparse 子命令集合 / argparse subparser collection.
+    @return None / None.
     """
 
-    role: str
-    password: str
-
-
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """@brief 解析命令行参数 / Parse command-line arguments.
-
-    @param argv 命令行参数 / Command-line arguments.
-    @return argparse 命名空间 / argparse namespace.
-    """
-
-    parser = argparse.ArgumentParser(
+    parser = subparsers.add_parser(
+        "bootstrap-postgres",
+        aliases=["bootstrap"],
+        help="Create PostgreSQL roles, database, and psql service files.",
         description=(
-            "Create the fogmoe database, application role, migration role, "
+            "Create the FogMoe database, application role, migration role, "
             "and project-local psql service files."
-        )
+        ),
     )
     parser.add_argument("--database", default="fogmoe")
     parser.add_argument("--host", default="localhost")
@@ -73,133 +66,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--rotate-passwords",
         action="store_true",
-        help="Generate new passwords even when var/psql/pgpass already has them.",
+        help="Generate new passwords even when pgpass already contains them.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print SQL and file paths without changing PostgreSQL or files.",
     )
-    return parser.parse_args(argv)
-
-
-def quote_ident(value: str) -> str:
-    """@brief 引用 SQL 标识符 / Quote SQL identifier.
-
-    @param value 标识符原文 / Raw identifier.
-    @return 双引号引用后的标识符 / Double-quoted identifier.
-    """
-
-    return '"' + value.replace('"', '""') + '"'
-
-
-def quote_literal(value: str) -> str:
-    """@brief 引用 SQL 字面量 / Quote SQL literal.
-
-    @param value 字面量原文 / Raw literal.
-    @return 单引号引用后的字面量 / Single-quoted literal.
-    """
-
-    return "'" + value.replace("'", "''") + "'"
-
-
-def escape_pgpass_field(value: str) -> str:
-    """@brief 转义 pgpass 字段 / Escape a pgpass field.
-
-    @param value 字段原文 / Raw field value.
-    @return pgpass 安全字段 / pgpass-safe field.
-    """
-
-    return value.replace("\\", "\\\\").replace(":", "\\:")
-
-
-def unescape_pgpass_field(value: str) -> str:
-    """@brief 反转义 pgpass 字段 / Unescape a pgpass field.
-
-    @param value pgpass 字段 / pgpass field.
-    @return 反转义后的字段 / Unescaped field.
-    """
-
-    chars: list[str] = []
-    escaping = False
-    for char in value:
-        if escaping:
-            chars.append(char)
-            escaping = False
-            continue
-        if char == "\\":
-            escaping = True
-            continue
-        chars.append(char)
-    if escaping:
-        chars.append("\\")
-    return "".join(chars)
-
-
-def split_pgpass_line(line: str) -> list[str]:
-    """@brief 拆分 pgpass 行 / Split a pgpass line.
-
-    @param line pgpass 原始行 / Raw pgpass line.
-    @return 五个 pgpass 字段 / Five pgpass fields.
-    """
-
-    fields: list[str] = []
-    chars: list[str] = []
-    escaping = False
-    for char in line.rstrip("\n"):
-        if escaping:
-            chars.append("\\" + char)
-            escaping = False
-            continue
-        if char == "\\":
-            escaping = True
-            continue
-        if char == ":" and len(fields) < 4:
-            fields.append(unescape_pgpass_field("".join(chars)))
-            chars = []
-            continue
-        chars.append(char)
-    if escaping:
-        chars.append("\\")
-    fields.append(unescape_pgpass_field("".join(chars)))
-    return fields
-
-
-def read_existing_password(
-    pgpass_path: Path,
-    *,
-    host: str,
-    port: int,
-    database: str,
-    role: str,
-) -> str | None:
-    """@brief 读取已有 pgpass 密码 / Read an existing pgpass password.
-
-    @param pgpass_path pgpass 文件路径 / pgpass file path.
-    @param host 数据库主机 / Database host.
-    @param port 数据库端口 / Database port.
-    @param database 数据库名 / Database name.
-    @param role PostgreSQL 角色名 / PostgreSQL role name.
-    @return 匹配密码或 None / Matching password or None.
-    """
-
-    if not pgpass_path.exists():
-        return None
-    for line in pgpass_path.read_text(encoding="utf-8").splitlines():
-        if not line or line.startswith("#"):
-            continue
-        fields = split_pgpass_line(line)
-        if len(fields) != 5:
-            continue
-        row_host, row_port, row_database, row_role, password = fields
-        if (
-            row_host in {host, "*"}
-            and row_port in {str(port), "*"}
-            and row_database in {database, "*"}
-            and row_role in {role, "*"}
-        ):
-            return password
-    return None
+    parser.set_defaults(handler=execute)
 
 
 def choose_password(
@@ -221,18 +95,18 @@ def choose_password(
     @param database 数据库名 / Database name.
     @param role PostgreSQL 角色名 / PostgreSQL role name.
     @param rotate_passwords 是否强制轮换 / Whether to rotate forcibly.
-    @return 可用于角色和配置的密码 / Password for role and config.
+    @return 可用于角色和配置的密码 / Password for the role and configuration.
     """
 
     if explicit_password:
         return explicit_password
     if not rotate_passwords:
-        existing = read_existing_password(
+        existing = find_pgpass_password(
             pgpass_path,
             host=host,
             port=port,
             database=database,
-            role=role,
+            user=role,
         )
         if existing:
             return existing
@@ -243,13 +117,13 @@ def build_role_sql(bot: RoleSecret, automation: RoleSecret) -> str:
     """@brief 构造角色 SQL / Build role SQL.
 
     @param bot bot 角色密码 / Bot role secret.
-    @param automation 自动化迁移角色密码 / Automation migration role secret.
+    @param automation 自动化迁移角色密码 / Automation role secret.
     @return 可执行 SQL / Executable SQL.
     """
 
     statements: list[str] = []
     for secret in (bot, automation):
-        role_ident = quote_ident(secret.role)
+        role_ident = quote_identifier(secret.role)
         role_literal = quote_literal(secret.role)
         password_literal = quote_literal(secret.password)
         statements.append(
@@ -282,7 +156,8 @@ def build_database_sql(database: str, owner_role: str) -> str:
 
     database_literal = quote_literal(database)
     create_database = quote_literal(
-        f"CREATE DATABASE {quote_ident(database)} OWNER {quote_ident(owner_role)}"
+        f"CREATE DATABASE {quote_identifier(database)} "
+        f"OWNER {quote_identifier(owner_role)}"
     )
     return (
         "SELECT "
@@ -292,18 +167,22 @@ def build_database_sql(database: str, owner_role: str) -> str:
     )
 
 
-def build_database_grant_sql(database: str, bot_role: str, automation_role: str) -> str:
+def build_database_grant_sql(
+    database: str,
+    bot_role: str,
+    automation_role: str,
+) -> str:
     """@brief 构造数据库级授权 SQL / Build database-level grant SQL.
 
     @param database 数据库名 / Database name.
     @param bot_role bot 角色名 / Bot role name.
-    @param automation_role 自动化迁移角色名 / Automation migration role name.
+    @param automation_role 自动化迁移角色名 / Automation role name.
     @return 可执行 SQL / Executable SQL.
     """
 
-    database_ident = quote_ident(database)
-    bot_ident = quote_ident(bot_role)
-    automation_ident = quote_ident(automation_role)
+    database_ident = quote_identifier(database)
+    bot_ident = quote_identifier(bot_role)
+    automation_ident = quote_identifier(automation_role)
     return f"""
 GRANT CONNECT ON DATABASE {database_ident} TO {bot_ident}, {automation_ident};
 GRANT CREATE, TEMPORARY ON DATABASE {database_ident} TO {automation_ident};
@@ -312,11 +191,11 @@ GRANT TEMPORARY ON DATABASE {database_ident} TO {bot_ident};
 
 
 def psql_command(args: argparse.Namespace, database: str) -> list[str]:
-    """@brief 构造 psql 命令 / Build psql command.
+    """@brief 构造管理员 psql 命令 / Build the administrator psql command.
 
-    @param args 命令行参数 / CLI arguments.
+    @param args CLI 参数 / CLI arguments.
     @param database 连接数据库名 / Connection database name.
-    @return subprocess 命令列表 / subprocess command list.
+    @return subprocess 命令 / subprocess command.
     """
 
     command = ["psql", "--no-psqlrc", "--set", "ON_ERROR_STOP=1", "--dbname", database]
@@ -326,9 +205,9 @@ def psql_command(args: argparse.Namespace, database: str) -> list[str]:
 
 
 def run_psql(args: argparse.Namespace, database: str, sql: str) -> None:
-    """@brief 执行 psql SQL / Execute SQL through psql.
+    """@brief 执行管理员 SQL / Execute administrator SQL.
 
-    @param args 命令行参数 / CLI arguments.
+    @param args CLI 参数 / CLI arguments.
     @param database 连接数据库名 / Connection database name.
     @param sql SQL 文本 / SQL text.
     @return None / None.
@@ -338,12 +217,7 @@ def run_psql(args: argparse.Namespace, database: str, sql: str) -> None:
         print(f"\n-- psql database={database}")
         print(sql)
         return
-    subprocess.run(
-        psql_command(args, database),
-        input=sql,
-        text=True,
-        check=True,
-    )
+    subprocess.run(psql_command(args, database), input=sql, text=True, check=True)
 
 
 def write_psql_config(
@@ -358,14 +232,14 @@ def write_psql_config(
     automation_service: str,
     dry_run: bool,
 ) -> None:
-    """@brief 写入 psql service 和 pgpass / Write psql service and pgpass files.
+    """@brief 写入项目 psql 配置 / Write project psql configuration.
 
-    @param config_dir 配置目录 / Config directory.
+    @param config_dir psql 配置目录 / psql configuration directory.
     @param host 数据库主机 / Database host.
     @param port 数据库端口 / Database port.
     @param database 数据库名 / Database name.
     @param bot bot 角色密码 / Bot role secret.
-    @param automation 自动化迁移角色密码 / Automation migration role secret.
+    @param automation 自动化角色密码 / Automation role secret.
     @param bot_service bot psql service 名 / Bot psql service name.
     @param automation_service 自动化 psql service 名 / Automation psql service name.
     @param dry_run 是否只打印 / Whether to print only.
@@ -386,33 +260,26 @@ port={port}
 dbname={database}
 user={automation.role}
 """
-    pgpass_lines = [
+    pgpass_text = "\n".join(
         ":".join(
-            [
-                escape_pgpass_field(host),
-                str(port),
-                escape_pgpass_field(database),
-                escape_pgpass_field(bot.role),
-                escape_pgpass_field(bot.password),
-            ]
-        ),
-        ":".join(
-            [
-                escape_pgpass_field(host),
-                str(port),
-                escape_pgpass_field(database),
-                escape_pgpass_field(automation.role),
-                escape_pgpass_field(automation.password),
-            ]
-        ),
-    ]
-    pgpass_text = "\n".join(pgpass_lines) + "\n"
+            escape_pgpass_field(value)
+            for value in (host, str(port), database, secret.role, secret.password)
+        )
+        for secret in (bot, automation)
+    ) + "\n"
 
     if dry_run:
+        pgpass_preview = "\n".join(
+            ":".join(
+                escape_pgpass_field(value)
+                for value in (host, str(port), database, secret.role, "***")
+            )
+            for secret in (bot, automation)
+        ) + "\n"
         print(f"\n-- would write {service_path}")
         print(service_text)
         print(f"-- would write {pgpass_path}")
-        print(pgpass_text)
+        print(pgpass_preview)
         return
 
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -421,19 +288,18 @@ user={automation.role}
     pgpass_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
 
-def main(argv: Sequence[str] | None = None) -> None:
-    """@brief 脚本入口 / Script entry point.
+def execute(args: argparse.Namespace) -> None:
+    """@brief 执行初始化用例 / Execute the bootstrap use case.
 
-    @param argv 命令行参数 / Command-line arguments.
+    @param args CLI 参数 / CLI arguments.
     @return None / None.
     """
 
-    args = parse_args(argv)
     config_dir = args.config_dir.resolve()
     pgpass_path = config_dir / "pgpass"
     bot = RoleSecret(
-        role=args.bot_role,
-        password=choose_password(
+        args.bot_role,
+        choose_password(
             args.bot_password,
             pgpass_path=pgpass_path,
             host=args.host,
@@ -444,8 +310,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         ),
     )
     automation = RoleSecret(
-        role=args.automation_role,
-        password=choose_password(
+        args.automation_role,
+        choose_password(
             args.automation_password,
             pgpass_path=pgpass_path,
             host=args.host,
@@ -456,7 +322,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         ),
     )
 
-    run_psql(args, "postgres", build_role_sql(bot, automation))
+    displayed_bot = RoleSecret(bot.role, "***") if args.dry_run else bot
+    displayed_automation = (
+        RoleSecret(automation.role, "***") if args.dry_run else automation
+    )
+    run_psql(
+        args,
+        "postgres",
+        build_role_sql(displayed_bot, displayed_automation),
+    )
     run_psql(args, "postgres", build_database_sql(args.database, args.automation_role))
     run_psql(
         args,
@@ -476,10 +350,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
 
     print(f"psql service file: {config_dir / 'pg_service.conf'}")
-    print(f"pgpass file: {config_dir / 'pgpass'}")
+    print(f"pgpass file: {pgpass_path}")
     print(f"bot service: {args.bot_service}")
     print(f"automation service: {args.automation_service}")
-
-
-if __name__ == "__main__":
-    main(sys.argv[1:])

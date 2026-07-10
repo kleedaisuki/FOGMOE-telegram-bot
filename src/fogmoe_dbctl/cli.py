@@ -1,53 +1,49 @@
-"""fogmoe-dbctl 命令行入口 / fogmoe-dbctl command-line entry point."""
+"""fogmoe-dbctl 组合根 / fogmoe-dbctl composition root."""
 
 from __future__ import annotations
 
+import argparse
 import sys
 from collections.abc import Sequence
+from typing import Any
 
-from fogmoe_dbctl import bootstrap_postgres, migrate_as_role
-
-COMMANDS = {
-    "bootstrap-postgres": bootstrap_postgres.main,
-    "bootstrap": bootstrap_postgres.main,
-    "migrate": migrate_as_role.main,
-    "upgrade": migrate_as_role.main,
-    "run-migrations-as-role": migrate_as_role.main,
-}
+from fogmoe_dbctl.commands import bootstrap, migrate
 
 
-def print_help() -> None:
-    """@brief 打印 dbctl 帮助 / Print dbctl help.
+COMMAND_MODULES = (bootstrap, migrate)
 
-    @return None / None.
+
+def build_parser() -> argparse.ArgumentParser:
+    """@brief 构造完整 CLI 解析器 / Build the complete CLI parser.
+
+    @return argparse 根解析器 / argparse root parser.
     """
 
-    print(
-        "usage: fogmoe-dbctl <command> [args]\n\n"
-        "Manage the external FogMoe PostgreSQL database.\n\n"
-        "commands:\n"
-        "  bootstrap-postgres      Create PostgreSQL roles, database, and psql service files.\n"
-        "  migrate                 Run Alembic migrations through the automation role and grants.\n\n"
-        "aliases:\n"
-        "  bootstrap, upgrade, run-migrations-as-role"
+    parser = argparse.ArgumentParser(
+        prog="fogmoe-dbctl",
+        description="Manage the external FogMoe PostgreSQL database.",
     )
+    subparsers = parser.add_subparsers(dest="command", metavar="command")
+    for command_module in COMMAND_MODULES:
+        command_module.configure_parser(subparsers)
+    return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """@brief 执行 dbctl CLI / Execute dbctl CLI.
+    """@brief 解析并执行 dbctl 子命令 / Parse and execute a dbctl subcommand.
 
     @param argv 命令行参数 / Command-line arguments.
     @return None / None.
     """
 
-    args = list(sys.argv[1:] if argv is None else argv)
-    if not args or args[0] in {"-h", "--help"}:
-        print_help()
+    args_list = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    if not args_list:
+        parser.print_help()
         return
 
-    command = args[0]
-    handler = COMMANDS.get(command)
+    args = parser.parse_args(args_list)
+    handler: Any | None = getattr(args, "handler", None)
     if handler is None:
-        print_help()
-        raise SystemExit(f"unknown fogmoe-dbctl command: {command}")
-    handler(args[1:])
+        parser.error("a command is required")
+    handler(args)

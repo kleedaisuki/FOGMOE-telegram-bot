@@ -104,6 +104,7 @@ fogmoe-dbctl bootstrap-postgres
 fogmoe-dbctl migrate
 ```
 数据库迁移由 `fogmoe-dbctl` 显式管理，机器人启动时不会自动迁移外部数据库。
+CLI 的分层结构和子命令扩展约定见 [`docs/dbctl.md`](docs/dbctl.md)。
 
 ### 启动机器人
 

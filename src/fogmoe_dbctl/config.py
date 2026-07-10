@@ -4,9 +4,26 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
+
+from fogmoe_dbctl.postgres import sqlalchemy_url
+
+
+# 数据库控制面的稳定项目路径 / Stable project path for the database control plane.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_DIR = PROJECT_ROOT / "var" / "psql"
+
+# 由迁移拥有、由运行时访问的 schema / Schemas owned by migrations and accessed at runtime.
+APPLICATION_SCHEMAS = (
+    "identity",
+    "conversation",
+    "assistant",
+    "economy",
+    "moderation",
+    "crypto",
+    "game",
+)
 
 
 def project_root() -> Path:
@@ -15,7 +32,7 @@ def project_root() -> Path:
     @return 项目根目录路径 / Project root path.
     """
 
-    return Path(__file__).resolve().parents[2]
+    return PROJECT_ROOT
 
 
 def load_project_env() -> None:
@@ -38,15 +55,13 @@ def sqlalchemy_database_uri() -> str:
     if database_url:
         return database_url
 
-    user = os.environ.get("POSTGRES_USER") or "postgres"
-    password = os.environ.get("POSTGRES_PASSWORD") or ""
-    host = os.environ.get("POSTGRES_HOST") or "localhost"
-    port = os.environ.get("POSTGRES_PORT") or "5432"
-    database = os.environ.get("POSTGRES_DATABASE") or "fogmoe"
-    auth = quote_plus(user)
-    if password:
-        auth = f"{auth}:{quote_plus(password)}"
-    return f"postgresql+asyncpg://{auth}@{host}:{port}/{database}"
+    return sqlalchemy_url(
+        user=os.environ.get("POSTGRES_USER") or "postgres",
+        password=os.environ.get("POSTGRES_PASSWORD") or "",
+        host=os.environ.get("POSTGRES_HOST") or "localhost",
+        port=int(os.environ.get("POSTGRES_PORT") or "5432"),
+        database=os.environ.get("POSTGRES_DATABASE") or "fogmoe",
+    )
 
 
 def migration_schema() -> str:
