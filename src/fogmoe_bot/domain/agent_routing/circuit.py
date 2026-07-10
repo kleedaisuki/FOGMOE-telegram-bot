@@ -1,3 +1,5 @@
+"""@brief Provider 熔断状态机 / Provider circuit-breaker state machine."""
+
 import logging
 import time
 
@@ -42,7 +44,6 @@ class ProviderCircuit:
             return False
         if current_time < open_until:
             return True
-
         self.open_until.pop(service_name, None)
         self.failure_streaks.pop(service_name, None)
         return False
@@ -70,12 +71,9 @@ class ProviderCircuit:
         ]
         recent_failures.append(current_time)
         self.failure_streaks[service_name] = recent_failures
-
         if len(recent_failures) < self.failure_threshold:
             return
-
-        open_until = current_time + self.cooldown_seconds
-        self.open_until[service_name] = open_until
+        self.open_until[service_name] = current_time + self.cooldown_seconds
         self.failure_streaks.pop(service_name, None)
         logging.warning(
             "%s 熔断 %s 秒：%s 秒内连续失败 %s 次",

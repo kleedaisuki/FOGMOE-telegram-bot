@@ -13,11 +13,11 @@ from telegram.ext import ContextTypes
 from fogmoe_bot.application.telegram.archive_utils import send_permanent_records_archive
 from fogmoe_bot.application.chat import group_chat_history
 from fogmoe_bot.application.economy import process_user, stake_reward_pool
-from fogmoe_bot.application.assistant.conversation_context import CHAT_CONTEXT_BUILDER
 from fogmoe_bot.application.assistant.context_state import load_user_state
 from fogmoe_bot.domain.context import (
     ChatMessageContext,
     ConversationScope,
+    ContextBuilder,
 )
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import db, connection as db_connection
@@ -28,11 +28,11 @@ from fogmoe_bot.infrastructure.telegram.telegram_utils import (
     safe_send_markdown,
 )
 from fogmoe_bot.application.assistant import summary
-from fogmoe_bot.application.assistant.conversation_locks import get_conversation_lock
+from fogmoe_bot.application.conversation_lock_manager import CONVERSATION_LOCK_MANAGER
 from fogmoe_bot.domain.agent_runtime.audio_delivery import send_generated_audio_from_tool_logs
 from fogmoe_bot.domain.agent_runtime.image_delivery import send_generated_images_from_tool_logs
 from fogmoe_bot.application.assistant.reply_filter import normalize_ai_reply_text
-from fogmoe_bot.application.assistant.router import get_ai_response
+from fogmoe_bot.application.assistant.inference import ASSISTANT_INFERENCE_SERVICE
 from fogmoe_bot.application.assistant.sticker_sender import normalize_sticker_directives, send_ai_reply_with_stickers
 from fogmoe_bot.application.assistant.telegram_visible_sender import TelegramVisibleContentHandler
 from fogmoe_bot.application.assistant.task_runner import run_ai_task
@@ -40,6 +40,9 @@ from fogmoe_bot.application.assistant.tasks.vision import analyze_image
 from fogmoe_bot.domain.agent_runtime.history import tool_logs_to_record_entries
 
 logger = logging.getLogger(__name__)
+
+_CONTEXT_BUILDER = ContextBuilder(config.SYSTEM_PROMPT)
+"""@brief Telegram 对话入口使用的上下文构造器 / Context builder used by Telegram conversation entrypoints."""
 
 
 _BOT_ID: int | None = None
@@ -161,7 +164,7 @@ def _format_xml_message(
 ) -> str:
     """@brief 兼容旧调用的消息渲染薄封装 / Thin compatibility wrapper for message rendering."""
 
-    return CHAT_CONTEXT_BUILDER.render_chat_message(
+    return _CONTEXT_BUILDER.render_chat_message(
         ChatMessageContext(
             chat_type=chat_type,
             chat_title=chat_title,
@@ -332,7 +335,7 @@ async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _reply_unlocked(update, context)
         return
     if config.CHAT_BATCH_WINDOW_SECONDS <= 0:
-        async with get_conversation_lock(batch_key[1]):
+        async with CONVERSATION_LOCK_MANAGER.hold(batch_key[1]):
             await _reply_unlocked(update, context)
         return
 
@@ -356,7 +359,7 @@ async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             async with _MESSAGE_BATCHES_LOCK:
                 ready_batch = _MESSAGE_BATCHES.pop(batch_key, batch)
 
-            async with get_conversation_lock(batch_key[1]):
+            async with CONVERSATION_LOCK_MANAGER.hold(batch_key[1]):
                 await _reply_batch_unlocked(ready_batch.items)
 
             if future and not future.done():
@@ -586,7 +589,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
     if user_state is None:
         logger.warning("User disappeared while building AI context: user_id=%s", user_id)
         return
-    user_state_prompt = CHAT_CONTEXT_BUILDER.render_user_state(user_state)
+    user_state_prompt = _CONTEXT_BUILDER.render_user_state(user_state)
 
     chat_type = update.effective_chat.type or "private"
     group_title = (update.effective_chat.title or "").strip() if update.effective_chat else ""
@@ -684,7 +687,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
                     base64_str=base64_str,
                     mime_type=_media_mime_type(media_type, message),
                 )
-                runtime_replacement = CHAT_CONTEXT_BUILDER.create_runtime_replacement(
+                runtime_replacement = _CONTEXT_BUILDER.create_runtime_replacement(
                     persisted_content=formatted_message,
                     runtime_message=runtime_user_message,
                 )
@@ -746,7 +749,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
 
     # 异步获取AI回复
     is_group_chat = update.effective_chat.type in ("group", "supergroup")
-    model_query = CHAT_CONTEXT_BUILDER.build_model_query(
+    model_query = _CONTEXT_BUILDER.build_model_query(
         history_messages=chat_history,
         scope=ConversationScope(
             user_id=user_id,
@@ -773,12 +776,12 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
         reply_to_message_id=getattr(effective_message, "message_id", None),
     )
 
-    assistant_message, tool_logs = await get_ai_response(
+    assistant_message, tool_logs = await ASSISTANT_INFERENCE_SERVICE.infer(
         model_query.messages,
-        user_id,
+        user_id=user_id,
         tool_context=model_query.tool_context,
         text_fallback_messages=model_query.text_fallback_messages,
-        visible_content_handler=visible_content_handler,
+        visible_content_sink=visible_content_handler,
     )
     sent_messages.extend(visible_content_handler.sent_messages)
     assistant_message = normalize_ai_reply_text(assistant_message)

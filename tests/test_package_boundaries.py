@@ -100,11 +100,20 @@ def test_agent_runtime_owns_agent_tooling():
         SRC_ROOT / "application" / "assistant" / "generated_image_sender.py",
         SRC_ROOT / "application" / "assistant" / "generated_audio_sender.py",
         SRC_ROOT / "application" / "assistant" / "types.py",
+        SRC_ROOT / "application" / "assistant" / "conversation_locks.py",
+        SRC_ROOT / "application" / "assistant" / "conversation_context.py",
+        SRC_ROOT / "application" / "assistant" / "router.py",
+        SRC_ROOT / "application" / "assistant" / "chat_capabilities.py",
+        SRC_ROOT / "application" / "assistant" / "providers",
+        SRC_ROOT / "application" / "assistant" / "routing",
     ]
 
     assert runtime_root.is_dir()
     assert (runtime_root / "runtime.py").is_file()
     assert (runtime_root / "tools").is_dir()
+    assert (SRC_ROOT / "application" / "conversation_lock_manager.py").is_file()
+    assert (SRC_ROOT / "application" / "assistant" / "inference").is_dir()
+    assert (SRC_ROOT / "domain" / "agent_routing").is_dir()
     assert [path for path in forbidden_paths if path.exists()] == []
 
 
