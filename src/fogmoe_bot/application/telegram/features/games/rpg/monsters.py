@@ -6,7 +6,7 @@ import asyncio
 from telegram.constants import ParseMode
 
 # 导入自定义模块
-from fogmoe_bot.application.economy import process_user
+from fogmoe_bot.application.accounts import service as process_user
 
 from .utils import calculate_damage, get_level_from_exp
 from .characters import check_and_process_level_up, get_character, update_character_stats

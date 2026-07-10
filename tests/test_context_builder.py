@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 
-from fogmoe_bot.application.assistant.context_state import (
+from fogmoe_bot.application.accounts.context import (
     normalize_personal_info,
     normalize_user_impression,
 )

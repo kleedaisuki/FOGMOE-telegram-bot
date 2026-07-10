@@ -1,7 +1,7 @@
 import asyncio
 import re
 from fogmoe_bot.infrastructure.database import connection as db_connection
-from fogmoe_bot.application.economy import process_user
+from fogmoe_bot.application.accounts import service as process_user
 from fogmoe_bot.infrastructure.database.repositories import crypto_repository
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler

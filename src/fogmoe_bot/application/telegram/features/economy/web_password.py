@@ -6,7 +6,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, CommandHandler
 
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
-from fogmoe_bot.application.economy import process_user
+from fogmoe_bot.application.accounts import service as process_user
 from fogmoe_bot.infrastructure.database.repositories import economy_repository
 import html
 

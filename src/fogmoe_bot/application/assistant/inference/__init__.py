@@ -1,11 +1,5 @@
-"""@brief Agent 推理应用服务 / Agent inference application services."""
+"""@brief Agent 推理应用服务 / Agent inference application services.
 
-from .service import ASSISTANT_INFERENCE_SERVICE, AssistantInferenceService
-from .task_runner import INFERENCE_TASK_RUNNER, InferenceTaskRunner
-
-__all__ = [
-    "ASSISTANT_INFERENCE_SERVICE",
-    "AssistantInferenceService",
-    "INFERENCE_TASK_RUNNER",
-    "InferenceTaskRunner",
-]
+请从具体模块导入 service 或 task_runner，避免包初始化时构造循环依赖。
+/ Import from the concrete service or task_runner module to avoid import-time cycles.
+"""

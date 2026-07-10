@@ -1,7 +1,7 @@
 import asyncio
 import random
 from fogmoe_bot.infrastructure.database import connection as db_connection
-from fogmoe_bot.application.economy import process_user
+from fogmoe_bot.application.accounts import service as process_user
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes

@@ -4,7 +4,7 @@ import aiohttp
 import re
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
-from fogmoe_bot.application.economy import process_user
+from fogmoe_bot.application.accounts import service as process_user
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
 
 # 创建一个日志记录器

@@ -4,7 +4,7 @@ import logging
 import telegram.error
 
 from fogmoe_bot.infrastructure.telegram import telegram_utils
-from fogmoe_bot.domain.agent_runtime import audio_delivery
+from fogmoe_bot.application.telegram import generated_audio_sender as audio_delivery
 
 
 def test_send_with_retry_prefers_telegram_voice(monkeypatch, tmp_path):

@@ -2,8 +2,8 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
-from fogmoe_bot.domain.agent_runtime.audio_delivery import send_generated_audio_from_tool_result
-from fogmoe_bot.domain.agent_runtime.image_delivery import send_generated_images_from_tool_result
+from .generated_audio_sender import send_generated_audio_from_tool_result
+from .generated_image_sender import send_generated_images_from_tool_result
 from .sticker_sender import (
     PartialAIReplySendError,
     normalize_sticker_directives,

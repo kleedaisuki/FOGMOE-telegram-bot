@@ -13,8 +13,8 @@ from fogmoe_bot.domain.agent_runtime.protocol import (
 from fogmoe_bot.infrastructure.llm.litellm_client import create_chat_completion
 
 from .agent_response import AgentResponse
-from .delivery.contracts import VisibleContentSink
-from .delivery.visible_content import emit_visible_content
+from .inference.output import VisibleContentSink
+from .inference.visible_output import emit_visible_content
 from .errors import PartialAgentResponseError
 
 

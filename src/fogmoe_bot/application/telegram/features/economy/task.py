@@ -1,6 +1,6 @@
 import asyncio
 from fogmoe_bot.infrastructure.database import connection as db_connection
-from fogmoe_bot.application.economy import process_user
+from fogmoe_bot.application.accounts import service as process_user
 from fogmoe_bot.infrastructure.database.repositories import economy_repository
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes

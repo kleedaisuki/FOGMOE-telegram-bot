@@ -12,8 +12,9 @@ from telegram.ext import ContextTypes
 
 from fogmoe_bot.application.telegram.archive_utils import send_permanent_records_archive
 from fogmoe_bot.application.chat import group_chat_history
-from fogmoe_bot.application.economy import process_user, stake_reward_pool
-from fogmoe_bot.application.assistant.context_state import load_user_state
+from fogmoe_bot.application.economy import stake_reward_pool
+from fogmoe_bot.application.accounts import service as process_user
+from fogmoe_bot.application.accounts.context import load_user_state
 from fogmoe_bot.domain.context import (
     ChatMessageContext,
     ConversationScope,
@@ -29,12 +30,12 @@ from fogmoe_bot.infrastructure.telegram.telegram_utils import (
 )
 from fogmoe_bot.application.assistant.tasks import summary
 from fogmoe_bot.application.conversation_lock_manager import CONVERSATION_LOCK_MANAGER
-from fogmoe_bot.domain.agent_runtime.audio_delivery import send_generated_audio_from_tool_logs
-from fogmoe_bot.domain.agent_runtime.image_delivery import send_generated_images_from_tool_logs
+from fogmoe_bot.application.telegram.generated_audio_sender import send_generated_audio_from_tool_logs
+from fogmoe_bot.application.telegram.generated_image_sender import send_generated_images_from_tool_logs
 from fogmoe_bot.application.assistant.reply_filter import normalize_ai_reply_text
-from fogmoe_bot.application.assistant.inference import ASSISTANT_INFERENCE_SERVICE
-from fogmoe_bot.application.assistant.sticker_sender import normalize_sticker_directives, send_ai_reply_with_stickers
-from fogmoe_bot.application.assistant.telegram_visible_sender import TelegramVisibleContentHandler
+from fogmoe_bot.application.assistant.inference.service import ASSISTANT_INFERENCE_SERVICE
+from fogmoe_bot.application.telegram.sticker_sender import normalize_sticker_directives, send_ai_reply_with_stickers
+from fogmoe_bot.application.telegram.assistant_visible_sender import TelegramVisibleContentHandler
 from fogmoe_bot.application.assistant.inference.task_runner import INFERENCE_TASK_RUNNER
 from fogmoe_bot.application.assistant.tasks.vision import analyze_image
 from fogmoe_bot.domain.agent_runtime.history import tool_logs_to_record_entries

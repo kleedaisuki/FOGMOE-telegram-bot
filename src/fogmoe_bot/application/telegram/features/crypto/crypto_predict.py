@@ -1,6 +1,6 @@
 import asyncio
 from fogmoe_bot.infrastructure.database import connection as db_connection
-from fogmoe_bot.application.economy import process_user
+from fogmoe_bot.application.accounts import service as process_user
 from fogmoe_bot.infrastructure.database.repositories import crypto_repository, user_repository
 import logging
 from datetime import datetime, timedelta

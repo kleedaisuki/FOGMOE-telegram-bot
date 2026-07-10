@@ -4,7 +4,7 @@ import logging
 import telegram.error
 
 from fogmoe_bot.infrastructure.telegram import telegram_utils
-from fogmoe_bot.domain.agent_runtime import image_delivery
+from fogmoe_bot.application.telegram import generated_image_sender as image_delivery
 
 
 def test_send_generated_image_uses_prompt_filename(monkeypatch, tmp_path):

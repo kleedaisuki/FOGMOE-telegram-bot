@@ -9,7 +9,7 @@ from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import ai_schedule_repository
 from fogmoe_bot.application.telegram.archive_utils import send_permanent_records_archive
-from fogmoe_bot.application.assistant.context_state import load_user_state
+from fogmoe_bot.application.accounts.context import load_user_state
 from fogmoe_bot.domain.context import (
     ConversationScope,
     ContextBuilder,
@@ -18,12 +18,12 @@ from fogmoe_bot.domain.context import (
 from fogmoe_bot.infrastructure.telegram.telegram_utils import partial_send
 from fogmoe_bot.application.assistant.tasks import summary
 from fogmoe_bot.application.conversation_lock_manager import CONVERSATION_LOCK_MANAGER
-from fogmoe_bot.domain.agent_runtime.audio_delivery import send_generated_audio_from_tool_logs
-from fogmoe_bot.domain.agent_runtime.image_delivery import send_generated_images_from_tool_logs
+from fogmoe_bot.application.telegram.generated_audio_sender import send_generated_audio_from_tool_logs
+from fogmoe_bot.application.telegram.generated_image_sender import send_generated_images_from_tool_logs
 from fogmoe_bot.application.assistant.reply_filter import normalize_ai_reply_text
-from fogmoe_bot.application.assistant.inference import ASSISTANT_INFERENCE_SERVICE
-from fogmoe_bot.application.assistant.sticker_sender import normalize_sticker_directives, send_ai_reply_with_stickers
-from fogmoe_bot.application.assistant.telegram_visible_sender import TelegramVisibleContentHandler
+from fogmoe_bot.application.assistant.inference.service import ASSISTANT_INFERENCE_SERVICE
+from fogmoe_bot.application.telegram.sticker_sender import normalize_sticker_directives, send_ai_reply_with_stickers
+from fogmoe_bot.application.telegram.assistant_visible_sender import TelegramVisibleContentHandler
 from fogmoe_bot.domain.agent_runtime.history import tool_logs_to_record_entries
 
 logger = logging.getLogger(__name__)

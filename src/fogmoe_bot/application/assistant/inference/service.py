@@ -16,10 +16,10 @@ from fogmoe_bot.infrastructure import config
 
 from ..agent_loop import run_agent_loop
 from ..agent_response import AgentResponse
-from ..delivery.contracts import VisibleContentSink
-from ..delivery.visible_content import visible_content_events, visible_content_was_sent
+from .output import VisibleContentSink
+from .visible_output import visible_content_events, visible_content_was_sent
 from ..errors import PartialAgentResponseError, SafetyBlockError
-from ..message_content import messages_have_images, strip_image_content
+from .message_content import messages_have_images, strip_image_content
 from .provider_profiles import build_provider_profiles, configured_service_order
 
 AI_PROVIDER_CIRCUIT_FAILURE_THRESHOLD = 3

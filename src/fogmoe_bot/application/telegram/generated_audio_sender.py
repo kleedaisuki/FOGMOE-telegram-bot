@@ -4,7 +4,7 @@ from typing import Any
 
 from fogmoe_bot.infrastructure.telegram.telegram_utils import retry_telegram_send, telegram_error_summary
 
-from .tools.voice_tools import pop_generated_audio_file
+from fogmoe_bot.domain.agent_runtime.tools.voice_tools import pop_generated_audio_file
 
 MAX_GENERATED_AUDIO_PER_REPLY = 3
 

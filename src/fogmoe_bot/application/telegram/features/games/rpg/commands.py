@@ -24,7 +24,7 @@ from .equipment import (
     item_type_to_chinese,
     INVENTORY_CAPACITY
 )
-from fogmoe_bot.application.economy import process_user
+from fogmoe_bot.application.accounts import service as process_user
 
 # --- 主命令处理 ---
 @cooldown  # 应用命令冷却

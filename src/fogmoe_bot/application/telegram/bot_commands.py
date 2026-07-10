@@ -12,7 +12,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from fogmoe_bot.application.telegram.archive_utils import send_permanent_records_archive
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
-from fogmoe_bot.application.economy import process_user, stake_reward_pool
+from fogmoe_bot.application.economy import stake_reward_pool
+from fogmoe_bot.application.accounts import service as process_user
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import (

@@ -5,7 +5,6 @@ from typing import Optional
 
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import kindness_repository, user_repository
-from fogmoe_bot.application.economy import process_user
 
 from .context import get_tool_request_context
 
@@ -57,7 +56,7 @@ def kindness_gift_tool(
     try:
         async def _record_gift():
             async with db_connection.transaction() as connection:
-                await process_user.add_free_coins(
+                await user_repository.add_free_coins(
                     recipient.user_id,
                     amt,
                     connection=connection,
@@ -117,19 +116,35 @@ def update_affection_tool(delta: int, **kwargs) -> dict:
         change = -10
 
     try:
-        affection = process_user.get_user_affection_sync(user_id)
+        affection = db_connection.run_sync(
+            user_repository.fetch_affection(user_id)
+        )
     except Exception as exc:
         logging.exception("Failed to fetch affection: %s", exc)
         return {"error": "Error querying affection level, please try again later"}
 
-    if affection is None:
-        return {"error": "User affection data not found"}
+    affection = int(affection or 0)
 
     if (affection >= 100 and change > 0) or (affection <= -100 and change < 0):
         return {"error": "Affection level has reached the limit, cannot adjust further"}
 
     try:
-        new_affection = process_user.update_user_affection_sync(user_id, change)
+        async def _update_affection() -> int:
+            async with db_connection.transaction() as connection:
+                current = await user_repository.fetch_affection(
+                    user_id,
+                    connection=connection,
+                    for_update=True,
+                )
+                new_value = max(-100, min(100, int(current or 0) + change))
+                await user_repository.upsert_affection(
+                    user_id,
+                    new_value,
+                    connection=connection,
+                )
+                return new_value
+
+        new_affection = db_connection.run_sync(_update_affection())
     except Exception as exc:
         logging.exception("Failed to update affection: %s", exc)
         return {"error": "Error updating affection level, please try again later"}
@@ -159,7 +174,16 @@ def update_impression_tool(impression: str, **kwargs) -> dict:
         text = text[:500]
 
     try:
-        saved = process_user.update_user_impression_sync(user_id, text)
+        async def _update_impression() -> str:
+            async with db_connection.transaction() as connection:
+                await user_repository.upsert_impression(
+                    user_id,
+                    text,
+                    connection=connection,
+                )
+            return text
+
+        saved = db_connection.run_sync(_update_impression())
     except Exception as exc:
         logging.exception("Failed to update impression: %s", exc)
         return {"user_id": user_id, "error": "Error updating impression"}

@@ -3,7 +3,7 @@ from typing import Optional, Dict, Any
 
 from sqlalchemy.exc import IntegrityError
 
-from fogmoe_bot.application.economy import process_user
+from fogmoe_bot.application.accounts import service as process_user
 from fogmoe_bot.infrastructure.database.repositories import game_repository, user_repository
 
 from .utils import get_level_from_exp

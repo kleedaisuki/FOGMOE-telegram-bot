@@ -99,6 +99,7 @@ def test_agent_runtime_owns_agent_tooling():
         SRC_ROOT / "application" / "assistant" / "tool_history.py",
         SRC_ROOT / "application" / "assistant" / "generated_image_sender.py",
         SRC_ROOT / "application" / "assistant" / "generated_audio_sender.py",
+        SRC_ROOT / "application" / "assistant" / "delivery",
         SRC_ROOT / "application" / "assistant" / "types.py",
         SRC_ROOT / "application" / "assistant" / "conversation_locks.py",
         SRC_ROOT / "application" / "assistant" / "conversation_context.py",
@@ -109,6 +110,12 @@ def test_agent_runtime_owns_agent_tooling():
         SRC_ROOT / "application" / "assistant" / "task_runner.py",
         SRC_ROOT / "application" / "assistant" / "provider_resolver.py",
         SRC_ROOT / "application" / "assistant" / "summary.py",
+        SRC_ROOT / "application" / "assistant" / "message_content.py",
+        SRC_ROOT / "application" / "assistant" / "context_state.py",
+        SRC_ROOT / "application" / "assistant" / "sticker_sender.py",
+        SRC_ROOT / "application" / "assistant" / "telegram_visible_sender.py",
+        SRC_ROOT / "application" / "economy" / "process_user.py",
+        SRC_ROOT / "application" / "user",
     ]
 
     assert runtime_root.is_dir()
@@ -118,8 +125,22 @@ def test_agent_runtime_owns_agent_tooling():
     assert (SRC_ROOT / "application" / "assistant" / "inference").is_dir()
     assert (SRC_ROOT / "application" / "assistant" / "inference" / "task_runner.py").is_file()
     assert (SRC_ROOT / "application" / "assistant" / "tasks" / "summary.py").is_file()
+    assert (SRC_ROOT / "application" / "assistant" / "inference" / "message_content.py").is_file()
+    assert (SRC_ROOT / "application" / "accounts" / "service.py").is_file()
+    assert (SRC_ROOT / "application" / "accounts" / "context.py").is_file()
+    assert (SRC_ROOT / "application" / "telegram" / "assistant_visible_sender.py").is_file()
+    assert (SRC_ROOT / "application" / "telegram" / "generated_image_sender.py").is_file()
+    assert (SRC_ROOT / "application" / "telegram" / "generated_audio_sender.py").is_file()
+    assert not (runtime_root / "image_delivery.py").exists()
+    assert not (runtime_root / "audio_delivery.py").exists()
     assert (SRC_ROOT / "domain" / "agent_routing").is_dir()
     assert [path for path in forbidden_paths if path.exists()] == []
+
+
+def test_runtime_user_tools_do_not_depend_on_application_services():
+    user_tools_path = SRC_ROOT / "domain" / "agent_runtime" / "tools" / "user_tools.py"
+
+    assert "fogmoe_bot.application" not in user_tools_path.read_text(encoding="utf-8")
 
 
 def test_database_control_plane_stays_out_of_bot_package():

@@ -6,7 +6,7 @@ from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import economy_repository, user_repository
-from fogmoe_bot.application.economy import process_user
+from fogmoe_bot.application.accounts import service as process_user
 import asyncio
 from fogmoe_bot.application.telegram.command_cooldown import cooldown 
 

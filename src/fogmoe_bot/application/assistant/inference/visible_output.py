@@ -1,7 +1,7 @@
 import logging
 from typing import NamedTuple
 
-from .contracts import VisibleContentSink
+from .output import VisibleContentSink
 
 
 class VisibleContentResult(NamedTuple):

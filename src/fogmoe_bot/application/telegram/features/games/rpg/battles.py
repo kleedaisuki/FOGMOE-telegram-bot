@@ -5,7 +5,7 @@ import time
 from typing import Tuple
 
 # 导入自定义模块
-from fogmoe_bot.application.economy import process_user
+from fogmoe_bot.application.accounts import service as process_user
 
 from .utils import calculate_damage, calculate_exp_gain, get_level_from_exp
 from .characters import (

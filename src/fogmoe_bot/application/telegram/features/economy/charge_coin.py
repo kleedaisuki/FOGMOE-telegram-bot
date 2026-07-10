@@ -10,7 +10,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import economy_repository, user_repository
-from fogmoe_bot.application.economy import process_user
+from fogmoe_bot.application.accounts import service as process_user
 from fogmoe_bot.application.telegram.command_cooldown import cooldown
 
 # 创建一个锁字典，用于防止同一卡密被并发使用

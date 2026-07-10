@@ -4,7 +4,7 @@ from typing import Any
 
 from fogmoe_bot.infrastructure.telegram.telegram_utils import retry_telegram_send, telegram_error_summary
 
-from .tools.image_tools import pop_generated_image_file
+from fogmoe_bot.domain.agent_runtime.tools.image_tools import pop_generated_image_file
 
 MAX_GENERATED_IMAGES_PER_REPLY = 10
 

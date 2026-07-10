@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fogmoe_bot.application.economy import process_user
+from . import service as user_service
 from fogmoe_bot.domain.context import UserState
 from fogmoe_bot.infrastructure.database.repositories import conversation_repository
 
@@ -53,13 +53,13 @@ async def load_user_state(
     """
 
     if account is None:
-        account = await process_user.get_user_account(user_id)
+        account = await user_service.get_user_account(user_id)
     if not account:
         return None
 
     user_coins = int(coins if coins is not None else account.total_coins)
-    user_plan = plan or process_user.resolve_user_plan(user_id, account.coins_paid)
-    impression_raw = await process_user.async_get_user_impression(user_id)
+    user_plan = plan or user_service.resolve_user_plan(user_id, account.coins_paid)
+    impression_raw = await user_service.async_get_user_impression(user_id)
     diary_exists = await conversation_repository.user_diary_exists(user_id)
 
     return UserState(
