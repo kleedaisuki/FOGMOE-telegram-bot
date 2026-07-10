@@ -18,7 +18,6 @@ from fogmoe_bot.application.accounts.context import load_user_state
 from fogmoe_bot.domain.context import (
     ChatMessageContext,
     ConversationScope,
-    ContextBuilder,
 )
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import db, connection as db_connection
@@ -34,6 +33,7 @@ from fogmoe_bot.application.telegram.generated_audio_sender import send_generate
 from fogmoe_bot.application.telegram.generated_image_sender import send_generated_images_from_tool_logs
 from fogmoe_bot.application.assistant.reply_filter import normalize_ai_reply_text
 from fogmoe_bot.application.assistant.inference.service import ASSISTANT_INFERENCE_SERVICE
+from fogmoe_bot.application.assistant.agent_loop import DEFAULT_AGENT_LOOP
 from fogmoe_bot.application.telegram.sticker_sender import normalize_sticker_directives, send_ai_reply_with_stickers
 from fogmoe_bot.application.telegram.assistant_visible_sender import TelegramVisibleContentHandler
 from fogmoe_bot.application.assistant.inference.task_runner import INFERENCE_TASK_RUNNER
@@ -41,9 +41,6 @@ from fogmoe_bot.application.assistant.tasks.vision import analyze_image
 from fogmoe_bot.domain.agent_runtime.history import tool_logs_to_record_entries
 
 logger = logging.getLogger(__name__)
-
-_CONTEXT_BUILDER = ContextBuilder(config.SYSTEM_PROMPT)
-"""@brief Telegram 对话入口使用的上下文构造器 / Context builder used by Telegram conversation entrypoints."""
 
 
 _BOT_ID: int | None = None
@@ -165,7 +162,7 @@ def _format_xml_message(
 ) -> str:
     """@brief 兼容旧调用的消息渲染薄封装 / Thin compatibility wrapper for message rendering."""
 
-    return _CONTEXT_BUILDER.render_chat_message(
+    return DEFAULT_AGENT_LOOP.context_builder.render_chat_message(
         ChatMessageContext(
             chat_type=chat_type,
             chat_title=chat_title,
@@ -590,7 +587,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
     if user_state is None:
         logger.warning("User disappeared while building AI context: user_id=%s", user_id)
         return
-    user_state_prompt = _CONTEXT_BUILDER.render_user_state(user_state)
+    user_state_prompt = DEFAULT_AGENT_LOOP.context_builder.render_user_state(user_state)
 
     chat_type = update.effective_chat.type or "private"
     group_title = (update.effective_chat.title or "").strip() if update.effective_chat else ""
@@ -688,7 +685,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
                     base64_str=base64_str,
                     mime_type=_media_mime_type(media_type, message),
                 )
-                runtime_replacement = _CONTEXT_BUILDER.create_runtime_replacement(
+                runtime_replacement = DEFAULT_AGENT_LOOP.context_builder.create_runtime_replacement(
                     persisted_content=formatted_message,
                     runtime_message=runtime_user_message,
                 )
@@ -750,7 +747,7 @@ async def _reply_batch_unlocked(batch_items: list[_QueuedUpdate]) -> None:
 
     # 异步获取AI回复
     is_group_chat = update.effective_chat.type in ("group", "supergroup")
-    model_query = _CONTEXT_BUILDER.build_model_query(
+    model_query = DEFAULT_AGENT_LOOP.context_builder.build_model_query(
         history_messages=chat_history,
         scope=ConversationScope(
             user_id=user_id,

@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from fogmoe_bot.domain.agent_routing import ProviderCircuit, ProviderRoute, model_supports_vision
@@ -14,8 +14,7 @@ from fogmoe_bot.domain.agent_runtime.tools import (
 )
 from fogmoe_bot.infrastructure import config
 
-from ..agent_loop import run_agent_loop
-from ..agent_response import AgentResponse
+from ..agent_loop import AgentLoop, AgentResponse, AgentRunRequest, DEFAULT_AGENT_LOOP
 from .output import VisibleContentSink
 from .visible_output import visible_content_events, visible_content_was_sent
 from ..errors import PartialAgentResponseError, SafetyBlockError
@@ -42,9 +41,6 @@ PARTIAL_AGENT_RESPONSE_ERROR_MESSAGE = (
     "You can report this issue to the admin @ScarletKc."
 )
 
-AgentRunner = Callable[..., AgentResponse]
-
-
 class AssistantInferenceService:
     """@brief 路由并执行 Agent 推理 / Route and execute Agent inference.
 
@@ -60,7 +56,7 @@ class AssistantInferenceService:
         profiles: Mapping[str, ProviderRoute],
         circuit: ProviderCircuit,
         text_only_model_patterns: Iterable[str],
-        agent_runner: AgentRunner = run_agent_loop,
+        agent_loop: AgentLoop = DEFAULT_AGENT_LOOP,
     ) -> None:
         """@brief 初始化推理服务 / Initialize the inference service.
 
@@ -68,13 +64,13 @@ class AssistantInferenceService:
         @param profiles 服务到 route 的映射 / Service-to-route mapping.
         @param circuit provider 熔断状态机 / Provider circuit-breaker state machine.
         @param text_only_model_patterns 纯文本模型模式 / Text-only model patterns.
-        @param agent_runner Agent 回合执行器 / Agent turn runner.
+        @param agent_loop 共享 Agent 回合编排器 / Shared Agent turn orchestrator.
         """
         self._service_order = tuple(service_order)
         self._profiles = dict(profiles)
         self._circuit = circuit
         self._text_only_model_patterns = tuple(text_only_model_patterns)
-        self._agent_runner = agent_runner
+        self._agent_loop = agent_loop
 
     @property
     def circuit(self) -> ProviderCircuit:
@@ -235,14 +231,16 @@ class AssistantInferenceService:
         last_error: Exception | None = None
         for model in route.models:
             try:
-                return self._agent_runner(
-                    route.provider_name,
-                    model or "",
-                    list(messages),
-                    provider_name=route.display_name,
-                    skip_tools=route.skip_tools,
-                    completion_kwargs=route.completion_kwargs or None,
-                    visible_content_handler=visible_content_sink,
+                return self._agent_loop.run(
+                    AgentRunRequest(
+                        provider=route.provider_name,
+                        model=model or "",
+                        messages=list(messages),
+                        provider_name=route.display_name,
+                        skip_tools=frozenset(route.skip_tools),
+                        completion_kwargs=route.completion_kwargs or None,
+                        visible_content_handler=visible_content_sink,
+                    )
                 )
             except PartialAgentResponseError:
                 raise

@@ -5,14 +5,12 @@ from typing import Optional
 
 from telegram.ext import ContextTypes
 
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import ai_schedule_repository
 from fogmoe_bot.application.telegram.archive_utils import send_permanent_records_archive
 from fogmoe_bot.application.accounts.context import load_user_state
 from fogmoe_bot.domain.context import (
     ConversationScope,
-    ContextBuilder,
     ScheduledTaskContext,
 )
 from fogmoe_bot.infrastructure.telegram.telegram_utils import partial_send
@@ -22,14 +20,12 @@ from fogmoe_bot.application.telegram.generated_audio_sender import send_generate
 from fogmoe_bot.application.telegram.generated_image_sender import send_generated_images_from_tool_logs
 from fogmoe_bot.application.assistant.reply_filter import normalize_ai_reply_text
 from fogmoe_bot.application.assistant.inference.service import ASSISTANT_INFERENCE_SERVICE
+from fogmoe_bot.application.assistant.agent_loop import DEFAULT_AGENT_LOOP
 from fogmoe_bot.application.telegram.sticker_sender import normalize_sticker_directives, send_ai_reply_with_stickers
 from fogmoe_bot.application.telegram.assistant_visible_sender import TelegramVisibleContentHandler
 from fogmoe_bot.domain.agent_runtime.history import tool_logs_to_record_entries
 
 logger = logging.getLogger(__name__)
-
-_CONTEXT_BUILDER = ContextBuilder(config.SYSTEM_PROMPT)
-"""@brief 定时任务使用的上下文构造器 / Context builder used by scheduled tasks."""
 
 SCHEDULE_POLL_INTERVAL = 60
 SCHEDULE_BATCH_SIZE = 5
@@ -77,7 +73,7 @@ def _format_scheduled_message(
 ) -> str:
     """@brief 兼容旧调用的定时任务渲染薄封装 / Thin compatibility wrapper for scheduled task rendering."""
 
-    return _CONTEXT_BUILDER.render_scheduled_task(
+    return DEFAULT_AGENT_LOOP.context_builder.render_scheduled_task(
         ScheduledTaskContext(
             timestamp=timestamp,
             scheduled_at=scheduled_at,
@@ -201,7 +197,7 @@ async def _process_schedule_task_locked(
                 error="user not found",
             )
             return
-        user_state_prompt = _CONTEXT_BUILDER.render_user_state(user_state)
+        user_state_prompt = DEFAULT_AGENT_LOOP.context_builder.render_user_state(user_state)
 
         now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
         scheduled_message = _format_scheduled_message(
@@ -231,7 +227,7 @@ async def _process_schedule_task_locked(
             summary.schedule_summary_generation(user_id)
 
         chat_history = await db_connection.async_get_chat_history(user_id)
-        model_query = _CONTEXT_BUILDER.build_model_query(
+        model_query = DEFAULT_AGENT_LOOP.context_builder.build_model_query(
             history_messages=chat_history,
             scope=ConversationScope(user_id=user_id),
             user_state_prompt=user_state_prompt,

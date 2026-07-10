@@ -101,6 +101,7 @@ def test_agent_runtime_owns_agent_tooling():
         SRC_ROOT / "application" / "assistant" / "generated_audio_sender.py",
         SRC_ROOT / "application" / "assistant" / "delivery",
         SRC_ROOT / "application" / "assistant" / "types.py",
+        SRC_ROOT / "application" / "assistant" / "agent_response.py",
         SRC_ROOT / "application" / "assistant" / "conversation_locks.py",
         SRC_ROOT / "application" / "assistant" / "conversation_context.py",
         SRC_ROOT / "application" / "assistant" / "router.py",

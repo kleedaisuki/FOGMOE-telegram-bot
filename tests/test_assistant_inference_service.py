@@ -1,6 +1,6 @@
 import asyncio
 
-from fogmoe_bot.application.assistant.agent_response import AgentResponse
+from fogmoe_bot.application.assistant.agent_loop import AgentResponse
 from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
 from fogmoe_bot.domain.agent_routing import ProviderCircuit, ProviderRoute
 
@@ -20,6 +20,18 @@ def _route(
 
 
 def _service(*, order, profiles, runner, text_only_patterns=()):
+    class _AgentLoop:
+        def run(self, request):
+            return runner(
+                request.provider,
+                request.model,
+                request.messages,
+                provider_name=request.provider_name,
+                skip_tools=request.skip_tools,
+                completion_kwargs=request.completion_kwargs,
+                visible_content_handler=request.visible_content_handler,
+            )
+
     return AssistantInferenceService(
         service_order=order,
         profiles=profiles,
@@ -29,7 +41,7 @@ def _service(*, order, profiles, runner, text_only_patterns=()):
             cooldown_seconds=1800,
         ),
         text_only_model_patterns=text_only_patterns,
-        agent_runner=runner,
+        agent_loop=_AgentLoop(),
     )
 
 
