@@ -16,3 +16,11 @@ def test_system_prompt_defines_persona_and_runtime_contract():
     assert "# Runtime Contract\n" in config.SYSTEM_PROMPT
     assert config.SYSTEM_PROMPT.endswith("public repository when appropriate.\n")
     assert "@kleek_RoPL_bot" in config.SYSTEM_PROMPT
+
+
+def test_system_prompt_includes_sticker_directive_examples():
+    """@brief 验证贴纸指令示例存在 / Verify sticker directive examples exist."""
+
+    assert "[sticker_pack:<pack name> emoji:<emoji>]" in config.SYSTEM_PROMPT
+    assert "[sticker_pack:WhiteWind emoji:😊]" in config.SYSTEM_PROMPT
+    assert "[sticker_pack:DonutTheDog emoji:😢]" in config.SYSTEM_PROMPT
