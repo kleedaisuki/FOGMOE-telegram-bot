@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from fogmoe_dbctl import cli
-from fogmoe_dbctl.commands import bootstrap, migrate
+from fogmoe_dbctl.commands import bootstrap, export_csv, migrate
 from fogmoe_dbctl.postgres import (
     ServiceConfig,
     escape_pgpass_field,
@@ -21,6 +21,8 @@ def test_cli_registers_commands_and_compatibility_aliases():
     assert parser.parse_args(["migrate"]).handler is migrate.execute
     assert parser.parse_args(["upgrade"]).handler is migrate.execute
     assert parser.parse_args(["run-migrations-as-role"]).handler is migrate.execute
+    assert parser.parse_args(["export-csv", "--table", "conversation.chat_records", "--output", "records.csv"]).handler is export_csv.execute
+    assert parser.parse_args(["export", "--table", "conversation.chat_records", "--output", "records.csv"]).handler is export_csv.execute
 
 
 def test_cli_without_command_prints_help(capsys):
@@ -112,3 +114,53 @@ def test_bootstrap_dry_run_redacts_passwords(tmp_path: Path, capsys):
     assert "automation-secret" not in output
     assert "***" in output
     assert not (tmp_path / "pgpass").exists()
+
+
+def test_export_csv_accepts_only_schema_qualified_identifiers():
+    """@brief 导出命令拒绝任意 SQL / Export command rejects arbitrary SQL."""
+
+    assert export_csv.parse_table_name("conversation.chat_records") == (
+        "conversation",
+        "chat_records",
+    )
+    assert export_csv.build_copy_sql("conversation", "chat_records") == (
+        'COPY (SELECT * FROM "conversation"."chat_records") '
+        "TO STDOUT WITH (FORMAT CSV, HEADER TRUE, ENCODING 'UTF8');"
+    )
+
+    for invalid_name in ("chat_records", "conversation.chat-records", "conversation.chat_records;DROP TABLE users"):
+        try:
+            export_csv.parse_table_name(invalid_name)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected invalid table name to fail: {invalid_name}")
+
+
+def test_export_csv_writes_atomically_through_psql_service(tmp_path: Path, monkeypatch):
+    """@brief CSV 经 service 原子写入，失败不会毁坏旧文件 / CSV writes atomically via service."""
+
+    output = tmp_path / "records.csv"
+    output.write_text("old\n", encoding="utf-8")
+    calls = []
+
+    def fake_run(command, *, stdout, env, check):
+        calls.append((command, env, check))
+        stdout.write(b"id\n1\n")
+
+    monkeypatch.setattr(export_csv.subprocess, "run", fake_run)
+    export_csv.export_table(
+        config_dir=tmp_path / "psql",
+        service_name="fogmoe_automation",
+        schema="conversation",
+        table="chat_records",
+        output_path=output,
+        force=True,
+    )
+
+    assert output.read_text(encoding="utf-8") == "id\n1\n"
+    command, environment, check = calls[0]
+    assert command[0] == "psql"
+    assert "service=fogmoe_automation" in command
+    assert environment["PGSERVICEFILE"] == str(tmp_path / "psql" / "pg_service.conf")
+    assert environment["PGPASSFILE"] == str(tmp_path / "psql" / "pgpass")
+    assert check is True

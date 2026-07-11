@@ -8,6 +8,7 @@
 cli.py                    组合根：构造 argparse、注册并分发命令
 commands/bootstrap.py     建库、角色与本地 psql 配置用例
 commands/migrate.py       Alembic 迁移与运行时授权用例
+commands/export_csv.py    通过 psql service 原子导出表为 CSV
 postgres.py               PostgreSQL URL、标识符、pgpass、service 共享原语
 config.py                 项目路径、schema 拓扑与环境配置
 migrations/               Alembic 适配层与版本化 SQL
@@ -29,5 +30,16 @@ migrations/               Alembic 适配层与版本化 SQL
 
 - `bootstrap-postgres`，别名 `bootstrap`
 - `migrate`，别名 `upgrade`、`run-migrations-as-role`
+- `export-csv`，别名 `export`
+
+导出仅接受 `schema.table`，不接受任意 SQL：
+
+```bash
+fogmoe-dbctl export-csv \
+  --table conversation.chat_records \
+  --output ./chat_records.csv
+```
+
+目标文件已存在时命令会拒绝覆盖；显式传入 `--force` 才会原子替换它。
 
 所有数据库变更仍需由操作者显式运行。`--dry-run` 不显示数据库密码。

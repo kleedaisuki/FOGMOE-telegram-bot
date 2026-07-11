@@ -102,6 +102,9 @@ fogmoe-dbctl bootstrap-postgres
 
 # 已有外部数据库：配置 .env 或 psql service 后直接运行迁移
 fogmoe-dbctl migrate
+
+# 通过受配置保护的 service 导出一张表；不会接受任意 SQL
+fogmoe-dbctl export-csv --table conversation.chat_records --output ./chat_records.csv
 ```
 数据库迁移由 `fogmoe-dbctl` 显式管理，机器人启动时不会自动迁移外部数据库。
 CLI 的分层结构和子命令扩展约定见 [`docs/dbctl.md`](docs/dbctl.md)。
