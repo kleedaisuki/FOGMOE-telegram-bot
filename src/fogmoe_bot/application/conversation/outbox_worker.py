@@ -28,6 +28,8 @@ from fogmoe_bot.domain.conversation.outbox import (
     OutboundClaim,
     OutboundMessage,
 )
+from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
 
 
 logger = logging.getLogger(__name__)
@@ -399,6 +401,7 @@ class OutboxWorker:
         attempt_timeout: timedelta,
         retry_policy: FullJitterDeliveryRetryPolicy | None = None,
         clock: UtcClock | None = None,
+        telemetry: Telemetry,
     ) -> None:
         """@brief 创建 outbox worker / Create an outbox worker.
 
@@ -410,6 +413,8 @@ class OutboxWorker:
         @param attempt_timeout 单次外部调用上限 / External-call timeout per attempt.
         @param retry_policy 失败策略 / Failure policy.
         @param clock 可替换 UTC 时钟 / Replaceable UTC clock.
+        @param telemetry 进程 typed telemetry / Process typed telemetry.
+        @return None / None.
         @raise ValueError 容量或时间参数非法时抛出 / Raised for invalid capacity or timing parameters.
         """
 
@@ -431,6 +436,7 @@ class OutboxWorker:
         self._attempt_timeout = attempt_timeout
         self._retry_policy = retry_policy or FullJitterDeliveryRetryPolicy()
         self._clock = clock or SystemUtcClock()
+        self._telemetry = telemetry
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """@brief 运行 producer 与固定 consumers / Run one producer and fixed consumers.
@@ -471,26 +477,40 @@ class OutboxWorker:
         CancelledError is not caught; the claim remains processing until lease recovery.
         """
 
-        try:
-            async with asyncio.timeout(self._attempt_timeout.total_seconds()):
-                receipt = await self._delivery.deliver(claim.message)
-        except TimeoutError:
-            await self._finalize_failure(
-                claim,
-                AmbiguousDeliveryTimeout(
+        message = claim.message
+        with self._telemetry.span(
+            "outbox.deliver",
+            kind=SpanKind.PRODUCER,
+            parent=message.draft.trace_context,
+            attributes={
+                "fogmoe.outbound.id": str(message.message_id),
+                "fogmoe.turn.id": str(message.turn_id) if message.turn_id else "",
+                "fogmoe.outbound.kind": message.kind.value,
+                "fogmoe.outbox.attempt": message.attempt_count,
+            },
+        ) as span:
+            try:
+                async with asyncio.timeout(self._attempt_timeout.total_seconds()):
+                    receipt = await self._delivery.deliver(message)
+            except TimeoutError:
+                error = AmbiguousDeliveryTimeout(
                     f"delivery attempt exceeded {self._attempt_timeout.total_seconds():g}s"
-                ),
-            )
-            return
-        except Exception as error:
-            await self._finalize_failure(claim, error)
-            return
+                )
+                span.set_status(SpanStatus.ERROR, str(error))
+                span.set_attribute("error.type", error.__class__.__name__)
+                await self._finalize_failure(claim, error)
+                return
+            except Exception as error:
+                span.set_status(SpanStatus.ERROR, str(error))
+                span.set_attribute("error.type", error.__class__.__name__)
+                await self._finalize_failure(claim, error)
+                return
 
-        await self._repository.mark_outbound_delivered(
-            claim,
-            delivered_at=self._clock.now(),
-            external_message_id=receipt.external_message_id,
-        )
+            await self._repository.mark_outbound_delivered(
+                claim,
+                delivered_at=self._clock.now(),
+                external_message_id=receipt.external_message_id,
+            )
 
     async def _produce(
         self,
@@ -515,6 +535,10 @@ class OutboxWorker:
                         now=now
                     )
                     if recovered:
+                        self._telemetry.counter(
+                            "fogmoe.outbox.leases.recovered",
+                            float(recovered),
+                        )
                         logger.warning(
                             "Recovered expired outbox leases: count=%s",
                             recovered,

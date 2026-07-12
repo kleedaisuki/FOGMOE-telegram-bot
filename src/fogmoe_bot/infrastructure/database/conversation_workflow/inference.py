@@ -187,15 +187,16 @@ class PostgresInferenceRepository:
                 "activity.conversation_id, activity.request, activity.status, "
                 "activity.version, activity.attempt_count, activity.next_attempt_at, "
                 "activity.created_at, activity.updated_at, activity.completed_at, "
-                "activity.completion_token, activity.last_error, candidates.previous_status",
+                "activity.completion_token, activity.last_error, activity.traceparent, "
+                "candidates.previous_status",
                 (timestamp, limit, str(token), lease_expires_at, timestamp),
                 connection=connection,
             )
             claims: list[InferenceActivityClaim] = []
             for row in rows:
-                values = _row_values(row, 14)
-                activity = _map_inference_activity(values[:13])
-                previous_status = InferenceActivityStatus(_text(values[13]))
+                values = _row_values(row, 15)
+                activity = _map_inference_activity(values[:14])
+                previous_status = InferenceActivityStatus(_text(values[14]))
                 turn = await _load_turn_for_mutation(
                     activity.turn_id,
                     connection=connection,
@@ -621,9 +622,9 @@ class PostgresInferenceRepository:
         )
         if row is None:
             raise TurnNotFoundError(f"Inference activity {activity_id} does not exist")
-        values = _row_values(row, 14)
-        token = LeaseToken.parse(_uuid(values[13])) if values[13] is not None else None
-        return _map_inference_activity(values[:13]), token
+        values = _row_values(row, 15)
+        token = LeaseToken.parse(_uuid(values[14])) if values[14] is not None else None
+        return _map_inference_activity(values[:14]), token
 
 
 __all__ = ["InferenceOutboxWriter", "PostgresInferenceRepository"]

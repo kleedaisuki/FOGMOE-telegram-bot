@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from observability_testkit import make_telemetry
 
 from fogmoe_bot.application.conversation.inbox_worker import (
     FullJitterRetryPolicy,
@@ -263,6 +264,7 @@ def _worker(
             jitter=lambda lower, upper: upper,
         ),
         clock=_Clock(),
+        telemetry=make_telemetry(),
     )
 
 

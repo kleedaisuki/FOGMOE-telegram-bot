@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from observability_testkit import make_telemetry
 
 from fogmoe_bot.application.conversation.outbox_worker import (
     DeliveryErrorCategory,
@@ -242,6 +243,7 @@ def _worker(
             jitter=lambda lower, upper: lower,
         ),
         clock=_Clock(),
+        telemetry=make_telemetry(),
     )
 
 
@@ -391,6 +393,7 @@ def test_attempt_timeout_is_persisted_as_ambiguous_retry() -> None:
                 jitter=lambda lower, upper: lower,
             ),
             clock=_Clock(),
+            telemetry=make_telemetry(),
         )
 
         await worker.process_claim(_claim())

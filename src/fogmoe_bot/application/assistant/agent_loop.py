@@ -37,6 +37,8 @@ from .tool_runtime import (
     ToolResultEvent,
     ToolRuntimeResult,
 )
+from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.domain.observability.signals import SpanKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,17 +117,21 @@ class AgentLoop:
         runtime: AgentRuntime,
         completion: AssistantCompletionPort,
         checkpoints: AgentCheckpointPersistence,
+        telemetry: Telemetry,
     ) -> None:
         """@brief 注入全部外部端口 / Inject every external port.
 
         @param runtime 无状态工具协调器 / Stateless tool coordinator.
         @param completion 异步 provider port / Async provider port.
         @param checkpoints durable step store / Durable step store.
+        @param telemetry 进程 typed telemetry / Process typed telemetry.
+        @return None / None.
         """
 
         self._runtime = runtime
         self._completion = completion
         self._checkpoints = checkpoints
+        self._telemetry = telemetry
 
     async def run(
         self,
@@ -259,14 +265,25 @@ class AgentLoop:
         for ordinal, call in enumerate(completion.tool_calls):
             if call.name in state.config.skip_tools:
                 continue
-            result = await self._runtime.execute(
-                context=tool_context,
-                step=state.step,
-                ordinal=ordinal,
-                provider_call_id=call.provider_call_id,
-                tool_name=call.name,
-                raw_arguments=_parse_arguments(call.arguments),
-            )
+            with self._telemetry.span(
+                "agent.tool.execute",
+                kind=SpanKind.INTERNAL,
+                attributes={
+                    "fogmoe.turn.id": str(tool_context.turn_id),
+                    "gen_ai.tool.name": call.name,
+                    "gen_ai.tool.step": state.step,
+                    "gen_ai.tool.ordinal": ordinal,
+                },
+            ) as span:
+                result = await self._runtime.execute(
+                    context=tool_context,
+                    step=state.step,
+                    ordinal=ordinal,
+                    provider_call_id=call.provider_call_id,
+                    tool_name=call.name,
+                    raw_arguments=_parse_arguments(call.arguments),
+                )
+                span.set_attribute("fogmoe.tool.replayed", result.replayed)
             self._append_call(
                 state, completion=completion, result=result, first=ordinal == 0
             )

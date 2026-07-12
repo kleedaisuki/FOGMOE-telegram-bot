@@ -7,6 +7,7 @@ from collections.abc import Coroutine
 from typing import Any
 
 import pytest
+from observability_testkit import make_observability
 import telegram.error
 
 from fogmoe_bot.infrastructure import config
@@ -122,7 +123,7 @@ def test_run_rebuilds_application_after_transient_bootstrap_failure(monkeypatch)
     monkeypatch.setattr(config, "TELEGRAM_POLLING_RETRY_INITIAL_DELAY", 1.0)
     monkeypatch.setattr(config, "TELEGRAM_POLLING_RETRY_MAX_DELAY", 30.0)
 
-    bot_app.run()
+    bot_app.run(make_observability())
 
     assert delays == [1.0]
     assert attempts == 2
@@ -146,7 +147,7 @@ def test_run_propagates_nonrecoverable_bootstrap_failure(monkeypatch):
     monkeypatch.setattr(bot_app.asyncio, "run", fail)
 
     with pytest.raises(telegram.error.InvalidToken):
-        bot_app.run()
+        bot_app.run(make_observability())
 
 
 def test_requests_session_uses_configured_socks_proxy(monkeypatch):

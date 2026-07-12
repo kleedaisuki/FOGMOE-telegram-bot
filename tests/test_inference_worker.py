@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from observability_testkit import make_telemetry
 
 from fogmoe_bot.application.conversation.inference_worker import (
     FullJitterInferenceRetryPolicy,
@@ -231,6 +232,7 @@ def _worker(
             jitter=lambda lower, upper: upper,
         ),
         clock=_Clock(),
+        telemetry=make_telemetry(),
     )
 
 

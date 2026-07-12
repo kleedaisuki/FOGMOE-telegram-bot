@@ -382,9 +382,9 @@ class PostgresTurnRepository:
         row = await db_connection.fetch_one(
             "INSERT INTO conversation.inference_activities "
             "(activity_id, turn_id, conversation_id, request, status, version, "
-            "attempt_count, next_attempt_at, created_at, updated_at) "
+            "attempt_count, next_attempt_at, created_at, updated_at, traceparent) "
             "VALUES (CAST(%s AS UUID), CAST(%s AS UUID), %s, CAST(%s AS JSONB), "
-            "'pending', 0, 0, %s, %s, %s) ON CONFLICT (turn_id) DO NOTHING "
+            "'pending', 0, 0, %s, %s, %s, %s) ON CONFLICT (turn_id) DO NOTHING "
             "RETURNING " + _INFERENCE_ACTIVITY_COLUMNS,
             (
                 str(draft.activity_id),
@@ -392,6 +392,7 @@ class PostgresTurnRepository:
                 str(draft.conversation_id),
                 _encode_json(draft.request),
                 draft.created_at,
+                draft.trace_context.to_traceparent(),
                 draft.created_at,
                 draft.created_at,
             ),

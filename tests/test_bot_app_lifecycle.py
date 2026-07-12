@@ -20,6 +20,7 @@ from fogmoe_bot.presentation.telegram.handler_catalog import install_error_polic
 from fogmoe_bot.presentation.telegram.handler_composition import (
     assemble_handler_capabilities,
 )
+from observability_testkit import make_observability
 
 
 def _offline_application():
@@ -50,7 +51,8 @@ def test_composition_has_one_listener_and_complete_phased_runtime() -> None:
 
     application = _offline_application()
 
-    runtime = bot_app.compose_bot_runtime(application)
+    observability = make_observability()
+    runtime = bot_app.compose_bot_runtime(application, observability)
 
     assert application.updater is None
     assert application.handlers == {}
@@ -68,11 +70,13 @@ def test_composition_has_one_listener_and_complete_phased_runtime() -> None:
         "btc-monitor",
         "assistant-blocking-calls",
         "outbox",
+        "runtime-metrics",
+        "telemetry-export",
     )
     assert application.bot_data[BOT_RUNTIME_DATA_KEY] is runtime
     assert application.bot_data[EXECUTION_RUNTIME_DATA_KEY] is runtime.execution_runtime
     with pytest.raises(RuntimeError, match="more than once"):
-        bot_app.compose_bot_runtime(application)
+        bot_app.compose_bot_runtime(application, observability)
 
 
 class _LifecycleApplication:
@@ -158,11 +162,19 @@ def test_serve_application_drains_runtime_before_bot_and_database(
             events.append("database.dispose")
 
         monkeypatch.setattr(bot_app.db, "dispose_current_engine", dispose)
-        monkeypatch.setattr(bot_app, "compose_bot_runtime", lambda value: runtime)
+        monkeypatch.setattr(
+            bot_app,
+            "compose_bot_runtime",
+            lambda value, observability: runtime,
+        )
         stop_event = asyncio.Event()
         stop_event.set()
 
-        await bot_app.serve_application(application, stop_event)  # type: ignore[arg-type]
+        await bot_app.serve_application(  # type: ignore[arg-type]
+            application,
+            stop_event,
+            make_observability(),
+        )
 
         assert events == [
             "application.initialize",

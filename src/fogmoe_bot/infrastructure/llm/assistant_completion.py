@@ -14,6 +14,8 @@ from fogmoe_bot.domain.conversation.payloads import (
     JsonValue,
 )
 from fogmoe_bot.infrastructure.blocking import AsyncBlockingBulkhead
+from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.domain.observability.signals import SpanKind
 
 from .litellm_client import create_chat_completion
 from .protocol import assistant_message_to_plain, normalise_tool_calls
@@ -22,13 +24,21 @@ from .protocol import assistant_message_to_plain, normalise_tool_calls
 class LiteLLMAssistantCompletion:
     """@brief 把同步 LiteLLM 限定在 thread adapter / Confine synchronous LiteLLM to a thread adapter."""
 
-    def __init__(self, *, bulkhead: AsyncBlockingBulkhead) -> None:
+    def __init__(
+        self,
+        *,
+        bulkhead: AsyncBlockingBulkhead,
+        telemetry: Telemetry,
+    ) -> None:
         """@brief 注入独立的 provider 隔舱 / Inject a dedicated provider bulkhead.
 
         @param bulkhead 同步 LiteLLM 调用隔舱 / Synchronous LiteLLM call bulkhead.
+        @param telemetry 进程 typed telemetry / Process typed telemetry.
+        @return None / None.
         """
 
         self._bulkhead = bulkhead
+        self._telemetry = telemetry
 
     async def complete(
         self,
@@ -58,14 +68,51 @@ class LiteLLMAssistantCompletion:
         if tools:
             kwargs["tools"] = tuple(tools)
             kwargs["tool_choice"] = tool_choice
-        response = await self._bulkhead.call(
-            lambda: create_chat_completion(
-                provider,
-                model,
-                [dict(message) for message in messages],
-                **kwargs,
+        attributes = {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.provider.name": provider,
+            "gen_ai.request.model": model,
+            "gen_ai.request.max_tokens": max_tokens,
+        }
+        with self._telemetry.span(
+            "chat",
+            kind=SpanKind.CLIENT,
+            attributes=attributes,
+        ) as span:
+            response = await self._bulkhead.call(
+                lambda: create_chat_completion(
+                    provider,
+                    model,
+                    [dict(message) for message in messages],
+                    **kwargs,
+                )
             )
-        )
+            usage = getattr(response, "usage", None)
+            for attribute_name, response_name in (
+                ("gen_ai.usage.input_tokens", "prompt_tokens"),
+                ("gen_ai.usage.output_tokens", "completion_tokens"),
+            ):
+                value = getattr(usage, response_name, None)
+                if (
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value >= 0
+                ):
+                    span.set_attribute(attribute_name, value)
+                    self._telemetry.counter(
+                        "gen_ai.client.token.usage",
+                        float(value),
+                        unit="{token}",
+                        attributes={
+                            "gen_ai.provider.name": provider,
+                            "gen_ai.request.model": model,
+                            "gen_ai.token.type": (
+                                "input"
+                                if response_name == "prompt_tokens"
+                                else "output"
+                            ),
+                        },
+                    )
         choices = getattr(response, "choices", None)
         if not isinstance(choices, Sequence) or not choices:
             raise ValueError("Provider response contains no choices")

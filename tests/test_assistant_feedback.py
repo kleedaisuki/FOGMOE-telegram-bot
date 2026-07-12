@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from observability_testkit import make_telemetry
 from datetime import UTC, datetime
 
 import pytest
@@ -75,7 +76,10 @@ def test_feedback_capability_maps_command_to_deterministic_standalone_draft() ->
     """@brief typed command 精确映射为确定性、无 Turn 的草稿 / A typed command maps exactly to a deterministic, Turn-less draft."""
 
     repository = RecordingStandaloneRepository()
-    capability = PostgresStandaloneOutboundCapability(repository=repository)
+    capability = PostgresStandaloneOutboundCapability(
+        repository=repository,
+        telemetry=make_telemetry(),
+    )
     command = _command()
 
     asyncio.run(capability.enqueue(command))
@@ -99,7 +103,10 @@ def test_feedback_capability_propagates_repository_failure() -> None:
     """@brief 仓储失败原样传播，使 inbox 可以重试 / Repository failure propagates so the inbox can retry."""
 
     repository = RecordingStandaloneRepository(failure=RuntimeError("database down"))
-    capability = PostgresStandaloneOutboundCapability(repository=repository)
+    capability = PostgresStandaloneOutboundCapability(
+        repository=repository,
+        telemetry=make_telemetry(),
+    )
 
     with pytest.raises(RuntimeError, match="database down"):
         asyncio.run(capability.enqueue(_command()))

@@ -31,6 +31,7 @@ from fogmoe_bot.domain.scheduling import (
     ScheduledJob,
     ensure_utc,
 )
+from fogmoe_bot.domain.observability.trace import TraceContext
 
 
 _PROMPT_SOURCE_KIND = "schedule.prompt"
@@ -153,6 +154,7 @@ class PromptTurnHandler:
                 inference_request=inference_request,
                 received_at=observed_at,
                 accepted_at=observed_at,
+                trace_context=TraceContext.new_root(),
             )
         )
 

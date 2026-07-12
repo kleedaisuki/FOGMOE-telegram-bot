@@ -38,6 +38,8 @@ from fogmoe_bot.domain.conversation.outbox import (
     OutboundKind,
 )
 from fogmoe_bot.domain.conversation.workflow_results import InferenceCompletionResult
+from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
 
 
 logger = logging.getLogger(__name__)
@@ -172,7 +174,9 @@ class InferenceResult:
             raise ValueError("Inference results require at least one outbound intent")
         first_stream = self.outbounds[0].delivery_stream_id
         if any(intent.delivery_stream_id != first_stream for intent in self.outbounds):
-            raise ValueError("Inference delivery intents must share one delivery stream")
+            raise ValueError(
+                "Inference delivery intents must share one delivery stream"
+            )
 
 
 class InferencePort(Protocol):
@@ -506,6 +510,7 @@ class InferenceWorker:
         runtime_limits: InferenceRuntimeLimits,
         retry_policy: FullJitterInferenceRetryPolicy | None = None,
         clock: UtcClock | None = None,
+        telemetry: Telemetry,
     ) -> None:
         """@brief 创建推理 worker / Create an inference worker.
 
@@ -516,6 +521,8 @@ class InferenceWorker:
         @param runtime_limits provider、attempt 与 lease 的统一预算 / Shared provider, attempt, and lease budgets.
         @param retry_policy 失败策略 / Failure policy.
         @param clock 可替换 UTC 时钟 / Replaceable UTC clock.
+        @param telemetry 进程 typed telemetry / Process typed telemetry.
+        @return None / None.
         @raise ValueError 容量或时间参数非法时抛出 / Raised for invalid capacity or timing parameters.
         """
 
@@ -531,6 +538,7 @@ class InferenceWorker:
         self._attempt_timeout = runtime_limits.attempt_timeout
         self._retry_policy = retry_policy or FullJitterInferenceRetryPolicy()
         self._clock = clock or SystemUtcClock()
+        self._telemetry = telemetry
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """@brief 运行 producer 与固定 consumers / Run one producer and fixed consumers.
@@ -570,59 +578,71 @@ class InferenceWorker:
         CancelledError is not caught; the claim remains processing until lease recovery.
         """
 
-        try:
-            async with asyncio.timeout(self._attempt_timeout.total_seconds()):
-                result = await self._inference.infer(dict(claim.activity.request))
-        except TimeoutError:
-            await self._finalize_failure(
-                claim,
-                InferenceAttemptTimeout(
+        activity = claim.activity
+        with self._telemetry.span(
+            "inference.attempt",
+            kind=SpanKind.CONSUMER,
+            parent=activity.draft.trace_context,
+            attributes={
+                "fogmoe.turn.id": str(activity.turn_id),
+                "fogmoe.activity.id": str(activity.activity_id),
+                "fogmoe.inference.attempt": activity.attempt_count,
+            },
+        ) as span:
+            try:
+                async with asyncio.timeout(self._attempt_timeout.total_seconds()):
+                    result = await self._inference.infer(dict(activity.request))
+            except TimeoutError:
+                error = InferenceAttemptTimeout(
                     f"inference attempt exceeded {self._attempt_timeout.total_seconds():g}s"
-                ),
-            )
-            return
-        except Exception as error:
-            await self._finalize_failure(claim, error)
-            return
+                )
+                span.set_status(SpanStatus.ERROR, str(error))
+                span.set_attribute("error.type", error.__class__.__name__)
+                await self._finalize_failure(claim, error)
+                return
+            except Exception as error:
+                span.set_status(SpanStatus.ERROR, str(error))
+                span.set_attribute("error.type", error.__class__.__name__)
+                await self._finalize_failure(claim, error)
+                return
 
-        completed_at = self._clock.now()
-        assistant_message = MessageDraft(
-            message_id=ConversationMessageId.for_turn(
-                claim.activity.turn_id,
-                "assistant.final",
-            ),
-            conversation_id=claim.activity.conversation_id,
-            turn_id=claim.activity.turn_id,
-            source_update_id=None,
-            role=MessageRole.ASSISTANT,
-            content=result.assistant_content,
-            idempotency_key=f"turn:{claim.activity.turn_id}:assistant:final",
-            created_at=completed_at,
-        )
-        outbounds = tuple(
-            OutboundDraft(
-                message_id=OutboundMessageId.for_turn(
-                    claim.activity.turn_id,
-                    f"outbound.{ordinal}",
+            completed_at = self._clock.now()
+            assistant_message = MessageDraft(
+                message_id=ConversationMessageId.for_turn(
+                    activity.turn_id,
+                    "assistant.final",
                 ),
-                conversation_id=claim.activity.conversation_id,
-                turn_id=claim.activity.turn_id,
-                delivery_stream_id=intent.delivery_stream_id,
-                kind=intent.kind,
-                payload=intent.payload,
-                idempotency_key=(
-                    f"turn:{claim.activity.turn_id}:outbound:{ordinal}"
-                ),
+                conversation_id=activity.conversation_id,
+                turn_id=activity.turn_id,
+                source_update_id=None,
+                role=MessageRole.ASSISTANT,
+                content=result.assistant_content,
+                idempotency_key=f"turn:{activity.turn_id}:assistant:final",
                 created_at=completed_at,
             )
-            for ordinal, intent in enumerate(result.outbounds)
-        )
-        await self._repository.complete_inference_activity(
-            claim,
-            assistant_message=assistant_message,
-            outbounds=outbounds,
-            completed_at=completed_at,
-        )
+            outbounds = tuple(
+                OutboundDraft(
+                    message_id=OutboundMessageId.for_turn(
+                        activity.turn_id,
+                        f"outbound.{ordinal}",
+                    ),
+                    conversation_id=activity.conversation_id,
+                    turn_id=activity.turn_id,
+                    delivery_stream_id=intent.delivery_stream_id,
+                    kind=intent.kind,
+                    payload=intent.payload,
+                    idempotency_key=(f"turn:{activity.turn_id}:outbound:{ordinal}"),
+                    created_at=completed_at,
+                    trace_context=span.context,
+                )
+                for ordinal, intent in enumerate(result.outbounds)
+            )
+            await self._repository.complete_inference_activity(
+                claim,
+                assistant_message=assistant_message,
+                outbounds=outbounds,
+                completed_at=completed_at,
+            )
 
     async def _produce(
         self,
@@ -647,6 +667,10 @@ class InferenceWorker:
                         now=now
                     )
                     if recovered:
+                        self._telemetry.counter(
+                            "fogmoe.inference.leases.recovered",
+                            float(recovered),
+                        )
                         logger.warning(
                             "Recovered expired inference leases: count=%s",
                             recovered,

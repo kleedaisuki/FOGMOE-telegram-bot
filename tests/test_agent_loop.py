@@ -1,6 +1,7 @@
 """@brief 可恢复 Agent loop 测试 / Tests for the resumable Agent loop."""
 
 import asyncio
+from observability_testkit import make_telemetry
 
 from fogmoe_bot.application.assistant.agent_loop import AgentExecutionConfig, AgentLoop
 from fogmoe_bot.application.assistant.completion import (
@@ -162,7 +163,10 @@ def test_checkpoint_precedes_effect_and_restart_replays_without_provider_or_muta
         )
         runtime = AgentRuntime(catalog=DEFAULT_TOOL_CATALOG, persistence=receipts)
         first_loop = AgentLoop(
-            runtime=runtime, completion=first_completion, checkpoints=checkpoints
+            runtime=runtime,
+            completion=first_completion,
+            checkpoints=checkpoints,
+            telemetry=make_telemetry(),
         )
         config = AgentExecutionConfig(provider="test", model="model", allow_tools=True)
         first = await first_loop.run(
@@ -175,7 +179,10 @@ def test_checkpoint_precedes_effect_and_restart_replays_without_provider_or_muta
 
         replay_completion = _Completion([], order)
         replay_loop = AgentLoop(
-            runtime=runtime, completion=replay_completion, checkpoints=checkpoints
+            runtime=runtime,
+            completion=replay_completion,
+            checkpoints=checkpoints,
+            telemetry=make_telemetry(),
         )
         replay = await replay_loop.run(
             _context(), config, tool_context=_tool_context(turn_id)

@@ -300,6 +300,7 @@ def test_standalone_outbox_uses_one_short_transaction_and_persists_null_turn(
             None,
             None,
             None,
+            draft.trace_context.to_traceparent(),
         ),
     ]
     insert_params: tuple[object, ...] | None = None
@@ -357,6 +358,7 @@ def test_standalone_outbox_replay_and_conflict_share_semantic_validator(
         None,
         None,
         None,
+        draft.trace_context.to_traceparent(),
     )
 
     async def fake_find(

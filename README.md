@@ -107,6 +107,39 @@ fogmoe-dbctl export-csv --table conversation.conversation_messages --output ./co
 数据库迁移由 `fogmoe-dbctl` 显式管理，机器人启动时不会自动迁移外部数据库。
 CLI 的分层结构和子命令扩展约定见 [`docs/dbctl.md`](docs/dbctl.md)。
 
+### 可观测性
+
+迁移 `0039_observability` 建立 `observability` schema。运行时以 W3C
+`traceparent` 串联 durable inbox、inference activity 与 transactional outbox，异步批量写入：
+
+- `observability.log_records`：脱敏后的结构化日志；
+- `observability.spans`：inbox、LLM、tool 与 outbox 操作耗时和错误；
+- `observability.metric_points`：mailbox、exporter、lease 与 token 指标；
+- `observability.pipeline_health`：当前积压、重试、最终失败和过期 lease；
+- `observability.turn_latency`：Turn 各阶段和端到端时延。
+
+日志仍同时进入本地轮转文件，PostgreSQL 故障不会阻塞 Telegram 或推理热路径。
+遥测使用独立的单连接 `asyncpg` pool、有界队列和批次级指数退避；每日分区由受限的
+`SECURITY DEFINER` 函数创建，默认保留 30 天。常用诊断查询：
+
+```sql
+SELECT *, CURRENT_TIMESTAMP - oldest_ready_at AS oldest_age
+FROM observability.pipeline_health;
+
+SELECT span_name,
+       count(*) AS calls,
+       count(*) FILTER (WHERE status_code = 'error') AS errors,
+       percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ns / 1e6) AS p95_ms
+FROM observability.spans
+WHERE started_at >= CURRENT_TIMESTAMP - INTERVAL '1 hour'
+GROUP BY span_name;
+
+SELECT occurred_at, severity_text, event_name, body
+FROM observability.log_records
+WHERE trace_id = decode(:trace_id_hex, 'hex')
+ORDER BY occurred_at;
+```
+
 ### 启动机器人
 
 ```bash
@@ -213,6 +246,9 @@ source .venv/bin/activate
 - `src/fogmoe_bot/domain/`：纯领域状态、不变量和值类型，不依赖 Telegram、SQLAlchemy 或 HTTP SDK
 - `src/fogmoe_bot/application/runtime/`：有界 keyed mailbox 与统一后台服务生命周期
 - `src/fogmoe_bot/application/conversation/`：durable inbox、Turn、inference activity 与 outbox 工作流
+- `src/fogmoe_bot/domain/observability/`：W3C trace identity 与不可变 typed signals
+- `src/fogmoe_bot/application/observability/`：有界 buffer、span scope、export/runtime metrics 生命周期
+- `src/fogmoe_bot/infrastructure/observability/`：结构日志、脱敏、独立 PostgreSQL batch sink 与进程装配
 - `src/fogmoe_bot/application/assistant/`：provider-neutral Agent、严格推理命令和类型化工具目录
 - `src/fogmoe_bot/presentation/telegram/`：Telegram Update 映射、显式路由和薄适配器
 - `src/fogmoe_bot/infrastructure/database/`：PostgreSQL UoW、lease/fencing 与 bounded-context adapters

@@ -1,6 +1,6 @@
 """Durable inbound Update 模型 / Durable inbound Update models."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Self
@@ -8,6 +8,7 @@ from typing import Self
 from .identity import ConversationId, LeaseToken, UpdateId
 from .payloads import JsonObject
 from .temporal import ensure_utc
+from fogmoe_bot.domain.observability.trace import TraceContext
 
 
 class InboundStatus(StrEnum):
@@ -48,6 +49,7 @@ class InboundUpdate:
     updated_at: datetime
     processed_at: datetime | None = None
     last_error: str | None = None
+    trace_context: TraceContext = field(default_factory=TraceContext.new_root)
 
     def __post_init__(self) -> None:
         """@brief 校验入口 Update 不变量 / Validate inbound-Update invariants.
@@ -78,6 +80,8 @@ class InboundUpdate:
         object.__setattr__(self, "next_attempt_at", next_attempt_at)
         object.__setattr__(self, "processed_at", processed_at)
         object.__setattr__(self, "payload", dict(self.payload))
+        if not isinstance(self.trace_context, TraceContext):
+            raise TypeError("Inbound Update requires a TraceContext")
 
     @classmethod
     def pending(
@@ -87,6 +91,7 @@ class InboundUpdate:
         conversation_id: ConversationId,
         payload: JsonObject,
         received_at: datetime,
+        trace_context: TraceContext | None = None,
     ) -> Self:
         """@brief 创建待处理入口 Update / Create a pending inbound Update.
 
@@ -102,6 +107,7 @@ class InboundUpdate:
             update_id=update_id,
             conversation_id=conversation_id,
             payload=dict(payload),
+            trace_context=trace_context or TraceContext.new_root(),
             status=InboundStatus.PENDING,
             version=0,
             attempt_count=0,

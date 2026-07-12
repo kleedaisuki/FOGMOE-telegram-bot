@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from observability_testkit import make_telemetry
 from datetime import UTC, datetime, timedelta
 import json
 import os
@@ -64,7 +65,9 @@ def test_admin_announcement_snapshot_is_concurrent_replayable_and_fenced() -> No
         conversation_id = f"assistant-user:{users[0]}"
         announcement_conversation: str | None = None
         operations = PostgresAdminAnnouncementOperations()
-        outbound = PostgresStandaloneOutboundCapability()
+        outbound = PostgresStandaloneOutboundCapability(
+            telemetry=make_telemetry(),
+        )
         factory = TelegramAnnouncementOutboundFactory()
         command = RequestAnnouncement(
             actor_id=users[0],

@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from fogmoe_bot.application.assistant.tools.catalog import ToolDefinition
-from fogmoe_bot.infrastructure.logging.bot_logging import prepare_litellm_logging
+from fogmoe_bot.infrastructure.observability.logging import prepare_litellm_logging
 
 prepare_litellm_logging()
 

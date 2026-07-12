@@ -25,12 +25,13 @@ from fogmoe_bot.domain.conversation.errors import (
     IdempotencyConflictError,
     StaleClaimError,
 )
+from fogmoe_bot.domain.observability.trace import TraceContext
 
 
 _INFERENCE_ACTIVITY_COLUMNS = (
     "activity_id, turn_id, conversation_id, request, status, version, "
     "attempt_count, next_attempt_at, created_at, updated_at, completed_at, "
-    "completion_token, last_error"
+    "completion_token, last_error, traceparent"
 )
 """@brief acceptance 与 inference 共享的活动列 / Activity columns shared by acceptance and inference."""
 
@@ -43,13 +44,14 @@ _INFERENCE_ACTIVITY_SELECT = (
 def _map_inference_activity(row: object) -> InferenceActivity:
     """@brief 将数据库行映射为推理活动 / Map a database row to an inference activity."""
 
-    values = _row_values(row, 13)
+    values = _row_values(row, 14)
     draft = InferenceActivityDraft(
         activity_id=InferenceActivityId.parse(_uuid(values[0])),
         turn_id=TurnId.parse(_uuid(values[1])),
         conversation_id=ConversationId(_text(values[2])),
         request=_json_object(values[3]),
         created_at=_datetime(values[8]),
+        trace_context=TraceContext.parse(_text(values[13])),
     )
     completion_token = (
         LeaseToken.parse(_uuid(values[11])) if values[11] is not None else None

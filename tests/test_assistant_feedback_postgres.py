@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from observability_testkit import make_telemetry
 from datetime import UTC, datetime
 import os
 from pathlib import Path
@@ -115,7 +116,8 @@ def test_real_postgres_feedback_is_idempotent_conflict_safe_and_rolled_back() ->
                 transaction = await connection.begin()
                 try:
                     capability = PostgresStandaloneOutboundCapability(
-                        repository=ConnectionBoundStandaloneRepository(connection)
+                        repository=ConnectionBoundStandaloneRepository(connection),
+                        telemetry=make_telemetry(),
                     )
                     await capability.enqueue(command)
                     await capability.enqueue(command)

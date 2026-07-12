@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 import asyncio
 
+from fogmoe_bot.application.observability.telemetry import Telemetry, TelemetryBuffer
+from fogmoe_bot.domain.observability.signals import SpanSignal, SpanStatus
 from fogmoe_bot.infrastructure.database import db
 
 
@@ -42,3 +44,45 @@ def test_exec_sql_uses_connection_from_context(monkeypatch):
     statement, params = fake_connection.calls[0]
     assert str(statement) == "SELECT :p0"
     assert params == {"p0": 42}
+
+
+def test_sql_operation_is_low_cardinality_and_never_returns_statement() -> None:
+    """@brief SQL 分类只返回有限 verb / SQL classification returns only bounded verbs."""
+
+    assert db._sql_operation("  SELECT secret FROM users") == "SELECT"
+    assert db._sql_operation("TRUNCATE private_table") == "OTHER"
+    assert db._sql_operation("") == "UNKNOWN"
+
+
+def test_database_span_stack_finishes_success_and_error() -> None:
+    """@brief 数据库事件栈正确结束成功与异常 span / The database event stack completes successful and failed spans."""
+
+    class Connection:
+        """@brief 提供 SQLAlchemy connection.info 形状 / Provide the SQLAlchemy connection.info shape."""
+
+        def __init__(self) -> None:
+            """@brief 初始化事件字典 / Initialize event state."""
+
+            self.info: dict[str, object] = {}
+
+    buffer = TelemetryBuffer(4)
+    telemetry = Telemetry(buffer)
+    connection = Connection()
+    success = telemetry.span("postgresql.query")
+    success.__enter__()
+    connection.info["fogmoe.observability.spans"] = [success]
+    db._finish_database_span(connection, None)
+
+    failure = telemetry.span("postgresql.query")
+    failure.__enter__()
+    spans = connection.info["fogmoe.observability.spans"]
+    assert isinstance(spans, list)
+    spans.append(failure)
+    db._finish_database_span(connection, OSError("unavailable"))
+
+    signals = buffer.drain(4)
+    assert [signal.status for signal in signals if isinstance(signal, SpanSignal)] == [
+        SpanStatus.OK,
+        SpanStatus.ERROR,
+    ]
+    assert telemetry.current_context is None

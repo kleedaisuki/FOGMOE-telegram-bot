@@ -53,6 +53,7 @@ from .generated_media import GeneratedMediaSettings, RequestsGeneratedMediaTools
 from .routing_config import build_provider_profiles, configured_service_order
 from .sticker_catalog import TelegramStickerCatalogReader
 from .tool_operations.dispatcher import AssistantToolOperationDispatcher
+from fogmoe_bot.application.observability.telemetry import Telemetry
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,12 +78,14 @@ def build_durable_assistant(
     system_prompt: str,
     runtime_limits: InferenceRuntimeLimits,
     retention: PostgresConversationRetention | None = None,
+    telemetry: Telemetry,
 ) -> DurableAssistantComposition:
     """@brief 组合 async Agent、receipts、adapters 与 durable inference / Compose the async Agent, receipts, adapters, and durable inference.
 
     @param system_prompt system prompt / System prompt.
     @param runtime_limits inference worker budgets / Inference-worker budgets.
     @param retention 可替换 retention repository / Replaceable retention repository.
+    @param telemetry 进程 typed telemetry / Process typed telemetry.
     @return inference 与 artifact store / Inference and artifact store.
     """
 
@@ -162,7 +165,10 @@ def build_durable_assistant(
         groups=PostgresGroupMessageProjection(),
     )
     store = PostgresAssistantToolStore(operations=operations)
-    completion = LiteLLMAssistantCompletion(bulkhead=provider_bulkhead)
+    completion = LiteLLMAssistantCompletion(
+        bulkhead=provider_bulkhead,
+        telemetry=telemetry,
+    )
     agent = AgentLoop(
         runtime=AgentRuntime(
             catalog=DEFAULT_TOOL_CATALOG,
@@ -170,6 +176,7 @@ def build_durable_assistant(
         ),
         completion=completion,
         checkpoints=store,
+        telemetry=telemetry,
     )
     circuit = ProviderCircuit(
         failure_threshold=3,

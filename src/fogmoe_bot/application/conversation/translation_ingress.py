@@ -9,7 +9,7 @@ they never enter long-lived Assistant history.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
@@ -33,6 +33,7 @@ from fogmoe_bot.domain.conversation.identity import (
 )
 from fogmoe_bot.domain.conversation.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
+from fogmoe_bot.domain.observability.trace import TraceContext
 
 
 TRANSLATION_TEXT_LIMIT = 3000
@@ -59,6 +60,7 @@ class TranslationReplyTarget:
     message_id: int
     message_thread_id: int | None
     delivery_stream_id: DeliveryStreamId
+    trace_context: TraceContext = field(default_factory=TraceContext.new_root)
 
     def __post_init__(self) -> None:
         """@brief 校验外部身份并规范时间 / Validate external identities and normalize time.
@@ -75,6 +77,8 @@ class TranslationReplyTarget:
         ):
             raise ValueError("Translation message_thread_id must be positive")
         object.__setattr__(self, "received_at", ensure_utc(self.received_at))
+        if not isinstance(self.trace_context, TraceContext):
+            raise TypeError("Translation target requires a TraceContext")
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +174,7 @@ class TranslationTurnRequest:
             coin_cost=cost,
             task_kind="translation",
             translation_input=self.text,
+            trace_context=self.target.trace_context,
         )
 
 

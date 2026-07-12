@@ -1,6 +1,6 @@
 """Transactional outbox 领域模型 / Transactional-outbox domain models."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
@@ -15,6 +15,7 @@ from .identity import (
 )
 from .payloads import JsonObject
 from .temporal import ensure_utc
+from fogmoe_bot.domain.observability.trace import TraceContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +91,7 @@ class OutboundDraft:
     payload: JsonObject
     idempotency_key: str
     created_at: datetime
+    trace_context: TraceContext = field(default_factory=TraceContext.new_root)
 
     def __post_init__(self) -> None:
         """@brief 校验出站草稿 / Validate the outbound draft.
@@ -103,6 +105,8 @@ class OutboundDraft:
         )
         object.__setattr__(self, "created_at", ensure_utc(self.created_at))
         object.__setattr__(self, "payload", dict(self.payload))
+        if not isinstance(self.trace_context, TraceContext):
+            raise TypeError("Outbound requires a TraceContext")
 
 
 @dataclass(frozen=True, slots=True)

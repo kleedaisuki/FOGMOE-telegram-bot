@@ -4,7 +4,8 @@ import logging
 import re
 
 from fogmoe_bot.infrastructure import config
-from fogmoe_bot.infrastructure.logging import bot_logging
+from fogmoe_bot.infrastructure.observability import logging as bot_logging
+from observability_testkit import make_telemetry
 
 
 def test_configure_logging_uses_timestamped_file_and_queue_consumer(
@@ -19,7 +20,7 @@ def test_configure_logging_uses_timestamped_file_and_queue_consumer(
     monkeypatch.setattr(config, "LOG_QUEUE_MAX_SIZE", 10)
 
     try:
-        log_path = bot_logging.configure_logging()
+        log_path = bot_logging.configure_logging(make_telemetry())
         logging.getLogger("fogmoe.test.logging").info("queued log record")
         bot_logging.shutdown_logging()
     finally:

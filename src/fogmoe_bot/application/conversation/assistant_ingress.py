@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
 from enum import StrEnum
@@ -32,6 +32,7 @@ from fogmoe_bot.domain.conversation.identity import (
 from fogmoe_bot.domain.conversation.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
 from fogmoe_bot.domain.conversation.workflow_results import TurnAcceptanceResult
+from fogmoe_bot.domain.observability.trace import TraceContext
 
 
 ASSISTANT_TEXT_LIMIT = 4096
@@ -116,6 +117,7 @@ class AssistantTurnRequest:
     delivery_stream_id: DeliveryStreamId
     user_content: JsonObject
     coin_cost: int
+    trace_context: TraceContext = field(default_factory=TraceContext.new_root)
     task_kind: AssistantTaskKind = "assistant"
     translation_input: str | None = None
 
@@ -165,6 +167,8 @@ class AssistantTurnRequest:
         if self.username is not None:
             object.__setattr__(self, "username", self.username.strip())
         object.__setattr__(self, "user_content", dict(self.user_content))
+        if not isinstance(self.trace_context, TraceContext):
+            raise TypeError("Assistant request requires a TraceContext")
 
     def to_accept_turn(
         self,
@@ -218,6 +222,7 @@ class AssistantTurnRequest:
             inference_request=inference_request,
             received_at=self.received_at,
             accepted_at=ensure_utc(accepted_at),
+            trace_context=self.trace_context,
         )
 
 

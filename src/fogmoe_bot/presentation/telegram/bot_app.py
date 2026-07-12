@@ -69,6 +69,7 @@ from fogmoe_bot.application.runtime import (
 from fogmoe_bot.application.scheduling.dispatcher import ScheduleDispatcher
 from fogmoe_bot.application.scheduling.prompt_turn import PromptTurnHandler
 from fogmoe_bot.application.scheduling.runtime import SchedulingWorkLoop
+from fogmoe_bot.application.observability.runtime_metrics import RuntimeMetricsService
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.blocking import (
     AsyncBlockingBulkhead,
@@ -109,7 +110,8 @@ from fogmoe_bot.infrastructure.database.repositories.schedule_repository import 
 from fogmoe_bot.infrastructure.database.scheduled_assistant_profile import (
     PostgresScheduledAssistantProfileReader,
 )
-from fogmoe_bot.infrastructure.logging.bot_logging import current_log_file_path
+from fogmoe_bot.infrastructure.observability.logging import current_log_file_path
+from fogmoe_bot.infrastructure.observability.composition import ObservabilityAssembly
 from fogmoe_bot.infrastructure.telegram.monitor_notification import (
     TelegramMonitorNotificationSink,
 )
@@ -199,9 +201,16 @@ def _required_capability[T](
     return value
 
 
-def _compose_primitives() -> _RuntimePrimitives:
-    """@brief 装配事务共享资源和执行器 / Compose transaction-sharing resources and the executor."""
+def _compose_primitives(
+    observability: ObservabilityAssembly,
+) -> _RuntimePrimitives:
+    """@brief 装配事务共享资源和执行器 / Compose transaction-sharing resources and the executor.
 
+    @param observability 进程唯一可观测性装配 / Sole process observability assembly.
+    @return 基础运行时资源 / Primitive runtime resources.
+    """
+
+    db.configure_observability(observability.telemetry)
     execution = KeyedMailboxRuntime(
         max_concurrency=config.RUNTIME_MAX_CONCURRENCY,
         global_capacity=config.RUNTIME_GLOBAL_CAPACITY,
@@ -210,7 +219,10 @@ def _compose_primitives() -> _RuntimePrimitives:
     )
     outbox_repository = PostgresOutboxRepository()
     turns = PostgresTurnRepository()
-    outbound = PostgresStandaloneOutboundCapability(outbox_repository)
+    outbound = PostgresStandaloneOutboundCapability(
+        outbox_repository,
+        telemetry=observability.telemetry,
+    )
     admin_operations = PostgresAdminAnnouncementOperations()
     return _RuntimePrimitives(
         execution=execution,
@@ -342,6 +354,7 @@ def _compose_services(
     application: TelegramApplication,
     primitives: _RuntimePrimitives,
     ingress: IngressRouter,
+    observability: ObservabilityAssembly,
 ) -> _ServiceAssembly:
     """@brief 装配并按排空阶段排序所有长驻服务 / Compose and drain-order every resident service."""
 
@@ -361,10 +374,12 @@ def _compose_services(
         worker_count=config.INBOX_WORKER_COUNT,
         poll_interval=config.INBOX_POLL_INTERVAL,
         lease_for=timedelta(seconds=config.INBOX_LEASE_SECONDS),
+        telemetry=observability.telemetry,
     )
     assistant = build_durable_assistant(
         system_prompt=config.SYSTEM_PROMPT,
         runtime_limits=primitives.inference_limits,
+        telemetry=observability.telemetry,
     )
     inference = InferenceWorker(
         repository=primitives.inference,
@@ -372,6 +387,7 @@ def _compose_services(
         worker_count=config.INFERENCE_WORKER_COUNT,
         poll_interval=config.INFERENCE_POLL_INTERVAL,
         runtime_limits=primitives.inference_limits,
+        telemetry=observability.telemetry,
     )
     outbox = OutboxWorker(
         repository=primitives.outbox_repository,
@@ -383,6 +399,7 @@ def _compose_services(
         poll_interval=config.OUTBOX_POLL_INTERVAL,
         lease_for=timedelta(seconds=config.OUTBOX_LEASE_SECONDS),
         attempt_timeout=timedelta(seconds=config.OUTBOX_ATTEMPT_TIMEOUT_SECONDS),
+        telemetry=observability.telemetry,
     )
     scheduling = SchedulingWorkLoop(
         dispatcher=ScheduleDispatcher(
@@ -468,6 +485,21 @@ def _compose_services(
             shutdown_phase=25,
         ),
         ServiceBinding("outbox", outbox, shutdown_phase=30),
+        ServiceBinding(
+            "runtime-metrics",
+            RuntimeMetricsService(
+                telemetry=observability.telemetry,
+                exporter=observability.runtime,
+                execution=primitives.execution,
+                interval=config.OBSERVABILITY_METRIC_INTERVAL_SECONDS,
+            ),
+            shutdown_phase=90,
+        ),
+        ServiceBinding(
+            "telemetry-export",
+            observability.runtime,
+            shutdown_phase=100,
+        ),
     )
     return _ServiceAssembly(bindings, btc_monitor)
 
@@ -483,10 +515,14 @@ def _required_blocking_bulkheads(
     return value
 
 
-def compose_bot_runtime(application: TelegramApplication) -> BotRuntime:
+def compose_bot_runtime(
+    application: TelegramApplication,
+    observability: ObservabilityAssembly,
+) -> BotRuntime:
     """@brief 装配 Listener、Conversation workers 与所有长驻服务 / Compose the Listener, Conversation workers, and every long-running service.
 
     @param application 已初始化且运行中的 PTB Application / Initialized and running PTB Application.
+    @param observability 进程唯一可观测性装配 / Sole process observability assembly.
     @return 单一顶层 BotRuntime / Sole top-level BotRuntime.
     @raise RuntimeError Bot identity/capability 缺失或重复装配 / Missing identity/capability or duplicate composition.
     @note 所有服务共享一个 event loop、Bot 与数据库引擎；只有组合根可以依赖所有层。/
@@ -502,14 +538,14 @@ def compose_bot_runtime(application: TelegramApplication) -> BotRuntime:
         raise RuntimeError("Initialized Telegram Bot requires a username")
     bot_user_id = application.bot.id
 
-    primitives = _compose_primitives()
+    primitives = _compose_primitives(observability)
     ingress = _compose_ingress(
         application,
         primitives,
         bot_user_id=bot_user_id,
         bot_username=bot_username,
     )
-    services = _compose_services(application, primitives, ingress)
+    services = _compose_services(application, primitives, ingress, observability)
     runtime = BotRuntime(
         execution_runtime=primitives.execution,
         services=services.bindings,
@@ -615,11 +651,13 @@ async def _shutdown_runtime(runtime: BotRuntime) -> None:
 async def serve_application(
     application: TelegramApplication,
     stop_event: asyncio.Event,
+    observability: ObservabilityAssembly,
 ) -> None:
     """@brief 在一个 event loop 中运行并完整清理 Application / Run and fully clean up the Application on one event loop.
 
     @param application 待运行 PTB Application / PTB Application to run.
     @param stop_event 外部停止事件 / External stop event.
+    @param observability 进程唯一可观测性装配 / Sole process observability assembly.
     @return None / None.
     @raise BaseExceptionGroup 主流程与清理同时失败 / Main execution and cleanup both fail.
     @note 关停顺序是 Listener → Inbox/Scheduling → Inference/feature workers
@@ -638,7 +676,7 @@ async def serve_application(
         initialized = True
         await application.start()
         started = True
-        runtime = compose_bot_runtime(application)
+        runtime = compose_bot_runtime(application, observability)
         await runtime.start()
         await _wait_for_stop_or_runtime_failure(runtime, stop_event)
     except BaseException as error:
@@ -699,17 +737,21 @@ def _install_signal_handlers(stop_event: asyncio.Event) -> tuple[signal.Signals,
     return tuple(registered)
 
 
-async def _run_application(application: TelegramApplication) -> None:
+async def _run_application(
+    application: TelegramApplication,
+    observability: ObservabilityAssembly,
+) -> None:
     """@brief 安装信号并运行一个 Application 实例 / Install signals and run one Application instance.
 
     @param application 待运行实例 / Instance to run.
+    @param observability 进程唯一可观测性装配 / Sole process observability assembly.
     @return None / None.
     """
 
     stop_event = asyncio.Event()
     registered = _install_signal_handlers(stop_event)
     try:
-        await serve_application(application, stop_event)
+        await serve_application(application, stop_event, observability)
     finally:
         loop = asyncio.get_running_loop()
         for process_signal in registered:
@@ -745,9 +787,10 @@ def _bootstrap_retry_delay(attempt: int) -> float:
     return float(min(max_delay, initial_delay * (2 ** max(0, attempt - 1))))
 
 
-def run() -> None:
+def run(observability: ObservabilityAssembly) -> None:
     """@brief 运行唯一自控 long-poll listener，并恢复瞬态 bootstrap 失败 / Run the sole self-controlled long-poll listener and recover transient bootstrap failures.
 
+    @param observability 进程唯一可观测性装配 / Sole process observability assembly.
     @return None / None.
     """
 
@@ -755,7 +798,7 @@ def run() -> None:
     while True:
         application = create_application()
         try:
-            asyncio.run(_run_application(application))
+            asyncio.run(_run_application(application, observability))
             return
         except KeyboardInterrupt:
             logger.info("Bot shutdown requested by keyboard interrupt")

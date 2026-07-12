@@ -18,6 +18,7 @@ from fogmoe_bot.domain.conversation.inbox import (
 )
 from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
 from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.domain.observability.trace import TraceContext
 
 from .common import (
     _claim_window,
@@ -37,11 +38,12 @@ from .common import (
 def _map_inbound(row: object) -> InboundUpdate:
     """@brief 将数据库行映射为入口实体 / Map a database row to an inbound entity."""
 
-    values = _row_values(row, 11)
+    values = _row_values(row, 12)
     return InboundUpdate(
         update_id=UpdateId(_integer(values[0])),
         conversation_id=ConversationId(_text(values[1])),
         payload=_json_object(values[2]),
+        trace_context=TraceContext.parse(_text(values[11])),
         status=InboundStatus(_text(values[3])),
         version=_integer(values[4]),
         attempt_count=_integer(values[5]),
@@ -76,8 +78,8 @@ class PostgresInboxRepository:
             row = await db_connection.fetch_one(
                 "INSERT INTO conversation.inbound_updates "
                 "(update_id, conversation_id, payload, status, version, attempt_count, "
-                "next_attempt_at, received_at, updated_at) "
-                "VALUES (%s, %s, CAST(%s AS JSONB), %s, %s, %s, %s, %s, %s) "
+                "next_attempt_at, received_at, updated_at, traceparent) "
+                "VALUES (%s, %s, CAST(%s AS JSONB), %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (update_id) DO NOTHING RETURNING update_id",
                 (
                     int(update.update_id),
@@ -89,6 +91,7 @@ class PostgresInboxRepository:
                     update.next_attempt_at,
                     update.received_at,
                     update.updated_at,
+                    update.trace_context.to_traceparent(),
                 ),
                 connection=connection,
             )
@@ -97,7 +100,7 @@ class PostgresInboxRepository:
 
             existing_row = await db_connection.fetch_one(
                 "SELECT update_id, conversation_id, payload, status, version, attempt_count, "
-                "next_attempt_at, received_at, updated_at, processed_at, last_error "
+                "next_attempt_at, received_at, updated_at, processed_at, last_error, traceparent "
                 "FROM conversation.inbound_updates WHERE update_id = %s",
                 (int(update.update_id),),
                 connection=connection,
@@ -162,7 +165,7 @@ class PostgresInboxRepository:
                 "RETURNING inbound.update_id, inbound.conversation_id, inbound.payload, "
                 "inbound.status, inbound.version, inbound.attempt_count, "
                 "inbound.next_attempt_at, inbound.received_at, inbound.updated_at, "
-                "inbound.processed_at, inbound.last_error",
+                "inbound.processed_at, inbound.last_error, inbound.traceparent",
                 (timestamp, limit, str(token), lease_expires_at, timestamp),
                 connection=connection,
             )

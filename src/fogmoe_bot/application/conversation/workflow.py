@@ -9,7 +9,7 @@ worker owns inference I/O and completion commits.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
@@ -29,6 +29,7 @@ from fogmoe_bot.domain.conversation.message import (
     MessageRole,
 )
 from fogmoe_bot.domain.conversation.workflow_results import TurnAcceptanceResult
+from fogmoe_bot.domain.observability.trace import TraceContext
 
 
 class TurnWorkflowPersistence(Protocol):
@@ -72,6 +73,7 @@ class AcceptConversationTurn:
     inference_request: JsonObject
     received_at: datetime
     accepted_at: datetime
+    trace_context: TraceContext = field(default_factory=TraceContext.new_root)
 
     def __post_init__(self) -> None:
         """@brief 校验命令时间并隔离可变 JSON / Validate command timing and isolate mutable JSON.
@@ -90,6 +92,8 @@ class AcceptConversationTurn:
         object.__setattr__(self, "accepted_at", accepted_at)
         object.__setattr__(self, "user_content", dict(self.user_content))
         object.__setattr__(self, "inference_request", dict(self.inference_request))
+        if not isinstance(self.trace_context, TraceContext):
+            raise TypeError("Conversation acceptance requires a TraceContext")
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +194,7 @@ class ConversationWorkflow:
             conversation_id=command.conversation_id,
             request=command.inference_request,
             created_at=command.accepted_at,
+            trace_context=command.trace_context,
         )
         return PreparedTurnAcceptance(
             turn=initial,

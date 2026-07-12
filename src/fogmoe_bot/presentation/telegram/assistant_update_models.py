@@ -250,4 +250,5 @@ class ParsedTelegramAssistantMessage:
             ),
             user_content=user_content,
             coin_cost=coin_cost,
+            trace_context=inbound.trace_context,
         )

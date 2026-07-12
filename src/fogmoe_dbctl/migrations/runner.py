@@ -6,6 +6,8 @@ from pathlib import Path
 from alembic import op
 
 SECTION_RE = re.compile(r"^\s*--\s*migrate:(up|down)\s*$", re.IGNORECASE)
+_DOLLAR_QUOTE_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+"""@brief PostgreSQL dollar-quote 起始或结束标签 / PostgreSQL dollar-quote delimiter."""
 
 
 class MigrationSqlError(RuntimeError):
@@ -136,11 +138,22 @@ def _split_sql_statements(sql: str) -> list[str]:
     quote: str | None = None
     in_line_comment = False
     in_block_comment = False
+    dollar_quote: str | None = None
     idx = 0
 
     while idx < len(sql):
         char = sql[idx]
         next_char = sql[idx + 1] if idx + 1 < len(sql) else ""
+
+        if dollar_quote is not None:
+            if sql.startswith(dollar_quote, idx):
+                chars.extend(dollar_quote)
+                idx += len(dollar_quote)
+                dollar_quote = None
+            else:
+                chars.append(char)
+                idx += 1
+            continue
 
         if in_line_comment:
             chars.append(char)
@@ -191,6 +204,13 @@ def _split_sql_statements(sql: str) -> list[str]:
             chars.append(char)
             idx += 1
             continue
+        if char == "$":
+            match = _DOLLAR_QUOTE_RE.match(sql, idx)
+            if match is not None:
+                dollar_quote = match.group(0)
+                chars.extend(dollar_quote)
+                idx = match.end()
+                continue
         if char == ";":
             statement = "".join(chars).strip()
             if statement:
@@ -203,6 +223,8 @@ def _split_sql_statements(sql: str) -> list[str]:
         idx += 1
 
     tail = "".join(chars).strip()
+    if quote is not None or in_block_comment or dollar_quote is not None:
+        raise MigrationSqlError("unterminated SQL quote or block comment")
     if tail:
         statements.append(tail)
     return statements

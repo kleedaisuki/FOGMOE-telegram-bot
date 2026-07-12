@@ -34,6 +34,7 @@ from fogmoe_bot.domain.conversation.errors import (
     IdempotencyConflictError,
 )
 from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.domain.observability.trace import TraceContext
 
 from .common import (
     _claim_window,
@@ -58,7 +59,7 @@ from .turn_uow import (
 def _map_outbound(row: object) -> OutboundMessage:
     """@brief 将数据库行映射为 outbox 消息 / Map a database row to an outbox message."""
 
-    values = _row_values(row, 17)
+    values = _row_values(row, 18)
     draft = OutboundDraft(
         message_id=OutboundMessageId.parse(_uuid(values[0])),
         conversation_id=ConversationId(_text(values[1])),
@@ -68,6 +69,7 @@ def _map_outbound(row: object) -> OutboundMessage:
         payload=_json_object(values[6]),
         idempotency_key=_text(values[7]),
         created_at=_datetime(values[12]),
+        trace_context=TraceContext.parse(_text(values[17])),
     )
     return OutboundMessage(
         draft=draft,
@@ -239,13 +241,13 @@ class PostgresOutboxRepository:
             "INSERT INTO conversation.outbound_messages "
             "(message_id, conversation_id, turn_id, delivery_stream_id, stream_sequence, "
             "kind, payload, idempotency_key, status, version, attempt_count, "
-            "next_attempt_at, created_at, updated_at) "
+            "next_attempt_at, created_at, updated_at, traceparent) "
             "VALUES (CAST(%s AS UUID), %s, CAST(%s AS UUID), %s, %s, %s, "
-            "CAST(%s AS JSONB), %s, 'pending', 0, 0, %s, %s, %s) "
+            "CAST(%s AS JSONB), %s, 'pending', 0, 0, %s, %s, %s, %s) "
             "RETURNING message_id, conversation_id, turn_id, delivery_stream_id, "
             "stream_sequence, kind, payload, idempotency_key, status, version, "
             "attempt_count, next_attempt_at, created_at, updated_at, delivered_at, "
-            "external_message_id, last_error",
+            "external_message_id, last_error, traceparent",
             (
                 str(draft.message_id),
                 str(draft.conversation_id),
@@ -256,6 +258,7 @@ class PostgresOutboxRepository:
                 _encode_json(draft.payload),
                 draft.idempotency_key,
                 draft.created_at,
+                draft.trace_context.to_traceparent(),
                 draft.created_at,
                 draft.created_at,
             ),
@@ -304,7 +307,7 @@ class PostgresOutboxRepository:
             "SELECT message_id, conversation_id, turn_id, delivery_stream_id, "
             "stream_sequence, kind, payload, idempotency_key, status, version, "
             "attempt_count, next_attempt_at, created_at, updated_at, delivered_at, "
-            "external_message_id, last_error FROM conversation.outbound_messages "
+            "external_message_id, last_error, traceparent FROM conversation.outbound_messages "
             "WHERE message_id = CAST(%s AS UUID) "
             "OR (conversation_id = %s AND idempotency_key = %s) LIMIT 1",
             (str(draft.message_id), str(draft.conversation_id), draft.idempotency_key),
@@ -325,7 +328,7 @@ class PostgresOutboxRepository:
             "SELECT message_id, conversation_id, turn_id, delivery_stream_id, "
             "stream_sequence, kind, payload, idempotency_key, status, version, "
             "attempt_count, next_attempt_at, created_at, updated_at, delivered_at, "
-            "external_message_id, last_error "
+            "external_message_id, last_error, traceparent "
             "FROM conversation.outbound_messages WHERE message_id = CAST(%s AS UUID)",
             (str(message_id),),
         )
@@ -380,15 +383,15 @@ class PostgresOutboxRepository:
                 "outbound.payload, outbound.idempotency_key, outbound.status, outbound.version, "
                 "outbound.attempt_count, outbound.next_attempt_at, outbound.created_at, "
                 "outbound.updated_at, outbound.delivered_at, outbound.external_message_id, "
-                "outbound.last_error, candidates.previous_status",
+                "outbound.last_error, outbound.traceparent, candidates.previous_status",
                 (timestamp, limit, str(token), lease_expires_at, timestamp),
                 connection=connection,
             )
             claims: list[OutboundClaim] = []
             for row in rows:
-                values = _row_values(row, 18)
-                message = _map_outbound(values[:17])
-                previous_status = OutboundStatus(_text(values[17]))
+                values = _row_values(row, 19)
+                message = _map_outbound(values[:18])
+                previous_status = OutboundStatus(_text(values[18]))
                 if message.turn_id is not None:
                     turn = await _load_turn_for_mutation(
                         message.turn_id,

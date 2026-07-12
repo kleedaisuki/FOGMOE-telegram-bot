@@ -25,6 +25,7 @@ APPLICATION_SCHEMAS = (
     "game",
     "media",
     "admin",
+    "observability",
 )
 
 

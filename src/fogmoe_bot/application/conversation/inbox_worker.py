@@ -6,7 +6,7 @@ import asyncio
 import logging
 import random
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Protocol
 
@@ -21,6 +21,8 @@ from .router import (
     DispatchDeferred,
     RouteOutcome,
 )
+from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
 
 
 logger = logging.getLogger(__name__)
@@ -250,6 +252,7 @@ class InboxWorker:
         lease_for: timedelta,
         retry_policy: FullJitterRetryPolicy | None = None,
         clock: UtcClock | None = None,
+        telemetry: Telemetry,
     ) -> None:
         """@brief 创建 inbox worker / Create an inbox worker.
 
@@ -260,6 +263,8 @@ class InboxWorker:
         @param lease_for 每个 claim 的租约时长 / Lease duration per claim.
         @param retry_policy 错误退避策略 / Failure-backoff policy.
         @param clock 可替换 UTC 时钟 / Replaceable UTC clock.
+        @param telemetry 进程 typed telemetry / Process typed telemetry.
+        @return None / None.
         """
 
         if worker_count < 1:
@@ -275,6 +280,7 @@ class InboxWorker:
         self._lease_for = lease_for
         self._retry_policy = retry_policy or FullJitterRetryPolicy()
         self._clock = clock or SystemUtcClock()
+        self._telemetry = telemetry
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """@brief 运行 producer 与固定数量 consumers / Run one producer and a fixed number of consumers.
@@ -316,17 +322,30 @@ class InboxWorker:
         ``CancelledError`` is not caught; cancellation leaves a processing claim for lease recovery.
         """
 
-        try:
-            outcome = await self._router.route(claim.update)
-            if isinstance(outcome, DispatchDeferred):
-                raise RuntimeAdmissionError(outcome)
-        except Exception as error:
-            await self._finalize_failure(claim, error)
-            return
-        await self._repository.mark_inbound_processed(
-            claim,
-            processed_at=self._clock.now(),
-        )
+        update = claim.update
+        with self._telemetry.span(
+            "inbox.process",
+            kind=SpanKind.CONSUMER,
+            parent=update.trace_context,
+            attributes={
+                "fogmoe.update.id": update.update_id.value,
+                "fogmoe.inbox.attempt": update.attempt_count,
+            },
+        ) as span:
+            routed_update = replace(update, trace_context=span.context)
+            try:
+                outcome = await self._router.route(routed_update)
+                if isinstance(outcome, DispatchDeferred):
+                    raise RuntimeAdmissionError(outcome)
+            except Exception as error:
+                span.set_status(SpanStatus.ERROR, str(error))
+                span.set_attribute("error.type", error.__class__.__name__)
+                await self._finalize_failure(claim, error)
+                return
+            await self._repository.mark_inbound_processed(
+                claim,
+                processed_at=self._clock.now(),
+            )
 
     async def _produce(
         self,
@@ -351,6 +370,10 @@ class InboxWorker:
                         now=now
                     )
                     if recovered:
+                        self._telemetry.counter(
+                            "fogmoe.inbox.leases.recovered",
+                            float(recovered),
+                        )
                         logger.warning(
                             "Recovered expired inbox leases: count=%s", recovered
                         )

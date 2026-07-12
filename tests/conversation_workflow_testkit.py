@@ -46,6 +46,9 @@ OUTBOUND_UUID = UUID("22222222-2222-4222-8222-222222222222")
 MESSAGE_UUID = UUID("33333333-3333-4333-8333-333333333333")
 """@brief 测试会话消息 UUID / Test conversation-message UUID."""
 
+TRACEPARENT = "00-11111111111141118111111111111111-2222222222224222-01"
+"""@brief 测试用 durable trace carrier / Durable trace carrier used in tests."""
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 """@brief 项目根目录 / Project root."""
 
@@ -166,6 +169,7 @@ def _outbound_row(
         delivered_at,
         None,
         None,
+        TRACEPARENT,
     )
 
 
@@ -380,4 +384,5 @@ def _inbound_row(*, status: str = "processing") -> tuple[object, ...]:
         NOW,
         None,
         None,
+        TRACEPARENT,
     )

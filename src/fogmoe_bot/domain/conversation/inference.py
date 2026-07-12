@@ -1,6 +1,6 @@
 """Durable inference activity 模型 / Durable inference-activity models."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Self
@@ -8,6 +8,7 @@ from typing import Self
 from .identity import ConversationId, InferenceActivityId, LeaseToken, TurnId
 from .payloads import JsonObject
 from .temporal import ensure_utc
+from fogmoe_bot.domain.observability.trace import TraceContext
 
 
 class InferenceActivityStatus(StrEnum):
@@ -43,6 +44,7 @@ class InferenceActivityDraft:
     conversation_id: ConversationId
     request: JsonObject
     created_at: datetime
+    trace_context: TraceContext = field(default_factory=TraceContext.new_root)
 
     def __post_init__(self) -> None:
         """@brief 校验活动草稿并隔离可变 JSON / Validate the activity draft and isolate mutable JSON.
@@ -52,6 +54,8 @@ class InferenceActivityDraft:
 
         object.__setattr__(self, "request", dict(self.request))
         object.__setattr__(self, "created_at", ensure_utc(self.created_at))
+        if not isinstance(self.trace_context, TraceContext):
+            raise TypeError("Inference activity requires a TraceContext")
 
 
 @dataclass(frozen=True, slots=True)

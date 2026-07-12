@@ -76,6 +76,7 @@ class TranslationTelegramCommandHandler:
                 command.chat_id,
                 command.message_thread_id,
             ),
+            trace_context=update.trace_context,
         )
         text = command.reply_text or command.argument_text
         if not text.strip():

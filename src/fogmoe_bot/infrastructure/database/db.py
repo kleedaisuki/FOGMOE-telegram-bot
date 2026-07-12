@@ -1,17 +1,38 @@
 import asyncio
-from contextlib import asynccontextmanager
 from collections.abc import Iterable, Mapping
+from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+from sqlalchemy.sql.elements import TextClause
 
+from fogmoe_bot.application.observability.telemetry import SpanScope, Telemetry
+from fogmoe_bot.domain.observability.signals import SpanKind
 from fogmoe_bot.infrastructure import config
 
 _ENGINE: AsyncEngine | None = None
 _ENGINE_OWNER_LOOP: asyncio.AbstractEventLoop | None = None
+_TELEMETRY: Telemetry | None = None
+"""@brief 数据库 client span recorder / Database-client span recorder."""
+_INSTRUMENTED_ENGINE_ID: int | None = None
+"""@brief 已安装事件 listener 的 sync engine identity / Identity of the instrumented synchronous engine."""
+
+
+def configure_observability(telemetry: Telemetry) -> None:
+    """@brief 为唯一数据库引擎配置安全 client spans / Configure safe client spans for the sole database engine.
+
+    @param telemetry 进程 typed telemetry / Process typed telemetry.
+    @return None / None.
+    @note 不记录 SQL statement、绑定参数或数据库凭据 / SQL statements, bind parameters,
+        and database credentials are never recorded.
+    """
+
+    global _TELEMETRY
+    _TELEMETRY = telemetry
+    if _ENGINE is not None:
+        _instrument_engine(_ENGINE)
 
 
 def _quote_identifier(identifier: str) -> str:
@@ -76,8 +97,113 @@ def get_engine() -> AsyncEngine:
         max_overflow=config.DB_MAX_OVERFLOW,
         connect_args=_connect_args(),
     )
+    _instrument_engine(_ENGINE)
     _ENGINE_OWNER_LOOP = loop
     return _ENGINE
+
+
+def _instrument_engine(engine: AsyncEngine) -> None:
+    """@brief 在 SQLAlchemy driver 边界安装一次 span hooks / Install span hooks once at the SQLAlchemy driver boundary.
+
+    @param engine 异步业务引擎 / Asynchronous business engine.
+    @return None / None.
+    """
+
+    global _INSTRUMENTED_ENGINE_ID
+    sync_engine = engine.sync_engine
+    if _configured_telemetry() is None or _INSTRUMENTED_ENGINE_ID == id(sync_engine):
+        return
+
+    @event.listens_for(sync_engine, "before_cursor_execute")
+    def before_cursor_execute(
+        connection: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: bool,
+    ) -> None:
+        """@brief 在 driver 调用前启动无 SQL 文本 span / Start a statement-free span before the driver call."""
+
+        del cursor, parameters, context
+        telemetry = _configured_telemetry()
+        if telemetry is None:
+            return
+        operation = _sql_operation(statement)
+        scope = telemetry.span(
+            "postgresql.query",
+            kind=SpanKind.CLIENT,
+            attributes={
+                "db.system.name": "postgresql",
+                "db.operation.name": operation,
+                "db.operation.batch": executemany,
+            },
+        )
+        scope.__enter__()
+        spans = connection.info.setdefault("fogmoe.observability.spans", [])
+        spans.append(scope)
+
+    @event.listens_for(sync_engine, "after_cursor_execute")
+    def after_cursor_execute(
+        connection: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: bool,
+    ) -> None:
+        """@brief 成功后结束 client span / Complete the client span after success."""
+
+        del cursor, statement, parameters, context, executemany
+        _finish_database_span(connection, None)
+
+    @event.listens_for(sync_engine, "handle_error")
+    def handle_error(exception_context: Any) -> None:
+        """@brief driver 失败时记录 error span / Record an error span after driver failure."""
+
+        connection = exception_context.connection
+        if connection is not None:
+            _finish_database_span(connection, exception_context.original_exception)
+
+    _INSTRUMENTED_ENGINE_ID = id(sync_engine)
+
+
+def _configured_telemetry() -> Telemetry | None:
+    """@brief 返回可选 recorder / Return the optional configured recorder.
+
+    @return 进程 typed telemetry 或 None / Process typed telemetry or None.
+    """
+
+    return _TELEMETRY
+
+
+def _finish_database_span(connection: Any, error: BaseException | None) -> None:
+    """@brief 从连接栈弹出并结束最近 span / Pop and finish the most recent span from a connection stack."""
+
+    raw_spans = connection.info.get("fogmoe.observability.spans")
+    if not isinstance(raw_spans, list) or not raw_spans:
+        return
+    scope = raw_spans.pop()
+    if not isinstance(scope, SpanScope):
+        return
+    if error is None:
+        scope.__exit__(None, None, None)
+        return
+    scope.__exit__(type(error), error, error.__traceback__)
+
+
+def _sql_operation(statement: str) -> str:
+    """@brief 仅提取低基数 SQL verb / Extract only a low-cardinality SQL verb.
+
+    @param statement SQLAlchemy 发送的 SQL / SQL sent by SQLAlchemy.
+    @return 大写 verb 或 UNKNOWN / Uppercase verb or UNKNOWN.
+    """
+
+    normalized = statement.lstrip()
+    if not normalized:
+        return "UNKNOWN"
+    verb = normalized.split(None, 1)[0].upper()
+    return verb if verb in {"SELECT", "INSERT", "UPDATE", "DELETE", "WITH"} else "OTHER"
 
 
 async def dispose_current_engine() -> None:
@@ -87,7 +213,7 @@ async def dispose_current_engine() -> None:
     @raise RuntimeError 从非 owner event loop 调用 / Called from a non-owner event loop.
     """
 
-    global _ENGINE, _ENGINE_OWNER_LOOP
+    global _ENGINE, _ENGINE_OWNER_LOOP, _INSTRUMENTED_ENGINE_ID
 
     engine = _ENGINE
     owner_loop = _ENGINE_OWNER_LOOP
@@ -98,6 +224,7 @@ async def dispose_current_engine() -> None:
         raise RuntimeError("Database engine must be disposed by its owner event loop")
     _ENGINE = None
     _ENGINE_OWNER_LOOP = None
+    _INSTRUMENTED_ENGINE_ID = None
     await engine.dispose()
 
 

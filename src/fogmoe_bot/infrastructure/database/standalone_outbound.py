@@ -7,8 +7,10 @@ from typing import Protocol
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
+from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.domain.conversation.identity import OutboundMessageId
 from fogmoe_bot.domain.conversation.outbox import OutboundDraft
+from fogmoe_bot.domain.observability.trace import TraceContext
 from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
     PostgresOutboxRepository,
 )
@@ -36,15 +38,22 @@ class PostgresStandaloneOutboundCapability:
     def __init__(
         self,
         repository: StandaloneOutboundRepository | None = None,
+        *,
+        telemetry: Telemetry,
     ) -> None:
-        """@brief 注入 standalone outbox 仓储 / Inject the standalone-outbox repository.
+        """@brief 注入仓储与遥测 / Inject the repository and telemetry.
 
         @param repository 可选仓储替身 / Optional repository substitute.
+        @param telemetry 进程 typed telemetry / Process typed telemetry.
+        @return None / None.
+        @param telemetry 进程 typed telemetry / Process typed telemetry.
+        @return None / None.
         """
 
         self._repository = (
             repository if repository is not None else PostgresOutboxRepository()
         )
+        self._telemetry = telemetry
 
     async def enqueue(self, command: StandaloneOutboundCommand) -> None:
         """@brief 以确定性 ID 幂等写入副作用 / Idempotently persist an effect with a deterministic ID.
@@ -67,6 +76,7 @@ class PostgresStandaloneOutboundCapability:
             payload=command.payload,
             idempotency_key=command.idempotency_key,
             created_at=command.created_at,
+            trace_context=self._telemetry.current_context or TraceContext.new_root(),
         )
         await self._repository.enqueue_standalone_outbound(draft)
 
