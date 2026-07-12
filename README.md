@@ -140,6 +140,29 @@ WHERE trace_id = decode(:trace_id_hex, 'hex')
 ORDER BY occurred_at;
 ```
 
+内建数据分析 CLI 提供 RED/USE 总览、pipeline、span 聚合、统一错误流、结构日志、
+trace waterfall、metric、GenAI token/延迟、Turn 延迟及实例生命周期视图：
+
+~~~bash
+fogmoe-dashboard --window 1h overview
+fogmoe-dashboard --window 24h spans --limit 20
+fogmoe-dashboard --window 6h traces --errors-only
+fogmoe-dashboard trace 0123456789abcdef0123456789abcdef
+fogmoe-dashboard --window 15m watch --interval 2
+
+# 稳定 JSON 适合 jq、定时任务或其他脚本消费
+fogmoe-dashboard --format json --window 1h errors | jq '.data'
+~~~
+
+需要自由查询时，可通过 automation service 打开前台 psql；密码仅从项目 pgpass
+读取：
+
+~~~bash
+fogmoe-dbctl shell
+~~~
+
+Python 异步 API、全部视图参数和生产安全边界见 [Dashboard 文档](docs/dashboard.md)。
+
 ### 启动机器人
 
 ```bash

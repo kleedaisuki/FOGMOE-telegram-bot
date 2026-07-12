@@ -1,0 +1,207 @@
+"""@brief Dashboard 领域、API 与 presentation 测试 / Dashboard domain, API, and presentation tests."""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+from rich.console import Console
+
+from fogmoe_dashboard.application.dashboard import Dashboard
+from fogmoe_dashboard.config import service_database_url
+from fogmoe_dashboard.domain.models import Overview, PipelineStage, TimeWindow
+from fogmoe_dashboard.presentation.cli import build_parser, parse_duration
+from fogmoe_dashboard.presentation.render import print_json, render, to_jsonable
+
+
+class FakeRepository:
+    """@brief 记录 Dashboard 查询的最小 fake / Minimal fake recording Dashboard queries."""
+
+    def __init__(self) -> None:
+        """@brief 初始化调用记录 / Initialize call records."""
+
+        self.calls: list[tuple[str, object]] = []
+        self.closed = False
+
+    async def overview(self, window: TimeWindow) -> Overview:
+        """@brief 返回固定总览 / Return a fixed overview."""
+
+        self.calls.append(("overview", window))
+        return _overview(window)
+
+    async def pipeline(self):
+        """@brief 返回固定 pipeline / Return a fixed pipeline."""
+
+        return _overview(TimeWindow.last(timedelta(hours=1))).pipeline
+
+    async def spans(self, window, *, name, limit):
+        """@brief 记录 span 查询 / Record a span query."""
+
+        self.calls.append(("spans", (window, name, limit)))
+        return ()
+
+    async def logs(self, window, *, minimum_severity, logger_name, limit):
+        """@brief 记录日志查询 / Record a log query."""
+
+        self.calls.append(("logs", (window, minimum_severity, logger_name, limit)))
+        return ()
+
+    async def trace(self, trace_id):
+        """@brief 记录 trace 查询 / Record a trace query."""
+
+        self.calls.append(("trace", trace_id))
+        return trace_id
+
+    async def close(self) -> None:
+        """@brief 记录关闭 / Record closure."""
+
+        self.closed = True
+
+
+def test_time_window_normalizes_utc_and_rejects_unbounded_queries() -> None:
+    """@brief 时间窗规范 UTC 且拒绝超大扫描 / Time windows normalize UTC and reject oversized scans."""
+
+    now = datetime.now(UTC)
+    window = TimeWindow(now - timedelta(hours=1), now)
+
+    assert window.start.tzinfo is UTC
+    with pytest.raises(ValueError):
+        TimeWindow(now, now)
+    with pytest.raises(ValueError):
+        TimeWindow(now - timedelta(days=91), now)
+
+
+def test_dashboard_reads_its_own_service_config_with_pgpass_escaping(
+    tmp_path: Path,
+) -> None:
+    """@brief Dashboard 配置不依赖 dbctl package / Dashboard configuration does not depend on the dbctl package."""
+
+    (tmp_path / "pg_service.conf").write_text(
+        "[analytics]\nhost=localhost\nport=5432\ndbname=fogmoe\nuser=reader\n",
+        encoding="utf-8",
+    )
+    pgpass = tmp_path / "pgpass"
+    pgpass.write_text(
+        r"localhost:5432:fogmoe:reader:p\:ass\\word" + "\n",
+        encoding="utf-8",
+    )
+    pgpass.chmod(0o600)
+
+    assert service_database_url(tmp_path, "analytics") == (
+        "postgresql+asyncpg://reader:p%3Aass%5Cword@localhost:5432/fogmoe"
+    )
+
+    pgpass.chmod(0o644)
+    with pytest.raises(RuntimeError, match="0600"):
+        service_database_url(tmp_path, "analytics")
+
+
+def test_dashboard_enforces_limits_filters_and_trace_identity() -> None:
+    """@brief 应用层在 repository 前约束查询 / The application layer bounds queries before the repository."""
+
+    async def scenario() -> None:
+        """@brief 执行类型化查询 / Execute typed queries."""
+
+        repository = FakeRepository()
+        dashboard = Dashboard(repository)  # type: ignore[arg-type]
+        window = TimeWindow.last(timedelta(hours=1))
+
+        await dashboard.spans(window, name=" chat ", limit=10)
+        await dashboard.logs(
+            window,
+            minimum_severity=17,
+            logger_name=" fogmoe.test ",
+            limit=5,
+        )
+        assert await dashboard.trace("A" * 32) == "a" * 32
+        with pytest.raises(ValueError):
+            await dashboard.spans(window, limit=0)
+        with pytest.raises(ValueError):
+            await dashboard.logs(window, minimum_severity=25)
+        with pytest.raises(ValueError):
+            await dashboard.trace("not-a-trace")
+
+        assert repository.calls[0][0] == "spans"
+        assert repository.calls[0][1][1:] == ("chat", 10)
+        await dashboard.close()
+        assert repository.closed
+
+    import asyncio
+
+    asyncio.run(scenario())
+
+
+def test_dashboard_cli_registers_all_builtin_views_and_parses_duration() -> None:
+    """@brief CLI 暴露完整内建视图 / The CLI exposes every built-in view."""
+
+    parser = build_parser()
+    views = {
+        "overview",
+        "pipeline",
+        "spans",
+        "errors",
+        "logs",
+        "traces",
+        "trace",
+        "metrics",
+        "ai",
+        "latency",
+        "resources",
+        "watch",
+    }
+
+    assert {
+        parser.parse_args([view, *(["0" * 32] if view == "trace" else [])]).view
+        for view in views
+    } == views
+    assert parse_duration("15m") == timedelta(minutes=15)
+    assert parse_duration("1.5h") == timedelta(minutes=90)
+    with pytest.raises(ValueError):
+        parse_duration("yesterday")
+
+
+def test_overview_renders_rich_table_and_stable_json() -> None:
+    """@brief 同一模型可交互渲染也可脚本消费 / One model supports interactive rendering and script consumption."""
+
+    value = _overview(TimeWindow.last(timedelta(hours=1)))
+    table_console = Console(record=True, width=120, color_system=None)
+    table_console.print(render("overview", value))
+    rendered = table_console.export_text()
+    assert "FogMoe observability" in rendered
+    assert "Durable pipeline" in rendered
+    assert "inbox" in rendered
+
+    json_console = Console(record=True, color_system=None)
+    print_json(json_console, "overview", value)
+    payload = json.loads(json_console.export_text())
+    assert payload["schema_version"] == 1
+    assert payload["view"] == "overview"
+    assert payload["data"]["spans"] == 10
+    assert to_jsonable(value.window)["start"].endswith("+00:00")
+
+
+def _overview(window: TimeWindow) -> Overview:
+    """@brief 创建固定总览 fixture / Create a fixed overview fixture."""
+
+    return Overview(
+        generated_at=window.end,
+        window=window,
+        spans=10,
+        error_spans=1,
+        traces=4,
+        logs=20,
+        error_logs=2,
+        p50_ms=1.2,
+        p95_ms=5.6,
+        p99_ms=8.9,
+        input_tokens=100,
+        output_tokens=20,
+        tool_calls=3,
+        pipeline=(
+            PipelineStage("inbox", 1, 2, 3, 4, None, 0),
+            PipelineStage("inference", 0, 1, 0, 0, None, 0),
+            PipelineStage("outbox", 2, 0, 0, 0, None, 0),
+        ),
+    )
