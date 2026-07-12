@@ -1,6 +1,7 @@
 """@brief 异步日志基础设施测试 / Asynchronous logging infrastructure tests."""
 
 import logging
+import os
 import re
 
 from fogmoe_bot.infrastructure import config
@@ -34,7 +35,7 @@ def test_configure_logging_uses_timestamped_file_and_queue_consumer(
 
 
 def test_configure_litellm_logging_removes_private_handlers(monkeypatch):
-    """@brief LiteLLM 私有 handler 被移除并传播 / LiteLLM private handlers are removed and propagated."""
+    """@brief LiteLLM 删除私有 handler 并继承根等级 / LiteLLM removes private handlers and inherits the root level."""
     litellm_logger = logging.getLogger("LiteLLM")
     original_handlers = list(litellm_logger.handlers)
     original_level = litellm_logger.level
@@ -42,7 +43,7 @@ def test_configure_litellm_logging_removes_private_handlers(monkeypatch):
     original_disabled = litellm_logger.disabled
     private_handler = logging.StreamHandler()
     litellm_logger.addHandler(private_handler)
-    monkeypatch.setattr(config, "LITELLM_LOG_LEVEL", "WARNING")
+    monkeypatch.setattr(config, "LOG_LEVEL", "WARNING")
 
     try:
         bot_logging.configure_litellm_logging()
@@ -58,6 +59,17 @@ def test_configure_litellm_logging_removes_private_handlers(monkeypatch):
         litellm_logger.setLevel(original_level)
         litellm_logger.propagate = original_propagate
         litellm_logger.disabled = original_disabled
+
+
+def test_prepare_litellm_logging_silences_import_time_stdout(monkeypatch):
+    """@brief LiteLLM import 环境禁止私有 stdout handler / LiteLLM import environment silences private stdout handlers."""
+
+    monkeypatch.setattr(config, "LOG_LEVEL", "DEBUG")
+    monkeypatch.delenv("LITELLM_LOG", raising=False)
+
+    bot_logging.prepare_litellm_logging()
+
+    assert os.environ["LITELLM_LOG"] == "ERROR"
 
 
 def test_shutdown_sentinel_waits_for_queue_capacity() -> None:

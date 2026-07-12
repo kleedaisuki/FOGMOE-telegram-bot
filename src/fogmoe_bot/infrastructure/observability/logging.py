@@ -217,15 +217,27 @@ def current_log_file_path() -> Path:
 
 
 def prepare_litellm_logging() -> None:
-    """@brief 在导入 LiteLLM 前禁用私有噪声 / Silence private LiteLLM noise before import."""
+    """@brief 在导入 LiteLLM 前禁止其私有 stdout handler / Prevent LiteLLM private stdout handlers before import.
+
+    @return None / None.
+    @note LiteLLM 在 import 时读取 ``LITELLM_LOG`` 并可能注册私有 stdout handler。
+        import 完成后 ``configure_litellm_logging`` 会删除私有 handler、让运行期日志
+        继承唯一的 ``LOG_LEVEL`` 并进入项目统一管道。/
+        LiteLLM reads ``LITELLM_LOG`` during import and may register private stdout handlers.
+        After import, ``configure_litellm_logging`` removes private handlers and routes runtime
+        logs at the sole ``LOG_LEVEL`` through the project pipeline.
+    """
 
     os.environ["LITELLM_LOG"] = "ERROR"
 
 
 def configure_litellm_logging() -> None:
-    """@brief 让 LiteLLM 统一传播到根日志管道 / Route LiteLLM through the root logging pipeline."""
+    """@brief 让 LiteLLM 继承根日志级别并传播到统一管道 / Inherit the root log level and route LiteLLM through the unified pipeline.
 
-    level = _resolve_log_level(config.LITELLM_LOG_LEVEL, fallback=logging.WARNING)
+    @return None / None.
+    """
+
+    level = _resolve_log_level(config.LOG_LEVEL)
     for logger_name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
         third_party_logger = logging.getLogger(logger_name)
         for handler in tuple(third_party_logger.handlers):
