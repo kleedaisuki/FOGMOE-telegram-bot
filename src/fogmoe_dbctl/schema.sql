@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0036_media_picture_receipts
--- Alembic head: 0036_media_picture_receipts
+-- Source migrations: 0001_initial through 0037_turn_delivery_plans
+-- Alembic head: 0037_turn_delivery_plans
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and user-plan backfill) and the
@@ -361,10 +361,6 @@ CREATE INDEX idx_outbound_messages_expired_lease
 CREATE INDEX idx_outbound_messages_stream_head
   ON conversation.outbound_messages (delivery_stream_id, stream_sequence)
   WHERE status IN ('pending', 'processing', 'retry_wait');
-
-CREATE UNIQUE INDEX uq_outbound_messages_turn_id
-  ON conversation.outbound_messages (turn_id)
-  WHERE turn_id IS NOT NULL;
 
 CREATE TABLE conversation.retention_segments (
   segment_id UUID PRIMARY KEY,

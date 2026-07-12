@@ -258,8 +258,8 @@ def _adapter(
     )
 
 
-def test_adapter_reads_cutoff_history_and_returns_one_durable_outbox_intent() -> None:
-    """@brief Adapter 读取 Turn 截止历史并返回单一 durable outbox / Adapter reads Turn-cutoff history and returns one durable outbox."""
+def test_adapter_reads_cutoff_history_and_returns_ordered_durable_outbox_intents() -> None:
+    """@brief Adapter 读取 Turn 截止历史并返回有序 durable outbox / Adapter reads Turn-cutoff history and returns ordered durable outbox intents."""
 
     async def scenario() -> None:
         turn_id = TurnId.new()
@@ -313,14 +313,25 @@ def test_adapter_reads_cutoff_history_and_returns_one_durable_outbox_intent() ->
             "tool_context": inference.kwargs["tool_context"],
         }
         assert inference.kwargs["tool_context"] is not None
-        assert result.outbound.kind == SEND_TELEGRAM_MESSAGE
-        assert result.outbound.payload == {
+        assert [intent.kind for intent in result.outbounds] == [
+            SEND_TELEGRAM_MESSAGE,
+            SEND_TELEGRAM_MESSAGE,
+        ]
+        assert result.outbounds[0].payload == {
             "chat_id": -100,
-            "text": "progress\n\nfinal answer",
+            "text": "progress",
             "disable_notification": False,
             "protect_content": False,
             "disable_web_page_preview": True,
             "reply_to_message_id": 42,
+            "message_thread_id": 9,
+        }
+        assert result.outbounds[1].payload == {
+            "chat_id": -100,
+            "text": "final answer",
+            "disable_notification": False,
+            "protect_content": False,
+            "disable_web_page_preview": True,
             "message_thread_id": 9,
         }
         runtime_events = result.assistant_content["runtime_events"]
@@ -404,7 +415,7 @@ def test_translation_uses_dedicated_prompt_without_tools_and_marks_output_exclud
         }
         assert result.assistant_content["task_kind"] == "translation"
         assert result.assistant_content["exclude_from_assistant"] is True
-        assert result.outbound.payload["text"] == "Hello, meow!"
+        assert result.outbounds[0].payload["text"] == "Hello, meow!"
 
     asyncio.run(scenario())
 

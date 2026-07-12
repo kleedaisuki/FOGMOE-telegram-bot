@@ -470,23 +470,29 @@ class DurableAssistantInferenceAdapter:
         }
         if command.task_kind == "translation":
             assistant_content["exclude_from_assistant"] = True
-        outbound_payload: JsonObject = {
-            "chat_id": cast(JsonValue, command.chat_id),
-            "text": delivery_text,
-            "disable_notification": command.disable_notification,
-            "protect_content": command.protect_content,
-            "disable_web_page_preview": command.disable_web_page_preview,
-        }
-        if command.reply_to_message_id is not None:
-            outbound_payload["reply_to_message_id"] = command.reply_to_message_id
-        if command.message_thread_id is not None:
-            outbound_payload["message_thread_id"] = command.message_thread_id
+        outbound_payloads: list[JsonObject] = []
+        for ordinal, text in enumerate(_delivery_text_parts(delivery_parts)):
+            outbound_payload: JsonObject = {
+                "chat_id": cast(JsonValue, command.chat_id),
+                "text": text,
+                "disable_notification": command.disable_notification,
+                "protect_content": command.protect_content,
+                "disable_web_page_preview": command.disable_web_page_preview,
+            }
+            if ordinal == 0 and command.reply_to_message_id is not None:
+                outbound_payload["reply_to_message_id"] = command.reply_to_message_id
+            if command.message_thread_id is not None:
+                outbound_payload["message_thread_id"] = command.message_thread_id
+            outbound_payloads.append(outbound_payload)
         return InferenceResult(
             assistant_content=assistant_content,
-            outbound=InferenceOutboundIntent(
-                delivery_stream_id=DeliveryStreamId(command.delivery_stream_id),
-                kind=SEND_TELEGRAM_MESSAGE,
-                payload=outbound_payload,
+            outbounds=tuple(
+                InferenceOutboundIntent(
+                    delivery_stream_id=DeliveryStreamId(command.delivery_stream_id),
+                    kind=SEND_TELEGRAM_MESSAGE,
+                    payload=payload,
+                )
+                for payload in outbound_payloads
             ),
         )
 
@@ -615,6 +621,21 @@ def _deduplicate_texts(values: Sequence[str]) -> list[str]:
             seen.add(normalized)
             result.append(normalized)
     return result
+
+
+def _delivery_text_parts(values: Sequence[str]) -> list[str]:
+    """@brief 将可见输出按自然段转为聊天气泡 / Convert visible output into paragraph-sized chat bubbles.
+
+    @param values 保序、已去重的可见文本 / Ordered deduplicated visible texts.
+    @return 非空的发送文本序列 / Non-empty delivery-text sequence.
+    @note 仅在空行处拆分，不切断句子、链接或代码片段。/
+    Splits only at blank lines and never cuts sentences, links, or code fragments.
+    """
+
+    parts: list[str] = []
+    for value in values:
+        parts.extend(part.strip() for part in value.split("\n\n") if part.strip())
+    return parts
 
 
 def _last_assistant_texts(messages: Sequence[Mapping[str, object]]) -> list[str]:

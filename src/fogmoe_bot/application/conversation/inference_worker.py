@@ -68,14 +68,14 @@ class InferencePersistence(Protocol):
         claim: InferenceActivityClaim,
         *,
         assistant_message: MessageDraft,
-        outbound: OutboundDraft,
+        outbounds: Sequence[OutboundDraft],
         completed_at: datetime,
     ) -> InferenceCompletionResult:
         """@brief 原子完成活动、历史与 outbox / Atomically complete the activity, history, and outbox.
 
         @param claim 当前 claim / Current claim.
         @param assistant_message 确定性助手消息 / Deterministic assistant message.
-        @param outbound 确定性出站意图 / Deterministic outbound intent.
+        @param outbounds 有序、确定性的出站意图 / Ordered deterministic outbound intents.
         @param completed_at 完成时间 / Completion time.
         @return 完成回执 / Completion receipt.
         """
@@ -155,11 +155,11 @@ class InferenceResult:
     """@brief Provider-neutral 推理成功结果 / Provider-neutral successful inference result.
 
     @param assistant_content 结构化助手历史内容 / Structured assistant-history content.
-    @param outbound primary 出站意图 / Primary outbound intent.
+    @param outbounds 一次发送的有序出站意图 / Ordered outbound intents for one delivery.
     """
 
     assistant_content: JsonObject
-    outbound: InferenceOutboundIntent
+    outbounds: tuple[InferenceOutboundIntent, ...]
 
     def __post_init__(self) -> None:
         """@brief 隔离可变助手内容 / Isolate mutable assistant content.
@@ -168,6 +168,11 @@ class InferenceResult:
         """
 
         object.__setattr__(self, "assistant_content", dict(self.assistant_content))
+        if not self.outbounds:
+            raise ValueError("Inference results require at least one outbound intent")
+        first_stream = self.outbounds[0].delivery_stream_id
+        if any(intent.delivery_stream_id != first_stream for intent in self.outbounds):
+            raise ValueError("Inference delivery intents must share one delivery stream")
 
 
 class InferencePort(Protocol):
@@ -594,23 +599,28 @@ class InferenceWorker:
             idempotency_key=f"turn:{claim.activity.turn_id}:assistant:final",
             created_at=completed_at,
         )
-        outbound = OutboundDraft(
-            message_id=OutboundMessageId.for_turn(
-                claim.activity.turn_id,
-                "outbound.primary",
-            ),
-            conversation_id=claim.activity.conversation_id,
-            turn_id=claim.activity.turn_id,
-            delivery_stream_id=result.outbound.delivery_stream_id,
-            kind=result.outbound.kind,
-            payload=result.outbound.payload,
-            idempotency_key=f"turn:{claim.activity.turn_id}:outbound:primary",
-            created_at=completed_at,
+        outbounds = tuple(
+            OutboundDraft(
+                message_id=OutboundMessageId.for_turn(
+                    claim.activity.turn_id,
+                    f"outbound.{ordinal}",
+                ),
+                conversation_id=claim.activity.conversation_id,
+                turn_id=claim.activity.turn_id,
+                delivery_stream_id=intent.delivery_stream_id,
+                kind=intent.kind,
+                payload=intent.payload,
+                idempotency_key=(
+                    f"turn:{claim.activity.turn_id}:outbound:{ordinal}"
+                ),
+                created_at=completed_at,
+            )
+            for ordinal, intent in enumerate(result.outbounds)
         )
         await self._repository.complete_inference_activity(
             claim,
             assistant_message=assistant_message,
-            outbound=outbound,
+            outbounds=outbounds,
             completed_at=completed_at,
         )
 

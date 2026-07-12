@@ -94,7 +94,7 @@ class _Repository:
         self.claims = list(claims)
         self.claim_limits: list[int] = []
         self.completed: list[
-            tuple[InferenceActivityClaim, MessageDraft, OutboundDraft, datetime]
+            tuple[InferenceActivityClaim, tuple[OutboundDraft, ...], datetime]
         ] = []
         self.retried: list[tuple[InferenceActivityClaim, datetime, datetime, str]] = []
         self.failed: list[tuple[InferenceActivityClaim, datetime, str]] = []
@@ -120,12 +120,13 @@ class _Repository:
         claim: InferenceActivityClaim,
         *,
         assistant_message: MessageDraft,
-        outbound: OutboundDraft,
+        outbounds: tuple[OutboundDraft, ...],
         completed_at: datetime,
     ) -> object:
         """@brief 记录成功提交 / Record successful completion."""
 
-        self.completed.append((claim, assistant_message, outbound, completed_at))
+        del assistant_message
+        self.completed.append((claim, outbounds, completed_at))
         return object()
 
     async def retry_inference_activity(
@@ -196,10 +197,12 @@ def _result() -> InferenceResult:
 
     return InferenceResult(
         assistant_content={"text": "world"},
-        outbound=InferenceOutboundIntent(
-            delivery_stream_id=DeliveryStreamId("connector:stream:7"),
-            kind=SEND_TELEGRAM_MESSAGE,
-            payload={"chat_id": 7, "text": "world"},
+        outbounds=(
+            InferenceOutboundIntent(
+                delivery_stream_id=DeliveryStreamId("connector:stream:7"),
+                kind=SEND_TELEGRAM_MESSAGE,
+                payload={"chat_id": 7, "text": "world"},
+            ),
         ),
     )
 
@@ -240,10 +243,10 @@ def test_success_builds_deterministic_effects_and_completes_claim() -> None:
         worker = _worker(repository, _Inference(_result()))
         await worker.process_claim(claim)
         assert len(repository.completed) == 1
-        saved_claim, message, outbound, completed_at = repository.completed[0]
+        saved_claim, outbounds, completed_at = repository.completed[0]
         assert saved_claim == claim
-        assert message.content == {"text": "world"}
-        assert outbound.payload == {"chat_id": 7, "text": "world"}
+        assert len(outbounds) == 1
+        assert outbounds[0].payload == {"chat_id": 7, "text": "world"}
         assert completed_at == NOW + timedelta(seconds=2)
 
     asyncio.run(scenario())

@@ -162,7 +162,7 @@ def test_inference_uow_failure_exits_the_single_transaction_for_rollback(
             repository.complete_inference_activity(
                 claim,
                 assistant_message=assistant_message,
-                outbound=outbound,
+                outbounds=(outbound,),
                 completed_at=NOW,
             )
         )
@@ -307,12 +307,12 @@ def test_inference_uow_replay_returns_existing_atomic_effects(
         repository.complete_inference_activity(
             claim,
             assistant_message=assistant_message,
-            outbound=outbound,
+                outbounds=(outbound,),
             completed_at=NOW,
         )
     )
 
     assert result.turn.state.value == current_state
     assert result.assistant_message.inserted is False
-    assert result.outbound.inserted is False
+    assert result.outbounds[0].inserted is False
     assert billing.settled == [(connection, TurnId(TURN_UUID), NOW)]

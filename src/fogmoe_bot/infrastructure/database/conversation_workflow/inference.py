@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from collections.abc import Sequence
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -238,14 +239,14 @@ class PostgresInferenceRepository:
         claim: InferenceActivityClaim,
         *,
         assistant_message: MessageDraft,
-        outbound: OutboundDraft,
+        outbounds: Sequence[OutboundDraft],
         completed_at: datetime,
     ) -> InferenceCompletionResult:
         """@brief 以 fencing token 原子提交推理、历史与 outbox / Atomically commit inference, history, and outbox with a fencing token.
 
         @param claim 当前活动 claim / Current activity claim.
         @param assistant_message 确定性助手消息 / Deterministic assistant message.
-        @param outbound 确定性 primary outbound / Deterministic primary outbound.
+        @param outbounds 有序、确定性的出站副作用 / Ordered deterministic outbound effects.
         @param completed_at 完成时间 / Completion time.
         @return 原子完成回执 / Atomic completion receipt.
         @raise StaleClaimError claim 已被恢复或替代时抛出 / Raised when the claim was recovered or superseded.
@@ -256,7 +257,11 @@ class PostgresInferenceRepository:
         timestamp = ensure_utc(completed_at)
         if timestamp < claim.activity.updated_at:
             raise ValueError("completed_at cannot precede inference claim time")
-        if assistant_message.created_at > timestamp or outbound.created_at > timestamp:
+        if not outbounds:
+            raise ValueError("Inference completion requires outbound effects")
+        if assistant_message.created_at > timestamp or any(
+            outbound.created_at > timestamp for outbound in outbounds
+        ):
             raise ValueError("Inference effects cannot be created after completed_at")
         async with db_connection.transaction() as connection:
             await db_connection.fetch_one(
@@ -281,7 +286,8 @@ class PostgresInferenceRepository:
                 assistant_message,
                 expected_role=MessageRole.ASSISTANT,
             )
-            _validate_outbound_for_turn(turn, outbound)
+            for outbound in outbounds:
+                _validate_outbound_for_turn(turn, outbound)
 
             if current.status is InferenceActivityStatus.COMPLETED:
                 if current.completion_token != claim.token:
@@ -298,12 +304,15 @@ class PostgresInferenceRepository:
                     operation="inference completion replay",
                     connection=connection,
                 )
-                outbound_result = (
-                    await self._outbox.require_existing_outbound_in_transaction(
-                        connection,
-                        outbound,
-                        operation="inference completion replay",
-                    )
+                outbound_results = tuple(
+                    [
+                        await self._outbox.require_existing_outbound_in_transaction(
+                            connection,
+                            outbound,
+                            operation="inference completion replay",
+                        )
+                        for outbound in outbounds
+                    ]
                 )
                 await self._billing.settle(
                     connection,
@@ -314,7 +323,7 @@ class PostgresInferenceRepository:
                     turn=turn,
                     activity=current,
                     assistant_message=message_result,
-                    outbound=outbound_result,
+                    outbounds=outbound_results,
                 )
 
             if (
@@ -334,9 +343,13 @@ class PostgresInferenceRepository:
                 assistant_message,
                 connection=connection,
             )
-            outbound_result = await self._outbox.enqueue_outbound_in_transaction(
-                connection,
-                outbound,
+            outbound_results = tuple(
+                [
+                    await self._outbox.enqueue_outbound_in_transaction(
+                        connection, outbound
+                    )
+                    for outbound in outbounds
+                ]
             )
             activity_row = await db_connection.fetch_one(
                 "UPDATE conversation.inference_activities "
@@ -382,7 +395,7 @@ class PostgresInferenceRepository:
                 turn=updated_turn,
                 activity=completed_activity,
                 assistant_message=message_result,
-                outbound=outbound_result,
+                outbounds=outbound_results,
             )
 
     async def retry_inference_activity(

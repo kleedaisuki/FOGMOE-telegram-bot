@@ -1,5 +1,6 @@
 """跨 aggregate 原子工作流结果 / Cross-aggregate atomic workflow results."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .inference import (
@@ -49,13 +50,13 @@ class InferenceCompletionResult:
     @param turn 已进入 WAITING_DELIVERY 的回合 / Turn now in WAITING_DELIVERY.
     @param activity 已成功 fenced 完成的活动 / Successfully fenced completed activity.
     @param assistant_message 幂等追加的助手消息 / Idempotently appended assistant message.
-    @param outbound 幂等入队的投递副作用 / Idempotently enqueued delivery effect.
+    @param outbounds 幂等入队的有序投递副作用 / Idempotently enqueued ordered delivery effects.
     """
 
     turn: ConversationTurn
     activity: InferenceActivity
     assistant_message: MessageAppendResult
-    outbound: OutboundEnqueueResult
+    outbounds: Sequence[OutboundEnqueueResult]
 
     def __post_init__(self) -> None:
         """@brief 校验推理完成结果状态 / Validate the inference-completion result state.
@@ -74,3 +75,5 @@ class InferenceCompletionResult:
             )
         if self.activity.turn_id != self.turn.turn_id:
             raise ValueError("Completed activity must belong to the result turn")
+        if not self.outbounds:
+            raise ValueError("Inference completion requires at least one outbound effect")
