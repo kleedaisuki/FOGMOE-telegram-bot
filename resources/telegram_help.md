@@ -27,7 +27,7 @@
 /rich - 查看富豪榜前五
 /stake - 质押经济系统
 /charge - 使用卡密充值金币
-/recharge - 联系管理员充值
+/recharge - 发起人工充值申请
 /webpassword - 设置Web登录密码
 
 ***娱乐相关：***

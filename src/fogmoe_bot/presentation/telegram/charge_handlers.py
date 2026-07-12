@@ -88,12 +88,19 @@ async def charge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "Thank you for your support!"
         )
         return
-    reason = _redemption_error(result.code, result.used_by, result.used_at, user.id)
+    administrator = telegram_runtime_settings(context).administrator_contact_label
+    reason = _redemption_error(
+        result.code,
+        result.used_by,
+        result.used_at,
+        user.id,
+        administrator,
+    )
     await processing.edit_text(
         f"❌ 充值失败\n原因: {reason}\n\n"
-        "如需帮助，请联系机器人管理员 @ScarletKc\n\n"
+        f"如需帮助，请联系机器人管理员 {administrator}\n\n"
         f"Charge failed\nReason: {reason}\n"
-        "For assistance, please contact the bot admin @ScarletKc"
+        f"For assistance, please contact the bot admin {administrator}"
     )
 
 
@@ -123,7 +130,8 @@ async def recharge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "【充值须知】\n"
         "目前仅支持用户主动私聊管理员充值。请务必核对管理员账号，谨防假冒！"
         "官方绝不会主动私信索要财物，请谨慎甄别，拒绝第三方渠道。\n\n"
-        "请选择充值套餐，系统会将请求转发给管理员 @ScarletKc ：",
+        "请选择充值套餐，系统会将请求转发给管理员 "
+        f"{telegram_runtime_settings(context).administrator_contact_label}：",
         reply_markup=InlineKeyboardMarkup(
             [
                 [
@@ -201,7 +209,8 @@ async def topup_request_callback(
         reply_markup=keyboard,
     )
     await query.edit_message_text(
-        f"已通知管理员 @ScarletKc 处理您的充值请求"
+        "已通知管理员 "
+        f"{telegram_runtime_settings(context).administrator_contact_label} 处理您的充值请求"
         f"（{_price(package.cents)} -> {package.coins}金币）。"
     )
 
@@ -269,7 +278,8 @@ async def topup_admin_callback(
     )
     await context.bot.send_message(
         target_user_id,
-        f"充值请求未通过（{_price(package.cents)}）。如有疑问请联系管理员 @ScarletKc 。",
+        f"充值请求未通过（{_price(package.cents)}）。如有疑问请联系管理员 "
+        f"{telegram_runtime_settings(context).administrator_contact_label}。",
     )
 
 
@@ -391,6 +401,7 @@ def _redemption_error(
     used_by: int | None,
     used_at: datetime | None,
     user_id: int,
+    administrator: str,
 ) -> str:
     """@brief 渲染卡密拒绝原因 / Render a redemption rejection.
 
@@ -398,6 +409,7 @@ def _redemption_error(
     @param used_by 已使用者 / Existing redeemer.
     @param used_at 已兑换时间 / Existing redemption time.
     @param user_id 当前用户 / Current user.
+    @param administrator 管理员展示名 / Administrator display name.
     @return 拒绝文本 / Rejection text.
     """
 
@@ -409,7 +421,7 @@ def _redemption_error(
         when = used_at.strftime("%Y-%m-%d %H:%M:%S") if used_at else "未知时间"
         owner = "您" if used_by == user_id else "其他用户"
         return f"此卡密已被{owner}在 {when} 使用"
-    return "充值处理过程中出现错误，请联系管理员"
+    return f"充值处理过程中出现错误，请联系管理员 {administrator}"
 
 
 __all__ = [

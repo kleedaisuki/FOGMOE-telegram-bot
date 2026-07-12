@@ -365,6 +365,7 @@ def assemble_handler_capabilities(application: TelegramApplication) -> None:
             ),
             TELEGRAM_SETTINGS_DATA_KEY: TelegramRuntimeSettings(
                 administrator_id=config.ADMIN_USER_ID,
+                administrator_contact_name=config.ADMIN_CONTACT_NAME,
                 new_user_bonus=config.NEW_USER_BONUS_COINS,
             ),
         }

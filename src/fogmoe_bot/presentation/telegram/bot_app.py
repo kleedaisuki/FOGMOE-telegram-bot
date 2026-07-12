@@ -149,6 +149,11 @@ from .moderation_composition import (
     TelegramModerationCapability,
 )
 from .reset_route import TelegramConversationResetPrimaryRoute
+from .runtime_settings import (
+    TELEGRAM_SETTINGS_DATA_KEY,
+    TelegramRuntimeSettings,
+    resolve_administrator_contact_name,
+)
 from .translation_handlers import TranslationTelegramCommandHandler
 
 
@@ -598,6 +603,34 @@ def create_application() -> TelegramApplication:
     return application
 
 
+async def _resolve_administrator_contact(
+    application: TelegramApplication,
+) -> None:
+    """@brief 启动时解析全局管理员展示名 / Resolve the global administrator display name at startup.
+
+    @param application 已初始化的 Telegram Application / Initialized Telegram Application.
+    @return None / None.
+    @note Telegram API 暂时不可用时保留 ``ADMIN_CONTACT_NAME`` 回退值且不阻止启动 /
+        Keep the ``ADMIN_CONTACT_NAME`` fallback and do not block startup when the Telegram API is unavailable.
+    """
+
+    settings = _required_capability(
+        application,
+        TELEGRAM_SETTINGS_DATA_KEY,
+        TelegramRuntimeSettings,
+    )
+    try:
+        resolved = await resolve_administrator_contact_name(application.bot, settings)
+    except telegram.error.TelegramError as error:
+        logger.warning(
+            "Unable to resolve administrator contact for user_id=%s; using configured fallback",
+            settings.administrator_id,
+            exc_info=error,
+        )
+        return
+    application.bot_data[TELEGRAM_SETTINGS_DATA_KEY] = resolved
+
+
 async def _wait_for_stop_or_runtime_failure(
     runtime: BotRuntime,
     stop_event: asyncio.Event,
@@ -674,6 +707,7 @@ async def serve_application(
     try:
         await application.initialize()
         initialized = True
+        await _resolve_administrator_contact(application)
         await application.start()
         started = True
         runtime = compose_bot_runtime(application, observability)

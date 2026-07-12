@@ -7,15 +7,10 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from .runtime_settings import telegram_runtime_settings
+
 
 logger = logging.getLogger(__name__)
-
-_GENERIC_ERROR_TEXT = (
-    "处理请求时出现了暂时性问题，请稍后重试。若问题持续，请联系管理员。\n"
-    "A temporary problem occurred while processing the request. Please retry later."
-)
-"""@brief 不泄露内部异常的用户文本 / User text that does not leak internal exceptions."""
-
 
 async def telegram_error_handler(
     update: object,
@@ -46,7 +41,14 @@ async def telegram_error_handler(
             )
             return
         if update.effective_message is not None:
-            await update.effective_message.reply_text(_GENERIC_ERROR_TEXT)
+            administrator = telegram_runtime_settings(
+                context
+            ).administrator_contact_label
+            await update.effective_message.reply_text(
+                "处理请求时出现了暂时性问题，请稍后重试。若问题持续，请联系管理员 "
+                f"{administrator}。\n"
+                "A temporary problem occurred while processing the request. Please retry later."
+            )
     except Exception:
         logger.exception(
             "Telegram error response also failed: update_id=%s",

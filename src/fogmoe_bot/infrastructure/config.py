@@ -126,6 +126,7 @@ class AppSettings(BaseSettings):
     FISH_AUDIO_REFERENCE_ID: str = "dc020cb237df4248907565718715b20b"
 
     ADMIN_USER_ID: int = 1002288404
+    ADMIN_CONTACT_NAME: str | None = None
     NEW_USER_BONUS_COINS: int = 10
 
     POSTGRES_HOST: str | None = None
@@ -178,6 +179,20 @@ class AppSettings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator("ADMIN_CONTACT_NAME", mode="before")
+    @classmethod
+    def _parse_optional_administrator_contact_name(cls, value: object) -> str | None:
+        """@brief 规范化管理员展示名回退配置 / Normalize the administrator display-name fallback.
+
+        @param value 环境变量原值 / Raw environment-variable value.
+        @return 去除首尾空白的名称；空值为 None / Trimmed name, or None for a blank value.
+        """
+
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
 
 
 SETTINGS = AppSettings()
@@ -297,6 +312,7 @@ FISH_AUDIO_MODEL = SETTINGS.FISH_AUDIO_MODEL
 FISH_AUDIO_REFERENCE_ID = SETTINGS.FISH_AUDIO_REFERENCE_ID
 
 ADMIN_USER_ID = SETTINGS.ADMIN_USER_ID
+ADMIN_CONTACT_NAME = SETTINGS.ADMIN_CONTACT_NAME
 NEW_USER_BONUS_COINS = SETTINGS.NEW_USER_BONUS_COINS
 
 POSTGRES_CONFIG = {
