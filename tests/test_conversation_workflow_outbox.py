@@ -331,6 +331,12 @@ def test_standalone_outbox_uses_one_short_transaction_and_persists_null_turn(
     assert result.message.turn_id is None
     assert insert_params is not None
     assert insert_params[2] is None
+    assert insert_params[-4:] == (
+        draft.created_at,
+        draft.created_at,
+        draft.created_at,
+        draft.trace_context.to_traceparent(),
+    )
     assert transaction.exception is None
 
 

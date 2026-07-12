@@ -453,11 +453,24 @@ class InboxWorker:
                 retry_at=decision.at,
                 error=error_text,
             )
+            logger.warning(
+                "Inbox update retry scheduled: update_id=%s attempt=%s retry_at=%s",
+                claim.update.update_id.value,
+                claim.update.attempt_count,
+                decision.at.isoformat(),
+                exc_info=error,
+            )
             return
         await self._repository.fail_inbound(
             claim,
             failed_at=failed_at,
             error=error_text,
+        )
+        logger.error(
+            "Inbox update moved to final-failure quarantine: update_id=%s attempt=%s",
+            claim.update.update_id.value,
+            claim.update.attempt_count,
+            exc_info=error,
         )
 
     @staticmethod

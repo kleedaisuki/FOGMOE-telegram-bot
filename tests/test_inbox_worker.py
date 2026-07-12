@@ -3,6 +3,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import logging
 
 import pytest
 from observability_testkit import make_telemetry
@@ -319,6 +320,30 @@ def test_runtime_deferred_is_retried_with_full_jitter_backoff() -> None:
     asyncio.run(scenario())
 
 
+def test_retryable_failure_is_logged_after_retry_is_persisted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """@brief 可重试失败在持久化重试后记录完整异常 / Retryable failures log the exception after retry persistence."""
+
+    repository = _Repository()
+    worker = _worker(repository, _Router(OSError("network")))
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="fogmoe_bot.application.conversation.inbox_worker",
+    ):
+        asyncio.run(worker.process_claim(_claim(update_id=17)))
+
+    assert len(repository.retried) == 1
+    record = next(
+        record
+        for record in caplog.records
+        if record.message.startswith("Inbox update retry scheduled:")
+    )
+    assert record.exc_info is not None
+    assert "update_id=17" in record.message
+
+
 def test_permanent_failure_is_quarantined_without_retry() -> None:
     """@brief 永久入口错误直接隔离 / Permanent ingress errors are quarantined directly."""
 
@@ -339,6 +364,30 @@ def test_permanent_failure_is_quarantined_without_retry() -> None:
         assert "invalid command" in repository.failed[0][2]
 
     asyncio.run(scenario())
+
+
+def test_final_failure_is_logged_after_quarantine_is_persisted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """@brief 最终隔离成功后记录错误异常 / Final quarantine logs the error after persistence succeeds."""
+
+    repository = _Repository()
+    worker = _worker(repository, _Router(PermanentIngressError("invalid command")))
+
+    with caplog.at_level(
+        logging.ERROR,
+        logger="fogmoe_bot.application.conversation.inbox_worker",
+    ):
+        asyncio.run(worker.process_claim(_claim(update_id=18)))
+
+    assert len(repository.failed) == 1
+    record = next(
+        record
+        for record in caplog.records
+        if record.message.startswith("Inbox update moved to final-failure quarantine:")
+    )
+    assert record.exc_info is not None
+    assert "update_id=18" in record.message
 
 
 def test_transient_failure_stops_after_attempt_budget() -> None:

@@ -288,6 +288,64 @@ def test_connection_bound_acceptance_uses_caller_transaction_without_nesting(
     assert result.turn.state.value == "waiting_inference"
 
 
+def test_inference_activity_insert_binds_traceparent_after_timestamps(
+    monkeypatch: Any,
+) -> None:
+    """@brief 活动 INSERT 的 traceparent 参数必须位于全部时间戳之后 / Activity INSERT binds traceparent after every timestamp."""
+
+    repository = PostgresTurnRepository()
+    draft = _activity_draft()
+    captured: dict[str, tuple[object, ...]] = {}
+
+    async def fake_fetch_one(
+        sql: str,
+        params: tuple[object, ...],
+        *,
+        connection: object,
+    ) -> None:
+        """@brief 捕获活动 INSERT 参数 / Capture activity INSERT parameters."""
+
+        del connection
+        assert "INSERT INTO conversation.inference_activities" in sql
+        captured["params"] = params
+        return None
+
+    async def fake_existing(
+        requested: InferenceActivityDraft,
+        *,
+        operation: str,
+        connection: object,
+    ) -> InferenceActivityEnqueueResult:
+        """@brief 为模拟冲突返回已存在活动 / Return an existing activity for the simulated conflict."""
+
+        del operation, connection
+        return InferenceActivityEnqueueResult(
+            InferenceActivity.pending(requested),
+            inserted=False,
+        )
+
+    monkeypatch.setattr(db_connection, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(
+        repository,
+        "_require_existing_inference_activity",
+        fake_existing,
+    )
+
+    asyncio.run(
+        repository._enqueue_inference_activity(  # pyright: ignore[reportPrivateUsage]
+            draft,
+            connection=object(),  # type: ignore[arg-type]
+        )
+    )
+
+    assert captured["params"][-4:] == (
+        draft.created_at,
+        draft.created_at,
+        draft.created_at,
+        draft.trace_context.to_traceparent(),
+    )
+
+
 def test_history_reader_uses_turn_sequence_cutoff_and_bounded_ascending_window(
     monkeypatch: Any,
 ) -> None:

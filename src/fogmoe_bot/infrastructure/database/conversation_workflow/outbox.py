@@ -258,9 +258,9 @@ class PostgresOutboxRepository:
                 _encode_json(draft.payload),
                 draft.idempotency_key,
                 draft.created_at,
+                draft.created_at,
+                draft.created_at,
                 draft.trace_context.to_traceparent(),
-                draft.created_at,
-                draft.created_at,
             ),
             connection=connection,
         )

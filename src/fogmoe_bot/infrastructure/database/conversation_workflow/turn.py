@@ -392,9 +392,9 @@ class PostgresTurnRepository:
                 str(draft.conversation_id),
                 _encode_json(draft.request),
                 draft.created_at,
+                draft.created_at,
+                draft.created_at,
                 draft.trace_context.to_traceparent(),
-                draft.created_at,
-                draft.created_at,
             ),
             connection=connection,
         )
