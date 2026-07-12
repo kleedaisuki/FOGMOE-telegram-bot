@@ -18,6 +18,7 @@ from fogmoe_bot.application.conversation.compaction_worker import (
 from fogmoe_bot.application.conversation.history_projection import (
     ConversationHistoryProjector,
 )
+from fogmoe_bot.application.conversation.history_cache import ConversationHistoryCache
 from fogmoe_bot.application.conversation.inference_worker import InferenceRuntimeLimits
 from fogmoe_bot.domain.assistant.routing.circuit import ProviderCircuit
 from fogmoe_bot.domain.conversation.retention import ContextTokenBudget, TokenCount
@@ -91,6 +92,10 @@ def build_durable_assistant(
         persistence=retention_repository,
         token_counter=ConservativeHistoryTokenCounter(guard_ratio=budget.guard_ratio),
         budget=budget,
+        cache=ConversationHistoryCache(
+            capacity=config.CONVERSATION_HISTORY_CACHE_CAPACITY,
+            ttl_seconds=config.CONVERSATION_HISTORY_CACHE_TTL_SECONDS,
+        ),
     )
     artifact_root = config.BASE_DIR / "logs" / "generated_artifacts"
     rate_limit_root = config.BASE_DIR / "logs" / "media_rate_limits"

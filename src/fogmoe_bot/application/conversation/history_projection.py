@@ -32,6 +32,8 @@ from fogmoe_bot.domain.conversation.retention import (
     TokenCount,
 )
 
+from .history_cache import CachedConversationHistory, ConversationHistoryCache
+
 
 HISTORY_PROJECTION_VERSION = 1
 """@brief 当前 provider-neutral 历史投影版本 / Current provider-neutral history-projection version."""
@@ -258,6 +260,7 @@ class ConversationHistoryProjector:
         token_counter: HistoryMessageTokenCounter,
         budget: ContextTokenBudget | None = None,
         page_size: int = _DEFAULT_PAGE_SIZE,
+        cache: ConversationHistoryCache | None = None,
     ) -> None:
         """@brief 注入 persistence、counter 与产品预算 / Inject persistence, counter, and product budget.
 
@@ -274,6 +277,7 @@ class ConversationHistoryProjector:
         self._token_counter = token_counter
         self._budget = budget or ContextTokenBudget()
         self._page_size = page_size
+        self._cache = cache
 
     async def project(
         self, request: HistoryProjectionRequest
@@ -322,10 +326,28 @@ class ConversationHistoryProjector:
             start_sequence = through_sequence
             memory_summary = checkpoint.summary.text
 
-        rows = await self._read_rows(
-            request.conversation_id,
-            after_sequence=start_sequence,
-            through_sequence=bounds.last_sequence,
+        checkpoint_id = str(checkpoint.segment_id) if checkpoint is not None else None
+        cached = (
+            self._cache.get(
+                conversation_id=request.conversation_id,
+                epoch_floor_sequence=bounds.epoch_floor_sequence,
+                start_sequence=start_sequence,
+                checkpoint_id=checkpoint_id,
+                include_history=request.include_history,
+                through_sequence=bounds.last_sequence,
+            )
+            if self._cache is not None
+            else None
+        )
+        cached_rows = cached.messages if cached is not None else ()
+        delta_start = cached.through_sequence if cached is not None else start_sequence
+        rows = (
+            *cached_rows,
+            *await self._read_rows(
+                request.conversation_id,
+                after_sequence=delta_start,
+                through_sequence=bounds.last_sequence,
+            ),
         )
         anchor_messages = tuple(
             message
@@ -352,7 +374,7 @@ class ConversationHistoryProjector:
             history=messages,
         )
         if int(estimated) <= int(self._budget.warning_tokens):
-            return HistoryReady(
+            ready = HistoryReady(
                 memory_summary,
                 messages,
                 estimated,
@@ -360,6 +382,8 @@ class ConversationHistoryProjector:
                 checkpoint,
                 anchor_messages,
             )
+            self._cache_ready(request, ready, start_sequence, checkpoint_id, rows)
+            return ready
 
         if not request.include_history:
             if int(estimated) > int(self._budget.hard_tokens):
@@ -368,7 +392,7 @@ class ConversationHistoryProjector:
                     estimated,
                     bounds,
                 )
-            return HistoryReady(
+            ready = HistoryReady(
                 None,
                 messages,
                 estimated,
@@ -376,6 +400,8 @@ class ConversationHistoryProjector:
                 None,
                 anchor_messages,
             )
+            self._cache_ready(request, ready, start_sequence, None, rows)
+            return ready
 
         active = await self._persistence.active_compaction(
             request.conversation_id,
@@ -408,7 +434,7 @@ class ConversationHistoryProjector:
                 estimated,
                 bounds,
             )
-        return HistoryReady(
+        ready = HistoryReady(
             memory_summary,
             messages,
             estimated,
@@ -416,6 +442,41 @@ class ConversationHistoryProjector:
             checkpoint,
             anchor_messages,
             None if terminal_failure else active,
+        )
+        self._cache_ready(request, ready, start_sequence, checkpoint_id, rows)
+        return ready
+
+    def _cache_ready(
+        self,
+        request: HistoryProjectionRequest,
+        ready: HistoryReady,
+        start_sequence: int,
+        checkpoint_id: str | None,
+        rows: Sequence[ConversationMessage],
+    ) -> None:
+        """@brief 缓存已验证的数据库历史窗口 / Cache a validated database-history window.
+
+        @param request 本次投影请求 / Current projection request.
+        @param ready 已完成的投影 / Completed projection.
+        @param start_sequence 窗口排他起点 / Exclusive window start.
+        @param checkpoint_id 窗口使用的 checkpoint ID / Checkpoint identifier used by the window.
+        @param rows 已验证的原始数据库行 / Validated raw database rows.
+        @return None / None.
+        """
+
+        if self._cache is None:
+            return
+        self._cache.put(
+            CachedConversationHistory(
+                conversation_id=request.conversation_id,
+                through_turn_id=request.through_turn_id,
+                epoch_floor_sequence=ready.bounds.epoch_floor_sequence,
+                start_sequence=start_sequence,
+                through_sequence=ready.bounds.last_sequence,
+                checkpoint_id=checkpoint_id,
+                messages=tuple(rows),
+                include_history=request.include_history,
+            )
         )
 
     async def _read_rows(

@@ -12,6 +12,7 @@ from fogmoe_bot.application.conversation.history_projection import (
     HistoryReady,
     memory_summary_message,
 )
+from fogmoe_bot.application.conversation.history_cache import ConversationHistoryCache
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -215,6 +216,44 @@ def test_more_than_128_tiny_rows_are_not_truncated() -> None:
         assert len(result.messages) == 130
         assert len(persistence.pages) == 5
         assert persistence.enqueued == []
+
+    asyncio.run(scenario())
+
+
+def test_history_cache_reuses_committed_prefix_and_reads_only_new_delta() -> None:
+    """@brief 连续 Turn 命中缓存时只读取新增历史 / Consecutive Turns reuse the cached committed prefix and read only the new delta."""
+
+    async def scenario() -> None:
+        """@brief 先投影首回合，再投影追加回合 / Project an initial Turn then an appended Turn."""
+
+        first_turn = TurnId.new()
+        second_turn = TurnId.new()
+        first = _message(1, first_turn, "first")
+        second = _message(2, second_turn, "second")
+        persistence = _Persistence(
+            bounds=HistoryBounds(CONVERSATION, first_turn, 1, 1, 0),
+            messages=(first,),
+        )
+        projector = ConversationHistoryProjector(
+            persistence=persistence,
+            token_counter=_CharacterCounter(),
+            cache=ConversationHistoryCache(capacity=2, ttl_seconds=60),
+        )
+
+        first_result = await projector.project(_request(first_turn))
+        assert isinstance(first_result, HistoryReady)
+        assert persistence.pages == [(0, 1, 256)]
+
+        persistence.bounds = HistoryBounds(CONVERSATION, second_turn, 2, 2, 0)
+        persistence.messages = (first, second)
+        second_result = await projector.project(_request(second_turn))
+
+        assert isinstance(second_result, HistoryReady)
+        assert second_result.messages == (
+            {"role": "user", "content": "first"},
+            {"role": "user", "content": "second"},
+        )
+        assert persistence.pages[-1] == (1, 2, 256)
 
     asyncio.run(scenario())
 
