@@ -9,6 +9,7 @@ from typing import Protocol
 from fogmoe_dashboard.domain.models import (
     ErrorEvent,
     GenAiStats,
+    HealthPoint,
     LogEntry,
     MetricStats,
     Overview,
@@ -37,6 +38,16 @@ class DashboardRepository(Protocol):
 
     async def pipeline(self) -> Sequence[PipelineStage]:
         """@brief 查询 durable pipeline / Query the durable pipeline."""
+
+        ...
+
+    async def health_series(
+        self,
+        window: TimeWindow,
+        *,
+        buckets: int,
+    ) -> Sequence[HealthPoint]:
+        """@brief 查询系统健康趋势 / Query system-health trends."""
 
         ...
 
@@ -172,6 +183,23 @@ class Dashboard:
         """
 
         return tuple(await self._repository.pipeline())
+
+    async def health_series(
+        self,
+        window: TimeWindow,
+        *,
+        buckets: int = 120,
+    ) -> tuple[HealthPoint, ...]:
+        """@brief 返回有界健康时间序列 / Return a bounded health time series.
+
+        @param window 分析窗口 / Analytics window.
+        @param buckets 期望的最大聚合桶数 / Desired maximum aggregate-bucket count.
+        @return 按时间排序的健康点 / Chronologically ordered health points.
+        """
+
+        if isinstance(buckets, bool) or not 12 <= buckets <= 360:
+            raise ValueError("health-series buckets must be between 12 and 360")
+        return tuple(await self._repository.health_series(window, buckets=buckets))
 
     async def spans(
         self,

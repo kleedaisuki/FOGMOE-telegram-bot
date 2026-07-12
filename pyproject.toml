@@ -27,11 +27,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dashboard-gui = [
+    "PyQt6>=6.10.1",
+    "matplotlib>=3.10.7",
+]
 dev = [
     "pytest>=8",
     "mypy>=1.18",
     "pyright>=1.1.411",
     "ruff>=0.12",
+    "PyQt6>=6.10.1",
+    "matplotlib>=3.10.7",
 ]
 
 [tool.mypy]
@@ -51,6 +57,7 @@ venv = ".venv"
 [project.scripts]
 fogmoe-bot = "fogmoe_bot.main:main"
 fogmoe-dashboard = "fogmoe_dashboard.presentation.cli:main"
+fogmoe-dashboard-gui = "fogmoe_dashboard.presentation.gui.app:main"
 fogmoe-dbctl = "fogmoe_dbctl.cli:main"
 
 [tool.setuptools.packages.find]

@@ -103,6 +103,28 @@ class Overview:
 
 
 @dataclass(frozen=True, slots=True)
+class HealthPoint:
+    """@brief 系统健康时间序列点 / System-health time-series point.
+
+    @param observed_at 聚合桶开始时间 / Aggregate-bucket start timestamp.
+    @param span_rate_per_second 每秒 span 数 / Spans per second.
+    @param span_error_rate 0..1 span 错误率 / Span error rate in the range 0..1.
+    @param p95_ms span 的 p95 延迟 / Span p95 latency.
+    @param error_logs 错误日志数 / Error-log count.
+    @param input_tokens 输入 token 数 / Input-token count.
+    @param output_tokens 输出 token 数 / Output-token count.
+    """
+
+    observed_at: datetime
+    span_rate_per_second: float
+    span_error_rate: float
+    p95_ms: float | None
+    error_logs: int
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
 class SpanStats:
     """@brief 按操作聚合的 RED 统计 / RED statistics grouped by operation."""
 
@@ -265,6 +287,14 @@ class SlowTurn:
 
 
 @dataclass(frozen=True, slots=True)
+class LatencySnapshot:
+    """@brief 同一时间窗的 Turn 延迟组合快照 / Combined Turn-latency snapshot for one time window."""
+
+    summary: tuple[TurnLatencyStats, ...]
+    slow_turns: tuple[SlowTurn, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ResourceInstance:
     """@brief 遥测资源实例生命周期 / Telemetry-resource instance lifecycle."""
 
@@ -314,9 +344,11 @@ def _json_value(value: object) -> JsonValue:
 __all__ = [
     "ErrorEvent",
     "GenAiStats",
+    "HealthPoint",
     "JsonObject",
     "JsonValue",
     "LogEntry",
+    "LatencySnapshot",
     "MetricStats",
     "Overview",
     "PipelineStage",

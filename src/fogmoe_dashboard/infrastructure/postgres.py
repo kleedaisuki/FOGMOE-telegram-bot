@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from math import ceil
 from typing import Any, cast
 from uuid import UUID
 
@@ -13,6 +14,7 @@ import asyncpg  # type: ignore[import-untyped]
 from fogmoe_dashboard.domain.models import (
     ErrorEvent,
     GenAiStats,
+    HealthPoint,
     LogEntry,
     MetricStats,
     Overview,
@@ -90,6 +92,37 @@ class PostgresDashboardRepository:
         """@brief 查询当前 pipeline 健康 / Query current pipeline health."""
 
         return tuple(_pipeline_stage(row) for row in await self._fetch(_PIPELINE_SQL))
+
+    async def health_series(
+        self,
+        window: TimeWindow,
+        *,
+        buckets: int,
+    ) -> Sequence[HealthPoint]:
+        """@brief 查询健康趋势聚合桶 / Query health-trend aggregate buckets."""
+
+        bucket_seconds = max(
+            1,
+            ceil((window.end - window.start).total_seconds() / buckets),
+        )
+        rows = await self._fetch(
+            _HEALTH_SERIES_SQL,
+            window.start,
+            window.end,
+            bucket_seconds,
+        )
+        return tuple(
+            HealthPoint(
+                observed_at=_datetime(row["observed_at"]),
+                span_rate_per_second=float(row["span_rate_per_second"]),
+                span_error_rate=float(row["span_error_rate"]),
+                p95_ms=_optional_float(row["p95_ms"]),
+                error_logs=int(row["error_logs"]),
+                input_tokens=int(row["input_tokens"]),
+                output_tokens=int(row["output_tokens"]),
+            )
+            for row in rows
+        )
 
     async def spans(
         self,
@@ -506,6 +539,52 @@ FROM observability.pipeline_health
 ORDER BY CASE stage WHEN 'inbox' THEN 1 WHEN 'inference' THEN 2 ELSE 3 END
 """
 """@brief Durable pipeline 健康 SQL / Durable-pipeline health SQL."""
+
+_HEALTH_SERIES_SQL = """
+WITH span_rollup AS (
+  SELECT floor(
+           EXTRACT(EPOCH FROM (started_at - $1::TIMESTAMPTZ)) / $3::INTEGER
+         )::BIGINT AS bucket,
+         count(*) AS spans,
+         count(*) FILTER (WHERE status_code = 'error') AS error_spans,
+         percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ns / 1e6) AS p95_ms,
+         coalesce(sum(CASE
+           WHEN jsonb_typeof(attributes -> 'gen_ai.usage.input_tokens') = 'number'
+           THEN (attributes ->> 'gen_ai.usage.input_tokens')::BIGINT ELSE 0 END), 0)
+           AS input_tokens,
+         coalesce(sum(CASE
+           WHEN jsonb_typeof(attributes -> 'gen_ai.usage.output_tokens') = 'number'
+           THEN (attributes ->> 'gen_ai.usage.output_tokens')::BIGINT ELSE 0 END), 0)
+           AS output_tokens
+  FROM observability.spans
+  WHERE started_at >= $1 AND started_at < $2
+  GROUP BY bucket
+), log_rollup AS (
+  SELECT floor(
+           EXTRACT(EPOCH FROM (occurred_at - $1::TIMESTAMPTZ)) / $3::INTEGER
+         )::BIGINT AS bucket,
+         count(*) FILTER (WHERE severity_number >= 17) AS error_logs
+  FROM observability.log_records
+  WHERE occurred_at >= $1 AND occurred_at < $2
+  GROUP BY bucket
+)
+SELECT $1::TIMESTAMPTZ
+         + make_interval(secs => coalesce(span_rollup.bucket, log_rollup.bucket)::INTEGER
+                                  * $3::INTEGER) AS observed_at,
+       coalesce(span_rollup.spans, 0)::DOUBLE PRECISION / $3::INTEGER
+         AS span_rate_per_second,
+       CASE WHEN coalesce(span_rollup.spans, 0) = 0 THEN 0
+            ELSE span_rollup.error_spans::DOUBLE PRECISION / span_rollup.spans END
+         AS span_error_rate,
+       span_rollup.p95_ms,
+       coalesce(log_rollup.error_logs, 0) AS error_logs,
+       coalesce(span_rollup.input_tokens, 0) AS input_tokens,
+       coalesce(span_rollup.output_tokens, 0) AS output_tokens
+FROM span_rollup
+FULL OUTER JOIN log_rollup USING (bucket)
+ORDER BY observed_at
+"""
+"""@brief 健康时间序列 SQL / Health time-series SQL."""
 
 _SPANS_SQL = """
 SELECT span_name, span_kind, count(*) AS calls,

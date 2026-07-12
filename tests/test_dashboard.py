@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,9 +11,15 @@ import pytest
 from rich.console import Console
 
 from fogmoe_dashboard.application.dashboard import Dashboard
+from fogmoe_dashboard.application.queries import (
+    DashboardView,
+    SpansQuery,
+    execute_query,
+)
 from fogmoe_dashboard.config import service_database_url
 from fogmoe_dashboard.domain.models import Overview, PipelineStage, TimeWindow
-from fogmoe_dashboard.presentation.cli import build_parser, parse_duration
+from fogmoe_dashboard.presentation.cli import build_parser
+from fogmoe_dashboard.presentation.duration import parse_duration
 from fogmoe_dashboard.presentation.render import print_json, render, to_jsonable
 
 
@@ -35,6 +42,12 @@ class FakeRepository:
         """@brief 返回固定 pipeline / Return a fixed pipeline."""
 
         return _overview(TimeWindow.last(timedelta(hours=1))).pipeline
+
+    async def health_series(self, window, *, buckets):
+        """@brief 返回空健康趋势 / Return an empty health trend."""
+
+        self.calls.append(("health_series", (window, buckets)))
+        return ()
 
     async def spans(self, window, *, name, limit):
         """@brief 记录 span 查询 / Record a span query."""
@@ -133,6 +146,68 @@ def test_dashboard_enforces_limits_filters_and_trace_identity() -> None:
     asyncio.run(scenario())
 
 
+def test_closed_query_language_reuses_application_semantics() -> None:
+    """@brief CLI/GUI 查询语言复用同一应用约束 / CLI and GUI query language reuse the same application constraints."""
+
+    async def scenario() -> None:
+        """@brief 执行一个封闭 Span 查询 / Execute one closed Span query."""
+
+        repository = FakeRepository()
+        dashboard = Dashboard(repository)  # type: ignore[arg-type]
+        window = TimeWindow.last(timedelta(minutes=15))
+
+        result = await execute_query(
+            dashboard,
+            SpansQuery(window, name=" chat ", limit=12),
+        )
+
+        assert result == ()
+        assert repository.calls[-1][1][1:] == ("chat", 12)
+
+    import asyncio
+
+    asyncio.run(scenario())
+
+
+def test_dashboard_layer_dependencies_point_inward() -> None:
+    """@brief Dashboard domain/application 不能依赖 adapter 或 GUI / Dashboard domain and application cannot depend on adapters or GUI."""
+
+    package_root = Path(__file__).parents[1] / "src" / "fogmoe_dashboard"
+    rules = {
+        "domain": (
+            "fogmoe_dashboard.application",
+            "fogmoe_dashboard.infrastructure",
+            "fogmoe_dashboard.presentation",
+            "PyQt6",
+            "matplotlib",
+        ),
+        "application": (
+            "fogmoe_dashboard.infrastructure",
+            "fogmoe_dashboard.presentation",
+            "PyQt6",
+            "matplotlib",
+        ),
+    }
+    violations: list[str] = []
+    for layer, forbidden in rules.items():
+        for path in (package_root / layer).rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                modules: tuple[str, ...] = ()
+                if isinstance(node, ast.ImportFrom):
+                    modules = (node.module or "",)
+                elif isinstance(node, ast.Import):
+                    modules = tuple(alias.name for alias in node.names)
+                if any(
+                    module.startswith(prefix)
+                    for module in modules
+                    for prefix in forbidden
+                ):
+                    violations.append(f"{path.relative_to(package_root)}:{node.lineno}")
+
+    assert violations == []
+
+
 def test_dashboard_cli_registers_all_builtin_views_and_parses_duration() -> None:
     """@brief CLI 暴露完整内建视图 / The CLI exposes every built-in view."""
 
@@ -167,14 +242,14 @@ def test_overview_renders_rich_table_and_stable_json() -> None:
 
     value = _overview(TimeWindow.last(timedelta(hours=1)))
     table_console = Console(record=True, width=120, color_system=None)
-    table_console.print(render("overview", value))
+    table_console.print(render(DashboardView.OVERVIEW, value))
     rendered = table_console.export_text()
     assert "FogMoe observability" in rendered
     assert "Durable pipeline" in rendered
     assert "inbox" in rendered
 
     json_console = Console(record=True, color_system=None)
-    print_json(json_console, "overview", value)
+    print_json(json_console, DashboardView.OVERVIEW, value)
     payload = json.loads(json_console.export_text())
     assert payload["schema_version"] == 1
     assert payload["view"] == "overview"

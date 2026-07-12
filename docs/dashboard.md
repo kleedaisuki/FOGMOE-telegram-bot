@@ -1,8 +1,57 @@
 # FogMoe Dashboard
 
-**fogmoe-dashboard** 是 observability schema 的内建分析客户端。它不是任意 SQL
-代理，而是一组参数化、有界、可审计的诊断查询。交互终端和 Python API 使用同一组
-不可变返回模型，因此两者不会逐渐产生不同语义。
+FogMoe Dashboard 是 observability schema 的内建分析客户端。它不是任意 SQL
+代理，而是一组参数化、有界、可审计的诊断查询。原生 Qt GUI、交互终端和 Python
+API 使用同一套封闭查询语言与不可变返回模型，因此三个入口不会逐渐产生不同语义。
+
+## 原生 GUI
+
+GUI 作为可选依赖安装，避免在仅运行 bot 或 CLI 的服务器上引入约 100 MiB 的 Qt
+runtime：
+
+~~~bash
+pip install -e '.[dashboard-gui]'
+fogmoe-dashboard-gui --window 6h
+fogmoe-dashboard-gui --window 24h --auto-refresh 10
+~~~
+
+它包含七个面向排障问题组织的工作区：
+
+| 工作区 | 交互与可视化 |
+|---|---|
+| 总览 | KPI、吞吐/错误率/p95 时间序列、durable pipeline 饱和度 |
+| 操作 | 精确 span-name 筛选、p50/p95/p99 对比、完整 RED 表 |
+| 事件与日志 | severity/logger 筛选、统一错误流、双击下钻 trace |
+| Traces | error-only 筛选、master-detail、waterfall、关联日志与 attributes |
+| Metrics | 精确 metric 筛选、latest/average/min–max 范围图、Counter rate |
+| AI 与 Turn | provider/model token 与 p95、Turn 分阶段延迟及 slow Turns |
+| Resources | service/version/environment/instance 生命周期 |
+
+全局窗口可选 15 分钟至 30 天；手动刷新和 2–300 秒自动刷新使用相同语义。每次刷新
+产生单调的 generation，旧 generation 即使较晚返回也不会覆盖新状态。查询期间界面
+仍可导航、滚动和复制数据。
+
+### GUI 并发与层次边界
+
+~~~text
+Qt widgets / Matplotlib canvas
+        │ DashboardQuery + immutable DashboardResult
+        ▼
+application.execute_query ──► Dashboard use cases / repository port
+        │
+        ▼
+single QThread + single persistent asyncio loop ──► asyncpg read-only pool
+~~~
+
+Qt 主线程只处理 widget；后台 `QThread` 独占一个持久 `asyncio` event loop 和 asyncpg
+连接池。这样既不跨 event loop 使用连接，也不让 PostgreSQL I/O 阻塞 GUI。页面只声明
+强类型 `DashboardQuery`，不接触连接、SQL 或线程。`ObjectTableModel[T]` 保留原始领域
+对象，显示文本只是 Qt role 的投影，而不是第二份字符串数据模型。
+
+图表采用 Matplotlib 的原生 `QtAgg` canvas。Plotly 的交互 renderer 依赖浏览器中的
+plotly.js；在桌面 Qt 内通常还要引入 Qt WebEngine/Chromium。当前数据量受查询上限约束，
+原生 canvas 已提供更小的部署面和一致的 Qt 生命周期；若未来需要百万点 WebGL 或跨浏览器
+共享，再把 Plotly/Dash 作为独立 web presentation，而不是塞进本地窗口。
 
 ## 连接与安全边界
 
@@ -91,7 +140,20 @@ dashboard = DashboardClient.from_database_url(
 
 公开方法均返回 fogmoe_dashboard.domain.models 中的 frozen、slotted dataclass，
 包括 Overview、SpanStats、ErrorEvent、TraceDetail、MetricStats、GenAiStats、
-TurnLatencyStats 与 ResourceInstance。
+TurnLatencyStats、HealthPoint 与 ResourceInstance。
+
+## 设计依据
+
+- Qt 官方 [Model/View Programming](https://doc.qt.io/qtforpython-6.10/overviews/qtwidgets-model-view-programming.html)
+  将数据、视图与 delegate 分离；本项目用 `QAbstractTableModel` 直接投影不可变领域对象。
+- Matplotlib 官方 [Embed in Qt](https://matplotlib.org/stable/gallery/user_interfaces/embedding_in_qt_sgskip.html)
+  说明 `FigureCanvasQTAgg` 的原生嵌入方式。
+- Davidson、Wall 与 Mace 的 IEEE TVCG 研究
+  [A Qualitative Interview Study of Distributed Tracing Visualisation](https://doi.org/10.1109/TVCG.2023.3241596)
+  指出现有 tracing 工具在 sensemaking 上的不足；这里用摘要筛选、waterfall、logs 与
+  attributes 同屏联动，而不是把 waterfall 当作孤立终点。
+- Plotly 官方 [renderers 文档](https://plotly.com/python/renderers/) 明确交互图由
+  plotly.js 在浏览器执行；因此当前 native desktop 路径不承担浏览器 runtime。
 
 ## 自由 SQL shell
 

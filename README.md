@@ -154,6 +154,14 @@ fogmoe-dashboard --window 15m watch --interval 2
 fogmoe-dashboard --format json --window 1h errors | jq '.data'
 ~~~
 
+原生 Qt GUI 提供健康趋势、KPI、交互筛选、trace master-detail waterfall、自动刷新和
+跨 logs/traces drill-down。GUI 是可选依赖，不会把 Qt runtime 带进 bot 的服务器部署：
+
+~~~bash
+pip install -e '.[dashboard-gui]'
+fogmoe-dashboard-gui --window 6h --auto-refresh 10
+~~~
+
 需要自由查询时，可通过 automation service 打开前台 psql；密码仅从项目 pgpass
 读取：
 

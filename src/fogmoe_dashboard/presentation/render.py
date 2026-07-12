@@ -14,7 +14,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from fogmoe_dashboard.domain.models import Overview, TraceDetail
+from fogmoe_dashboard.application.queries import DashboardView
+from fogmoe_dashboard.domain.models import LatencySnapshot, Overview, TraceDetail
 
 
 _COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -118,7 +119,7 @@ _COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
 """@brief 低噪声终端列定义 / Low-noise terminal column definitions."""
 
 
-def print_json(console: Console, view: str, value: object) -> None:
+def print_json(console: Console, view: DashboardView, value: object) -> None:
     """@brief 输出稳定 JSON envelope / Print a stable JSON envelope.
 
     @param console 输出 console / Output console.
@@ -127,7 +128,7 @@ def print_json(console: Console, view: str, value: object) -> None:
     @return None / None.
     """
 
-    payload = {"schema_version": 1, "view": view, "data": to_jsonable(value)}
+    payload = {"schema_version": 1, "view": view.value, "data": to_jsonable(value)}
     console.print(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         markup=False,
@@ -136,7 +137,7 @@ def print_json(console: Console, view: str, value: object) -> None:
     )
 
 
-def render(view: str, value: object) -> RenderableType:
+def render(view: DashboardView, value: object) -> RenderableType:
     """@brief 将查询结果映射为 Rich renderable / Map a query result to a Rich renderable.
 
     @param view 视图名 / View name.
@@ -144,22 +145,22 @@ def render(view: str, value: object) -> RenderableType:
     @return Rich renderable / Rich renderable.
     """
 
-    if view == "overview":
+    if view is DashboardView.OVERVIEW:
         if not isinstance(value, Overview):
             raise TypeError("overview renderer requires Overview")
         return _overview(value)
-    if view == "trace":
+    if view is DashboardView.TRACE:
         if not isinstance(value, TraceDetail):
             raise TypeError("trace renderer requires TraceDetail")
         return _trace(value)
-    if view == "latency":
-        if not isinstance(value, dict):
-            raise TypeError("latency renderer requires a mapping")
+    if view is DashboardView.LATENCY:
+        if not isinstance(value, LatencySnapshot):
+            raise TypeError("latency renderer requires LatencySnapshot")
         return Group(
-            _table("latency", value.get("summary", ()), title="Turn latency"),
-            _table("slow_turns", value.get("slow_turns", ()), title="Slow Turns"),
+            _table("latency", value.summary, title="Turn latency"),
+            _table("slow_turns", value.slow_turns, title="Slow Turns"),
         )
-    return _table(view, value, title=view.replace("_", " ").title())
+    return _table(view.value, value, title=view.value.replace("_", " ").title())
 
 
 def to_jsonable(value: object) -> object:

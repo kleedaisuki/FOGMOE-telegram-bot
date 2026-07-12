@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import re
 import sys
 from collections.abc import Sequence
 from datetime import timedelta
@@ -14,13 +13,28 @@ from rich.console import Console
 from rich.live import Live
 
 from fogmoe_dashboard.api import DashboardClient
+from fogmoe_dashboard.application.queries import (
+    DashboardQuery,
+    DashboardView,
+    ErrorsQuery,
+    GenAiQuery,
+    LatencyQuery,
+    LogsQuery,
+    MetricsQuery,
+    OverviewQuery,
+    PipelineQuery,
+    ResourcesQuery,
+    SpansQuery,
+    TraceQuery,
+    TracesQuery,
+    execute_query,
+)
 from fogmoe_dashboard.config import DEFAULT_CONFIG_DIR
 from fogmoe_dashboard.domain.models import TimeWindow
+from fogmoe_dashboard.presentation.duration import parse_duration
 from fogmoe_dashboard.presentation.render import print_json, render
 
 
-_DURATION = re.compile(r"(?P<amount>[0-9]+(?:\.[0-9]+)?)(?P<unit>[smhd])\Z")
-"""@brief CLI 紧凑时长语法 / Compact CLI duration syntax."""
 _SEVERITY = {"trace": 1, "debug": 5, "info": 9, "warn": 13, "error": 17, "fatal": 21}
 """@brief CLI 严重度到 OTel number 映射 / CLI severity-to-OTel-number mapping."""
 
@@ -124,11 +138,13 @@ async def _run(args: argparse.Namespace) -> None:
             await _watch(client, console, args, duration)
             return
         window = TimeWindow.last(duration)
-        value = await _query(client, args, window)
+        query = _query(args, window)
+        value = await execute_query(client, query)
+        view = DashboardView(args.view)
         if args.format == "json":
-            print_json(console, args.view, value)
+            print_json(console, view, value)
         else:
-            console.print(render(args.view, value))
+            console.print(render(view, value))
 
 
 def _client(args: argparse.Namespace) -> DashboardClient:
@@ -146,49 +162,44 @@ def _client(args: argparse.Namespace) -> DashboardClient:
     )
 
 
-async def _query(
-    client: DashboardClient,
+def _query(
     args: argparse.Namespace,
     window: TimeWindow,
-) -> object:
+) -> DashboardQuery:
     """@brief 分派一个封闭视图集合 / Dispatch one closed set of views."""
 
     match args.view:
         case "overview":
-            return await client.overview(window)
+            return OverviewQuery(window)
         case "pipeline":
-            return await client.pipeline()
+            return PipelineQuery()
         case "spans":
-            return await client.spans(window, name=args.name, limit=args.limit)
+            return SpansQuery(window, name=args.name, limit=args.limit)
         case "errors":
-            return await client.errors(window, limit=args.limit)
+            return ErrorsQuery(window, limit=args.limit)
         case "logs":
-            return await client.logs(
+            return LogsQuery(
                 window,
                 minimum_severity=_SEVERITY[args.severity],
                 logger_name=args.logger,
                 limit=args.limit,
             )
         case "traces":
-            return await client.traces(
+            return TracesQuery(
                 window,
                 errors_only=args.errors_only,
                 limit=args.limit,
             )
         case "trace":
-            return await client.trace(args.trace_id)
+            return TraceQuery(args.trace_id)
         case "metrics":
-            return await client.metrics(window, name=args.name, limit=args.limit)
+            return MetricsQuery(window, name=args.name, limit=args.limit)
         case "ai":
-            return await client.gen_ai(window, limit=args.limit)
+            return GenAiQuery(window, limit=args.limit)
         case "latency":
-            summary, slow_turns = await asyncio.gather(
-                client.latency(window),
-                client.slow_turns(window, limit=args.limit),
-            )
-            return {"summary": summary, "slow_turns": slow_turns}
+            return LatencyQuery(window, slow_turn_limit=args.limit)
         case "resources":
-            return await client.resources(window, limit=args.limit)
+            return ResourcesQuery(window, limit=args.limit)
         case _:
             raise ValueError(f"Unknown Dashboard view: {args.view}")
 
@@ -209,39 +220,21 @@ async def _watch(
     if args.format == "json":
         while args.iterations == 0 or iterations < args.iterations:
             value = await client.overview(TimeWindow.last(duration))
-            print_json(console, "overview", value)
+            print_json(console, DashboardView.OVERVIEW, value)
             iterations += 1
             if args.iterations == 0 or iterations < args.iterations:
                 await asyncio.sleep(args.interval)
         return
     initial = await client.overview(TimeWindow.last(duration))
     with Live(
-        render("overview", initial), console=console, refresh_per_second=4
+        render(DashboardView.OVERVIEW, initial), console=console, refresh_per_second=4
     ) as live:
         iterations = 1
         while args.iterations == 0 or iterations < args.iterations:
             await asyncio.sleep(args.interval)
             value = await client.overview(TimeWindow.last(duration))
-            live.update(render("overview", value), refresh=True)
+            live.update(render(DashboardView.OVERVIEW, value), refresh=True)
             iterations += 1
-
-
-def parse_duration(value: str) -> timedelta:
-    """@brief 解析紧凑正时长 / Parse a compact positive duration.
-
-    @param value 例如 15m、1h、7d / Value such as 15m, 1h, or 7d.
-    @return timedelta / timedelta.
-    """
-
-    match = _DURATION.fullmatch(value.strip().lower())
-    if match is None:
-        raise ValueError("window must look like 15m, 1h, or 7d")
-    amount = float(match.group("amount"))
-    factors = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
-    duration = timedelta(seconds=amount * factors[match.group("unit")])
-    if duration <= timedelta():
-        raise ValueError("window must be positive")
-    return duration
 
 
 def _add_limit(parser: argparse.ArgumentParser, default: int) -> None:
@@ -250,4 +243,4 @@ def _add_limit(parser: argparse.ArgumentParser, default: int) -> None:
     parser.add_argument("--limit", type=int, default=default)
 
 
-__all__ = ["build_parser", "main", "parse_duration"]
+__all__ = ["build_parser", "main"]
