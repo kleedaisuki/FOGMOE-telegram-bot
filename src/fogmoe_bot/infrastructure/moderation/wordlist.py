@@ -6,11 +6,10 @@ import logging
 import re
 from pathlib import Path
 
-from fogmoe_bot.domain.moderation import ModerationRule, RuleKind, RuleScope
+from fogmoe_bot.domain.moderation.models import ModerationRule, RuleKind, RuleScope
 
 
 logger = logging.getLogger(__name__)
-"""@brief 模块日志器 / Module logger."""
 
 
 class FileModerationRuleProvider:

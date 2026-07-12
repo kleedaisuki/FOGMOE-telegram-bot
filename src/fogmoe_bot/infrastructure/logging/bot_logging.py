@@ -7,6 +7,7 @@ import queue
 from datetime import datetime
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
+from typing import cast
 
 from fogmoe_bot.infrastructure import config
 
@@ -47,6 +48,16 @@ class DroppingQueueHandler(QueueHandler):
             self.dropped_records += 1
 
 
+class DrainingQueueListener(QueueListener):
+    """Queue listener whose shutdown sentinel cannot be dropped on a full queue."""
+
+    def enqueue_sentinel(self) -> None:
+        """Wait for consumer capacity when scheduling the terminal sentinel."""
+
+        log_queue = cast(queue.Queue[object], self.queue)
+        log_queue.put(getattr(self, "_sentinel", None))
+
+
 def _resolve_log_level(value: str, *, fallback: int = logging.INFO) -> int:
     """@brief 解析日志级别 / Resolve a logging level.
 
@@ -70,8 +81,11 @@ def current_log_file_path() -> Path:
     """@brief 获取当前日志文件路径 / Get the current log file path.
 
     @return 已配置的当前日志文件路径 / Configured current log file path.
+    @raise RuntimeError 日志管道尚未配置 / Raised before the logging pipeline is configured.
     """
-    return _CURRENT_LOG_FILE_PATH or config.LOG_FILE_PATH
+    if _CURRENT_LOG_FILE_PATH is None:
+        raise RuntimeError("Logging has not been configured")
+    return _CURRENT_LOG_FILE_PATH
 
 
 def prepare_litellm_logging() -> None:
@@ -134,11 +148,14 @@ def configure_logging() -> Path:
     root_logger.setLevel(log_level)
     root_logger.addHandler(queue_handler)
 
-    listener = QueueListener(log_queue, file_handler, respect_handler_level=True)
+    listener = DrainingQueueListener(
+        log_queue,
+        file_handler,
+        respect_handler_level=True,
+    )
     listener.start()
 
     _CURRENT_LOG_FILE_PATH = log_file_path
-    config.LOG_FILE_PATH = log_file_path
     _QUEUE_HANDLER = queue_handler
     _LOG_LISTENER = listener
     if not _ATEXIT_REGISTERED:

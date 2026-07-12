@@ -1,6 +1,8 @@
-NO_RESPONSE_SENTINELS = {
-    "[no_response]",
-}
+NO_RESPONSE_SENTINELS = frozenset(
+    {
+        "[no_response]",
+    }
+)
 
 
 def normalize_ai_reply_text(value: object) -> str:

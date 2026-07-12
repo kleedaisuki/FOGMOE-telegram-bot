@@ -3,7 +3,7 @@
 from typing import Iterable
 
 
-def xml_escape(value: str) -> str:
+def xml_escape(value: object | None) -> str:
     if value is None:
         return ""
     return (
@@ -26,9 +26,7 @@ def join_prompt_sections(*sections: object) -> str:
     """
 
     return "\n\n".join(
-        text
-        for section in sections
-        if (text := str(section or "").strip())
+        text for section in sections if (text := str(section or "").strip())
     )
 
 
@@ -44,12 +42,10 @@ _METADATA_ATTR_ORDER = (
 )
 
 
-def format_metadata_attrs(attrs: Iterable[tuple[str, str]]) -> str:
+def format_metadata_attrs(attrs: Iterable[tuple[str, str | None]]) -> str:
     order = {key: idx for idx, key in enumerate(_METADATA_ATTR_ORDER)}
     ordered = sorted(attrs, key=lambda item: (order.get(item[0], len(order)), item[0]))
-    return " ".join(
-        f'{key}="{xml_escape(value)}"' for key, value in ordered if value
-    )
+    return " ".join(f'{key}="{xml_escape(value)}"' for key, value in ordered if value)
 
 
 def format_user_state_prompt(
@@ -84,6 +80,8 @@ def format_user_state_prompt(
         if impression:
             lines.append(f"  <impression>{xml_escape(impression)}</impression>")
         if personal_info:
-            lines.append(f"  <personal_info>{xml_escape(personal_info)}</personal_info>")
+            lines.append(
+                f"  <personal_info>{xml_escape(personal_info)}</personal_info>"
+            )
         lines.append("</user_profile>")
     return "\n".join(lines)

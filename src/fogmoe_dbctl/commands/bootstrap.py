@@ -183,11 +183,14 @@ def build_database_grant_sql(
     database_ident = quote_identifier(database)
     bot_ident = quote_identifier(bot_role)
     automation_ident = quote_identifier(automation_role)
-    return f"""
+    return (
+        f"""
 GRANT CONNECT ON DATABASE {database_ident} TO {bot_ident}, {automation_ident};
 GRANT CREATE, TEMPORARY ON DATABASE {database_ident} TO {automation_ident};
 GRANT TEMPORARY ON DATABASE {database_ident} TO {bot_ident};
-""".strip() + "\n"
+""".strip()
+        + "\n"
+    )
 
 
 def psql_command(args: argparse.Namespace, database: str) -> list[str]:
@@ -260,22 +263,28 @@ port={port}
 dbname={database}
 user={automation.role}
 """
-    pgpass_text = "\n".join(
-        ":".join(
-            escape_pgpass_field(value)
-            for value in (host, str(port), database, secret.role, secret.password)
-        )
-        for secret in (bot, automation)
-    ) + "\n"
-
-    if dry_run:
-        pgpass_preview = "\n".join(
+    pgpass_text = (
+        "\n".join(
             ":".join(
                 escape_pgpass_field(value)
-                for value in (host, str(port), database, secret.role, "***")
+                for value in (host, str(port), database, secret.role, secret.password)
             )
             for secret in (bot, automation)
-        ) + "\n"
+        )
+        + "\n"
+    )
+
+    if dry_run:
+        pgpass_preview = (
+            "\n".join(
+                ":".join(
+                    escape_pgpass_field(value)
+                    for value in (host, str(port), database, secret.role, "***")
+                )
+                for secret in (bot, automation)
+            )
+            + "\n"
+        )
         print(f"\n-- would write {service_path}")
         print(service_text)
         print(f"-- would write {pgpass_path}")

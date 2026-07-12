@@ -1,25 +1,17 @@
 import asyncio
-import contextvars
-import threading
-import weakref
 from contextlib import asynccontextmanager
 from collections.abc import Iterable, Mapping
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator
 
 from sqlalchemy import text
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from fogmoe_bot.infrastructure import config
 
-_ENGINES: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, AsyncEngine] = (
-    weakref.WeakKeyDictionary()
-)
-_ENGINE_LOCK = threading.Lock()
-_DEFAULT_MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
-_BOUND_LOOP: contextvars.ContextVar[asyncio.AbstractEventLoop | None] = (
-    contextvars.ContextVar("database_bound_loop", default=None)
-)
+_ENGINE: AsyncEngine | None = None
+_ENGINE_OWNER_LOOP: asyncio.AbstractEventLoop | None = None
 
 
 def _quote_identifier(identifier: str) -> str:
@@ -39,9 +31,7 @@ def _search_path() -> str:
     """
 
     schemas = [
-        item.strip()
-        for item in config.DB_SEARCH_PATH.split(",")
-        if item.strip()
+        item.strip() for item in config.DB_SEARCH_PATH.split(",") if item.strip()
     ]
     return ", ".join(_quote_identifier(schema) for schema in schemas)
 
@@ -61,68 +51,63 @@ def _connect_args() -> dict[str, Any]:
 
 
 def get_engine() -> AsyncEngine:
-    """@brief 返回当前 event loop 专属引擎 / Return the engine owned by the current event loop.
+    """@brief 返回主 event loop 所有的唯一引擎 / Return the sole engine owned by the main event loop.
 
-    @return 当前 loop 的 SQLAlchemy 异步引擎 / Async SQLAlchemy engine for the current loop.
-    @note SQLAlchemy pooled async engine 不能跨 event loop 共享；调度守护线程必须使用自己的连接池 /
-    A pooled SQLAlchemy async engine cannot be shared across event loops, so the scheduling daemon owns a separate pool.
+    @return 进程唯一 SQLAlchemy 异步引擎 / Process-wide SQLAlchemy async engine.
+    @raise RuntimeError 引擎被另一个 event loop 使用 / The engine belongs to another event loop.
+    @note 顶层组合根在所有数据库 worker 停止后调用 ``dispose_current_engine``；不再为已删除的
+    secondary loops 保留 engine registry。/ The composition root calls ``dispose_current_engine``
+    after every database worker stops; no engine registry remains for removed secondary loops.
     """
+
+    global _ENGINE, _ENGINE_OWNER_LOOP
 
     loop = asyncio.get_running_loop()
-    with _ENGINE_LOCK:
-        engine = _ENGINES.get(loop)
-        if engine is None:
-            engine = create_async_engine(
-                config.SQLALCHEMY_DATABASE_URI,
-                pool_pre_ping=True,
-                pool_recycle=config.DB_POOL_RECYCLE,
-                pool_size=config.DB_POOL_SIZE,
-                max_overflow=config.DB_MAX_OVERFLOW,
-                connect_args=_connect_args(),
-            )
-            _ENGINES[loop] = engine
-        return engine
+    if _ENGINE is not None:
+        if _ENGINE_OWNER_LOOP is not loop:
+            raise RuntimeError("Database engine belongs to another event loop")
+        return _ENGINE
 
-
-def set_main_loop(loop: asyncio.AbstractEventLoop) -> None:
-    """@brief 设置默认应用 event loop / Set the default application event loop.
-
-    @param loop Telegram 应用 event loop / Telegram application event loop.
-    @return None / None.
-    """
-
-    global _DEFAULT_MAIN_LOOP
-    _DEFAULT_MAIN_LOOP = loop
-    bind_loop(loop)
-
-
-def bind_loop(loop: asyncio.AbstractEventLoop) -> None:
-    """@brief 将当前执行上下文绑定到一个 event loop / Bind the current execution context to an event loop.
-
-    @param loop 当前上下文应回投的 event loop / Event loop used by the current execution context.
-    @return None / None.
-    @note 用于从线程池同步代码回投数据库协程；调用方需传播 contextvars /
-    Used to route database coroutines from thread-pool code; callers must propagate contextvars.
-    """
-
-    _BOUND_LOOP.set(loop)
+    _ENGINE = create_async_engine(
+        config.SQLALCHEMY_DATABASE_URI,
+        pool_pre_ping=True,
+        pool_recycle=config.DB_POOL_RECYCLE,
+        pool_size=config.DB_POOL_SIZE,
+        max_overflow=config.DB_MAX_OVERFLOW,
+        connect_args=_connect_args(),
+    )
+    _ENGINE_OWNER_LOOP = loop
+    return _ENGINE
 
 
 async def dispose_current_engine() -> None:
-    """@brief 释放当前 event loop 的数据库连接池 / Dispose the current event loop's database pool.
+    """@brief 释放主 event loop 的数据库连接池 / Dispose the main event loop's database pool.
 
     @return None / None.
+    @raise RuntimeError 从非 owner event loop 调用 / Called from a non-owner event loop.
     """
 
+    global _ENGINE, _ENGINE_OWNER_LOOP
+
+    engine = _ENGINE
+    owner_loop = _ENGINE_OWNER_LOOP
+    if engine is None:
+        return
     loop = asyncio.get_running_loop()
-    with _ENGINE_LOCK:
-        engine = _ENGINES.pop(loop, None)
-    if engine is not None:
-        await engine.dispose()
+    if owner_loop is not loop:
+        raise RuntimeError("Database engine must be disposed by its owner event loop")
+    _ENGINE = None
+    _ENGINE_OWNER_LOOP = None
+    await engine.dispose()
 
 
 @asynccontextmanager
 async def connect() -> AsyncIterator[AsyncConnection]:
+    """@brief 打开当前事件循环的数据库连接 / Open a connection for the current event loop.
+
+    @return 异步连接上下文 / Async connection context.
+    """
+
     engine = get_engine()
     async with engine.connect() as connection:
         yield connection
@@ -130,37 +115,31 @@ async def connect() -> AsyncIterator[AsyncConnection]:
 
 @asynccontextmanager
 async def transaction() -> AsyncIterator[AsyncConnection]:
+    """@brief 打开自动提交或回滚的事务 / Open an auto-committing or rolling-back transaction.
+
+    @return 异步事务连接上下文 / Async transactional connection context.
+    """
+
     engine = get_engine()
     async with engine.begin() as connection:
         yield connection
 
 
-def run_sync(coro):
-    """@brief 从同步代码执行数据库协程 / Run a database coroutine from synchronous code.
-
-    @param coro 要执行的协程 / Coroutine to execute.
-    @return 协程结果 / Coroutine result.
-    @note 优先使用 context-bound loop，未绑定时回退 Telegram 主 loop /
-    Prefers the context-bound loop and falls back to the Telegram main loop.
-    """
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        loop = _BOUND_LOOP.get() or _DEFAULT_MAIN_LOOP
-        if loop and loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(coro, loop)
-            return future.result()
-        return asyncio.run(coro)
-    raise RuntimeError("run_sync cannot be used inside a running event loop")
-
-
 async def exec_sql(
     sql: str,
-    params: Optional[Iterable[Any] | Mapping[str, Any]] = None,
+    params: Iterable[Any] | Mapping[str, Any] | None = None,
     *,
-    connection: Optional[AsyncConnection] = None,
-):
+    connection: AsyncConnection | None = None,
+) -> CursorResult[Any]:
+    """@brief 执行参数化 SQL / Execute parameterized SQL.
+
+    @param sql SQL 文本 / SQL text.
+    @param params 位置参数或命名参数 / Positional or named parameters.
+    @param connection 可选的现有连接 / Optional existing connection.
+    @return SQLAlchemy 游标结果 / SQLAlchemy cursor result.
+    @note 未提供连接时仅适合读取；写入请经 transaction 或 connection.execute / Without a connection this is intended for reads; writes should use a transaction or connection.execute.
+    """
+
     statement, bind_params = _prepare_statement(sql, params)
     if connection is None:
         async with connect() as connection:
@@ -170,7 +149,7 @@ async def exec_sql(
 
 def _prepare_statement(
     sql: str,
-    params: Optional[Iterable[Any] | Mapping[str, Any]],
+    params: Iterable[Any] | Mapping[str, Any] | None,
 ) -> tuple[TextClause, Mapping[str, Any]]:
     """@brief 准备 SQLAlchemy 文本语句 / Prepare a SQLAlchemy text statement.
 

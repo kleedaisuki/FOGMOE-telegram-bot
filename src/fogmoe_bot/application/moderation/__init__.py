@@ -1,1 +1,1 @@
-"""内容治理应用逻辑 / Moderation application logic."""
+"""Content-moderation application use cases."""

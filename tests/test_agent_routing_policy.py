@@ -1,5 +1,5 @@
-from fogmoe_bot.application.assistant.inference.provider_profiles import build_provider_profiles
-from fogmoe_bot.domain.agent_routing import model_supports_vision
+from fogmoe_bot.infrastructure.assistant.routing_config import build_provider_profiles
+from fogmoe_bot.domain.assistant.routing.policy import model_supports_vision
 from fogmoe_bot.infrastructure import config
 
 

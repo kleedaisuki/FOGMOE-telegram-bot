@@ -33,8 +33,14 @@ def configure_parser(subparsers: Any) -> None:
             "psql service. Arbitrary SQL is intentionally not accepted."
         ),
     )
-    parser.add_argument("--table", required=True, help="Schema-qualified table, e.g. conversation.chat_records.")
-    parser.add_argument("--output", required=True, type=Path, help="Destination CSV path.")
+    parser.add_argument(
+        "--table",
+        required=True,
+        help="Schema-qualified table, e.g. conversation.chat_records.",
+    )
+    parser.add_argument(
+        "--output", required=True, type=Path, help="Destination CSV path."
+    )
     parser.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG_DIR)
     parser.add_argument("--service", default="fogmoe_automation")
     parser.add_argument(
@@ -55,7 +61,9 @@ def parse_table_name(raw_table: str) -> tuple[str, str]:
     """
 
     parts = raw_table.split(".")
-    if len(parts) != 2 or not all(_IDENTIFIER_PATTERN.fullmatch(part) for part in parts):
+    if len(parts) != 2 or not all(
+        _IDENTIFIER_PATTERN.fullmatch(part) for part in parts
+    ):
         raise ValueError(
             "table must be a schema-qualified PostgreSQL identifier, "
             "for example conversation.chat_records"
@@ -113,7 +121,9 @@ def export_table(
     """
 
     if output_path.exists() and not force:
-        raise FileExistsError(f"output already exists: {output_path}; use --force to replace it")
+        raise FileExistsError(
+            f"output already exists: {output_path}; use --force to replace it"
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sql = build_copy_sql(schema, table)
     command = [

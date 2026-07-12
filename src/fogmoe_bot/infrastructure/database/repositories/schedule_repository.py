@@ -1,6 +1,9 @@
 import uuid
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, cast
+
+from sqlalchemy.engine import Row
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.domain.scheduling import (
     PROMPT_JOB_KIND,
@@ -8,17 +11,20 @@ from fogmoe_bot.domain.scheduling import (
     Recurrence,
     ScheduleClaim,
     ScheduledJob,
-    ScheduleCreationBlockReason,
-    ScheduleCreationResult,
     ScheduleSnapshot,
     ScheduleStatus,
+    StaleScheduleClaimError,
     ensure_utc,
     to_storage_datetime,
 )
 from fogmoe_bot.infrastructure.database import connection as db_connection
 
 
-async def count_pending_for_user(user_id: int, *, connection=None) -> int:
+async def count_pending_for_user(
+    user_id: int,
+    *,
+    connection: AsyncConnection | None = None,
+) -> int:
     """@brief 统计用户待执行任务数 / Count a user's pending schedules.
 
     @param user_id Telegram 用户 ID / Telegram user ID.
@@ -34,7 +40,11 @@ async def count_pending_for_user(user_id: int, *, connection=None) -> int:
     return int(row[0] or 0) if row else 0
 
 
-async def count_total_for_user(user_id: int, *, connection=None) -> int:
+async def count_total_for_user(
+    user_id: int,
+    *,
+    connection: AsyncConnection | None = None,
+) -> int:
     """@brief 统计用户任务总数 / Count all schedules for a user.
 
     @param user_id Telegram 用户 ID / Telegram user ID.
@@ -50,7 +60,11 @@ async def count_total_for_user(user_id: int, *, connection=None) -> int:
     return int(row[0] or 0) if row else 0
 
 
-async def fetch_oldest_non_pending_id(user_id: int, *, connection=None) -> int | None:
+async def fetch_oldest_non_pending_id(
+    user_id: int,
+    *,
+    connection: AsyncConnection | None = None,
+) -> int | None:
     """@brief 读取最旧的非待执行任务 ID / Fetch the oldest non-pending schedule ID.
 
     @param user_id Telegram 用户 ID / Telegram user ID.
@@ -76,7 +90,7 @@ async def replace_schedule(
     trigger_reason: str,
     context_text: str | None,
     instruction_text: str,
-    connection=None,
+    connection: AsyncConnection | None = None,
 ) -> None:
     """@brief 替换已有任务内容 / Replace an existing schedule.
 
@@ -121,7 +135,7 @@ async def insert_schedule(
     trigger_reason: str,
     context_text: str | None,
     instruction_text: str,
-    connection=None,
+    connection: AsyncConnection | None = None,
 ) -> int | None:
     """@brief 插入新任务 / Insert a new schedule.
 
@@ -153,101 +167,6 @@ async def insert_schedule(
         connection=connection,
     )
     return int(row[0]) if row and row[0] is not None else None
-
-
-async def fetch_created_at(schedule_id: int, *, connection=None) -> datetime | None:
-    """@brief 读取任务创建时间 / Fetch schedule creation timestamp.
-
-    @param schedule_id 定时任务 ID / Schedule ID.
-    @param connection 可选数据库连接 / Optional database connection.
-    @return 创建时间；不存在时返回 None / Creation timestamp, or None when absent.
-    """
-
-    row = await db_connection.fetch_one(
-        "SELECT created_at FROM ai_schedules WHERE id = %s",
-        (schedule_id,),
-        connection=connection,
-    )
-    return ensure_utc(row[0]) if row else None
-
-
-async def create_or_replace_for_user(
-    *,
-    user_id: int,
-    run_at: datetime,
-    trigger_reason: str,
-    context_text: str | None,
-    instruction_text: str,
-    recurrence_unit: str,
-    recurrence_interval: int,
-    max_pending: int,
-    max_total: int,
-) -> ScheduleCreationResult:
-    """@brief 为用户创建或替换定时任务 / Create or replace a schedule for a user.
-
-    @param user_id Telegram 用户 ID / Telegram user ID.
-    @param run_at 执行时间 / Run timestamp.
-    @param trigger_reason 触发原因 / Trigger reason.
-    @param context_text 上下文文本 / Context text.
-    @param instruction_text 指令文本 / Instruction text.
-    @param recurrence_unit 重复单位 / Recurrence unit.
-    @param recurrence_interval 重复间隔 / Recurrence interval.
-    @param max_pending 最大待执行任务数 / Maximum pending schedules.
-    @param max_total 最大任务总数 / Maximum total schedules.
-    @return 创建结果 / Creation result.
-    """
-
-    replaced = False
-    async with db_connection.transaction() as connection:
-        pending_count = await count_pending_for_user(user_id, connection=connection)
-        if pending_count >= max_pending:
-            return ScheduleCreationResult(
-                None,
-                None,
-                False,
-                ScheduleCreationBlockReason.PENDING_LIMIT,
-            )
-
-        total_count = await count_total_for_user(user_id, connection=connection)
-        schedule_id: int | None = None
-        if total_count >= max_total:
-            schedule_id = await fetch_oldest_non_pending_id(user_id, connection=connection)
-            if schedule_id is None:
-                return ScheduleCreationResult(
-                    None,
-                    None,
-                    False,
-                    ScheduleCreationBlockReason.TOTAL_LIMIT,
-                )
-            await replace_schedule(
-                schedule_id,
-                run_at=run_at,
-                recurrence_unit=recurrence_unit,
-                recurrence_interval=recurrence_interval,
-                trigger_reason=trigger_reason,
-                context_text=context_text,
-                instruction_text=instruction_text,
-                connection=connection,
-            )
-            replaced = True
-
-        if schedule_id is None:
-            schedule_id = await insert_schedule(
-                user_id=user_id,
-                run_at=run_at,
-                recurrence_unit=recurrence_unit,
-                recurrence_interval=recurrence_interval,
-                trigger_reason=trigger_reason,
-                context_text=context_text,
-                instruction_text=instruction_text,
-                connection=connection,
-            )
-
-        created_at = None
-        if schedule_id is not None:
-            created_at = await fetch_created_at(schedule_id, connection=connection)
-
-    return ScheduleCreationResult(schedule_id, created_at, replaced, None)
 
 
 async def list_for_user(
@@ -308,22 +227,6 @@ async def list_for_user(
     return tuple(snapshots)
 
 
-async def cancel_pending_for_user(schedule_id: int, user_id: int) -> bool:
-    """@brief 取消用户待执行任务 / Cancel a user's pending schedule.
-
-    @param schedule_id 定时任务 ID / Schedule ID.
-    @param user_id Telegram 用户 ID / Telegram user ID.
-    @return 取消成功返回 True / True when a row was cancelled.
-    """
-
-    rowcount = await db_connection.execute(
-        "UPDATE ai_schedules SET status = 'cancelled' "
-        "WHERE id = %s AND user_id = %s AND status = 'pending'",
-        (schedule_id, user_id),
-    )
-    return rowcount > 0
-
-
 class ScheduleRepository:
     """@brief 基于 ai_schedules 表的类型化仓储 / Typed repository backed by ai_schedules."""
 
@@ -378,27 +281,40 @@ class ScheduleRepository:
             for row, token in zip(rows, tokens, strict=True)
         )
 
-    async def mark_executed(self, claim: ScheduleClaim[object]) -> None:
-        """@brief 标记一次性任务完成 / Mark a one-shot job executed."""
+    async def mark_executed(self, claim: ScheduleClaim[PromptJobPayload]) -> None:
+        """@brief 以 claim token 标记一次性任务完成 / Mark a one-shot job executed with its claim token.
 
-        await db_connection.execute(
+        @param claim 当前领取凭证 / Current claim.
+        @return None / None.
+        @raise StaleScheduleClaimError claim 已被回收或替换 / The claim was recovered or replaced.
+        """
+
+        changed = await db_connection.execute(
             "UPDATE ai_schedules SET status = 'executed', executed_at = CURRENT_TIMESTAMP, "
             "updated_at = CURRENT_TIMESTAMP, error = NULL, claim_token = NULL, "
             "lease_expires_at = NULL WHERE id = %s AND status = 'executing' "
             "AND claim_token = CAST(%s AS uuid)",
             (claim.job.schedule_id, claim.token),
         )
+        _require_current_claim(changed, claim)
 
     async def reschedule(
         self,
-        claim: ScheduleClaim[object],
+        claim: ScheduleClaim[PromptJobPayload],
         *,
         last_run_at: datetime,
         next_run_at: datetime,
     ) -> None:
-        """@brief 推进周期任务 / Advance a recurring job."""
+        """@brief 以 claim token 推进周期任务 / Advance a recurring job with its claim token.
 
-        await db_connection.execute(
+        @param claim 当前领取凭证 / Current claim.
+        @param last_run_at 本次计划时刻 / Current scheduled occurrence.
+        @param next_run_at 下一计划时刻 / Next scheduled occurrence.
+        @return None / None.
+        @raise StaleScheduleClaimError claim 已被回收或替换 / The claim was recovered or replaced.
+        """
+
+        changed = await db_connection.execute(
             "UPDATE ai_schedules SET status = 'pending', run_at = %s, last_run_at = %s, "
             "executed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, error = NULL, "
             "claim_token = NULL, lease_expires_at = NULL "
@@ -410,22 +326,44 @@ class ScheduleRepository:
                 claim.token,
             ),
         )
+        _require_current_claim(changed, claim)
 
-    async def mark_failed(self, claim: ScheduleClaim[object], error: str) -> None:
-        """@brief 标记执行失败 / Mark execution failed."""
+    async def mark_failed(
+        self,
+        claim: ScheduleClaim[PromptJobPayload],
+        error: str,
+    ) -> None:
+        """@brief 以 claim token 标记执行失败 / Mark execution failed with its claim token.
 
-        await db_connection.execute(
+        @param claim 当前领取凭证 / Current claim.
+        @param error 有界错误描述 / Bounded error description.
+        @return None / None.
+        @raise StaleScheduleClaimError claim 已被回收或替换 / The claim was recovered or replaced.
+        """
+
+        changed = await db_connection.execute(
             "UPDATE ai_schedules SET status = 'failed', error = %s, "
             "updated_at = CURRENT_TIMESTAMP, claim_token = NULL, lease_expires_at = NULL "
             "WHERE id = %s AND status = 'executing' AND claim_token = CAST(%s AS uuid)",
             (error[:500], claim.job.schedule_id, claim.token),
         )
+        _require_current_claim(changed, claim)
 
     @staticmethod
-    def _map_row(row: tuple) -> ScheduledJob[PromptJobPayload]:
+    def _map_row(row: Row[Any]) -> ScheduledJob[PromptJobPayload]:
         """@brief 将仓储私有行转换为领域任务 / Map a repository-private row to a domain job."""
 
-        schedule_id, owner_id, run_at, created_at, reason, context, prompt, unit, interval = row
+        (
+            schedule_id,
+            owner_id,
+            run_at,
+            created_at,
+            reason,
+            context,
+            prompt,
+            unit,
+            interval,
+        ) = row
         return ScheduleRepository._map_values(
             schedule_id=schedule_id,
             owner_id=owner_id,
@@ -454,8 +392,8 @@ class ScheduleRepository:
         """@brief 将字段集合转换为领域任务 / Map stored fields to a domain job."""
 
         return ScheduledJob(
-            schedule_id=int(schedule_id),
-            owner_id=int(owner_id),
+            schedule_id=int(cast(Any, schedule_id)),
+            owner_id=int(cast(Any, owner_id)),
             kind=PROMPT_JOB_KIND,
             run_at=ensure_utc(run_at),
             created_at=ensure_utc(created_at) if created_at is not None else None,
@@ -465,6 +403,24 @@ class ScheduleRepository:
                 context_text=_decode_optional_text(context),
                 instruction=_decode_text(prompt),
             ),
+        )
+
+
+def _require_current_claim(
+    changed: int,
+    claim: ScheduleClaim[PromptJobPayload],
+) -> None:
+    """@brief 要求终结操作命中唯一当前 claim / Require finalization to match the one current claim.
+
+    @param changed SQL 影响行数 / SQL affected-row count.
+    @param claim 尝试终结的领取凭证 / Claim being finalized.
+    @return None / None.
+    @raise StaleScheduleClaimError 未命中唯一当前 claim / No unique current claim matched.
+    """
+
+    if changed != 1:
+        raise StaleScheduleClaimError(
+            f"schedule claim is stale: schedule_id={claim.job.schedule_id}"
         )
 
 

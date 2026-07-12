@@ -2,8 +2,8 @@
 
 from fogmoe_dbctl.migrations.runner import run_migration_sql
 
-revision = '0009_add_recharge_blocked_until'
-down_revision = '0008_merge_heads'
+revision = "0009_add_recharge_blocked_until"
+down_revision = "0008_merge_heads"
 branch_labels = None
 depends_on = None
 

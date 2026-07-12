@@ -32,7 +32,9 @@ def _dialect_candidates(dialect_name: str) -> list[str]:
     """
 
     normalized = (dialect_name or "").lower()
-    candidates = ["postgresql" if normalized in {"postgres", "postgresql"} else normalized]
+    candidates = [
+        "postgresql" if normalized in {"postgres", "postgresql"} else normalized
+    ]
     candidates.append("generic")
     return [candidate for candidate in candidates if candidate]
 
@@ -69,7 +71,9 @@ def _sql_file_for_revision(revision_file: str | Path) -> Path:
         str(sql_root / dialect / f"{revision_name}.sql")
         for dialect in _dialect_candidates(dialect_name)
     )
-    raise MigrationSqlError(f"missing SQL migration for {revision_name}; searched: {searched}")
+    raise MigrationSqlError(
+        f"missing SQL migration for {revision_name}; searched: {searched}"
+    )
 
 
 def _render_template(sql: str) -> str:
@@ -114,7 +118,9 @@ def _sections(sql_text: str, path: Path) -> dict[str, str]:
 
     parsed = {name: "\n".join(lines).strip() for name, lines in sections.items()}
     if not parsed["up"] and not parsed["down"]:
-        raise MigrationSqlError(f"{path} must contain -- migrate:up or -- migrate:down sections")
+        raise MigrationSqlError(
+            f"{path} must contain -- migrate:up or -- migrate:down sections"
+        )
     return parsed
 
 

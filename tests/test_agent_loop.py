@@ -1,289 +1,190 @@
-from copy import deepcopy
+"""@brief 可恢复 Agent loop 测试 / Tests for the resumable Agent loop."""
 
-from fogmoe_bot.application.assistant import agent_loop
+import asyncio
+
+from fogmoe_bot.application.assistant.agent_loop import AgentExecutionConfig, AgentLoop
+from fogmoe_bot.application.assistant.completion import (
+    AgentStepCheckpoint,
+    AssistantCompletion,
+    CompletionToolCall,
+)
+from fogmoe_bot.application.assistant.tool_runtime import (
+    AgentRuntime,
+    PersistedToolResult,
+    ToolEffectRequest,
+    ToolExecutionContext,
+)
+from fogmoe_bot.application.assistant.tools.catalog import DEFAULT_TOOL_CATALOG
 from fogmoe_bot.domain.context import ContextState, ConversationScope, UserState
+from fogmoe_bot.domain.conversation.identity import (
+    ConversationId,
+    DeliveryStreamId,
+    TurnId,
+)
 
 
-class _Message:
-    def __init__(self, content="", tool_calls=None):
-        self.content = content
-        self.tool_calls = tool_calls
+class _Checkpoints:
+    """@brief 内存 checkpoint port / In-memory checkpoint port."""
+
+    def __init__(self, order: list[str]) -> None:
+        """@brief 保存共享顺序日志 / Store a shared order log."""
+
+        self.values: dict[tuple[TurnId, int], AgentStepCheckpoint] = {}
+        self.order = order
+
+    async def load_step(
+        self, turn_id: TurnId, step_no: int
+    ) -> AgentStepCheckpoint | None:
+        """@brief 读取 checkpoint / Load a checkpoint."""
+
+        return self.values.get((turn_id, step_no))
+
+    async def save_step(self, checkpoint: AgentStepCheckpoint) -> AgentStepCheckpoint:
+        """@brief 保存 checkpoint / Save a checkpoint."""
+
+        self.order.append(f"checkpoint:{checkpoint.step_no}")
+        return self.values.setdefault(
+            (checkpoint.turn_id, checkpoint.step_no), checkpoint
+        )
 
 
-class _Choice:
-    def __init__(self, message):
-        self.message = message
+class _Completion:
+    """@brief 队列 completion port / Queue-backed completion port."""
+
+    def __init__(self, values: list[AssistantCompletion], order: list[str]) -> None:
+        """@brief 保存 responses / Store responses."""
+
+        self.values = values
+        self.calls = 0
+        self.order = order
+
+    async def complete(self, **kwargs: object) -> AssistantCompletion:
+        """@brief 返回下一个 response / Return the next response."""
+
+        del kwargs
+        self.order.append(f"provider:{self.calls}")
+        self.calls += 1
+        if not self.values:
+            raise AssertionError("checkpoint replay called provider")
+        return self.values.pop(0)
 
 
-class _Response:
-    def __init__(self, message):
-        self.choices = [_Choice(message)]
+class _Receipts:
+    """@brief 幂等 receipt port / Idempotent receipt port."""
+
+    def __init__(self, order: list[str]) -> None:
+        """@brief 初始化 receipt map / Initialize receipt map."""
+
+        self.values: dict[tuple[str, str], object] = {}
+        self.mutation_count = 0
+        self.order = order
+
+    async def execute(self, request: ToolEffectRequest) -> PersistedToolResult:
+        """@brief 首次 mutation，随后 replay / Mutate once and replay thereafter."""
+
+        key = (request.invocation_id, request.effect_kind)
+        if key in self.values:
+            return PersistedToolResult(self.values[key], True)  # type: ignore[arg-type]
+        self.order.append(f"effect:{request.invocation_id}")
+        self.mutation_count += 1
+        result = {"status": "updated", "impression": request.arguments["impression"]}
+        self.values[key] = result
+        return PersistedToolResult(result, False)
 
 
-def _context(messages):
+def _context() -> ContextState:
+    """@brief 构造模型上下文 / Build model context."""
+
     return ContextState(
         scope=ConversationScope(user_id=42),
-        user_state=UserState(coins=10, plan="free", permission=0, impression="Not recorded"),
-        messages=messages,
-        tool_context={"user_id": 42, "is_group": False, "group_id": None, "message_id": None},
+        user_state=UserState(coins=10, plan="free", permission=0, impression="unknown"),
+        messages=[{"role": "user", "content": "remember me"}],
+        tool_context={},
     )
 
 
-def test_agent_execution_state_separates_context_from_configuration():
-    context = _context([{"role": "user", "content": "search example"}])
-    config = agent_loop.AgentExecutionConfig(
-        provider="test_provider",
-        model="test_model",
-        provider_name="Test",
-        skip_tools=frozenset({"generate_image"}),
-        completion_kwargs={"temperature": 0.2},
-    )
-    state = agent_loop.AgentExecutionState.from_context(context, config)
-    state.events.append({"type": "tool_result", "tool_name": "google_search", "result": {"count": 1}})
-    state.iteration = 2
+def _tool_context(turn_id: TurnId) -> ToolExecutionContext:
+    """@brief 构造 durable tool context / Build durable tool context."""
 
-    assert state.context is context
-    assert state.config is config
-    assert state.messages == [{"role": "user", "content": "search example"}]
-    assert state.events[0]["tool_name"] == "google_search"
-    assert state.iteration == 2
-
-
-def test_agent_loop_returns_context_updated_with_final_reply():
-    """@brief AgentLoop 返回含最终回复的可变 ContextState / AgentLoop returns ContextState with final reply."""
-
-    context = _context([{"role": "user", "content": "hello"}])
-    loop = agent_loop.AgentLoop(
-        runtime=agent_loop.DEFAULT_AGENT_RUNTIME,
-        completion_client=lambda *_args, **_kwargs: _Response(_Message("world")),
+    return ToolExecutionContext(
+        turn_id=turn_id,
+        conversation_id=ConversationId("assistant-user:42"),
+        delivery_stream_id=DeliveryStreamId("telegram:primary:chat:42:thread:0"),
+        user_id=42,
+        chat_id=42,
+        is_group=False,
+        group_id=None,
+        message_id=1,
     )
 
-    response = loop.run(
-        context,
-        agent_loop.AgentExecutionConfig(
-            provider="test_provider",
-            model="test_model",
-            provider_name="Test",
-        ),
-    )
 
-    assert response.context_state is context
-    assert context.messages[-1] == {"role": "assistant", "content": "world"}
+def test_checkpoint_precedes_effect_and_restart_replays_without_provider_or_mutation() -> (
+    None
+):
+    """@brief kill-9 replay 使用相同 plan/receipt / Kill-9 replay uses the same plan and receipt."""
 
+    async def scenario() -> None:
+        """@brief 执行首次与重启场景 / Execute initial and restarted scenarios."""
 
-def test_agent_loop_does_not_synthesize_tool_result_reply(monkeypatch):
-    responses = [
-        _Response(
-            _Message(
-                "",
-                [
+        order: list[str] = []
+        turn_id = TurnId.new()
+        checkpoints = _Checkpoints(order)
+        receipts = _Receipts(order)
+        first_completion = _Completion(
+            [
+                AssistantCompletion(
+                    "",
                     {
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {
-                            "name": "google_search",
-                            "arguments": '{"query": "example"}',
-                        },
-                    }
-                ],
-            )
-        ),
-        _Response(_Message("", None)),
-    ]
-
-    calls = []
-
-    def fake_create_chat_completion(*args, **kwargs):
-        calls.append(deepcopy(kwargs))
-        return responses.pop(0)
-
-    monkeypatch.setitem(
-        agent_loop.DEFAULT_AGENT_RUNTIME.handlers,
-        "google_search",
-        lambda **kwargs: {
-            "organic_results": [
-                {
-                    "title": "Example result",
-                    "link": "https://example.test",
-                    "snippet": "Example snippet",
-                }
-            ]
-        },
-    )
-
-    loop = agent_loop.AgentLoop(
-        runtime=agent_loop.DEFAULT_AGENT_RUNTIME,
-        completion_client=fake_create_chat_completion,
-    )
-    message, tool_logs = loop.run(
-        _context([{"role": "user", "content": "search example"}]),
-        agent_loop.AgentExecutionConfig(
-            provider="test_provider",
-            model="test_model",
-            provider_name="Test",
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "provider-call-a",
+                                "type": "function",
+                                "function": {
+                                    "name": "update_impression",
+                                    "arguments": '{"impression":"curious"}',
+                                },
+                            }
+                        ],
+                    },
+                    (
+                        CompletionToolCall(
+                            "provider-call-a",
+                            "update_impression",
+                            {"impression": "curious"},
+                        ),
+                    ),
+                ),
+                AssistantCompletion("done", {"role": "assistant", "content": "done"}),
+            ],
+            order,
         )
-    )
-
-    assert message == ""
-    assert any(
-        log.get("type") == "tool_result"
-        and log.get("tool_name") == "google_search"
-        for log in tool_logs
-    )
-    assert calls[0]["messages"] == [{"role": "user", "content": "search example"}]
-
-
-def test_agent_loop_generates_final_reply_after_tool_limit(monkeypatch):
-    responses = [
-        _Response(
-            _Message(
-                "",
-                [
-                    {
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {
-                            "name": "google_search",
-                            "arguments": '{"query": "example"}',
-                        },
-                    }
-                ],
-            )
-        ),
-        _Response(_Message("根据已有搜索结果，Example result 是相关结果。", None)),
-    ]
-    calls = []
-
-    def fake_create_chat_completion(*args, **kwargs):
-        calls.append(kwargs)
-        return responses.pop(0)
-
-    monkeypatch.setitem(
-        agent_loop.DEFAULT_AGENT_RUNTIME.handlers,
-        "google_search",
-        lambda **kwargs: {
-            "organic_results": [
-                {
-                    "title": "Example result",
-                    "link": "https://example.test",
-                    "snippet": "Example snippet",
-                }
-            ]
-        },
-    )
-
-    loop = agent_loop.AgentLoop(
-        runtime=agent_loop.DEFAULT_AGENT_RUNTIME,
-        completion_client=fake_create_chat_completion,
-    )
-    message, tool_logs = loop.run(
-        _context([
-            {
-                "role": "system",
-                "content": "at most 10 tool-calling rounds",
-            },
-            {"role": "user", "content": "search example"},
-        ]),
-        agent_loop.AgentExecutionConfig(
-            provider="test_provider",
-            model="test_model",
-            provider_name="Test",
-            max_iterations=1,
+        runtime = AgentRuntime(catalog=DEFAULT_TOOL_CATALOG, persistence=receipts)
+        first_loop = AgentLoop(
+            runtime=runtime, completion=first_completion, checkpoints=checkpoints
         )
-    )
-
-    assert message == "根据已有搜索结果，Example result 是相关结果。"
-    assert "抱歉，处理您的请求时遇到了问题" not in message
-    assert len(calls) == 2
-    assert "tools" in calls[0]
-    assert "tool_choice" in calls[0]
-    assert "tools" not in calls[1]
-    assert "tool_choice" not in calls[1]
-    assert "Tool calling has reached the maximum allowed iterations" not in calls[1]["messages"][0]["content"]
-    assert "at most 10 tool-calling rounds" in calls[1]["messages"][0]["content"]
-    assert any(message["role"] == "tool" for message in calls[1]["messages"])
-    assert any(
-        log.get("type") == "tool_result"
-        and log.get("tool_name") == "google_search"
-        for log in tool_logs
-    )
-
-
-def test_agent_loop_sends_generated_voice_immediately(monkeypatch):
-    responses = [
-        _Response(
-            _Message(
-                "",
-                [
-                    {
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {
-                            "name": "generate_voice",
-                            "arguments": '{"text": "hello"}',
-                        },
-                    }
-                ],
-            )
-        ),
-        _Response(_Message("", None)),
-    ]
-
-    def fake_create_chat_completion(*args, **kwargs):
-        return responses.pop(0)
-
-    class _VisibleHandler:
-        def __init__(self):
-            self.calls = []
-
-        def send_media(self, tool_name, result):
-            self.calls.append((tool_name, result))
-            return ["sent_message"]
-
-    visible_handler = _VisibleHandler()
-    monkeypatch.setitem(
-        agent_loop.DEFAULT_AGENT_RUNTIME.handlers,
-        "generate_voice",
-        lambda **kwargs: {
-            "status": "generated",
-            "count": 1,
-            "audios": [{"audio_id": "secret-audio-id"}],
-        },
-    )
-
-    loop = agent_loop.AgentLoop(
-        runtime=agent_loop.DEFAULT_AGENT_RUNTIME,
-        completion_client=fake_create_chat_completion,
-    )
-    message, tool_logs = loop.run(
-        _context([{"role": "user", "content": "say hello"}]),
-        agent_loop.AgentExecutionConfig(
-            provider="test_provider",
-            model="test_model",
-            provider_name="Test",
-        ),
-        visible_content_handler=visible_handler,
-    )
-
-    voice_results = [
-        log
-        for log in tool_logs
-        if log.get("type") == "tool_result"
-        and log.get("tool_name") == "generate_voice"
-    ]
-
-    assert message == ""
-    assert visible_handler.calls == [
-        (
-            "generate_voice",
-            {
-                "status": "generated",
-                "count": 1,
-                "audios": [{"audio_id": "secret-audio-id"}],
-            },
+        config = AgentExecutionConfig(provider="test", model="model", allow_tools=True)
+        first = await first_loop.run(
+            _context(), config, tool_context=_tool_context(turn_id)
         )
-    ]
-    assert voice_results[0]["media_sent"] is True
-    assert voice_results[0]["sent_message_count"] == 1
-    assert voice_results[0]["result"]["message"] == "Generated audio has been sent to Telegram."
-    assert "forward" not in str(voice_results[0]["result"]).lower()
+
+        assert first.text == "done"
+        assert order.index("checkpoint:0") < order.index("effect:step:0:call:0")
+        assert receipts.mutation_count == 1
+
+        replay_completion = _Completion([], order)
+        replay_loop = AgentLoop(
+            runtime=runtime, completion=replay_completion, checkpoints=checkpoints
+        )
+        replay = await replay_loop.run(
+            _context(), config, tool_context=_tool_context(turn_id)
+        )
+
+        assert replay.text == "done"
+        assert replay_completion.calls == 0
+        assert receipts.mutation_count == 1
+        results = [event for event in replay.events if event["type"] == "tool_result"]
+        assert results[0]["replayed"] is True
+
+    asyncio.run(scenario())

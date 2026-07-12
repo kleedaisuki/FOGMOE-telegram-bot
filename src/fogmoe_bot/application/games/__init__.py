@@ -1,1 +1,1 @@
-"""游戏应用逻辑 / Game application logic."""
+"""@brief Games bounded context 应用层 / Games bounded-context application layer."""

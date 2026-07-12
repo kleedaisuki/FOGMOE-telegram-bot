@@ -1,1 +1,1 @@
-"""管理后台应用逻辑 / Administrative application logic."""
+"""@brief Admin bounded context 应用层 / Admin bounded-context application layer."""

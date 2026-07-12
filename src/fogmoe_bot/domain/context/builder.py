@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping
 
 from .formatting import (
     format_metadata_attrs,
@@ -58,7 +58,10 @@ def render_chat_message(context: ChatMessageContext) -> str:
         ("type", context.chat_type),
         ("timestamp", context.timestamp),
         ("user", f"@{context.user_name}"),
-        ("message_id", str(context.message_id) if context.message_id is not None else None),
+        (
+            "message_id",
+            str(context.message_id) if context.message_id is not None else None,
+        ),
         ("edited", "true" if context.edited else None),
         ("edited_at", context.edited_at if context.edited else None),
     ]
@@ -102,7 +105,7 @@ def render_scheduled_task(context: ScheduledTaskContext) -> str:
 def create_runtime_replacement(
     *,
     persisted_content: str,
-    runtime_message: dict[str, Any] | None,
+    runtime_message: dict[str, object] | None,
 ) -> RuntimeMessageReplacement | None:
     """@brief 创建运行时消息替换 / Create a runtime message replacement.
 
@@ -121,11 +124,11 @@ def create_runtime_replacement(
 def build_context_state(
     *,
     system_prompt: str,
-    history_messages: Iterable[Mapping[str, Any]],
+    history_messages: Iterable[Mapping[str, object]],
     scope: ConversationScope,
     user_state: UserState,
     runtime_replacements: Iterable[RuntimeMessageReplacement] | None = None,
-    text_fallback_messages: Iterable[Mapping[str, Any]] | None = None,
+    text_fallback_messages: Iterable[Mapping[str, object]] | None = None,
 ) -> ContextState:
     """@brief 构造 Agent 上下文状态 / Build Agent context state.
 
@@ -137,16 +140,20 @@ def build_context_state(
     @param text_fallback_messages 纯文本降级历史 / Text-only fallback history.
     @return 可直接交给 AgentLoop 的领域上下文快照 / Domain context snapshot ready for AgentLoop.
     """
-    history = [dict(message) for message in history_messages if isinstance(message, Mapping)]
-    query_history = _apply_runtime_replacements(history, list(runtime_replacements or []))
-    system_message = {
+    history = [
+        dict(message) for message in history_messages if isinstance(message, Mapping)
+    ]
+    query_history = _apply_runtime_replacements(
+        history, list(runtime_replacements or [])
+    )
+    system_message: dict[str, object] = {
         "role": "system",
         "content": compose_system_prompt(
             system_prompt=system_prompt,
             user_state_prompt=render_user_state(user_state),
         ),
     }
-    fallback = None
+    fallback: list[dict[str, object]] | None = None
     if text_fallback_messages is not None:
         fallback_history = [
             dict(message)
@@ -164,7 +171,7 @@ def build_context_state(
     )
 
 
-def build_tool_context(scope: ConversationScope) -> dict[str, Any]:
+def build_tool_context(scope: ConversationScope) -> dict[str, object]:
     """@brief 构造工具请求上下文 / Build tool request context.
 
     @param scope 对话作用域 / Conversation scope.
@@ -179,9 +186,9 @@ def build_tool_context(scope: ConversationScope) -> dict[str, Any]:
 
 
 def _apply_runtime_replacements(
-    messages: list[dict[str, Any]],
+    messages: list[dict[str, object]],
     replacements: list[RuntimeMessageReplacement],
-) -> list[dict[str, Any]]:
+) -> list[dict[str, object]]:
     """@brief 应用运行时消息替换 / Apply runtime message replacements.
 
     @param messages 历史消息 / History messages.
@@ -255,8 +262,12 @@ def _append_reply(lines: list[str], context: ChatMessageContext) -> None:
 
     if context.reply_user or context.reply_text:
         reply_user_value = f"@{context.reply_user}" if context.reply_user else ""
-        reply_attr = f' user="{xml_escape(reply_user_value)}"' if reply_user_value else ""
-        lines.append(f"  <reply{reply_attr}>{xml_escape(context.reply_text or '')}</reply>")
+        reply_attr = (
+            f' user="{xml_escape(reply_user_value)}"' if reply_user_value else ""
+        )
+        lines.append(
+            f"  <reply{reply_attr}>{xml_escape(context.reply_text or '')}</reply>"
+        )
 
 
 def _append_media(lines: list[str], context: ChatMessageContext) -> None:
@@ -267,12 +278,14 @@ def _append_media(lines: list[str], context: ChatMessageContext) -> None:
     """
     if not context.media_type:
         return
-    media_attrs = [("type", context.media_type)]
+    media_attrs: list[tuple[str, str | None]] = [("type", context.media_type)]
     if context.media_emoji:
         media_attrs.append(("emoji", context.media_emoji))
     lines.append(f"  <media {_format_optional_attrs(media_attrs)}>")
     if context.media_description:
-        lines.append(f"    <description>{xml_escape(context.media_description)}</description>")
+        lines.append(
+            f"    <description>{xml_escape(context.media_description)}</description>"
+        )
     lines.append("  </media>")
 
 

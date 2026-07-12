@@ -60,25 +60,25 @@ class ModerationEngine:
             return self._allow(policy)
 
         if policy.block_links:
-            match = URL_PATTERN.search(request.content)
-            if match:
+            regex_match = URL_PATTERN.search(request.content)
+            if regex_match:
                 return self._block(
                     policy,
-                    self._synthetic_match(RuleKind.LINK, match),
+                    self._synthetic_match(RuleKind.LINK, regex_match),
                 )
 
         if policy.block_mentions:
-            match = MENTION_PATTERN.search(request.content)
-            if match:
+            regex_match = MENTION_PATTERN.search(request.content)
+            if regex_match:
                 return self._block(
                     policy,
-                    self._synthetic_match(RuleKind.MENTION, match),
+                    self._synthetic_match(RuleKind.MENTION, regex_match),
                 )
 
         for rule in self._select_rules(policy, global_rules, group_rules):
-            match = self._match_rule(request.content, rule)
-            if match:
-                return self._block(policy, match)
+            rule_match = self._match_rule(request.content, rule)
+            if rule_match:
+                return self._block(policy, rule_match)
 
         return self._allow(policy)
 

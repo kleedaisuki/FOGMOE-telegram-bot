@@ -28,5 +28,5 @@ def main() -> None:
         shutdown_logging()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

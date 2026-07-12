@@ -44,8 +44,7 @@ def outbound_proxy_url() -> str | None:
     if scheme not in SUPPORTED_PROXY_SCHEMES or not parsed.hostname:
         supported = ", ".join(sorted(SUPPORTED_PROXY_SCHEMES))
         raise ValueError(
-            "NETWORK_PROXY_URL must use one of "
-            f"{supported} and include a hostname."
+            f"NETWORK_PROXY_URL must use one of {supported} and include a hostname."
         )
     return proxy_url
 
@@ -74,7 +73,9 @@ def configure_proxy_environment() -> None:
 
     for variable_name in PROXY_ENVIRONMENT_VARIABLES:
         os.environ[variable_name] = proxy_url
-    logger.info("Configured unified outbound proxy: %s", _redacted_proxy_endpoint(proxy_url))
+    logger.info(
+        "Configured unified outbound proxy: %s", _redacted_proxy_endpoint(proxy_url)
+    )
 
 
 def create_requests_session() -> requests.Session:
@@ -105,7 +106,9 @@ def create_aiohttp_session(**kwargs: Any) -> aiohttp.ClientSession:
     scheme = urlsplit(proxy_url).scheme.lower()
     if scheme in SOCKS_PROXY_SCHEMES:
         if "connector" in session_kwargs:
-            raise ValueError("A SOCKS proxy cannot be combined with a custom aiohttp connector.")
+            raise ValueError(
+                "A SOCKS proxy cannot be combined with a custom aiohttp connector."
+            )
         connector = ProxyConnector.from_url(proxy_url)
         return aiohttp.ClientSession(connector=connector, **session_kwargs)
     return aiohttp.ClientSession(proxy=proxy_url, **session_kwargs)

@@ -21,8 +21,30 @@ def test_cli_registers_commands_and_compatibility_aliases():
     assert parser.parse_args(["migrate"]).handler is migrate.execute
     assert parser.parse_args(["upgrade"]).handler is migrate.execute
     assert parser.parse_args(["run-migrations-as-role"]).handler is migrate.execute
-    assert parser.parse_args(["export-csv", "--table", "conversation.chat_records", "--output", "records.csv"]).handler is export_csv.execute
-    assert parser.parse_args(["export", "--table", "conversation.chat_records", "--output", "records.csv"]).handler is export_csv.execute
+    assert (
+        parser.parse_args(
+            [
+                "export-csv",
+                "--table",
+                "conversation.chat_records",
+                "--output",
+                "records.csv",
+            ]
+        ).handler
+        is export_csv.execute
+    )
+    assert (
+        parser.parse_args(
+            [
+                "export",
+                "--table",
+                "conversation.chat_records",
+                "--output",
+                "records.csv",
+            ]
+        ).handler
+        is export_csv.execute
+    )
 
 
 def test_cli_without_command_prints_help(capsys):
@@ -47,13 +69,16 @@ def test_pgpass_round_trip_and_first_match(tmp_path: Path):
     pgpass.write_text(f"{line}\n*:*:*:*:fallback\n", encoding="utf-8")
 
     assert split_pgpass_line(line)[4] == password
-    assert find_pgpass_password(
-        pgpass,
-        host="localhost",
-        port=5432,
-        database="fogmoe",
-        user="fogmoe-bot",
-    ) == password
+    assert (
+        find_pgpass_password(
+            pgpass,
+            host="localhost",
+            port=5432,
+            database="fogmoe",
+            user="fogmoe-bot",
+        )
+        == password
+    )
 
 
 def test_service_url_uses_sqlalchemy_escaping():
@@ -128,7 +153,11 @@ def test_export_csv_accepts_only_schema_qualified_identifiers():
         "TO STDOUT WITH (FORMAT CSV, HEADER TRUE, ENCODING 'UTF8');"
     )
 
-    for invalid_name in ("chat_records", "conversation.chat-records", "conversation.chat_records;DROP TABLE users"):
+    for invalid_name in (
+        "chat_records",
+        "conversation.chat-records",
+        "conversation.chat_records;DROP TABLE users",
+    ):
         try:
             export_csv.parse_table_name(invalid_name)
         except ValueError:

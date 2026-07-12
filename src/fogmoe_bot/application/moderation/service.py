@@ -2,11 +2,11 @@
 
 from typing import Protocol
 
-from fogmoe_bot.domain.moderation import (
+from fogmoe_bot.domain.moderation.engine import ModerationEngine
+from fogmoe_bot.domain.moderation.models import (
     ChatId,
     GroupModerationPolicy,
     ModerationDecision,
-    ModerationEngine,
     ModerationRequest,
     ModerationRule,
 )

@@ -2,8 +2,8 @@
 
 from fogmoe_dbctl.migrations.runner import run_migration_sql
 
-revision = '0002_stake_reward_pool'
-down_revision = '0001_initial'
+revision = "0002_stake_reward_pool"
+down_revision = "0001_initial"
 branch_labels = None
 depends_on = None
 

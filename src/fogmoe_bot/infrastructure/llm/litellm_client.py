@@ -1,6 +1,10 @@
-import logging
-from typing import Any, Dict, List
+# ruff: noqa: E402
 
+import logging
+from collections.abc import Sequence
+from typing import Any
+
+from fogmoe_bot.application.assistant.tools.catalog import ToolDefinition
 from fogmoe_bot.infrastructure.logging.bot_logging import prepare_litellm_logging
 
 prepare_litellm_logging()
@@ -8,63 +12,43 @@ prepare_litellm_logging()
 import litellm
 
 from fogmoe_bot.infrastructure import config
-from fogmoe_bot.infrastructure.llm.litellm_models import litellm_model_name, normalize_provider
+from fogmoe_bot.infrastructure.llm.litellm_models import (
+    litellm_model_name,
+    normalize_provider,
+)
 from fogmoe_bot.infrastructure.network.proxy import configure_litellm_proxy
 from fogmoe_bot.infrastructure.llm.litellm_message_sanitizer import (
-    PROVIDER_SPECIFIC_KEYS,
-    sanitize_message_for_provider,
     sanitize_messages_for_provider,
-    sanitize_tool_call_for_provider,
 )
-from fogmoe_bot.infrastructure.llm.litellm_provider_config import (
-    azure_api_base,
-    gemini_native_api_base,
-    openai_compatible_api_base,
-    provider_params,
-)
+from fogmoe_bot.infrastructure.llm.litellm_provider_config import provider_params
+from fogmoe_bot.infrastructure.llm.tool_serialization import serialize_tool_definitions
 
 
-def _sanitize_tool_call_for_provider(
-    tool_call: Dict[str, Any],
-    provider: str,
-) -> Dict[str, Any]:
-    return sanitize_tool_call_for_provider(tool_call, provider)
+def _serialize_request_tools(request_kwargs: dict[str, Any]) -> None:
+    """@brief 在 provider 边界序列化工具 / Serialize tools at the provider boundary.
 
+    @param request_kwargs 即将交给 LiteLLM 的参数 / Arguments about to be passed to LiteLLM.
+    @return None / None.
+    @raise TypeError tools 不是 ToolDefinition 序列时抛出 / Raised unless tools is a ToolDefinition sequence.
+    """
 
-def _sanitize_message_for_provider(
-    message: Dict[str, Any],
-    provider: str,
-) -> Dict[str, Any]:
-    return sanitize_message_for_provider(message, provider)
-
-
-def _sanitize_messages_for_provider(
-    messages: List[Dict[str, Any]],
-    provider: str,
-) -> List[Dict[str, Any]]:
-    return sanitize_messages_for_provider(messages, provider)
-
-
-def _azure_api_base() -> str:
-    return azure_api_base()
-
-
-def _openai_compatible_api_base(value: str) -> str:
-    return openai_compatible_api_base(value)
-
-
-def _gemini_native_api_base(value: str) -> str:
-    return gemini_native_api_base(value)
-
-
-def _provider_params(provider: str) -> Dict[str, Any]:
-    return provider_params(provider)
+    raw_tools: object = request_kwargs.get("tools")
+    if raw_tools is None:
+        return
+    if not isinstance(raw_tools, Sequence) or isinstance(raw_tools, (str, bytes)):
+        raise TypeError("tools must be a sequence of ToolDefinition values")
+    definitions: list[ToolDefinition] = []
+    for item in raw_tools:
+        if not isinstance(item, ToolDefinition):
+            raise TypeError("tools must contain only ToolDefinition values")
+        definitions.append(item)
+    request_kwargs["tools"] = serialize_tool_definitions(definitions)
 
 
 def create_chat_completion(
     provider: str,
     model: str,
-    messages: List[Dict[str, Any]],
+    messages: list[dict[str, Any]],
     **kwargs: Any,
 ) -> Any:
     configure_litellm_proxy(litellm)
@@ -74,20 +58,19 @@ def create_chat_completion(
         if litellm_provider == "gemini" and config.GEMINI_OPENAI_COMPATIBLE
         else litellm_provider
     )
-    provider_messages = _sanitize_messages_for_provider(messages, history_provider)
-    request_kwargs = {
-        key: value
-        for key, value in kwargs.items()
-        if value is not None
-    }
+    provider_messages = sanitize_messages_for_provider(messages, history_provider)
+    request_kwargs = {key: value for key, value in kwargs.items() if value is not None}
+    _serialize_request_tools(request_kwargs)
     request_kwargs.setdefault("drop_params", True)
 
     litellm_model = litellm_model_name(litellm_provider, model)
-    logging.debug("Calling LiteLLM provider=%s model=%s", litellm_provider, litellm_model)
+    logging.debug(
+        "Calling LiteLLM provider=%s model=%s", litellm_provider, litellm_model
+    )
 
     return litellm.completion(
         model=litellm_model,
         messages=provider_messages,
-        **_provider_params(litellm_provider),
+        **provider_params(litellm_provider),
         **request_kwargs,
     )

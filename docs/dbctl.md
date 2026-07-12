@@ -36,8 +36,8 @@ migrations/               Alembic 适配层与版本化 SQL
 
 ```bash
 fogmoe-dbctl export-csv \
-  --table conversation.chat_records \
-  --output ./chat_records.csv
+  --table conversation.conversation_messages \
+  --output ./conversation_messages.csv
 ```
 
 目标文件已存在时命令会拒绝覆盖；显式传入 `--force` 才会原子替换它。

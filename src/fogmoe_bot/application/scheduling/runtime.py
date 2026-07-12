@@ -1,92 +1,91 @@
-"""@brief 同进程调度运行时 / In-process scheduling runtime."""
+"""@brief 单主循环调度运行时 / Single-main-loop scheduling runtime."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Generic, Protocol, TypeVar
 
-from telegram import Bot
-from telegram.request import HTTPXRequest
-
-from fogmoe_bot.application.assistant.prompt_job_handler import PromptJobHandler
-from fogmoe_bot.domain.scheduling import (
-    JobKind,
-    MaintenanceTaskHandler,
-    ScheduleClaim,
-    ScheduleDispatcher,
-)
-from fogmoe_bot.infrastructure import config
-from fogmoe_bot.infrastructure.database import db
-from fogmoe_bot.infrastructure.database.repositories.schedule_repository import ScheduleRepository
+from fogmoe_bot.application.scheduling.ports import MaintenanceTaskHandler
+from fogmoe_bot.domain.scheduling import JobKind, ScheduleClaim
 
 
 logger = logging.getLogger(__name__)
 
+PayloadT = TypeVar("PayloadT")
+
+
+class ScheduleClaimExecutor(Protocol[PayloadT]):
+    """@brief 工作循环所需的最小领取执行端口 / Minimal claim-and-execute port for the work loop."""
+
+    async def claim_due(
+        self,
+        *,
+        limit: int,
+    ) -> Sequence[ScheduleClaim[PayloadT]]:
+        """@brief 领取至多 limit 个任务 / Claim at most ``limit`` jobs.
+
+        @param limit 最大领取数量 / Maximum number of claims.
+        @return 带 fencing token 的领取凭证 / Claims carrying fencing tokens.
+        """
+
+        ...
+
+    async def execute_claim(self, claim: ScheduleClaim[PayloadT]) -> bool:
+        """@brief 执行并终结领取 / Execute and finalize a claim.
+
+        @param claim 当前领取凭证 / Current claim.
+        @return 业务处理成功时返回 True / True when business handling succeeds.
+        """
+
+        ...
+
 
 @dataclass(frozen=True, slots=True)
-class _ClaimWork:
-    """@brief 持久化任务领取的队列项 / Queue item for a persisted job claim.
+class _ClaimWork(Generic[PayloadT]):
+    """@brief 持久化任务队列项 / Persisted-claim queue item.
 
-    @param claim 已领取的持久化调度任务 / Claimed persisted scheduled job.
+    @param claim 已领取的持久化任务 / Claimed persisted job.
     """
 
-    claim: ScheduleClaim[Any]
+    claim: ScheduleClaim[PayloadT]
 
 
 @dataclass(frozen=True, slots=True)
 class _MaintenanceWork:
-    """@brief 进程内维护任务的队列项 / Queue item for an in-process maintenance task.
+    """@brief 进程内维护队列项 / In-process maintenance queue item.
 
-    @param handler 维护任务的类型化处理器 / Typed maintenance-task handler.
+    @param handler 类型化维护处理器 / Typed maintenance handler.
     """
 
     handler: MaintenanceTaskHandler
 
 
-WorkItem = _ClaimWork | _MaintenanceWork
-"""@brief 同一 consumer 队列可消费的工作项 / Work item consumable by the shared consumer queue."""
+type WorkItem[PayloadT] = _ClaimWork[PayloadT] | _MaintenanceWork
+"""@brief 共享 consumer 队列的工作联合 / Work union consumed by the shared queue."""
 
 
-def create_scheduling_bot() -> Bot:
-    """@brief 创建调度线程专属 Telegram 客户端 / Create the scheduling thread's Telegram client.
-
-    @return 仅由调度 event loop 使用的 Telegram Bot / Telegram Bot used only by the scheduling event loop.
-    """
-
-    request = HTTPXRequest(
-        connection_pool_size=config.SCHEDULING_CONNECTION_POOL_SIZE,
-        connect_timeout=config.TELEGRAM_CONNECT_TIMEOUT,
-        read_timeout=config.TELEGRAM_READ_TIMEOUT,
-        write_timeout=config.TELEGRAM_WRITE_TIMEOUT,
-        pool_timeout=config.TELEGRAM_POOL_TIMEOUT,
-        proxy=config.NETWORK_PROXY_URL,
-    )
-    return Bot(token=config.TELEGRAM_BOT_TOKEN, request=request)
-
-
-class SchedulingWorkLoop:
-    """@brief 有界生产者—消费者调度循环 / Bounded producer-consumer scheduling loop."""
+class SchedulingWorkLoop(Generic[PayloadT]):
+    """@brief 有界、结构化并发的调度循环 / Bounded structured-concurrency scheduling loop."""
 
     def __init__(
         self,
         *,
-        dispatcher: ScheduleDispatcher,
+        dispatcher: ScheduleClaimExecutor[PayloadT],
         maintenance: Sequence[MaintenanceTaskHandler],
         poll_interval: float,
         worker_count: int,
     ) -> None:
-        """@brief 创建工作循环 / Create the work loop.
+        """@brief 创建调度工作循环 / Create the scheduling work loop.
 
-        @param dispatcher 领取与终结持久化任务的领域服务 / Domain service for persisted jobs.
-        @param maintenance 周期维护任务的类型化处理器 / Typed periodic maintenance-task handlers.
-        @param poll_interval 空闲 producer 轮询间隔 / Idle producer polling interval.
-        @param worker_count consumer worker 数量 / Number of consumer workers.
+        @param dispatcher 领取并终结持久化任务的端口 / Port that claims and finalizes persisted jobs.
+        @param maintenance 周期维护处理器 / Periodic maintenance handlers.
+        @param poll_interval 空闲轮询间隔秒数 / Idle polling interval in seconds.
+        @param worker_count consumer 数量及总准入容量 / Consumer count and total admission capacity.
+        @raise ValueError 配置非法或维护类型重复时抛出 / Raised for invalid configuration or duplicate maintenance kinds.
         """
 
         if poll_interval <= 0:
@@ -102,63 +101,64 @@ class SchedulingWorkLoop:
         self._worker_count = worker_count
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        """@brief 运行一个 producer 与多个 consumer / Run one producer and multiple consumers.
+        """@brief 运行一个 producer 与多个受监督 consumer / Run one producer and supervised consumers.
 
         @param stop_event 请求停止时置位 / Set to request shutdown.
         @return None / None.
-        @note 容量令牌从领取或投递开始持有到任务终结，已接收工作总数不会超过 worker_count /
-        A capacity token is held from claim or submission through completion, so accepted work never exceeds worker_count.
+        @note 容量令牌从领取前持有至任务终结，已领取加运行任务不会超过 worker_count /
+        Capacity is reserved before claiming and held through finalization, so claimed plus running work never exceeds worker_count.
         """
 
-        work_queue: asyncio.Queue[WorkItem] = asyncio.Queue(maxsize=self._worker_count)
-        capacity_tokens: asyncio.Queue[None] = asyncio.Queue(maxsize=self._worker_count)
+        work_queue: asyncio.Queue[WorkItem[PayloadT]] = asyncio.Queue(
+            maxsize=self._worker_count
+        )
+        capacity_tokens: asyncio.Queue[object] = asyncio.Queue(
+            maxsize=self._worker_count
+        )
         for _ in range(self._worker_count):
-            capacity_tokens.put_nowait(None)
+            capacity_tokens.put_nowait(object())
+        loop = asyncio.get_running_loop()
         next_maintenance_run = {
-            handler.task.kind: asyncio.get_running_loop().time()
-            + handler.task.initial_delay.total_seconds()
+            handler.task.kind: loop.time() + handler.task.initial_delay.total_seconds()
             for handler in self._maintenance
         }
 
-        consumers = tuple(
-            asyncio.create_task(
-                self._consume(work_queue, capacity_tokens),
-                name=f"scheduling-consumer-{index}",
+        async with asyncio.TaskGroup() as task_group:
+            consumers = tuple(
+                task_group.create_task(
+                    self._consume(work_queue, capacity_tokens),
+                    name=f"scheduling-consumer-{index}",
+                )
+                for index in range(self._worker_count)
             )
-            for index in range(self._worker_count)
-        )
-        producer = asyncio.create_task(
-            self._produce(
-                work_queue,
-                capacity_tokens,
-                next_maintenance_run,
-                stop_event,
-            ),
-            name="scheduling-producer",
-        )
-        try:
+            producer = task_group.create_task(
+                self._produce(
+                    work_queue,
+                    capacity_tokens,
+                    next_maintenance_run,
+                    stop_event,
+                ),
+                name="scheduling-producer",
+            )
             await stop_event.wait()
-        finally:
-            stop_event.set()
-            await asyncio.gather(producer, return_exceptions=True)
+            await producer
             await work_queue.join()
             for consumer in consumers:
                 consumer.cancel()
-            await asyncio.gather(*consumers, return_exceptions=True)
 
     async def _produce(
         self,
-        work_queue: asyncio.Queue[WorkItem],
-        capacity_tokens: asyncio.Queue[None],
+        work_queue: asyncio.Queue[WorkItem[PayloadT]],
+        capacity_tokens: asyncio.Queue[object],
         next_maintenance_run: dict[JobKind, float],
         stop_event: asyncio.Event,
     ) -> None:
-        """@brief 领取持久化任务并投递周期维护任务 / Claim persisted work and submit periodic maintenance work.
+        """@brief 领取持久化任务并投递维护任务 / Claim persisted jobs and submit maintenance work.
 
-        @param work_queue 已接收工作的有界队列 / Bounded queue of accepted work.
-        @param capacity_tokens 已接收工作总量的令牌桶 / Token bucket for total accepted work.
-        @param next_maintenance_run 每类维护任务的下次运行时刻 / Next run time per maintenance-task kind.
-        @param stop_event 请求停止时置位 / Set to request shutdown.
+        @param work_queue 有界工作队列 / Bounded work queue.
+        @param capacity_tokens 总准入容量令牌 / Total-admission capacity tokens.
+        @param next_maintenance_run 每类维护任务的下次时刻 / Next monotonic time per maintenance kind.
+        @param stop_event 停止信号 / Stop signal.
         @return None / None.
         """
 
@@ -180,25 +180,26 @@ class SchedulingWorkLoop:
                         remaining_tokens,
                     )
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=self._poll_interval)
-            except asyncio.TimeoutError:
-                continue
+                async with asyncio.timeout(self._poll_interval):
+                    await stop_event.wait()
+            except TimeoutError:
+                pass
 
     async def _submit_due_maintenance(
         self,
-        work_queue: asyncio.Queue[WorkItem],
-        tokens: Sequence[None],
+        work_queue: asyncio.Queue[WorkItem[PayloadT]],
+        tokens: Sequence[object],
         next_maintenance_run: dict[JobKind, float],
         *,
         now: float,
     ) -> int:
-        """@brief 向队列投递已到期维护任务 / Submit due maintenance tasks to the queue.
+        """@brief 投递到期维护任务 / Submit due maintenance tasks.
 
-        @param work_queue 已接收工作的有界队列 / Bounded queue of accepted work.
-        @param tokens 可用于投递的容量令牌 / Capacity tokens available for submission.
-        @param next_maintenance_run 每类维护任务的下次运行时刻 / Next run time per maintenance-task kind.
-        @param now 当前单调时钟时刻 / Current monotonic-clock time.
-        @return 已消耗的令牌数 / Number of consumed tokens.
+        @param work_queue 有界工作队列 / Bounded work queue.
+        @param tokens 本轮可用容量 / Capacity available in this iteration.
+        @param next_maintenance_run 每类维护任务的下次时刻 / Next time per maintenance kind.
+        @param now 当前单调时钟 / Current monotonic time.
+        @return 已占用令牌数 / Number of occupied tokens.
         """
 
         submitted = 0
@@ -210,21 +211,25 @@ class SchedulingWorkLoop:
             if next_run > now:
                 continue
             await work_queue.put(_MaintenanceWork(handler))
-            next_maintenance_run[task.kind] = self._next_maintenance_run(task.interval, next_run, now)
+            next_maintenance_run[task.kind] = self._next_maintenance_run(
+                task.interval,
+                next_run,
+                now,
+            )
             submitted += 1
         return submitted
 
     async def _claim_persisted_work(
         self,
-        work_queue: asyncio.Queue[WorkItem],
-        capacity_tokens: asyncio.Queue[None],
-        tokens: Sequence[None],
+        work_queue: asyncio.Queue[WorkItem[PayloadT]],
+        capacity_tokens: asyncio.Queue[object],
+        tokens: Sequence[object],
     ) -> None:
-        """@brief 领取数据库任务并归还未使用容量 / Claim database jobs and return unused capacity.
+        """@brief 领取持久化任务并归还未用容量 / Claim persisted jobs and return unused capacity.
 
-        @param work_queue 已接收工作的有界队列 / Bounded queue of accepted work.
-        @param capacity_tokens 已接收工作总量的令牌桶 / Token bucket for total accepted work.
-        @param tokens 可用于领取的容量令牌 / Capacity tokens available for claims.
+        @param work_queue 有界工作队列 / Bounded work queue.
+        @param capacity_tokens 总准入容量令牌 / Total-admission capacity tokens.
+        @param tokens 已预留容量 / Reserved capacity.
         @return None / None.
         """
 
@@ -234,19 +239,24 @@ class SchedulingWorkLoop:
             self._return_tokens(capacity_tokens, tokens)
             logger.exception("Scheduling producer failed to claim due jobs")
             return
+        if len(claims) > len(tokens):
+            self._return_tokens(capacity_tokens, tokens)
+            raise RuntimeError(
+                "Schedule dispatcher returned more claims than requested"
+            )
         for claim in claims:
             await work_queue.put(_ClaimWork(claim))
         self._return_tokens(capacity_tokens, tokens[len(claims) :])
 
     async def _consume(
         self,
-        work_queue: asyncio.Queue[WorkItem],
-        capacity_tokens: asyncio.Queue[None],
+        work_queue: asyncio.Queue[WorkItem[PayloadT]],
+        capacity_tokens: asyncio.Queue[object],
     ) -> None:
-        """@brief 消费一个工作项并释放容量令牌 / Consume a work item and release its capacity token.
+        """@brief 消费并终结工作项 / Consume and finalize work items.
 
-        @param work_queue 已接收工作队列 / Queue of accepted work.
-        @param capacity_tokens 已接收工作总量的令牌桶 / Token bucket for total accepted work.
+        @param work_queue 有界工作队列 / Bounded work queue.
+        @param capacity_tokens 总准入容量令牌 / Total-admission capacity tokens.
         @return None / None.
         """
 
@@ -267,19 +277,23 @@ class SchedulingWorkLoop:
                         work.handler.task.kind.value,
                     )
             except Exception:
-                logger.exception("Scheduling consumer crashed while executing work item")
+                logger.exception(
+                    "Scheduling consumer failed while executing a work item"
+                )
             finally:
                 work_queue.task_done()
-                capacity_tokens.put_nowait(None)
+                capacity_tokens.put_nowait(object())
 
     @staticmethod
-    def _next_maintenance_run(interval: timedelta, previous: float, now: float) -> float:
-        """@brief 计算严格晚于当前时刻的下一维护时刻 / Compute the next maintenance time strictly after now.
+    def _next_maintenance_run(
+        interval: timedelta, previous: float, now: float
+    ) -> float:
+        """@brief 计算严格晚于当前时刻的下次维护时间 / Compute the next maintenance time strictly after now.
 
         @param interval 维护周期 / Maintenance interval.
-        @param previous 上一次计划时刻 / Previous scheduled time.
-        @param now 当前单调时钟时刻 / Current monotonic-clock time.
-        @return 下一次单调时钟时刻 / Next monotonic-clock time.
+        @param previous 上次计划时刻 / Previous scheduled time.
+        @param now 当前单调时刻 / Current monotonic time.
+        @return 下次单调时刻 / Next monotonic time.
         """
 
         interval_seconds = interval.total_seconds()
@@ -287,14 +301,16 @@ class SchedulingWorkLoop:
         return previous + skipped * interval_seconds
 
     @staticmethod
-    def _take_available_tokens(capacity_tokens: asyncio.Queue[None]) -> list[None]:
-        """@brief 非阻塞地取出所有空闲容量 / Take all currently free capacity without blocking.
+    def _take_available_tokens(
+        capacity_tokens: asyncio.Queue[object],
+    ) -> list[object]:
+        """@brief 非阻塞取出全部空闲容量 / Take all free capacity without blocking.
 
-        @param capacity_tokens 容量令牌桶 / Capacity-token bucket.
-        @return 本轮领取对应的令牌 / Tokens for this producer round.
+        @param capacity_tokens 总准入容量令牌 / Total-admission capacity tokens.
+        @return 本轮预留令牌 / Tokens reserved for this iteration.
         """
 
-        tokens: list[None] = []
+        tokens: list[object] = []
         while True:
             try:
                 tokens.append(capacity_tokens.get_nowait())
@@ -303,12 +319,12 @@ class SchedulingWorkLoop:
 
     @staticmethod
     def _return_tokens(
-        capacity_tokens: asyncio.Queue[None],
-        tokens: Sequence[None],
+        capacity_tokens: asyncio.Queue[object],
+        tokens: Sequence[object],
     ) -> None:
-        """@brief 归还未被任务占用的容量 / Return capacity not occupied by a work item.
+        """@brief 归还未使用容量 / Return unused capacity.
 
-        @param capacity_tokens 容量令牌桶 / Capacity-token bucket.
+        @param capacity_tokens 总准入容量令牌 / Total-admission capacity tokens.
         @param tokens 要归还的令牌 / Tokens to return.
         @return None / None.
         """
@@ -317,94 +333,7 @@ class SchedulingWorkLoop:
             capacity_tokens.put_nowait(token)
 
 
-class SchedulingRuntime:
-    """@brief 由守护线程承载的调度运行时 / Scheduling runtime hosted by a daemon thread."""
-
-    def __init__(self) -> None:
-        """@brief 创建未启动的运行时 / Create an unstarted runtime."""
-
-        self._stop_requested = threading.Event()
-        self._ready = threading.Event()
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._stop_event: asyncio.Event | None = None
-        self._thread = threading.Thread(
-            target=self._run_thread,
-            name="scheduling-runtime",
-            daemon=True,
-        )
-
-    def start(self) -> None:
-        """@brief 启动调度守护线程 / Start the scheduling daemon thread.
-
-        @return None / None.
-        """
-
-        self._thread.start()
-
-    def stop(self) -> None:
-        """@brief 请求停止并等待已接收任务终结 / Request stop and wait for accepted work to finalize.
-
-        @return None / None.
-        """
-
-        self._stop_requested.set()
-        self._ready.wait()
-        if self._loop is not None and self._stop_event is not None:
-            self._loop.call_soon_threadsafe(self._stop_event.set)
-        self._thread.join()
-
-    def _run_thread(self) -> None:
-        """@brief 守护线程入口 / Daemon-thread entry point.
-
-        @return None / None.
-        """
-
-        try:
-            asyncio.run(self._run_async())
-        except Exception:
-            logger.exception("Scheduling runtime terminated unexpectedly")
-        finally:
-            self._ready.set()
-
-    async def _run_async(self) -> None:
-        """@brief 在线程专属 event loop 中初始化并运行 / Initialize and run on the thread-owned event loop.
-
-        @return None / None.
-        """
-
-        self._loop = asyncio.get_running_loop()
-        self._stop_event = asyncio.Event()
-        db.bind_loop(self._loop)
-        self._ready.set()
-        if self._stop_requested.is_set():
-            self._stop_event.set()
-        bot = create_scheduling_bot()
-        inference_executor = ThreadPoolExecutor(
-            max_workers=config.SCHEDULING_WORKER_COUNT,
-            thread_name_prefix="scheduled-agent",
-        )
-        try:
-            await bot.initialize()
-            from fogmoe_bot.application.scheduling.maintenance import maintenance_handlers
-
-            dispatcher = ScheduleDispatcher(
-                repository=ScheduleRepository(),
-                handlers=(PromptJobHandler(bot, inference_executor=inference_executor),),
-                batch_size=config.SCHEDULING_WORKER_COUNT,
-                stale_after=timedelta(seconds=config.SCHEDULING_LEASE_SECONDS),
-            )
-            work_loop = SchedulingWorkLoop(
-                dispatcher=dispatcher,
-                maintenance=maintenance_handlers(),
-                poll_interval=config.SCHEDULING_POLL_INTERVAL,
-                worker_count=config.SCHEDULING_WORKER_COUNT,
-            )
-            logger.info("Scheduling runtime started")
-            await work_loop.run(self._stop_event)
-        finally:
-            inference_executor.shutdown(wait=True)
-            try:
-                await bot.shutdown()
-            finally:
-                await db.dispose_current_engine()
-                logger.info("Scheduling runtime stopped")
+__all__ = [
+    "ScheduleClaimExecutor",
+    "SchedulingWorkLoop",
+]

@@ -5,8 +5,9 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BOT_DIR="$SCRIPT_DIR"
 SRC_DIR="$BOT_DIR/src"
 LOG_DIR="$BOT_DIR/logs"
-VENV_DIR="$BOT_DIR/venv"
+VENV_DIR="$BOT_DIR/.venv"
 PYPROJECT_FILE="$BOT_DIR/pyproject.toml"
+STOP_TIMEOUT_SECONDS="${BOT_STOP_TIMEOUT_SECONDS:-40}"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -16,7 +17,8 @@ NC='\033[0m' # No Color
 
 # 获取bot进程ID
 get_bot_pid() {
-    ps -ef | grep -E "[f]ogmoe-bot|[p]ython3.*-m fogmoe_bot" | awk '{print $2}'
+    ps -ef | grep -E "[f]ogmoe-bot|[p]ython3.*-m fogmoe_bot" \
+        | awk 'NR == 1 {print $2; exit}'
 }
 
 # 获取当前或最近一次应用日志；应用进程会以时间戳文件名写入。
@@ -119,7 +121,7 @@ start_bot() {
 
     # 检查是否已经在运行
     OLD_PID=$(get_bot_pid)
-    if [ ! -z "$OLD_PID" ]; then
+    if [ -n "$OLD_PID" ]; then
         echo -e "${YELLOW}Bot已在运行 (PID: $OLD_PID)${NC}"
         echo "如需重启，请使用: $0 restart"
         exit 1
@@ -188,7 +190,7 @@ start_bot() {
 
     # 检查进程是否成功启动
     sleep 2
-    if ps -p $NEW_PID > /dev/null; then
+    if ps -p "$NEW_PID" > /dev/null; then
         LOG_FILE=$(get_latest_log_file)
         echo -e "${GREEN}✓ Bot运行正常${NC}"
         echo ""
@@ -220,20 +222,25 @@ stop_bot() {
     echo "正在停止..."
 
     # 尝试优雅地停止
-    kill $BOT_PID
+    kill "$BOT_PID"
 
-    # 等待进程结束
-    sleep 3
+    # BotRuntime 默认会在 30 秒 grace period 内按阶段排空；这里多留缓冲，
+    # 只在明确超时后才升级为 SIGKILL。
+    waited=0
+    while ps -p "$BOT_PID" > /dev/null 2>&1 && [ "$waited" -lt "$STOP_TIMEOUT_SECONDS" ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
 
     # 检查是否还在运行
-    if ps -p $BOT_PID > /dev/null 2>&1; then
-        echo "进程未响应，强制终止..."
-        kill -9 $BOT_PID
+    if ps -p "$BOT_PID" > /dev/null 2>&1; then
+        echo "进程在 ${STOP_TIMEOUT_SECONDS} 秒内未完成排空，强制终止..."
+        kill -9 "$BOT_PID"
         sleep 1
     fi
 
     # 最终检查
-    if ps -p $BOT_PID > /dev/null 2>&1; then
+    if ps -p "$BOT_PID" > /dev/null 2>&1; then
         echo -e "${RED}✗ 错误: 无法停止进程 $BOT_PID${NC}"
         exit 1
     else
@@ -274,7 +281,7 @@ status_bot() {
         # 显示进程信息
         echo ""
         echo "进程详情:"
-        ps -fp $BOT_PID
+        ps -fp "$BOT_PID"
 
         # 检查虚拟环境
         if [ -d "$VENV_DIR" ]; then
@@ -304,7 +311,7 @@ update_deps() {
 
     # 检查bot是否在运行
     BOT_PID=$(get_bot_pid)
-    if [ ! -z "$BOT_PID" ]; then
+    if [ -n "$BOT_PID" ]; then
         echo -e "${YELLOW}警告: Bot正在运行，建议先停止${NC}"
         echo "是否继续更新? (y/n)"
         read -r response

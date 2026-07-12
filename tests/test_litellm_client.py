@@ -1,8 +1,11 @@
 import pytest
 
+from fogmoe_bot.application.assistant.tools.catalog import ToolArguments, define_tool
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.llm import litellm_client
-from fogmoe_bot.infrastructure.llm.litellm_message_sanitizer import sanitize_message_for_provider
+from fogmoe_bot.infrastructure.llm.litellm_message_sanitizer import (
+    sanitize_message_for_provider,
+)
 from fogmoe_bot.infrastructure.llm.litellm_provider_config import (
     azure_api_base,
     gemini_native_api_base,
@@ -20,7 +23,9 @@ def test_openai_compatible_api_base_strips_chat_completions_suffix():
 
 def test_gemini_native_api_base_strips_models_suffix():
     assert (
-        gemini_native_api_base("https://generativelanguage.googleapis.com/v1beta/models")
+        gemini_native_api_base(
+            "https://generativelanguage.googleapis.com/v1beta/models"
+        )
         == "https://generativelanguage.googleapis.com/v1beta"
     )
 
@@ -220,6 +225,63 @@ def test_create_chat_completion_normalizes_provider_and_filters_none_kwargs(
     ]
 
 
+def test_create_chat_completion_serializes_typed_tools_at_provider_boundary(
+    monkeypatch,
+):
+    calls = []
+    messages = [{"role": "user", "content": "hello"}]
+    monkeypatch.setattr(config, "ZAI_API_KEY", "zai-key")
+    monkeypatch.setattr(config, "ZAI_API_BASE", "https://zai.test/v4")
+
+    definition = define_tool(
+        name="ping",
+        description="Return pong",
+        arguments_model=ToolArguments,
+    )
+
+    def fake_completion(**kwargs):
+        calls.append(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(litellm_client.litellm, "completion", fake_completion)
+
+    result = litellm_client.create_chat_completion(
+        "zhipu",
+        "glm-test",
+        messages,
+        tools=(definition,),
+    )
+
+    assert result == "ok"
+    assert calls[0]["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "ping",
+                "description": "Return pong",
+                "parameters": {
+                    "additionalProperties": False,
+                    "properties": {},
+                    "type": "object",
+                },
+            },
+        }
+    ]
+
+
+def test_create_chat_completion_rejects_prebuilt_provider_tool_dicts(monkeypatch):
+    monkeypatch.setattr(config, "ZAI_API_KEY", "zai-key")
+    monkeypatch.setattr(config, "ZAI_API_BASE", "https://zai.test/v4")
+
+    with pytest.raises(TypeError, match="ToolDefinition"):
+        litellm_client.create_chat_completion(
+            "zhipu",
+            "glm-test",
+            [{"role": "user", "content": "hello"}],
+            tools=[{"type": "function"}],
+        )
+
+
 def test_create_chat_completion_uses_openrouter_provider_prefix(monkeypatch):
     calls = []
     messages = [{"role": "user", "content": "hello"}]
@@ -278,7 +340,9 @@ def test_create_chat_completion_uses_openai_history_shape_for_compatible_gemini(
 
     monkeypatch.setattr(litellm_client.litellm, "completion", fake_completion)
 
-    assert litellm_client.create_chat_completion("gemini", "gemini-test", messages) == "ok"
+    assert (
+        litellm_client.create_chat_completion("gemini", "gemini-test", messages) == "ok"
+    )
     assert calls[0]["model"] == "openai/gemini-test"
     assert calls[0]["messages"] == [
         {

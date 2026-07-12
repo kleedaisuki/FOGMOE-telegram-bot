@@ -1,74 +1,50 @@
-# 测试规范
+# 测试与质量门禁
 
-本项目测试以高价值核心逻辑为主，不追求全覆盖。优先保证容易回归、影响用户体验、外部依赖较多或分支复杂的代码有小而稳定的测试。
+测试围绕可观察行为和架构不变量组织。领域规则使用小型单元测试；事务、锁序、幂等回执、
+lease/fencing 和迁移往返使用真实 PostgreSQL 测试；Telegram、LLM 与 HTTP 在默认测试中使用
+窄端口替身，不访问真实网络。
 
-## 测试目标
+## 分层重点
 
-- 覆盖核心纯逻辑，例如 AI 消息内容降级、token 估算、回复过滤、金额/奖励/状态计算等。
-- 覆盖容易被配置或 provider 切换影响的分支。
-- 覆盖 bug 修复对应的最小复现场景，避免同类问题回归。
-- 不为了覆盖率去测试 Telegram 框架、数据库驱动、第三方 SDK 的内部行为。
+- `domain/`：状态转移、值对象、计算规则和非法状态。
+- `application/`：用例编排、重放、超时、取消和端口契约。
+- `infrastructure/`：SQL 原子性、迁移、外部协议解析和资源边界。
+- `presentation/telegram/`：Update 映射、路由互斥、callback 协议和用户可见渲染。
+- `test_package_boundaries.py` 与 `test_domain_dependencies.py`：依赖方向、已删除旧路径和阻塞
+  I/O 准入边界。
 
-## 分层约定
+测试应断言结果和不变量，避免复刻实现。修复并发或恢复缺陷时，回归测试必须覆盖导致缺陷的
+交错、重放或取消时机；仅测试正常路径不足以证明修复。
 
-- `src/fogmoe_bot/main.py` 只作为进程入口，不写单元测试。
-- `src/presentation/telegram/` 是应用组装和 Telegram handler 注册层，测试重点放在较稳定的组装边界，避免启动真实 bot。
-- `src/domain/` 放纯领域规则，适合写小型单元测试。
-- `src/application/` 放用例编排和应用服务，优先把可测试逻辑拆到独立函数或小模块。
-- `src/infrastructure/` 放数据库、外部 API、Telegram 发送、AI provider 等基础设施适配。
-- `src/application/telegram/features/` 放 Telegram 命令和 callback 入口。
-- 外部服务调用、数据库读写、Telegram API 交互默认用替身对象或小范围集成测试，不在普通单元测试里访问真实网络或真实数据库。
+## 本地门禁
 
-## 测试选择标准
+从仓库根目录运行：
 
-优先写这些测试：
-
-- 输入输出清晰的纯函数。
-- 复杂分支、fallback、边界值、异常路径。
-- 曾经出过问题或改动频繁的逻辑。
-- 用户可见影响大的核心路径，例如 AI 回复过滤、多模态消息降级、token 限额估算、经济系统记账规则。
-
-可以暂缓这些测试：
-
-- 只有一行框架注册代码的 handler。
-- 纯粹转发到第三方 SDK 的薄封装。
-- 短期会频繁改版且尚未稳定的实验功能。
-- 只能靠真实 Telegram、真实支付、真实 AI provider 才能验证的路径。
-
-## 编写规范
-
-- 默认使用 `pytest`，测试代码保持轻量，优先使用普通 `assert`。
-- 测试文件放在 `tests/`，命名为 `test_*.py`。
-- 每个测试聚焦一个行为，断言结果而不是实现细节。
-- 测试数据尽量小，避免读取 `.env`、真实资源文件或网络。
-- 新增业务逻辑时，优先让核心判断函数不依赖 Telegram Update、数据库 session 或外部 client。
-- 需要替身对象时，用简单 fake/stub 类，不引入复杂 mock 层。
-
-## 运行方式
-
-在 Windows 上使用项目虚拟环境：
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest
+```bash
+.venv/bin/python -m compileall -q src tests
+ruff check .
+ruff format --check .
+.venv/bin/pyright
+.venv/bin/mypy --strict src/fogmoe_bot src/fogmoe_dbctl
+.venv/bin/pytest -q
+git diff --check
 ```
 
-手动检查当前 `.env` 里的真实 AI API 连通性：
+开发依赖通过项目虚拟环境安装：
 
-```powershell
-$env:RUN_ENV_API_CONNECTIVITY_TESTS = "1"
-.\.venv\Scripts\python.exe -m pytest tests/test_env_api_connectivity.py -s
+```bash
+uv pip install --python .venv/bin/python -e '.[dev]'
 ```
 
-默认会按 `AI_CHAT_ORDER` 检查 chat provider。只检查指定 provider 时：
+## 显式集成测试
 
-```powershell
-$env:RUN_ENV_API_CONNECTIVITY_TESTS = "1"
-$env:ENV_API_CONNECTIVITY_PROVIDERS = "gemini"
-.\.venv\Scripts\python.exe -m pytest tests/test_env_api_connectivity.py -s
+真实 PostgreSQL 测试默认跳过。使用隔离测试库并显式开启：
+
+```bash
+FOGMOE_TEST_POSTGRES=1 .venv/bin/pytest -q \
+  $(rg -l 'FOGMOE_TEST_POSTGRES' tests | sort)
 ```
 
-开发依赖安装：
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-```
+迁移变更还必须在空库验证 `fresh → head`，并从父版本执行一次
+`upgrade → downgrade → upgrade`；测试结束后删除隔离实例。真实 provider 连通性测试仅在人工
+诊断时使用 `RUN_ENV_API_CONNECTIVITY_TESTS=1`，不得成为普通测试或 CI 的隐式网络依赖。

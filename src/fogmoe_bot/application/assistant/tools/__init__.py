@@ -1,0 +1,1 @@
+"""Typed Assistant tool catalog."""

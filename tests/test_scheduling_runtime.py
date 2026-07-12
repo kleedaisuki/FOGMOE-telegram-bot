@@ -51,6 +51,7 @@ class _Dispatcher:
         self.executing: list[int] = []
         self.all_started = asyncio.Event()
         self.release = asyncio.Event()
+        self.execution_loop: asyncio.AbstractEventLoop | None = None
 
     async def claim_due(self, *, limit: int) -> tuple[ScheduleClaim[Any], ...]:
         """@brief 按上限返回未领取任务 / Return unclaimed work under the requested limit.
@@ -72,6 +73,7 @@ class _Dispatcher:
         """
 
         self.executing.append(claim.job.schedule_id)
+        self.execution_loop = asyncio.get_running_loop()
         if len(self.executing) == 2:
             self.all_started.set()
         await self.release.wait()

@@ -1,4 +1,6 @@
-from typing import Any, Dict, List
+"""Normalize provider-specific fields at the LiteLLM protocol boundary."""
+
+from typing import Any
 
 
 PROVIDER_SPECIFIC_KEYS = {
@@ -7,9 +9,9 @@ PROVIDER_SPECIFIC_KEYS = {
 
 
 def sanitize_tool_call_for_provider(
-    tool_call: Dict[str, Any],
+    tool_call: dict[str, Any],
     provider: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     sanitized = dict(tool_call)
     if provider != "gemini":
         for key in PROVIDER_SPECIFIC_KEYS:
@@ -20,9 +22,9 @@ def sanitize_tool_call_for_provider(
 
 
 def sanitize_message_for_provider(
-    message: Dict[str, Any],
+    message: dict[str, Any],
     provider: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     sanitized = dict(message)
     if provider != "gemini":
         for key in PROVIDER_SPECIFIC_KEYS:
@@ -50,9 +52,9 @@ def sanitize_message_for_provider(
 
 
 def sanitize_messages_for_provider(
-    messages: List[Dict[str, Any]],
+    messages: list[dict[str, Any]],
     provider: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     return [
         sanitize_message_for_provider(message, provider)
         if isinstance(message, dict)

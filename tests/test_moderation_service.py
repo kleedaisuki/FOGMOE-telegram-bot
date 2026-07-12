@@ -1,7 +1,7 @@
 import asyncio
 
 from fogmoe_bot.application.moderation.service import ModerationService
-from fogmoe_bot.domain.moderation import (
+from fogmoe_bot.domain.moderation.models import (
     ActorRole,
     ChatId,
     ContentKind,
@@ -70,9 +70,7 @@ def test_service_skips_rule_io_when_policy_is_disabled():
 
 def test_service_composes_typed_providers_and_engine():
     service = ModerationService(
-        _PolicyProvider(
-            GroupModerationPolicy(chat_id=ChatId(-1001), enabled=True)
-        ),
+        _PolicyProvider(GroupModerationPolicy(chat_id=ChatId(-1001), enabled=True)),
         _GroupRuleProvider(()),
         _GlobalRuleProvider(
             (

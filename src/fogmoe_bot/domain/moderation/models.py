@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum, auto
+from enum import Enum, StrEnum, auto
 from typing import NewType
 
 
@@ -18,6 +18,34 @@ MessageId = NewType("MessageId", int)
 
 RuleId = NewType("RuleId", int)
 """@brief 持久化审核规则 ID / Persisted moderation-rule ID."""
+
+
+class ModerationCommandReceiptConflict(RuntimeError):
+    """@brief 幂等键被复用于不同治理命令 / An idempotency key was reused for a different moderation command."""
+
+
+@dataclass(frozen=True, slots=True)
+class ModerationToggleResult:
+    """@brief 可重放的治理开关结果 / Replayable moderation-toggle result.
+
+    @param enabled 首次命令提交后的开关值 / Switch value committed by the first command.
+    @param replayed 是否来自既有回执 / Whether the result came from an existing receipt.
+    """
+
+    enabled: bool
+    replayed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class KeywordReply:
+    """@brief 一条关键词自动回复 / One keyword auto-reply.
+
+    @param keyword 触发关键词 / Trigger keyword.
+    @param response 回复内容 / Reply content.
+    """
+
+    keyword: str
+    response: str
 
 
 class ContentKind(Enum):
@@ -53,19 +81,19 @@ class RuleScope(Enum):
     GROUP = auto()
 
 
-class RuleMergeMode(Enum):
+class RuleMergeMode(StrEnum):
     """@brief 群规则与全局规则的合并策略 / Group/global rule merge strategy."""
 
-    GLOBAL_ONLY = auto()
-    EXTEND_GLOBAL = auto()
-    OVERRIDE_GLOBAL = auto()
+    GLOBAL_ONLY = "global_only"
+    EXTEND_GLOBAL = "extend_global"
+    OVERRIDE_GLOBAL = "override_global"
 
 
-class EnforcementFailureMode(Enum):
+class EnforcementFailureMode(StrEnum):
     """@brief 处置失败时的传播策略 / Propagation policy after enforcement failure."""
 
-    FAIL_OPEN = auto()
-    FAIL_CLOSED = auto()
+    FAIL_OPEN = "fail_open"
+    FAIL_CLOSED = "fail_closed"
 
 
 class Verdict(Enum):
@@ -178,21 +206,3 @@ class ModerationDecision:
         """
 
         return self.matches[0] if self.matches else None
-
-
-@dataclass(frozen=True, slots=True)
-class EnforcementResult:
-    """@brief Telegram 处置执行结果 / Telegram enforcement result.
-
-    @param decision 原始审核判决 / Original moderation decision.
-    @param message_deleted 消息是否成功删除 / Whether deletion succeeded.
-    @param warning_sent 警告是否成功发送 / Whether the warning was sent.
-    @param downstream_stopped 是否阻止后续 handler / Whether downstream handlers were stopped.
-    @param error 可选错误摘要 / Optional error summary.
-    """
-
-    decision: ModerationDecision
-    message_deleted: bool
-    warning_sent: bool
-    downstream_stopped: bool
-    error: str | None = None

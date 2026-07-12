@@ -2,8 +2,8 @@
 
 from fogmoe_dbctl.migrations.runner import run_migration_sql
 
-revision = '0005_add_ai_user_diary_pages'
-down_revision = '0004_add_ai_schedules'
+revision = "0005_add_ai_user_diary_pages"
+down_revision = "0004_add_ai_schedules"
 branch_labels = None
 depends_on = None
 

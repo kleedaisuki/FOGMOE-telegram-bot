@@ -2,6 +2,9 @@
 
 import asyncio
 import os
+from types import SimpleNamespace
+from collections.abc import Coroutine
+from typing import Any
 
 import pytest
 import telegram.error
@@ -24,6 +27,7 @@ class _RecordingApplicationBuilder:
         @param name 构建器方法名 / Builder method name.
         @return 可链式调用的方法 / Chainable method.
         """
+
         def recorder(*args: object) -> "_RecordingApplicationBuilder":
             self.calls[name] = args
             return self
@@ -35,7 +39,7 @@ class _RecordingApplicationBuilder:
 
         @return 测试应用哨兵 / Test application sentinel.
         """
-        return object()
+        return SimpleNamespace(bot=object(), bot_data={})
 
 
 def test_requests_session_is_direct_when_proxy_is_not_configured(monkeypatch):
@@ -54,12 +58,21 @@ def test_telegram_builder_configures_api_and_polling_proxy(monkeypatch):
     proxy_url = "socks5://127.0.0.1:7891"
     monkeypatch.setattr(config, "NETWORK_PROXY_URL", proxy_url)
     monkeypatch.setattr(bot_app, "ApplicationBuilder", lambda: builder)
-    monkeypatch.setattr(bot_app, "register_handlers", lambda application: None)
+    monkeypatch.setattr(
+        bot_app,
+        "assemble_handler_capabilities",
+        lambda application: None,
+    )
+    monkeypatch.setattr(bot_app, "install_error_policy", lambda application: None)
 
-    bot_app.create_application()
+    application = bot_app.create_application()
 
     assert builder.calls["proxy"] == (proxy_url,)
     assert builder.calls["get_updates_proxy"] == (proxy_url,)
+    assert builder.calls["job_queue"] == (None,)
+    assert builder.calls["updater"] == (None,)
+    assert "concurrent_updates" not in builder.calls
+    assert application.bot_data == {}
 
 
 def test_telegram_builder_configures_polling_connection_pool(monkeypatch):
@@ -68,72 +81,43 @@ def test_telegram_builder_configures_polling_connection_pool(monkeypatch):
     monkeypatch.setattr(config, "NETWORK_PROXY_URL", None)
     monkeypatch.setattr(config, "TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE", 2)
     monkeypatch.setattr(bot_app, "ApplicationBuilder", lambda: builder)
-    monkeypatch.setattr(bot_app, "register_handlers", lambda application: None)
+    monkeypatch.setattr(
+        bot_app,
+        "assemble_handler_capabilities",
+        lambda application: None,
+    )
+    monkeypatch.setattr(bot_app, "install_error_policy", lambda application: None)
 
-    bot_app.create_application()
+    application = bot_app.create_application()
 
     assert builder.calls["get_updates_connection_pool_size"] == (2,)
+    assert application.bot_data == {}
 
 
-class _PollingApplication:
-    """@brief 可编排轮询结果的测试应用 / Test application with scripted polling outcomes."""
+def test_run_rebuilds_application_after_transient_bootstrap_failure(monkeypatch):
+    """@brief 临时网络错误后退避并重建 Application / Rebuild the Application after a transient bootstrap error."""
 
-    def __init__(self, outcome: BaseException | None) -> None:
-        """@brief 保存本次轮询结果 / Store this polling outcome.
-
-        @param outcome 要抛出的异常；None 代表正常停止 / Exception to raise; None means normal stop.
-        """
-
-        self.outcome = outcome
-        self.calls: list[dict[str, object]] = []
-
-    def run_polling(self, **kwargs: object) -> None:
-        """@brief 记录参数并模拟轮询 / Record arguments and simulate polling.
-
-        @param kwargs 传入 PTB 的轮询参数 / Polling arguments passed to PTB.
-        @return None / None.
-        """
-
-        self.calls.append(kwargs)
-        if self.outcome is not None:
-            raise self.outcome
-
-
-class _SchedulingRuntime:
-    """@brief 独立 scheduling 生命周期测试替身 / Test double for independent scheduling lifecycle."""
-
-    started = 0
-    stopped = 0
-
-    def start(self) -> None:
-        """@brief 记录启动 / Record startup.
-
-        @return None / None.
-        """
-
-        type(self).started += 1
-
-    def stop(self) -> None:
-        """@brief 记录停止 / Record shutdown.
-
-        @return None / None.
-        """
-
-        type(self).stopped += 1
-
-
-
-
-def test_run_rebuilds_application_after_transient_polling_failure(monkeypatch):
-    """@brief 临时网络错误后退避并重建轮询应用 / Rebuild polling application after transient network error."""
-    first = _PollingApplication(telegram.error.NetworkError("proxy unavailable"))
-    second = _PollingApplication(None)
+    first = object()
+    second = object()
     applications = iter([first, second])
     delays: list[float] = []
-    _SchedulingRuntime.started = 0
-    _SchedulingRuntime.stopped = 0
+    attempts = 0
+
+    def run_once(coroutine: Coroutine[Any, Any, None]) -> None:
+        """@brief 编排 asyncio.run 结果并关闭未执行 coroutine / Script asyncio.run outcomes and close the unexecuted coroutine.
+
+        @param coroutine 未执行应用 coroutine / Unexecuted application coroutine.
+        @return None / None.
+        """
+
+        nonlocal attempts
+        attempts += 1
+        coroutine.close()
+        if attempts == 1:
+            raise telegram.error.NetworkError("proxy unavailable")
+
     monkeypatch.setattr(bot_app, "create_application", lambda: next(applications))
-    monkeypatch.setattr(bot_app, "SchedulingRuntime", _SchedulingRuntime)
+    monkeypatch.setattr(bot_app.asyncio, "run", run_once)
     monkeypatch.setattr(bot_app.time, "sleep", delays.append)
     monkeypatch.setattr(config, "TELEGRAM_POLLING_RETRY_INITIAL_DELAY", 1.0)
     monkeypatch.setattr(config, "TELEGRAM_POLLING_RETRY_MAX_DELAY", 30.0)
@@ -141,29 +125,28 @@ def test_run_rebuilds_application_after_transient_polling_failure(monkeypatch):
     bot_app.run()
 
     assert delays == [1.0]
-    assert first.calls == [
-        {
-            "timeout": config.TELEGRAM_GET_UPDATES_TIMEOUT,
-            "bootstrap_retries": 0,
-        }
-    ]
-    assert second.calls == first.calls
-    assert (_SchedulingRuntime.started, _SchedulingRuntime.stopped) == (1, 1)
+    assert attempts == 2
 
 
-def test_run_propagates_nonrecoverable_polling_failure(monkeypatch):
+def test_run_propagates_nonrecoverable_bootstrap_failure(monkeypatch):
     """@brief 无效 token 等永久错误不应无限重试 / Permanent errors such as bad tokens must not retry forever."""
-    application = _PollingApplication(telegram.error.InvalidToken("bad token"))
-    monkeypatch.setattr(bot_app, "create_application", lambda: application)
-    monkeypatch.setattr(bot_app, "SchedulingRuntime", _SchedulingRuntime)
+    application = object()
 
-    _SchedulingRuntime.started = 0
-    _SchedulingRuntime.stopped = 0
+    def fail(coroutine: Coroutine[Any, Any, None]) -> None:
+        """@brief 关闭 coroutine 并抛永久错误 / Close the coroutine and raise a permanent error.
+
+        @param coroutine 未执行应用 coroutine / Unexecuted application coroutine.
+        @return None / None.
+        """
+
+        coroutine.close()
+        raise telegram.error.InvalidToken("bad token")
+
+    monkeypatch.setattr(bot_app, "create_application", lambda: application)
+    monkeypatch.setattr(bot_app.asyncio, "run", fail)
 
     with pytest.raises(telegram.error.InvalidToken):
         bot_app.run()
-
-    assert (_SchedulingRuntime.started, _SchedulingRuntime.stopped) == (1, 1)
 
 
 def test_requests_session_uses_configured_socks_proxy(monkeypatch):
@@ -220,7 +203,9 @@ def test_configure_proxy_environment_overrides_all_standard_variables(monkeypatc
     assert {
         variable_name: os.environ[variable_name]
         for variable_name in proxy.PROXY_ENVIRONMENT_VARIABLES
-    } == {variable_name: proxy_url for variable_name in proxy.PROXY_ENVIRONMENT_VARIABLES}
+    } == {
+        variable_name: proxy_url for variable_name in proxy.PROXY_ENVIRONMENT_VARIABLES
+    }
 
 
 @pytest.mark.parametrize(

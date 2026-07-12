@@ -53,6 +53,58 @@ def test_safe_send_markdown_retries_timed_out(monkeypatch):
     assert sleeps == [telegram_utils.TELEGRAM_SEND_RETRY_INITIAL_DELAY_SECONDS]
 
 
+def test_safe_send_markdown_falls_back_when_reply_target_disappears(monkeypatch):
+    primary_calls = []
+    fallback_calls = []
+
+    async def primary(text, **kwargs):
+        primary_calls.append((text, kwargs))
+        raise telegram.error.BadRequest("Message to be replied not found")
+
+    async def fallback(text, **kwargs):
+        fallback_calls.append((text, kwargs))
+        return "sent"
+
+    monkeypatch.setattr(telegram_utils, "telegramify_markdown", None)
+
+    sent = asyncio.run(
+        telegram_utils.safe_send_markdown(
+            primary,
+            "hello",
+            fallback_send=fallback,
+            reply_to_message_id=42,
+        )
+    )
+
+    assert sent == ["sent"]
+    assert primary_calls[0][1]["reply_to_message_id"] == 42
+    assert "reply_to_message_id" not in fallback_calls[0][1]
+
+
+def test_safe_send_markdown_reports_completed_chunks_on_partial_failure(monkeypatch):
+    calls = []
+
+    async def send(text, **kwargs):
+        calls.append((text, kwargs))
+        if len(calls) == 2:
+            raise telegram.error.Forbidden("blocked")
+        return "first"
+
+    with pytest.raises(telegram_utils.PartialTelegramSendError) as caught:
+        asyncio.run(
+            telegram_utils.safe_send_markdown(
+                send,
+                "hello " + "x" * telegram_utils.TELEGRAM_MAX_MESSAGE_LENGTH,
+                reply_to_message_id=42,
+            )
+        )
+
+    assert caught.value.sent_messages == ["first"]
+    assert caught.value.sent_text == "hello"
+    assert calls[0][1]["reply_to_message_id"] == 42
+    assert "reply_to_message_id" not in calls[1][1]
+
+
 def test_retry_telegram_send_uses_retry_after_delay(monkeypatch):
     attempts = 0
     sleeps = []

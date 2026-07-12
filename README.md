@@ -3,7 +3,7 @@
 <div align="center">
 
 ![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)
-![Python](https://img.shields.io/badge/python-3.10+-green.svg)
+![Python](https://img.shields.io/badge/python-3.14-green.svg)
 ![Telegram Bot](https://img.shields.io/badge/Telegram-Bot-blue.svg)
 
 一个功能丰富、可扩展的 Telegram 机器人，集成 AI 聊天、经济系统、娱乐游戏和群组管理功能。
@@ -59,7 +59,7 @@
 
 ### 环境要求
 
-- **Python**: 3.10 或更高版本
+- **Python**: 3.14
 - **PostgreSQL**: 15 或更高版本
 - **操作系统**: Linux / macOS / Windows
 
@@ -71,7 +71,7 @@ git clone https://github.com/kleedaisuki/FOGMOE-telegram-bot.git
 cd FOGMOE-telegram-bot
 
 # 安装 Python 依赖和命令行入口
-python3 -m pip install -e .
+python -m pip install -e .
 ```
 
 ### 配置环境变量
@@ -90,8 +90,6 @@ AI 调用统一通过 LiteLLM SDK，provider 和模型需要在 `.env` 中显式
 AI_CHAT_ORDER=openai,openrouter,siliconflow,azure,zhipu,gemini
 AI_SUMMARY_PROVIDER=openai
 AI_TRANSLATE_PROVIDER=openai
-AI_VISION_PROVIDER=openai
-AI_CLASSIFIER_PROVIDER=openai
 ```
 
 ### 数据库设置
@@ -104,7 +102,7 @@ fogmoe-dbctl bootstrap-postgres
 fogmoe-dbctl migrate
 
 # 通过受配置保护的 service 导出一张表；不会接受任意 SQL
-fogmoe-dbctl export-csv --table conversation.chat_records --output ./chat_records.csv
+fogmoe-dbctl export-csv --table conversation.conversation_messages --output ./conversation_messages.csv
 ```
 数据库迁移由 `fogmoe-dbctl` 显式管理，机器人启动时不会自动迁移外部数据库。
 CLI 的分层结构和子命令扩展约定见 [`docs/dbctl.md`](docs/dbctl.md)。
@@ -133,6 +131,9 @@ kill <PID>
 # 编辑 runBot.sh 查看命令
 ```
 
+`runBot.sh stop` 默认最多等待 40 秒，让运行时完成分阶段排空；部署环境可通过
+`BOT_STOP_TIMEOUT_SECONDS` 调整脚本的强制终止上限。
+
 ---
 
 ## 📦 部署指南
@@ -141,13 +142,13 @@ kill <PID>
 
 ```bash
 # 创建虚拟环境
-python3 -m venv venv
+python -m venv .venv
 
 # 激活虚拟环境
 # Linux/macOS:
-source venv/bin/activate
+source .venv/bin/activate
 # Windows:
-venv\Scripts\activate
+.venv\Scripts\activate
 ```
 
 ---
@@ -157,7 +158,7 @@ venv\Scripts\activate
 ### 必需配置
 
 #### 获取必要的 API 密钥
-在 `.env` `config.py` 文件中配置必需项。
+在 `.env` 中配置必需项；不要把真实密钥提交到仓库。
 
 ---
 
@@ -170,7 +171,7 @@ venv\Scripts\activate
 
 无需在容器内运行 PostgreSQL，只容器化机器人。
 
-1. 复制 `.env.example` 为 `.env`，填好 Telegram/AI/PostgreSQL 配置；`POSTGRES_HOST` 设为外部数据库地址（宿主机 PostgreSQL 可用 `host.docker.internal` 或宿主机 IP）。  
+1. 复制 `.env.example` 为 `.env`，填好 Telegram/AI/PostgreSQL 配置；`POSTGRES_HOST` 设为外部数据库地址（宿主机 PostgreSQL 可用 `host.docker.internal` 或宿主机 IP）。
 2. 构建镜像：
    ```bash
    docker compose build bot
@@ -179,7 +180,9 @@ venv\Scripts\activate
    ```bash
    docker compose up -d bot
    ```
-4. 查看日志：`docker compose logs -f bot`。如需把日志落盘到宿主机，取消 `docker-compose.yml` 中 `logs` 挂载行的注释。
+4. 查看日志：`docker compose logs -f bot`。Compose 默认用 `fogmoe-runtime` named volume 持久化
+   文件日志、待投递媒体 artifact 与跨进程限流状态；如需直接查看宿主机文件，可把该挂载改成
+   `./logs:/app/logs`。Compose 的 40 秒停止宽限覆盖运行时默认 30 秒分阶段排空窗口。
 5. 更新代码并重建/重启容器：
    ```bash
    git pull --ff-only && docker compose up -d --build bot
@@ -192,7 +195,7 @@ venv\Scripts\activate
 
    如果服务器上的 Docker 需要 root 权限，把 `docker` 改成 `sudo docker` 即可。
 
-> 默认镜像基于 `python:3.11-slim`，入口命令为 `fogmoe-bot`，仅依赖外部 PostgreSQL。
+> 默认镜像基于 `python:3.14-slim`，入口命令为 `fogmoe-bot`，仅依赖外部 PostgreSQL。
 
 
 ### 使用的主要技术
@@ -205,12 +208,38 @@ venv\Scripts\activate
 - [智谱 AI](https://open.bigmodel.cn/) - 中文 AI 模型
 - [PostgreSQL](https://www.postgresql.org/) - 数据库
 
+### 核心代码分层
+
+- `src/fogmoe_bot/domain/`：纯领域状态、不变量和值类型，不依赖 Telegram、SQLAlchemy 或 HTTP SDK
+- `src/fogmoe_bot/application/runtime/`：有界 keyed mailbox 与统一后台服务生命周期
+- `src/fogmoe_bot/application/conversation/`：durable inbox、Turn、inference activity 与 outbox 工作流
+- `src/fogmoe_bot/application/assistant/`：provider-neutral Agent、严格推理命令和类型化工具目录
+- `src/fogmoe_bot/presentation/telegram/`：Telegram Update 映射、显式路由和薄适配器
+- `src/fogmoe_bot/infrastructure/database/`：PostgreSQL UoW、lease/fencing 与 bounded-context adapters
+- `src/fogmoe_bot/infrastructure/assistant/`：LLM/HTTP/media 工具适配与 composition
+- `src/fogmoe_dbctl/`：独立数据库控制面；机器人运行时不会隐式执行迁移
+
+执行模型、状态所有权、幂等边界和迁移决策详见
+[`docs/runtime-architecture.md`](docs/runtime-architecture.md)。
+
 ---
 
 ## 🤝 贡献指南
 
-我们欢迎所有形式的贡献！
-如果发现 Bug 或有功能建议，请报告问题。
+开发依赖与本地门禁：
+
+```bash
+python -m pip install -e '.[dev]'
+python -m compileall -q src tests
+ruff check .
+pyright
+mypy --strict src/fogmoe_bot src/fogmoe_dbctl
+pytest -q
+```
+
+涉及迁移、事务、lease/fencing 或幂等 receipt 的改动，还必须在独立的临时
+PostgreSQL 实例上覆盖 upgrade、downgrade/re-up 与对应真实语义测试。
+完整命令和测试分层见 [`docs/testing-guidelines.md`](docs/testing-guidelines.md)。
 
 ---
 

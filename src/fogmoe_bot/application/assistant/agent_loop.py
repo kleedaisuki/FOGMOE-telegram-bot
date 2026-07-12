@@ -1,494 +1,420 @@
-"""@brief 状态化 Agent 回合编排 / Stateful Agent turn orchestration."""
+"""@brief 可恢复的异步 Agent 状态机 / Resumable asynchronous Agent state machine.
 
+每个 provider response 在执行其 tool calls 前 checkpoint。重启后相同 Turn 从 checkpoint
+恢复，再由 effect receipt 重放每个工具结果，因此不会重新规划已发生的 mutation。/
+Every provider response is checkpointed before its tool calls execute. After restart the same Turn
+resumes from that checkpoint and replays every result through effect receipts, so already-applied
+mutations are never replanned.
+"""
+
+from __future__ import annotations
+
+import hashlib
 import json
-import logging
-from collections.abc import Callable
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import cast
 
-from fogmoe_bot.domain.agent_runtime import AgentRuntime, DEFAULT_AGENT_RUNTIME, ToolTask
-from fogmoe_bot.domain.agent_runtime.events import RuntimeEvent
-from fogmoe_bot.domain.agent_runtime.protocol import (
-    assistant_message_to_plain,
-    normalise_tool_calls,
-)
 from fogmoe_bot.domain.context import ContextState
-from fogmoe_bot.infrastructure.llm.litellm_client import create_chat_completion
+from fogmoe_bot.domain.conversation.payloads import (
+    JsonObject,
+    JsonValue,
+)
 
-from .errors import PartialAgentResponseError
-from .inference.output import VisibleContentSink
-from .inference.visible_output import emit_visible_content
+from .completion import (
+    AgentCheckpointConflictError,
+    AgentCheckpointPersistence,
+    AgentStepCheckpoint,
+    AssistantCompletion,
+    AssistantCompletionPort,
+)
+from .errors import ResumableAgentInterruptedError
+from .tool_runtime import (
+    AgentRuntime,
+    AssistantToolCallEvent,
+    RuntimeEvent,
+    ToolExecutionContext,
+    ToolResultEvent,
+    ToolRuntimeResult,
+)
 
 
-CompletionClient = Callable[..., Any]
-"""@brief 同步模型完成调用 / Synchronous model-completion call."""
-
-
-@dataclass
+@dataclass(frozen=True, slots=True)
 class AgentResponse:
-    """@brief Agent 回合输出 / Agent turn output."""
+    """@brief Agent 回合输出 / Agent-turn output.
+
+    @param text 最终文本 / Final text.
+    @param events receipt-backed 事件 / Receipt-backed events.
+    @param context_state 已更新 attempt-local 上下文 / Updated attempt-local context.
+    """
 
     text: str
-    events: list[RuntimeEvent]
+    events: Sequence[RuntimeEvent]
     context_state: ContextState | None = None
 
-    def __iter__(self) -> Iterator[object]:
-        """@brief 保持二元解包兼容 / Preserve two-value unpacking compatibility.
 
-        @return 依次产出文本和事件 / Yield text then events.
-        """
-
-        yield self.text
-        yield self.events
-
-    def __len__(self) -> int:
-        """@brief 保持二元响应长度兼容 / Preserve two-value response length compatibility.
-
-        @return 固定为 2 / Always 2.
-        """
-
-        return 2
-
-    def __getitem__(self, index: int | slice) -> object:
-        """@brief 保持元组式索引兼容 / Preserve tuple-style indexing compatibility.
-
-        @param index 整数或切片索引 / Integer or slice index.
-        @return 对应公开响应字段 / Requested public response field.
-        """
-
-        return (self.text, self.events)[index]
-
-    def __eq__(self, other: object) -> bool:
-        """@brief 兼容旧的二元组比较 / Support legacy two-tuple comparison.
-
-        @param other 比较对象 / Object to compare.
-        @return 是否具有相同公开响应 / Whether public responses are equal.
-        """
-
-        if isinstance(other, tuple) and len(other) == 2:
-            return (self.text, self.events) == other
-        if not isinstance(other, AgentResponse):
-            return NotImplemented
-        return (
-            self.text == other.text
-            and self.events == other.events
-            and self.context_state == other.context_state
-        )
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AgentExecutionConfig:
-    """@brief AgentLoop 的运行配置 / Runtime configuration for AgentLoop.
-
-    配置只描述模型与循环策略，不携带用户、消息或其他 ContextState 内容。
-    / Configuration describes model and loop policy only; it carries no user,
-    message, or other ContextState content.
-    """
+    """@brief Agent 状态机配置 / Agent-state-machine configuration."""
 
     provider: str
     model: str
     provider_name: str = "AI"
-    tool_choice: str | dict[str, object] = "auto"
+    tool_choice: str | JsonObject | None = "auto"
     max_tokens: int = 4096
     max_iterations: int = 10
     skip_tools: frozenset[str] = field(default_factory=frozenset)
-    completion_kwargs: dict[str, Any] | None = None
+    allow_tools: bool = True
+    completion_options: Mapping[str, JsonValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """@brief 校验显式容量 / Validate explicit bounds.
+
+        @return None / None.
+        """
+
+        if not self.provider.strip() or not self.model.strip():
+            raise ValueError("provider and model cannot be empty")
+        if self.max_tokens < 1 or self.max_iterations < 1:
+            raise ValueError("max_tokens and max_iterations must be positive")
 
 
-@dataclass
+@dataclass(slots=True)
 class AgentExecutionState:
-    """@brief 单回合的可变执行状态 / Mutable execution state for one turn.
-
-    该对象只在 AgentLoop 内演进；长期记忆由上层持久化。
-    / This object evolves only inside AgentLoop; long-term memory is persisted by
-    upper layers.
-    """
+    """@brief 单 attempt 的可重建执行状态 / Rebuildable execution state for one attempt."""
 
     context: ContextState
     config: AgentExecutionConfig
-    messages: list[dict[str, Any]]
+    messages: list[JsonObject]
     events: list[RuntimeEvent] = field(default_factory=list)
-    iteration: int = 0
+    step: int = 0
 
     @classmethod
     def from_context(
         cls,
         context: ContextState,
         config: AgentExecutionConfig,
-    ) -> "AgentExecutionState":
-        """@brief 从领域上下文创建执行状态 / Create execution state from domain context.
+    ) -> AgentExecutionState:
+        """@brief 从规范上下文建立 attempt 状态 / Build attempt state from canonical context.
 
-        @param context 本回合领域上下文 / Domain context for this turn.
-        @param config AgentLoop 运行配置 / AgentLoop runtime configuration.
-        @return 尚未执行的回合状态 / Unexecuted turn state.
+        @param context attempt-local 上下文 / Attempt-local context.
+        @param config 配置 / Configuration.
+        @return 新状态 / New state.
         """
-        return cls(
-            context=context,
-            config=config,
-            messages=[
-                message
-                for message in context.messages
-                if message.get("content") is not None or message.get("tool_calls")
-            ],
-        )
+
+        messages = tuple(_message(value) for value in context.messages)
+        return cls(context, config, list(messages))
+
 
 class AgentLoop:
-    """@brief 执行单次 Agent 工具回合 / Execute one Agent tool-use turn.
-
-    Loop 持有 Runtime、模型调用与上下文构造依赖；每次 run 的消息、事件和轮次状态
-    都是局部变量，因此共享实例不会在并发请求之间泄露状态。
-    / The Loop owns Runtime, model-call and context-building dependencies. Each
-    run keeps messages, events and iteration state local, so a shared instance
-    does not leak state across concurrent requests.
-    """
+    """@brief Provider completion 与 durable tools 的异步状态机 / Async state machine for provider completion and durable tools."""
 
     def __init__(
         self,
         *,
         runtime: AgentRuntime,
-        completion_client: CompletionClient,
+        completion: AssistantCompletionPort,
+        checkpoints: AgentCheckpointPersistence,
     ) -> None:
-        """@brief 初始化 Agent Loop / Initialize the Agent Loop.
+        """@brief 注入全部外部端口 / Inject every external port.
 
-        @param runtime AgentRuntime 任务执行环境 / AgentRuntime task execution environment.
-        @param completion_client 同步模型调用依赖 / Synchronous model-call dependency.
+        @param runtime 无状态工具协调器 / Stateless tool coordinator.
+        @param completion 异步 provider port / Async provider port.
+        @param checkpoints durable step store / Durable step store.
         """
-        self._runtime = runtime
-        self._completion_client = completion_client
 
-    def run(
+        self._runtime = runtime
+        self._completion = completion
+        self._checkpoints = checkpoints
+
+    async def run(
         self,
         context: ContextState,
         config: AgentExecutionConfig,
         *,
-        visible_content_handler: VisibleContentSink | None = None,
+        tool_context: ToolExecutionContext | None = None,
         state: AgentExecutionState | None = None,
     ) -> AgentResponse:
-        """@brief 驱动一个 Agent 回合 / Drive an Agent turn.
+        """@brief 运行或恢复一个 Agent Turn / Run or resume one Agent Turn.
 
-        @param context 本回合领域上下文 / Domain context for this turn.
-        @param config AgentLoop 运行配置 / AgentLoop runtime configuration.
-        @param visible_content_handler 本回合可见输出端口 / Visible output sink for this turn.
-        @param state 可选的既有执行状态 / Optional existing execution state.
-        @return 文本回复和 Runtime 事件 / Text reply and Runtime events.
+        @param context attempt-local 规范上下文 / Attempt-local canonical context.
+        @param config route 配置 / Route configuration.
+        @param tool_context durable 工具身份；禁用工具时可省略 / Durable tool identity; optional when tools are disabled.
+        @param state 测试用可选状态 / Optional state for tests.
+        @return 最终响应 / Final response.
         """
-        state = state or AgentExecutionState.from_context(context, config)
-        if state.context != context or state.config != config:
-            raise ValueError("AgentExecutionState does not belong to this ContextState/config pair")
 
-        for iteration in range(state.iteration, config.max_iterations):
-            state.iteration = iteration + 1
-            response = self._request_with_partial_events(
-                config=config,
-                state=state,
-                tools=self._runtime.tool_definitions,
-                tool_choice=config.tool_choice,
+        current = state or AgentExecutionState.from_context(context, config)
+        if current.context is not context or current.config != config:
+            raise ValueError("AgentExecutionState belongs to another context/config")
+        if config.allow_tools and tool_context is None:
+            raise ValueError("tool_context is required when tools are enabled")
+        while current.step < config.max_iterations:
+            completion = await self._complete_step(
+                current, tool_context=tool_context, expose_tools=config.allow_tools
             )
-            assistant_message = response.choices[0].message
-            raw_tool_calls = getattr(assistant_message, "tool_calls", None)
-            assistant_content = assistant_message.content or ""
-            if not raw_tool_calls:
-                logging.info("%s 第 %s 轮：无工具调用，直接返回答案", config.provider_name, iteration + 1)
-                return self._final_response(
-                    config=config,
-                    state=state,
-                    content_text=assistant_content,
-                    visible_content_handler=visible_content_handler,
+            if not completion.tool_calls:
+                return _final_response(current, completion)
+            if not config.allow_tools:
+                raise ValueError(
+                    "provider returned tool calls while tools were disabled"
                 )
-
-            tool_calls = normalise_tool_calls(raw_tool_calls)
-            logging.info("%s 第 %s 轮：检测到 %s 个工具调用", config.provider_name, iteration + 1, len(tool_calls))
-            assistant_content_for_model, completed = self._emit_intermediate_content(
-                content=assistant_content,
-                config=config,
-                state=state,
-                visible_content_handler=visible_content_handler,
+            current.messages.append(dict(completion.message))
+            await self._execute_calls(
+                current,
+                completion=completion,
+                tool_context=cast(ToolExecutionContext, tool_context),
             )
-            if not completed:
-                return self._response(state, "")
+            current.step += 1
 
-            assistant_model_message = assistant_message_to_plain(
-                assistant_message,
-                content=assistant_content_for_model,
-                tool_calls=tool_calls,
-            )
-            state.messages.append(assistant_model_message)
-            self._consume_tool_calls(
-                tool_calls=tool_calls,
-                assistant_message=assistant_model_message,
-                config=config,
-                state=state,
-                visible_content_handler=visible_content_handler,
-            )
-
-        logging.warning("%s 工具调用次数超限（%s轮）", config.provider_name, config.max_iterations)
-        response = self._request_with_partial_events(
-            config=config,
-            state=state,
+        completion = await self._complete_step(
+            current, tool_context=tool_context, expose_tools=False
         )
-        assistant_message = response.choices[0].message
-        if getattr(assistant_message, "tool_calls", None):
-            logging.warning("%s 工具调用超限后的最终回复仍包含工具调用，忽略工具调用。", config.provider_name)
-        return self._final_response(
-            config=config,
-            state=state,
-            content_text=assistant_message.content or "",
-            visible_content_handler=visible_content_handler,
-        )
+        return _final_response(current, completion)
 
-    def _request_with_partial_events(
+    async def _complete_step(
         self,
-        *,
-        config: AgentExecutionConfig,
         state: AgentExecutionState,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str | dict[str, object] | None = None,
-    ) -> Any:
-        """@brief 请求模型并保留部分事件 / Request a model while preserving partial events.
+        *,
+        tool_context: ToolExecutionContext | None,
+        expose_tools: bool,
+    ) -> AssistantCompletion:
+        """@brief 读取 checkpoint 或先调用 provider 再保存 / Load a checkpoint or call and then persist the provider.
 
-        @param config AgentLoop 运行配置 / AgentLoop runtime configuration.
-        @param state 当前可恢复状态 / Current resumable state.
-        @param tools 可选工具定义 / Optional tool definitions.
-        @param tool_choice 可选工具选择策略 / Optional tool-choice policy.
-        @return provider 响应 / Provider response.
+        @param state 当前状态 / Current state.
+        @param tool_context durable identity / Durable identity.
+        @param expose_tools 是否暴露目录 / Whether to expose the catalog.
+        @return 规范完成 / Canonical completion.
         """
-        request_kwargs: dict[str, Any] = {
-            "messages": state.messages,
-            "max_tokens": config.max_tokens,
-            **(config.completion_kwargs or {}),
-        }
-        if tools is not None:
-            request_kwargs["tools"] = tools
-            request_kwargs["tool_choice"] = tool_choice
+
+        route_key = f"{state.config.provider}:{state.config.model}"
+        request_hash = _completion_request_hash(state, expose_tools=expose_tools)
+        if tool_context is None:
+            return await self._completion.complete(
+                provider=state.config.provider,
+                model=state.config.model,
+                messages=tuple(state.messages),
+                tools=(),
+                tool_choice=None,
+                max_tokens=state.config.max_tokens,
+                request_options=state.config.completion_options,
+            )
+        existing = await self._checkpoints.load_step(tool_context.turn_id, state.step)
+        if existing is not None:
+            _validate_checkpoint(
+                existing, request_hash=request_hash, route_key=route_key
+            )
+            return existing.completion
+        definitions = (
+            tuple(
+                definition
+                for definition in self._runtime.tool_definitions
+                if definition.name not in state.config.skip_tools
+            )
+            if expose_tools
+            else ()
+        )
         try:
-            return self._completion_client(config.provider, config.model, **request_kwargs)
-        except Exception as exc:
-            if state.events:
-                raise PartialAgentResponseError(str(exc), state.events) from exc
+            completion = await self._completion.complete(
+                provider=state.config.provider,
+                model=state.config.model,
+                messages=tuple(state.messages),
+                tools=definitions,
+                tool_choice=(state.config.tool_choice if expose_tools else None),
+                max_tokens=state.config.max_tokens,
+                request_options=state.config.completion_options,
+            )
+        except Exception as error:
+            if state.step > 0 or state.events:
+                raise ResumableAgentInterruptedError(
+                    str(error) or error.__class__.__name__
+                ) from error
             raise
-
-    def _emit_intermediate_content(
-        self,
-        *,
-        content: str,
-        config: AgentExecutionConfig,
-        state: AgentExecutionState,
-        visible_content_handler: VisibleContentSink | None,
-    ) -> tuple[str, bool]:
-        """@brief 投递带工具调用的中间文本 / Emit intermediate text accompanying tool calls.
-
-        @param content assistant 中间文本 / Assistant intermediate text.
-        @param config AgentLoop 运行配置 / AgentLoop runtime configuration.
-        @param state 当前可恢复状态 / Current resumable state.
-        @return 回填模型的文本和是否完成 / Model-feedback text and completion flag.
-        """
-        if visible_content_handler is None or not content.strip():
-            return content, True
-        visible_result = emit_visible_content(
-            visible_content_handler,
-            content,
-            provider_name=config.provider_name,
+        checkpoint = AgentStepCheckpoint(
+            turn_id=tool_context.turn_id,
+            step_no=state.step,
+            request_hash=request_hash,
+            route_key=route_key,
+            completion=completion,
         )
-        if visible_result.content:
-            state.events.append({"type": "assistant_visible", "content": visible_result.content})
-            return visible_result.content, visible_result.completed
-        return content, visible_result.completed
+        canonical = await self._checkpoints.save_step(checkpoint)
+        _validate_checkpoint(canonical, request_hash=request_hash, route_key=route_key)
+        return canonical.completion
 
-    def _consume_tool_calls(
+    async def _execute_calls(
         self,
-        *,
-        tool_calls: list[dict[str, Any]],
-        assistant_message: dict[str, Any],
-        config: AgentExecutionConfig,
         state: AgentExecutionState,
-        visible_content_handler: VisibleContentSink | None,
+        *,
+        completion: AssistantCompletion,
+        tool_context: ToolExecutionContext,
     ) -> None:
-        """@brief 提交并消费本轮工具调用 / Submit and consume this turn's tool calls.
+        """@brief 顺序执行一个 checkpoint 中的工具调用 / Sequentially execute calls from one checkpoint.
 
-        @param tool_calls 已归一化工具调用 / Normalized tool calls.
-        @param assistant_message 要持久化的 assistant 调用消息 / Assistant call message to persist.
-        @param config AgentLoop 运行配置 / AgentLoop runtime configuration.
-        @param state 当前可恢复状态 / Current resumable state.
+        @param state 当前状态 / Current state.
+        @param completion 已持久化完成 / Persisted completion.
+        @param tool_context durable identity / Durable identity.
+        @return None / None.
         """
-        assistant_message_logged = False
-        for tool_call in tool_calls:
-            function_payload = tool_call.get("function") or {}
-            function_name = function_payload.get("name")
-            if not function_name:
-                logging.warning("%s 返回的工具调用缺少函数名: %s", config.provider_name, tool_call)
-                continue
-            if function_name in config.skip_tools:
-                continue
-            task_result = self._execute_tool_task(
-                tool_name=function_name,
-                raw_arguments=function_payload.get("arguments"),
-                invocation_id=tool_call.get("id"),
-                config=config,
-                visible_content_handler=visible_content_handler,
-            )
-            assistant_message_logged = self._append_task_events(
-                task_result=task_result,
-                assistant_message=assistant_message,
-                assistant_message_logged=assistant_message_logged,
-                state=state,
-            )
 
-    def _execute_tool_task(
-        self,
-        *,
-        tool_name: str,
-        raw_arguments: Any,
-        invocation_id: str | None,
-        config: AgentExecutionConfig,
-        visible_content_handler: VisibleContentSink | None,
-    ) -> Any:
-        """@brief 在 Runtime 中执行一个能力任务 / Execute one capability task in the Runtime.
-
-        @param tool_name 能力名称 / Capability name.
-        @param raw_arguments provider 原始参数 / Raw provider arguments.
-        @param invocation_id provider 调用标识 / Provider invocation identifier.
-        @param config AgentLoop 运行配置 / AgentLoop runtime configuration.
-        @return Runtime 任务结果 / Runtime task result.
-        """
-        handle = self._runtime.submit(
-            ToolTask(
-                name=tool_name,
-                arguments=self._parse_tool_arguments(raw_arguments, provider_name=config.provider_name),
-                invocation_id=invocation_id,
-                producer_name=config.provider_name,
+        for ordinal, call in enumerate(completion.tool_calls):
+            if call.name in state.config.skip_tools:
+                continue
+            result = await self._runtime.execute(
+                context=tool_context,
+                step=state.step,
+                ordinal=ordinal,
+                provider_call_id=call.provider_call_id,
+                tool_name=call.name,
+                raw_arguments=_parse_arguments(call.arguments),
             )
-        )
-        return self._runtime.consume(handle, visible_content_handler=visible_content_handler)
+            self._append_call(
+                state, completion=completion, result=result, first=ordinal == 0
+            )
 
     @staticmethod
-    def _append_task_events(
-        *,
-        task_result: Any,
-        assistant_message: dict[str, Any],
-        assistant_message_logged: bool,
+    def _append_call(
         state: AgentExecutionState,
-    ) -> bool:
-        """@brief 记录任务事件并回填模型结果 / Record task events and feed result back to the model.
+        *,
+        completion: AssistantCompletion,
+        result: ToolRuntimeResult,
+        first: bool,
+    ) -> None:
+        """@brief 追加事件与 provider tool message / Append events and a provider tool message.
 
-        @param task_result Runtime 任务结果 / Runtime task result.
-        @param assistant_message assistant 调用消息 / Assistant call message.
-        @param assistant_message_logged 是否已记录调用消息 / Whether the call message was logged.
-        @param state 当前可恢复状态 / Current resumable state.
-        @return 更新后的调用消息记录状态 / Updated call-message logging state.
+        @param state 当前状态 / Current state.
+        @param completion 调用来源消息 / Source message.
+        @param result receipt 结果 / Receipt result.
+        @param first 是否本消息第一调用 / Whether this is the first call in the message.
+        @return None / None.
         """
-        call_event: RuntimeEvent = {
+
+        call_event: AssistantToolCallEvent = {
             "type": "assistant_tool_call",
-            "tool_name": task_result.name,
-            "arguments": task_result.logged_arguments,
-            "tool_call_id": task_result.invocation_id,
+            "tool_name": result.name,
+            "arguments": cast(JsonValue, result.arguments),
+            "tool_call_id": result.provider_call_id,
+            "invocation_id": result.invocation_id,
         }
-        if task_result.validation_error is not None:
-            call_event["validation_error"] = task_result.validation_error
-        if not assistant_message_logged:
-            call_event["assistant_message"] = assistant_message
-            assistant_message_logged = True
+        if first:
+            call_event["assistant_message"] = dict(completion.message)
+        if result.validation_error is not None:
+            call_event["validation_error"] = result.validation_error
         state.events.append(call_event)
         state.messages.append(
             {
                 "role": "tool",
-                "tool_call_id": task_result.invocation_id,
-                "name": task_result.name,
-                "content": json.dumps(task_result.public_result, ensure_ascii=False),
+                "tool_call_id": result.provider_call_id,
+                "name": result.name,
+                "content": json.dumps(
+                    result.public_result, ensure_ascii=False, separators=(",", ":")
+                ),
             }
         )
-        result_event: RuntimeEvent = {
+        result_event: ToolResultEvent = {
             "type": "tool_result",
-            "tool_name": task_result.name,
-            "arguments": task_result.arguments,
-            "result": task_result.public_result,
-            "tool_call_id": task_result.invocation_id,
-            "internal_result": task_result.internal_result,
+            "tool_name": result.name,
+            "arguments": result.arguments,
+            "result": result.public_result,
+            "tool_call_id": result.provider_call_id,
+            "invocation_id": result.invocation_id,
+            "effect_kind": result.effect_kind,
+            "replayed": result.replayed,
         }
-        if task_result.media_sent:
-            result_event["media_sent"] = True
-            result_event["sent_message_count"] = task_result.sent_message_count
         state.events.append(result_event)
-        return assistant_message_logged
 
-    @staticmethod
-    def _parse_tool_arguments(raw_arguments: Any, *, provider_name: str) -> Any:
-        """@brief 解析 Agent 工具参数 / Parse Agent tool arguments.
 
-        @param raw_arguments provider 返回的原始参数 / Raw provider arguments.
-        @param provider_name provider 名称 / Provider name.
-        @return 可提交给 Runtime 的参数 / Arguments suitable for Runtime submission.
-        """
-        if isinstance(raw_arguments, (dict, list)):
-            return raw_arguments
+def _completion_request_hash(state: AgentExecutionState, *, expose_tools: bool) -> str:
+    """@brief 摘要一个模型 step 输入 / Digest one model-step input.
+
+    @param state 当前状态 / Current state.
+    @param expose_tools 是否暴露工具 / Whether tools are exposed.
+    @return SHA-256 / SHA-256.
+    """
+
+    payload = {
+        "messages": state.messages,
+        "provider": state.config.provider,
+        "model": state.config.model,
+        "max_tokens": state.config.max_tokens,
+        "tool_choice": state.config.tool_choice if expose_tools else None,
+        "expose_tools": expose_tools,
+        "skip_tools": sorted(state.config.skip_tools),
+        "options": dict(state.config.completion_options),
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _validate_checkpoint(
+    checkpoint: AgentStepCheckpoint,
+    *,
+    request_hash: str,
+    route_key: str,
+) -> None:
+    """@brief 拒绝 checkpoint identity drift / Reject checkpoint identity drift.
+
+    @param checkpoint 规范 checkpoint / Canonical checkpoint.
+    @param request_hash 期望输入摘要 / Expected input digest.
+    @param route_key 期望 route / Expected route.
+    @return None / None.
+    """
+
+    if checkpoint.request_hash != request_hash or checkpoint.route_key != route_key:
+        raise AgentCheckpointConflictError(
+            f"Agent checkpoint conflict at step {checkpoint.step_no}"
+        )
+
+
+def _parse_arguments(value: JsonValue) -> object:
+    """@brief 解码 provider arguments / Decode provider arguments.
+
+    @param value JSON 字符串或树 / JSON string or tree.
+    @return 参数对象 / Argument object.
+    """
+
+    if isinstance(value, str):
         try:
-            return json.loads(raw_arguments or "{}")
-        except (TypeError, json.JSONDecodeError) as exc:
-            logging.error("%s 工具参数解析失败: %s", provider_name, exc)
+            decoded: object = json.loads(value or "{}")
+        except json.JSONDecodeError:
             return {}
-
-    @staticmethod
-    def _response(
-        state: AgentExecutionState,
-        text: str,
-        *,
-        history_content: str | None = None,
-    ) -> AgentResponse:
-        """@brief 返回并提交本轮 Agent 消息 / Return and commit this turn's Agent messages.
-
-        @param state 本轮可变执行状态 / Mutable execution state for this turn.
-        @param text 最终文本 / Final text.
-        @param history_content 应加入上下文的最终文本 / Final text to append to context.
-        @return 携带已更新 ContextState 的 Agent 响应 / Agent response carrying the updated ContextState.
-        """
-
-        if history_content:
-            state.messages.append({"role": "assistant", "content": history_content})
-        state.context.messages = state.messages
-        return AgentResponse(text, state.events, state.context)
-
-    @staticmethod
-    def _final_response(
-        *,
-        config: AgentExecutionConfig,
-        state: AgentExecutionState,
-        content_text: str,
-        visible_content_handler: VisibleContentSink | None,
-    ) -> AgentResponse:
-        """@brief 处理 Agent 最终文本 / Handle final Agent text.
-
-        @param config AgentLoop 运行配置 / AgentLoop runtime configuration.
-        @param state 当前可恢复状态 / Current resumable state.
-        @param content_text Agent 最终文本 / Final Agent text.
-        @return 回复文本和事件 / Reply text and events.
-        """
-        if content_text.strip():
-            if visible_content_handler:
-                visible_result = emit_visible_content(
-                    visible_content_handler,
-                    content_text,
-                    provider_name=config.provider_name,
-                )
-                if visible_result.content:
-                    state.events.append({"type": "assistant_visible", "content": visible_result.content})
-                    return AgentLoop._response(
-                        state,
-                        "",
-                        history_content=visible_result.content,
-                    )
-                if not visible_result.completed:
-                    return AgentLoop._response(state, "")
-            return AgentLoop._response(
-                state,
-                content_text,
-                history_content=content_text,
-            )
-        if state.events:
-            logging.warning("%s 工具调用后最终回复为空。", config.provider_name)
-        return AgentLoop._response(state, content_text)
+        return decoded
+    return value
 
 
-DEFAULT_AGENT_LOOP = AgentLoop(
-    runtime=DEFAULT_AGENT_RUNTIME,
-    completion_client=create_chat_completion,
-)
-"""@brief 进程共享 Agent Loop / Process-shared Agent Loop."""
+def _message(value: Mapping[str, object]) -> JsonObject:
+    """@brief 校验 ContextState message 为 JSON / Validate a ContextState message as JSON.
+
+    @param value 原始消息 / Raw message.
+    @return 独立 JSON 对象 / Independent JSON object.
+    """
+
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    decoded = json.loads(encoded)
+    if not isinstance(decoded, dict):
+        raise TypeError("Assistant message must be a JSON object")
+    return cast(JsonObject, decoded)
+
+
+def _final_response(
+    state: AgentExecutionState, completion: AssistantCompletion
+) -> AgentResponse:
+    """@brief 提交最终 Assistant message / Commit the final Assistant message.
+
+    @param state 当前状态 / Current state.
+    @param completion 无 tool calls 的完成 / Completion without tool calls.
+    @return Agent response / Agent response.
+    """
+
+    state.messages.append(dict(completion.message))
+    state.context.messages = cast(list[dict[str, object]], state.messages)
+    return AgentResponse(completion.content, tuple(state.events), state.context)
+
+
+__all__ = [
+    "AgentExecutionConfig",
+    "AgentExecutionState",
+    "AgentLoop",
+    "AgentResponse",
+]

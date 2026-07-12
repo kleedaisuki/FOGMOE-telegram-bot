@@ -1,8 +1,8 @@
 from datetime import datetime, timezone, timedelta
 
-from fogmoe_bot.application.accounts.context import (
-    normalize_personal_info,
-    normalize_user_impression,
+from fogmoe_bot.application.conversation.assistant_ingress import (
+    normalize_assistant_personal_info as normalize_personal_info,
+    normalize_assistant_impression as normalize_user_impression,
 )
 from fogmoe_bot.domain.context import (
     ChatMessageContext,
@@ -40,8 +40,10 @@ def test_context_tools_render_chat_message_metadata_and_escape_content():
         'timestamp="2026-07-06 20:10:00" user="@kc"'
     )
     assert 'message_id="1201"' in lines[0]
-    assert '<forward type="channel" chat="@some_channel" message_id="456" />' in lines[1]
-    assert '<message>hello &lt;Klee&gt; &amp; &quot;world&quot;</message>' in result
+    assert (
+        '<forward type="channel" chat="@some_channel" message_id="456" />' in lines[1]
+    )
+    assert "<message>hello &lt;Klee&gt; &amp; &quot;world&quot;</message>" in result
 
 
 def test_context_tools_render_scheduled_task_with_utc_timestamps():
@@ -117,7 +119,9 @@ def test_context_state_builds_model_messages_with_runtime_replacements():
     context_state = build_context_state(
         system_prompt="base system policy",
         history_messages=history,
-        scope=ConversationScope(user_id=42, is_group=True, group_id=-100, message_id=12),
+        scope=ConversationScope(
+            user_id=42, is_group=True, group_id=-100, message_id=12
+        ),
         user_state=user_state,
         runtime_replacements=[
             RuntimeMessageReplacement(
@@ -154,10 +158,13 @@ def test_context_state_builds_model_messages_with_runtime_replacements():
 
 
 def test_context_tools_ignore_empty_runtime_replacement():
-    assert create_runtime_replacement(
-        persisted_content="persisted",
-        runtime_message=None,
-    ) is None
+    assert (
+        create_runtime_replacement(
+            persisted_content="persisted",
+            runtime_message=None,
+        )
+        is None
+    )
 
 
 def test_user_state_normalizers_keep_prompt_inputs_bounded():

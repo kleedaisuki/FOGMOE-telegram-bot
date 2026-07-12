@@ -2,8 +2,8 @@
 
 from fogmoe_dbctl.migrations.runner import run_migration_sql
 
-revision = '0007_add_user_permanent_records_limit'
-down_revision = '0006_drop_ai_user_diary'
+revision = "0007_add_user_permanent_records_limit"
+down_revision = "0006_drop_ai_user_diary"
 branch_labels = None
 depends_on = None
 

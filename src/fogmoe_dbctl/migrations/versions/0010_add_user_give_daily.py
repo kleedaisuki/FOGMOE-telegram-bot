@@ -2,8 +2,8 @@
 
 from fogmoe_dbctl.migrations.runner import run_migration_sql
 
-revision = '0010_add_user_give_daily'
-down_revision = '0009_add_recharge_blocked_until'
+revision = "0010_add_user_give_daily"
+down_revision = "0009_add_recharge_blocked_until"
 branch_labels = None
 depends_on = None
 

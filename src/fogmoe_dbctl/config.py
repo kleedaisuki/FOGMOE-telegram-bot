@@ -23,6 +23,8 @@ APPLICATION_SCHEMAS = (
     "moderation",
     "crypto",
     "game",
+    "media",
+    "admin",
 )
 
 

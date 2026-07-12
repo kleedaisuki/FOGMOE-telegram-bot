@@ -8,21 +8,12 @@ from .models import (
     Recurrence,
     RecurrenceUnit,
     ScheduledJob,
-    ScheduleCreationBlockReason,
-    ScheduleCreationResult,
     ScheduleClaim,
     ScheduleSnapshot,
     ScheduleStatus,
+    StaleScheduleClaimError,
     ensure_utc,
     to_storage_datetime,
-)
-from .service import (
-    Clock,
-    ScheduleDispatcher,
-    MaintenanceTaskHandler,
-    ScheduledJobHandler,
-    ScheduleRepository,
-    SystemClock,
 )
 
 __all__ = [
@@ -33,17 +24,10 @@ __all__ = [
     "Recurrence",
     "RecurrenceUnit",
     "ScheduledJob",
-    "ScheduleCreationBlockReason",
-    "ScheduleCreationResult",
     "ScheduleClaim",
     "ScheduleSnapshot",
     "ScheduleStatus",
+    "StaleScheduleClaimError",
     "ensure_utc",
     "to_storage_datetime",
-    "Clock",
-    "ScheduleDispatcher",
-    "MaintenanceTaskHandler",
-    "ScheduledJobHandler",
-    "ScheduleRepository",
-    "SystemClock",
 ]

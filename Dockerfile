@@ -1,5 +1,5 @@
 # Minimal image for running the Telegram bot (Python only, PostgreSQL is external)
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

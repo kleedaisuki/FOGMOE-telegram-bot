@@ -1,42 +1,55 @@
-"""@brief 用户举报领域模型 / User-reporting domain models."""
+"""@brief 可持久化用户举报领域模型 / Persistable user-reporting domain models."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum, auto
+from enum import StrEnum
 
 from .models import ChatId, MessageId, UserId
 
 
-class ReportRegistration(Enum):
+class ReportRegistration(StrEnum):
     """@brief 举报登记结果 / Report-registration result."""
 
-    ACCEPTED = auto()
-    DUPLICATE = auto()
+    ACCEPTED = "accepted"
+    """@brief 首次举报已持久化 / First report was persisted."""
+
+    DUPLICATE = "duplicate"
+    """@brief 同一用户已举报同一消息 / The same user already reported the same message."""
 
 
 @dataclass(frozen=True, slots=True)
 class ReportKey:
-    """@brief 全局唯一被举报消息键 / Globally unique reported-message key.
+    """@brief 举报幂等键 / Report idempotency key.
 
-    @param chat_id Telegram 群组 ID / Telegram chat ID.
-    @param message_id Telegram 消息 ID / Telegram message ID.
+    @param chat_id 群组 ID / Group identifier.
+    @param message_id 被举报消息 ID / Reported-message identifier.
+    @param reporter_id 举报人 ID / Reporter identifier.
     """
 
     chat_id: ChatId
     message_id: MessageId
+    reporter_id: UserId
 
 
 @dataclass(frozen=True, slots=True)
-class ReportRecord:
-    """@brief 举报去重记录 / Report deduplication record.
+class ReportRequest:
+    """@brief 与传输层无关的举报请求 / Transport-independent report request.
 
-    @param created_at 单调时钟创建时间 / Monotonic creation time.
-    @param reporters 已举报用户集合 / Users who already reported.
+    @param key 举报幂等键 / Report idempotency key.
+    @param reported_user_id 被举报人 ID / Reported-user identifier.
+    @param reported_user_name 被举报人显示名 / Reported-user display name.
+    @param reporter_name 举报人显示名 / Reporter display name.
+    @param chat_title 群组标题 / Group title.
+    @param reported_text 被举报文本 / Reported text.
     """
 
-    created_at: float
-    reporters: frozenset[UserId]
+    key: ReportKey
+    reported_user_id: UserId
+    reported_user_name: str
+    reporter_name: str
+    chat_title: str
+    reported_text: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,59 +63,36 @@ class ReportDeliveryResult:
     administrator_count: int
     delivered_count: int
 
+    def __post_init__(self) -> None:
+        """@brief 验证投递计数 / Validate delivery counts.
 
-class InMemoryReportDeduplicator:
-    """@brief 按群组和消息去重举报 / Deduplicate reports by chat and message.
+        @return None / None.
+        @raises ValueError 计数无效 / For invalid counts.
+        """
 
-    @param ttl_seconds 去重窗口秒数 / Deduplication-window length in seconds.
+        if (
+            self.administrator_count < 0
+            or not 0 <= self.delivered_count <= self.administrator_count
+        ):
+            raise ValueError("Invalid report delivery counts")
+
+
+@dataclass(frozen=True, slots=True)
+class ReportOutcome:
+    """@brief 举报用例结果 / Reporting use-case outcome.
+
+    @param registration 登记结果 / Registration result.
+    @param delivery 首次登记后的可选投递结果 / Optional delivery result after first registration.
     """
 
-    def __init__(self, ttl_seconds: float = 3600.0) -> None:
-        self._ttl_seconds = ttl_seconds
-        self._records: dict[ReportKey, ReportRecord] = {}
+    registration: ReportRegistration
+    delivery: ReportDeliveryResult | None = None
 
-    def register(
-        self,
-        key: ReportKey,
-        reporter_id: UserId,
-        *,
-        now: float,
-    ) -> ReportRegistration:
-        """@brief 登记一次举报 / Register one report.
 
-        @param key 被举报消息键 / Reported-message key.
-        @param reporter_id 举报用户 ID / Reporter user ID.
-        @param now 当前单调时间 / Current monotonic time.
-        @return 接受或重复 / Accepted or duplicate.
-        """
-
-        current = self._records.get(key)
-        if current and now - current.created_at < self._ttl_seconds:
-            if reporter_id in current.reporters:
-                return ReportRegistration.DUPLICATE
-            self._records[key] = ReportRecord(
-                created_at=current.created_at,
-                reporters=current.reporters | {reporter_id},
-            )
-        else:
-            self._records[key] = ReportRecord(
-                created_at=now,
-                reporters=frozenset({reporter_id}),
-            )
-        self._remove_expired(now)
-        return ReportRegistration.ACCEPTED
-
-    def _remove_expired(self, now: float) -> None:
-        """@brief 清理过期去重记录 / Remove expired deduplication records.
-
-        @param now 当前单调时间 / Current monotonic time.
-        @return None / None.
-        """
-
-        expired = [
-            key
-            for key, record in self._records.items()
-            if now - record.created_at >= self._ttl_seconds
-        ]
-        for key in expired:
-            self._records.pop(key, None)
+__all__ = [
+    "ReportDeliveryResult",
+    "ReportKey",
+    "ReportOutcome",
+    "ReportRegistration",
+    "ReportRequest",
+]

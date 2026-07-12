@@ -7,7 +7,7 @@ from pathlib import Path
 
 from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy.ext.asyncio import AsyncEngine, async_engine_from_config
 
 from alembic import context
 
@@ -158,7 +158,7 @@ def do_run_migrations(connection: Connection) -> None:
         context.run_migrations()
 
 
-def make_connectable():
+def make_connectable() -> AsyncEngine:
     """@brief 创建异步迁移引擎 / Create async migration engine.
 
     @return SQLAlchemy 异步引擎 / SQLAlchemy async engine.

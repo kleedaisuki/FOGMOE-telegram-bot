@@ -1,2 +1,1 @@
-"""聊天上下文应用服务模块。"""
-
+"""Group-chat application package."""

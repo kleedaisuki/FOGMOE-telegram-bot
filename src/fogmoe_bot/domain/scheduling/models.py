@@ -18,11 +18,12 @@ class ScheduleStatus(str, Enum):
     FAILED = "failed"
 
 
-class ScheduleCreationBlockReason(str, Enum):
-    """@brief 创建任务受阻原因 / Reasons schedule creation can be blocked."""
+class StaleScheduleClaimError(RuntimeError):
+    """@brief 调度 claim 已被回收或替换 / Schedule claim was recovered or replaced.
 
-    PENDING_LIMIT = "pending_limit"
-    TOTAL_LIMIT = "total_limit"
+    @note 调用方不得把陈旧 worker 的终结尝试报告为业务成功 / Callers must not
+        report a stale worker's finalization attempt as business success.
+    """
 
 
 class RecurrenceUnit(str, Enum):
@@ -140,7 +141,7 @@ class Recurrence:
         except ValueError as exc:
             raise ValueError(f"Unsupported recurrence unit: {normalized_unit}") from exc
         try:
-            normalized_interval = int(interval or 1)
+            normalized_interval = int(str(interval or 1))
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Invalid recurrence interval: {interval}") from exc
         return cls(recurrence_unit, normalized_interval)
@@ -246,22 +247,6 @@ class ScheduleSnapshot(Generic[PayloadT]):
     executed_at: datetime | None
     last_run_at: datetime | None
     error: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class ScheduleCreationResult:
-    """@brief 创建或替换任务的领域结果 / Domain result of creating or replacing a schedule.
-
-    @param schedule_id 创建或替换的任务 ID / Created or replaced schedule identifier.
-    @param created_at 创建时刻 / Creation time.
-    @param replaced 是否替换历史任务 / Whether a historical job was replaced.
-    @param blocked_reason 受阻原因 / Blocking reason.
-    """
-
-    schedule_id: int | None
-    created_at: datetime | None
-    replaced: bool
-    blocked_reason: ScheduleCreationBlockReason | None
 
 
 def ensure_utc(value: datetime) -> datetime:

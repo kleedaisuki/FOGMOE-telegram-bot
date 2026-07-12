@@ -7,10 +7,10 @@ name = "fogmoe-telegram-bot"
 version = "0.1.0"
 description = "FogMoe Telegram bot"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 license = { text = "AGPL-3.0-or-later" }
 dependencies = [
-    "python-telegram-bot[job-queue,socks]",
+    "python-telegram-bot[socks]",
     "SQLAlchemy>=2.0",
     "asyncpg",
     "alembic",
@@ -23,13 +23,29 @@ dependencies = [
     "requests[socks]",
     "telegramify-markdown",
     "python-dotenv",
-    "e2b",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
+    "mypy>=1.18",
+    "pyright>=1.1.411",
+    "ruff>=0.12",
 ]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+packages = ["fogmoe_bot", "fogmoe_dbctl"]
+exclude = ["^tests/"]
+warn_unreachable = true
+show_error_codes = true
+
+[tool.pyright]
+include = ["src/fogmoe_bot", "src/fogmoe_dbctl"]
+pythonVersion = "3.14"
+venvPath = "."
+venv = ".venv"
 
 [project.scripts]
 fogmoe-bot = "fogmoe_bot.main:main"
@@ -39,7 +55,8 @@ fogmoe-dbctl = "fogmoe_dbctl.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-fogmoe_dbctl = ["migrations/sql/postgresql/*.sql"]
+fogmoe_dbctl = ["migrations/sql/postgresql/*.sql", "py.typed"]
+fogmoe_bot = ["py.typed"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

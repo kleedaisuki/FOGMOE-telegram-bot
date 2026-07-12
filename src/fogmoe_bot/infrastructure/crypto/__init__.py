@@ -1,2 +1,1 @@
-"""加密货币基础设施适配模块。"""
-
+"""Cryptocurrency infrastructure adapters."""

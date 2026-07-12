@@ -1,10 +1,10 @@
-from fogmoe_bot.domain.moderation import (
+from fogmoe_bot.domain.moderation.engine import ModerationEngine
+from fogmoe_bot.domain.moderation.models import (
     ActorRole,
     ChatId,
     ContentKind,
     GroupModerationPolicy,
     MessageId,
-    ModerationEngine,
     ModerationRequest,
     ModerationRule,
     RuleKind,
@@ -70,18 +70,24 @@ def test_legacy_override_uses_group_rules_instead_of_global_rules():
     global_rules = (_literal("博彩", RuleScope.GLOBAL),)
     group_rules = (_literal("广告", RuleScope.GROUP),)
 
-    assert engine.evaluate(
-        _request("博彩"),
-        policy,
-        global_rules=global_rules,
-        group_rules=group_rules,
-    ).verdict is Verdict.ALLOW
-    assert engine.evaluate(
-        _request("广告"),
-        policy,
-        global_rules=global_rules,
-        group_rules=group_rules,
-    ).verdict is Verdict.BLOCK
+    assert (
+        engine.evaluate(
+            _request("博彩"),
+            policy,
+            global_rules=global_rules,
+            group_rules=group_rules,
+        ).verdict
+        is Verdict.ALLOW
+    )
+    assert (
+        engine.evaluate(
+            _request("广告"),
+            policy,
+            global_rules=global_rules,
+            group_rules=group_rules,
+        ).verdict
+        is Verdict.BLOCK
+    )
 
 
 def test_extend_mode_combines_group_and_global_rules():

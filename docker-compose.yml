@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   bot:
     build: .
@@ -9,8 +7,13 @@ services:
     environment:
       # 让容器使用宿主机/外部数据库；根据你的 PostgreSQL 地址修改
       POSTGRES_HOST: ${POSTGRES_HOST:-host.docker.internal}
-    volumes: [] # 如需落盘日志，改为下方注释形式
-    # volumes:
-    #   - ./logs:/app/logs
+    # outbox artifact、跨进程媒体限流状态与日志必须跨容器重建保留。
+    volumes:
+      - fogmoe-runtime:/app/logs
+    # 必须覆盖 BotRuntime 默认 30 秒 drain grace，避免 Compose 提前 SIGKILL。
+    stop_grace_period: 40s
     restart: unless-stopped
     # 如需使用代理，可在此添加 extra_hosts 或网络设置
+
+volumes:
+  fogmoe-runtime:

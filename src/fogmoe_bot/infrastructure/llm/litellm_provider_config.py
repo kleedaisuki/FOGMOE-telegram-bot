@@ -1,4 +1,6 @@
-from typing import Any, Dict
+"""Build provider-specific LiteLLM connection parameters."""
+
+from collections.abc import Callable
 
 from fogmoe_bot.infrastructure import config
 
@@ -30,36 +32,36 @@ def gemini_native_api_base(value: str) -> str:
     return base_url
 
 
-def _openai_params() -> Dict[str, Any]:
+def _openai_params() -> dict[str, object]:
     api_key = config.OPENAI_API_KEY
     if not api_key and config.OPENAI_BASE_URL:
         api_key = "sk-no-key-required"
     if not api_key:
         raise RuntimeError("Missing OPENAI_API_KEY configuration.")
 
-    params: Dict[str, Any] = {"api_key": api_key}
+    params: dict[str, object] = {"api_key": api_key}
     if config.OPENAI_BASE_URL:
         params["api_base"] = config.OPENAI_BASE_URL
     return params
 
 
-def _openrouter_params() -> Dict[str, Any]:
+def _openrouter_params() -> dict[str, object]:
     """@brief 构建 OpenRouter 参数 / Build OpenRouter parameters."""
     if not config.OPENROUTER_API_KEY:
         raise RuntimeError("Missing OPENROUTER_API_KEY configuration.")
 
-    params: Dict[str, Any] = {"api_key": config.OPENROUTER_API_KEY}
+    params: dict[str, object] = {"api_key": config.OPENROUTER_API_KEY}
     if config.OPENROUTER_API_BASE:
         params["api_base"] = openai_compatible_api_base(config.OPENROUTER_API_BASE)
     return params
 
 
-def _gemini_params() -> Dict[str, Any]:
+def _gemini_params() -> dict[str, object]:
     if not config.GEMINI_API_KEY:
         raise RuntimeError("Missing GEMINI_API_KEY configuration.")
     if config.GEMINI_OPENAI_COMPATIBLE and not config.GEMINI_API_BASE:
         raise RuntimeError("GEMINI_OPENAI_COMPATIBLE requires GEMINI_API_BASE.")
-    params = {"api_key": config.GEMINI_API_KEY}
+    params: dict[str, object] = {"api_key": config.GEMINI_API_KEY}
     if config.GEMINI_API_BASE:
         params["api_base"] = (
             openai_compatible_api_base(config.GEMINI_API_BASE)
@@ -69,16 +71,16 @@ def _gemini_params() -> Dict[str, Any]:
     return params
 
 
-def _zai_params() -> Dict[str, Any]:
+def _zai_params() -> dict[str, object]:
     if not config.ZAI_API_KEY:
         raise RuntimeError("Missing ZAI_API_KEY configuration.")
-    params = {"api_key": config.ZAI_API_KEY}
+    params: dict[str, object] = {"api_key": config.ZAI_API_KEY}
     if config.ZAI_API_BASE:
         params["api_base"] = config.ZAI_API_BASE
     return params
 
 
-def _siliconflow_params() -> Dict[str, Any]:
+def _siliconflow_params() -> dict[str, object]:
     if not config.SILICONFLOW_API_KEY:
         raise RuntimeError("Missing SILICONFLOW_API_KEY configuration.")
     api_base = openai_compatible_api_base(config.SILICONFLOW_API_BASE)
@@ -90,7 +92,7 @@ def _siliconflow_params() -> Dict[str, Any]:
     }
 
 
-def _azure_params() -> Dict[str, Any]:
+def _azure_params() -> dict[str, object]:
     if not config.AZURE_OPENAI_API_KEY:
         raise RuntimeError("Missing AZURE_OPENAI_API_KEY configuration.")
     api_base = azure_api_base()
@@ -105,7 +107,7 @@ def _azure_params() -> Dict[str, Any]:
     }
 
 
-PROVIDER_PARAM_BUILDERS = {
+PROVIDER_PARAM_BUILDERS: dict[str, Callable[[], dict[str, object]]] = {
     "openai": _openai_params,
     "openrouter": _openrouter_params,
     "gemini": _gemini_params,
@@ -115,7 +117,7 @@ PROVIDER_PARAM_BUILDERS = {
 }
 
 
-def provider_params(provider: str) -> Dict[str, Any]:
+def provider_params(provider: str) -> dict[str, object]:
     builder = PROVIDER_PARAM_BUILDERS.get(provider)
     if not builder:
         raise RuntimeError(f"Unsupported AI provider: {provider}")
