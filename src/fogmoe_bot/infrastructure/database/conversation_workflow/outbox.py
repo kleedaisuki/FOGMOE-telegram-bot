@@ -394,31 +394,18 @@ class PostgresOutboxRepository:
                         message.turn_id,
                         connection=connection,
                     )
-                    if previous_status is OutboundStatus.PENDING:
-                        if turn.state is not TurnState.WAITING_DELIVERY:
-                            raise ConcurrentTurnUpdateError(
-                                f"Pending outbound {message.message_id} requires a "
-                                f"waiting_delivery turn, found {turn.state.value}"
-                            )
-                    elif previous_status is OutboundStatus.RETRY_WAIT:
-                        if turn.state is not TurnState.DELIVERY_RETRY_WAIT:
-                            raise ConcurrentTurnUpdateError(
-                                f"Retry outbound {message.message_id} requires a "
-                                f"delivery_retry_wait turn, found {turn.state.value}"
-                            )
-                        resumed = turn.transition(
-                            TurnEvent.RETRY_DELIVERY,
-                            occurred_at=timestamp,
-                        )
-                        await _persist_turn(
-                            resumed,
-                            expected_version=turn.version,
-                            connection=connection,
-                        )
-                    else:
+                    if previous_status not in {
+                        OutboundStatus.PENDING,
+                        OutboundStatus.RETRY_WAIT,
+                    }:
                         raise RuntimeError(
                             "Claim query returned unsupported previous status "
                             f"{previous_status.value}"
+                        )
+                    if turn.state is not TurnState.WAITING_DELIVERY:
+                        raise ConcurrentTurnUpdateError(
+                            f"Claimable outbound {message.message_id} requires a "
+                            f"waiting_delivery turn, found {turn.state.value}"
                         )
                 claims.append(
                     OutboundClaim(
@@ -479,9 +466,8 @@ class PostgresOutboxRepository:
                 "outbound",
                 str(claim.message.message_id),
             )
-            await self._transition_delivery_turn(
+            await self._complete_delivery_turn_if_settled(
                 claim,
-                event=TurnEvent.DELIVERY_SUCCEEDED,
                 occurred_at=timestamp,
                 connection=connection,
             )
@@ -532,14 +518,6 @@ class PostgresOutboxRepository:
                 "outbound",
                 str(claim.message.message_id),
             )
-            await self._transition_delivery_turn(
-                claim,
-                event=TurnEvent.SCHEDULE_DELIVERY_RETRY,
-                occurred_at=failure_time,
-                retry_at=retry_time,
-                error=normalized_error,
-                connection=connection,
-            )
 
     async def fail_outbound(
         self,
@@ -581,38 +559,44 @@ class PostgresOutboxRepository:
                 "outbound",
                 str(claim.message.message_id),
             )
-            await self._transition_delivery_turn(
+            await self._fail_delivery_turn(
                 claim,
-                event=TurnEvent.FAIL_FINAL,
                 occurred_at=failure_time,
                 error=normalized_error,
                 connection=connection,
             )
 
-    async def _transition_delivery_turn(
+    async def _complete_delivery_turn_if_settled(
         self,
         claim: OutboundClaim,
         *,
-        event: TurnEvent,
         occurred_at: datetime,
-        retry_at: datetime | None = None,
-        error: str | None = None,
         connection: AsyncConnection,
     ) -> ConversationTurn | None:
-        """@brief 在 outbox 事务内推进可选关联回合 / Advance the optional associated Turn in the outbox transaction.
+        """@brief 全部投递成功后终结关联回合 / Complete the associated Turn after its whole delivery plan succeeds.
 
         @param claim outbox 领取凭证 / Outbox claim receipt.
-        @param event 投递领域事件 / Delivery domain event.
         @param occurred_at 事件时间 / Event time.
-        @param retry_at 可选重试时间 / Optional retry time.
-        @param error 可选错误 / Optional error.
         @param connection 当前短事务连接 / Current short-transaction connection.
-        @return 更新后的回合；standalone 副作用为 None / Updated Turn, or None for a standalone effect.
-        @raise ConcurrentTurnUpdateError 回合不在 WAITING_DELIVERY 时抛出 / Raised when the turn is not WAITING_DELIVERY.
+        @return 已完成的回合；计划尚未清空或独立副作用时为 None / Completed Turn, or None while effects remain or for standalone effects.
+        @note 单条 outbox 成功不是 Turn 成功；只有同一 Turn 的所有消息均 delivered 才推进状态。/
+        A single outbox success is not Turn success; state advances only when every message for the Turn is delivered.
         """
 
         turn_id = claim.message.turn_id
         if turn_id is None:
+            return None
+        remaining_row = await db_connection.fetch_one(
+            "SELECT EXISTS ("
+            "SELECT 1 FROM conversation.outbound_messages "
+            "WHERE turn_id = CAST(%s AS UUID) AND status <> 'delivered'"
+            ")",
+            (str(turn_id),),
+            connection=connection,
+        )
+        if remaining_row is None:
+            raise RuntimeError(f"Missing outbound plan for Turn {turn_id}")
+        if bool(_row_values(remaining_row, 1)[0]):
             return None
         turn = await _load_turn_for_mutation(
             turn_id,
@@ -624,9 +608,45 @@ class PostgresOutboxRepository:
                 f"found {turn.state.value}"
             )
         updated = turn.transition(
-            event,
+            TurnEvent.DELIVERY_SUCCEEDED,
             occurred_at=occurred_at,
-            retry_at=retry_at,
+        )
+        await _persist_turn(
+            updated,
+            expected_version=turn.version,
+            connection=connection,
+        )
+        return updated
+
+    async def _fail_delivery_turn(
+        self,
+        claim: OutboundClaim,
+        *,
+        occurred_at: datetime,
+        error: str,
+        connection: AsyncConnection,
+    ) -> ConversationTurn | None:
+        """@brief 一条消息最终失败时终结所属投递计划 / Fail the owning delivery plan when one effect fails permanently.
+
+        @param claim outbox 领取凭证 / Outbox claim receipt.
+        @param occurred_at 事件时间 / Event time.
+        @param error 最终失败原因 / Final failure reason.
+        @param connection 当前短事务连接 / Current short-transaction connection.
+        @return 已失败的回合；独立副作用时为 None / Failed Turn, or None for standalone effects.
+        """
+
+        turn_id = claim.message.turn_id
+        if turn_id is None:
+            return None
+        turn = await _load_turn_for_mutation(turn_id, connection=connection)
+        if turn.state is not TurnState.WAITING_DELIVERY:
+            raise ConcurrentTurnUpdateError(
+                f"Outbound {claim.message.message_id} requires a waiting_delivery turn, "
+                f"found {turn.state.value}"
+            )
+        updated = turn.transition(
+            TurnEvent.FAIL_FINAL,
+            occurred_at=occurred_at,
             error=error,
         )
         await _persist_turn(
@@ -671,30 +691,6 @@ class PostgresOutboxRepository:
                 ),
                 connection=connection,
             )
-            for row in rows:
-                message = _map_outbound(row)
-                if message.turn_id is None:
-                    continue
-                turn = await _load_turn_for_mutation(
-                    message.turn_id,
-                    connection=connection,
-                )
-                if turn.state is not TurnState.WAITING_DELIVERY:
-                    raise ConcurrentTurnUpdateError(
-                        f"Expired outbound {message.message_id} requires a "
-                        f"waiting_delivery turn, found {turn.state.value}"
-                    )
-                retrying = turn.transition(
-                    TurnEvent.SCHEDULE_DELIVERY_RETRY,
-                    occurred_at=timestamp,
-                    retry_at=retry_time,
-                    error=recovery_error,
-                )
-                await _persist_turn(
-                    retrying,
-                    expected_version=turn.version,
-                    connection=connection,
-                )
             return len(rows)
 
 

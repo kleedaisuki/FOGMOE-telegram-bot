@@ -159,14 +159,13 @@ def test_claim_standalone_outbound_does_not_load_or_transition_a_turn(
     assert claims[0].message.status is OutboundStatus.PROCESSING
 
 
-def test_claim_retry_outbound_atomically_resumes_delivery_turn(
+def test_claim_retry_outbound_keeps_delivery_plan_waiting(
     monkeypatch: Any,
 ) -> None:
-    """@brief 重领 outbox retry row 会在同事务恢复投递回合 / Reclaiming an outbox retry row resumes its delivery turn in the same transaction."""
+    """@brief 重领重试消息不改写整份投递计划状态 / Reclaiming a retry message does not rewrite the delivery-plan state."""
 
     connection = object()
     repository = PostgresOutboxRepository()
-    captured: dict[str, object] = {}
 
     async def fake_fetch_all(
         sql: str,
@@ -183,30 +182,22 @@ def test_claim_retry_outbound_atomically_resumes_delivery_turn(
         *,
         connection: object,
     ) -> object:
-        """@brief 返回等待投递重试的回合 / Return a turn waiting for a delivery retry."""
+        """@brief 返回仍在等待整份计划的回合 / Return a Turn still waiting for the whole plan."""
 
         return turn_uow._map_turn(
             _turn_row(
-                state="delivery_retry_wait",
+                state="waiting_delivery",
                 version=5,
                 inference_attempts=1,
                 delivery_attempts=1,
-                next_retry_at=NOW,
-                last_error="rate limited",
             )
         )
 
-    async def fake_persist(
-        turn: object,
-        *,
-        expected_version: int,
-        connection: object,
-    ) -> None:
-        """@brief 捕获恢复后的回合 / Capture the resumed turn."""
+    async def unexpected_persist(*args: object, **kwargs: object) -> None:
+        """@brief 重试领取不应写 Turn / A retry claim must not write the Turn."""
 
-        captured["turn"] = turn
-        captured["version"] = expected_version
-        captured["connection"] = connection
+        del args, kwargs
+        raise AssertionError("retry claim rewrote delivery-plan state")
 
     monkeypatch.setattr(
         db_connection,
@@ -215,7 +206,7 @@ def test_claim_retry_outbound_atomically_resumes_delivery_turn(
     )
     monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
     monkeypatch.setattr(outbox_repository, "_load_turn_for_mutation", fake_load_turn)
-    monkeypatch.setattr(outbox_repository, "_persist_turn", fake_persist)
+    monkeypatch.setattr(outbox_repository, "_persist_turn", unexpected_persist)
 
     claims = asyncio.run(
         repository.claim_outbound(
@@ -225,12 +216,8 @@ def test_claim_retry_outbound_atomically_resumes_delivery_turn(
         )
     )
 
-    resumed = captured["turn"]
     assert len(claims) == 1
-    assert getattr(resumed, "state").value == "waiting_delivery"
-    assert getattr(resumed, "delivery_attempts") == 2
-    assert captured["version"] == 5
-    assert captured["connection"] is connection
+    assert claims[0].message.status is OutboundStatus.PROCESSING
 
 
 def test_transactional_outbox_allocates_stream_sequence_under_advisory_lock(
@@ -526,6 +513,19 @@ def test_delivered_outbound_atomically_completes_turn(monkeypatch: Any) -> None:
             )
         )
 
+    async def fake_fetch_one(
+        sql: str,
+        params: tuple[object, ...],
+        *,
+        connection: object,
+    ) -> tuple[bool]:
+        """@brief 表示这是计划中最后一条 effect / Report this as the final effect in the plan."""
+
+        assert "status <> 'delivered'" in sql
+        assert params
+        assert connection is not None
+        return (False,)
+
     async def fake_persist(
         turn: object,
         *,
@@ -544,6 +544,7 @@ def test_delivered_outbound_atomically_completes_turn(monkeypatch: Any) -> None:
         lambda: _TransactionContext(connection),
     )
     monkeypatch.setattr(db_connection, "execute", fake_execute)
+    monkeypatch.setattr(db_connection, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(outbox_repository, "_load_turn_for_mutation", fake_load_turn)
     monkeypatch.setattr(outbox_repository, "_persist_turn", fake_persist)
     claim = OutboundClaim(
@@ -565,6 +566,69 @@ def test_delivered_outbound_atomically_completes_turn(monkeypatch: Any) -> None:
     assert captured["outbox_connection"] is connection
     assert captured["turn_connection"] is connection
     assert captured["version"] == 4
+
+
+def test_delivered_effect_keeps_turn_waiting_until_delivery_plan_is_empty(
+    monkeypatch: Any,
+) -> None:
+    """@brief 中间 effect 成功不终结 Turn / A non-final effect does not complete the Turn."""
+
+    connection = object()
+    repository = PostgresOutboxRepository()
+
+    async def fake_execute(
+        sql: str,
+        params: tuple[object, ...],
+        *,
+        connection: object,
+    ) -> int:
+        """@brief 模拟本条 effect 成功 / Simulate successful delivery of this effect."""
+
+        del sql, params, connection
+        return 1
+
+    async def fake_fetch_one(
+        sql: str,
+        params: tuple[object, ...],
+        *,
+        connection: object,
+    ) -> tuple[bool]:
+        """@brief 表示计划仍有未投递 effect / Report that the plan still has undelivered effects."""
+
+        assert "status <> 'delivered'" in sql
+        assert params
+        assert connection is not None
+        return (True,)
+
+    async def unexpected_turn_load(*args: object, **kwargs: object) -> object:
+        """@brief 中间 effect 成功不应加载或推进 Turn / A non-final effect must not load or advance the Turn."""
+
+        del args, kwargs
+        raise AssertionError("intermediate delivery completed the Turn")
+
+    monkeypatch.setattr(
+        db_connection,
+        "transaction",
+        lambda: _TransactionContext(connection),
+    )
+    monkeypatch.setattr(db_connection, "execute", fake_execute)
+    monkeypatch.setattr(db_connection, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(
+        outbox_repository, "_load_turn_for_mutation", unexpected_turn_load
+    )
+    claim = OutboundClaim(
+        message=outbox_repository._map_outbound(_outbound_row()),
+        token=LeaseToken.new(),
+        lease_expires_at=NOW + timedelta(seconds=30),
+    )
+
+    asyncio.run(
+        repository.mark_outbound_delivered(
+            claim,
+            delivered_at=NOW + timedelta(seconds=1),
+            external_message_id="42",
+        )
+    )
 
 
 def test_delivered_standalone_outbound_never_transitions_a_turn(
@@ -616,10 +680,10 @@ def test_delivered_standalone_outbound_never_transitions_a_turn(
     )
 
 
-def test_expired_outbound_recovery_atomically_schedules_turn_retry(
+def test_expired_outbound_recovery_leaves_delivery_plan_state_unchanged(
     monkeypatch: Any,
 ) -> None:
-    """@brief 过期 outbox lease 与 Turn retry 在同事务恢复 / Expired outbox lease and Turn retry recover in one transaction."""
+    """@brief 过期 lease 仅恢复消息，不改写整份投递计划 / Expired leases recover only messages, not the delivery-plan state."""
 
     connection = object()
     repository = PostgresOutboxRepository()
@@ -636,32 +700,11 @@ def test_expired_outbound_recovery_atomically_schedules_turn_retry(
         captured["sql"] = sql
         return [_outbound_row(status="retry_wait")]
 
-    async def fake_load_turn(
-        turn_id: TurnId,
-        *,
-        connection: object,
-    ) -> object:
-        """@brief 返回等待投递的回合 / Return a turn waiting for delivery."""
+    async def unexpected_turn_load(*args: object, **kwargs: object) -> object:
+        """@brief 租约恢复不应加载 Turn / Lease recovery must not load a Turn."""
 
-        return turn_uow._map_turn(
-            _turn_row(
-                state="waiting_delivery",
-                version=4,
-                inference_attempts=1,
-                delivery_attempts=1,
-            )
-        )
-
-    async def fake_persist(
-        turn: object,
-        *,
-        expected_version: int,
-        connection: object,
-    ) -> None:
-        """@brief 捕获 retry-wait 回合 / Capture the retry-wait turn."""
-
-        captured["turn"] = turn
-        captured["connection"] = connection
+        del args, kwargs
+        raise AssertionError("lease recovery rewrote delivery-plan state")
 
     monkeypatch.setattr(
         db_connection,
@@ -669,17 +712,14 @@ def test_expired_outbound_recovery_atomically_schedules_turn_retry(
         lambda: _TransactionContext(connection),
     )
     monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
-    monkeypatch.setattr(outbox_repository, "_load_turn_for_mutation", fake_load_turn)
-    monkeypatch.setattr(outbox_repository, "_persist_turn", fake_persist)
+    monkeypatch.setattr(
+        outbox_repository, "_load_turn_for_mutation", unexpected_turn_load
+    )
 
     recovered = asyncio.run(repository.recover_expired_outbound_leases(now=NOW))
 
-    retrying = captured["turn"]
     assert recovered == 1
     assert "FOR UPDATE SKIP LOCKED" in str(captured["sql"])
-    assert getattr(retrying, "state").value == "delivery_retry_wait"
-    assert getattr(retrying, "next_retry_at") > NOW
-    assert captured["connection"] is connection
 
 
 def test_expired_standalone_outbound_recovery_does_not_touch_a_turn(

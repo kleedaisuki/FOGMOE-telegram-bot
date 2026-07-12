@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
 -- Source migrations: 0001_initial through 0037_turn_delivery_plans
--- Alembic head: 0037_turn_delivery_plans
+-- Alembic head: 0038_repair_turn_delivery_plan_state
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and user-plan backfill) and the
