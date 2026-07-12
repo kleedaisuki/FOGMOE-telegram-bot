@@ -12,8 +12,11 @@ from typing import cast
 import requests
 
 from fogmoe_bot.application.assistant.tool_runtime import ToolEffectRequest
+from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
 from fogmoe_bot.domain.media.artifact import ArtifactKind
+from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
+from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
 from fogmoe_bot.infrastructure.blocking import AsyncBlockingBulkhead
 from fogmoe_bot.infrastructure.media.file_artifact_store import FileArtifactStore
 from fogmoe_bot.infrastructure.media.file_rate_limiter import FileSlidingWindowLimiter
@@ -51,6 +54,7 @@ class RequestsGeneratedMediaTools:
         artifacts: FileArtifactStore,
         limiter: FileSlidingWindowLimiter,
         bulkhead: AsyncBlockingBulkhead,
+        telemetry: Telemetry,
     ) -> None:
         """@brief 注入配置与 durable file services / Inject settings and durable file services.
 
@@ -66,6 +70,7 @@ class RequestsGeneratedMediaTools:
         self._artifacts = artifacts
         self._limiter = limiter
         self._bulkhead = bulkhead
+        self._telemetry = telemetry
 
     async def generate(self, request: ToolEffectRequest) -> JsonValue:
         """@brief 在线程边界生成媒体 / Generate media behind a thread boundary.
@@ -74,7 +79,40 @@ class RequestsGeneratedMediaTools:
         @return artifact references / Artifact references.
         """
 
-        return await self._bulkhead.call(lambda: self._generate_sync(request))
+        dependency = _dependency_name(request.tool_name)
+        with self._telemetry.span(
+            "media.generate",
+            kind=SpanKind.CLIENT,
+            attributes={
+                "gen_ai.tool.name": request.tool_name,
+                "fogmoe.dependency.name": dependency,
+            },
+        ) as span:
+            try:
+                result = await self._bulkhead.call(lambda: self._generate_sync(request))
+            except Exception:
+                self._telemetry.counter(
+                    MetricName.DEPENDENCY_OUTCOMES,
+                    attributes={
+                        "outcome": Outcome.FAILURE,
+                        "fogmoe.dependency.name": dependency,
+                    },
+                )
+                raise
+            if isinstance(result, dict) and "error" in result:
+                span.set_status(SpanStatus.ERROR, str(result["error"]))
+                span.set_attribute("error.type", "media_generation_error")
+                outcome = Outcome.FAILURE
+            else:
+                outcome = Outcome.SUCCESS
+            self._telemetry.counter(
+                MetricName.DEPENDENCY_OUTCOMES,
+                attributes={
+                    "outcome": outcome,
+                    "fogmoe.dependency.name": dependency,
+                },
+            )
+            return result
 
     def _generate_sync(self, request: ToolEffectRequest) -> JsonValue:
         """@brief 同步生成实现 / Synchronous generation implementation.
@@ -298,6 +336,19 @@ def _audio_meta(content_type: str | None) -> tuple[str, str]:
     if normalized in {"audio/mpeg", "audio/mp3"}:
         return ".mp3", "audio/mpeg"
     return ".ogg", "audio/ogg"
+
+
+def _dependency_name(tool_name: str) -> str:
+    """@brief 映射媒体工具到依赖名称 / Map a media tool to a dependency name.
+
+    @param tool_name 工具目录名称 / Tool-catalog name.
+    @return 低基数 provider 标识 / Low-cardinality provider identifier.
+    """
+
+    return {
+        "generate_image": "image_generation",
+        "generate_voice": "fish_audio",
+    }.get(tool_name, "unknown")
 
 
 def _filename(text: str, extension: str, fallback: str) -> str:

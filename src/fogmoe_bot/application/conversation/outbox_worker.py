@@ -29,6 +29,7 @@ from fogmoe_bot.domain.conversation.outbox import (
     OutboundMessage,
 )
 from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.domain.observability.conventions import EventName, MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
 
 
@@ -498,11 +499,25 @@ class OutboxWorker:
                 )
                 span.set_status(SpanStatus.ERROR, str(error))
                 span.set_attribute("error.type", error.__class__.__name__)
+                self._telemetry.counter(
+                    MetricName.OUTBOX_OUTCOMES,
+                    attributes={
+                        "outcome": Outcome.TIMEOUT,
+                        "message.kind": message.kind.value,
+                    },
+                )
                 await self._finalize_failure(claim, error)
                 return
             except Exception as error:
                 span.set_status(SpanStatus.ERROR, str(error))
                 span.set_attribute("error.type", error.__class__.__name__)
+                self._telemetry.counter(
+                    MetricName.OUTBOX_OUTCOMES,
+                    attributes={
+                        "outcome": Outcome.FAILURE,
+                        "message.kind": message.kind.value,
+                    },
+                )
                 await self._finalize_failure(claim, error)
                 return
 
@@ -510,6 +525,13 @@ class OutboxWorker:
                 claim,
                 delivered_at=self._clock.now(),
                 external_message_id=receipt.external_message_id,
+            )
+            self._telemetry.counter(
+                MetricName.OUTBOX_OUTCOMES,
+                attributes={
+                    "outcome": Outcome.SUCCESS,
+                    "message.kind": message.kind.value,
+                },
             )
 
     async def _produce(
@@ -536,12 +558,17 @@ class OutboxWorker:
                     )
                     if recovered:
                         self._telemetry.counter(
-                            "fogmoe.outbox.leases.recovered",
+                            MetricName.LEASE_RECOVERIES,
                             float(recovered),
+                            attributes={"pipeline.stage": "outbox"},
                         )
                         logger.warning(
                             "Recovered expired outbox leases: count=%s",
                             recovered,
+                            extra={
+                                "event_name": EventName.OUTBOX_LEASE_RECOVERED,
+                                "telemetry_attributes": {"pipeline.stage": "outbox"},
+                            },
                         )
                     claims = tuple(
                         await self._repository.claim_outbound(
@@ -626,11 +653,25 @@ class OutboxWorker:
                 retry_at=decision.at,
                 error=error_text,
             )
+            self._telemetry.counter(
+                MetricName.OUTBOX_OUTCOMES,
+                attributes={
+                    "outcome": Outcome.RETRY,
+                    "message.kind": claim.message.kind.value,
+                },
+            )
             return
         await self._repository.fail_outbound(
             claim,
             failed_at=failed_at,
             error=error_text,
+        )
+        self._telemetry.counter(
+            MetricName.OUTBOX_OUTCOMES,
+            attributes={
+                "outcome": Outcome.DROPPED,
+                "message.kind": claim.message.kind.value,
+            },
         )
 
     @staticmethod

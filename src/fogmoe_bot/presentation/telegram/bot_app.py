@@ -598,7 +598,6 @@ def create_application() -> TelegramApplication:
     if proxy_url:
         builder = builder.proxy(proxy_url).get_updates_proxy(proxy_url)
     application = builder.build()
-    assemble_handler_capabilities(application)
     install_error_policy(application)
     return application
 
@@ -707,6 +706,7 @@ async def serve_application(
     try:
         await application.initialize()
         initialized = True
+        assemble_handler_capabilities(application, telemetry=observability.telemetry)
         await _resolve_administrator_contact(application)
         await application.start()
         started = True

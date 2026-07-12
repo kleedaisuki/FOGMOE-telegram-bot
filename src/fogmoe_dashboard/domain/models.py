@@ -233,6 +233,7 @@ class MetricStats:
     name: str
     kind: str
     unit: str
+    attributes: JsonObject
     points: int
     latest_at: datetime
     latest: float

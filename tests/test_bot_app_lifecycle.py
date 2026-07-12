@@ -41,7 +41,7 @@ def _offline_application():
         "_bot_user",
         User(id=999, first_name="Fog", is_bot=True, username="FogMoeBot"),
     )
-    assemble_handler_capabilities(application)
+    assemble_handler_capabilities(application, telemetry=make_observability().telemetry)
     install_error_policy(application)
     return application
 
@@ -162,6 +162,16 @@ def test_serve_application_drains_runtime_before_bot_and_database(
             events.append("database.dispose")
 
         monkeypatch.setattr(bot_app.db, "dispose_current_engine", dispose)
+        monkeypatch.setattr(
+            bot_app,
+            "assemble_handler_capabilities",
+            lambda application, *, telemetry: None,
+        )
+
+        async def skip_contact(application: object) -> None:
+            """@brief 跳过无 capability fake 的管理员解析 / Skip admin resolution for a capability-free fake."""
+
+        monkeypatch.setattr(bot_app, "_resolve_administrator_contact", skip_contact)
         monkeypatch.setattr(
             bot_app,
             "compose_bot_runtime",

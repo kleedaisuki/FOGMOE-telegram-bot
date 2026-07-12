@@ -38,6 +38,7 @@ from .tool_runtime import (
     ToolRuntimeResult,
 )
 from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind
 
 
@@ -275,15 +276,33 @@ class AgentLoop:
                     "gen_ai.tool.ordinal": ordinal,
                 },
             ) as span:
-                result = await self._runtime.execute(
-                    context=tool_context,
-                    step=state.step,
-                    ordinal=ordinal,
-                    provider_call_id=call.provider_call_id,
-                    tool_name=call.name,
-                    raw_arguments=_parse_arguments(call.arguments),
-                )
+                try:
+                    result = await self._runtime.execute(
+                        context=tool_context,
+                        step=state.step,
+                        ordinal=ordinal,
+                        provider_call_id=call.provider_call_id,
+                        tool_name=call.name,
+                        raw_arguments=_parse_arguments(call.arguments),
+                    )
+                except Exception:
+                    self._telemetry.counter(
+                        MetricName.TOOL_OUTCOMES,
+                        attributes={
+                            "outcome": Outcome.FAILURE,
+                            "gen_ai.tool.name": call.name,
+                        },
+                    )
+                    raise
                 span.set_attribute("fogmoe.tool.replayed", result.replayed)
+                self._telemetry.counter(
+                    MetricName.TOOL_OUTCOMES,
+                    attributes={
+                        "outcome": Outcome.SUCCESS,
+                        "gen_ai.tool.name": call.name,
+                        "fogmoe.tool.replayed": result.replayed,
+                    },
+                )
             self._append_call(
                 state, completion=completion, result=result, first=ordinal == 0
             )

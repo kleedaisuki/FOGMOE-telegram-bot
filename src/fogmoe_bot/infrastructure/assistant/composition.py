@@ -146,12 +146,14 @@ def build_durable_assistant(
         artifacts=artifacts,
         limiter=FileSlidingWindowLimiter(rate_limit_root),
         bulkhead=media_bulkhead,
+        telemetry=telemetry,
     )
     operations = AssistantToolOperationDispatcher(
         help_text=config.HELP_TEXT,
         external_reads=RequestsExternalReadTools(
             external_settings,
             bulkhead=external_bulkhead,
+            telemetry=telemetry,
         ),
         generated_media=generated_media,
         stickers=TelegramStickerCatalogReader(

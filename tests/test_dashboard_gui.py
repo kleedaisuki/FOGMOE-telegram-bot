@@ -127,7 +127,7 @@ def test_main_window_executes_queries_in_worker_and_closes_cleanly() -> None:
     window.show()
     _drain_events(250)
 
-    assert len(window.pages) == 7
+    assert len(window.pages) == 8
     overview = window.pages[0][1]
     assert isinstance(overview, OverviewPage)
     assert overview._cards["spans"].text == "10"

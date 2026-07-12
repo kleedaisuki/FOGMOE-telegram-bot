@@ -10,10 +10,11 @@ from collections.abc import Mapping, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from types import TracebackType
+from types import MappingProxyType, TracebackType
 from typing import Literal, Protocol, Self
 
 from fogmoe_bot.domain.observability.signals import (
+    Attributes,
     AttributeValue,
     LogSignal,
     MetricKind,
@@ -34,6 +35,43 @@ _CURRENT_TRACE: ContextVar[TraceContext | None] = ContextVar(
 )
 """@brief 当前异步调用链 trace context / Current async-call-chain trace context."""
 
+_CURRENT_ATTRIBUTES: ContextVar[Attributes] = ContextVar(
+    "fogmoe_telemetry_attributes",
+    default=freeze_attributes(),
+)
+"""@brief 当前调用链的关联属性 / Correlation attributes for the active call chain.
+
+仅用于 span、日志和错误事件之间的关联；metric 必须显式传入低基数属性，避免把
+``turn_id`` 等高基数 identity 变成 metric label。
+Only correlates spans, logs, and errors. Metrics must receive explicit low-cardinality
+attributes so identities such as ``turn_id`` never become metric labels.
+"""
+
+
+def _signal_counts() -> dict[str, int]:
+    """@brief 创建完整 signal-kind 计数器 / Create a complete signal-kind counter.
+
+    @return 各类 signal 的零值计数 / Zero-valued count for every signal kind.
+    """
+
+    return {"log": 0, "span": 0, "metric": 0}
+
+
+def _signal_kind(signal: TelemetrySignal) -> str:
+    """@brief 映射 signal 到稳定低基数类别 / Map a signal to a stable low-cardinality kind.
+
+    @param signal 已记录或待丢弃的 signal / Recorded or dropped signal.
+    @return ``log``、``span`` 或 ``metric`` / ``log``, ``span``, or ``metric``.
+    """
+
+    if isinstance(signal, LogSignal):
+        return "log"
+    if isinstance(signal, SpanSignal):
+        return "span"
+    if isinstance(signal, MetricSignal):
+        return "metric"
+    raise TypeError(f"Unsupported telemetry signal: {type(signal).__name__}")
+
 
 @dataclass(frozen=True, slots=True)
 class BufferSnapshot:
@@ -49,6 +87,8 @@ class BufferSnapshot:
     capacity: int
     accepted_total: int
     dropped_total: int
+    accepted_by_signal: Attributes
+    dropped_by_signal: Attributes
 
 
 class TelemetryBuffer:
@@ -66,6 +106,8 @@ class TelemetryBuffer:
         self._capacity = capacity
         self._accepted_total = 0
         self._dropped_total = 0
+        self._accepted_by_signal: dict[str, int] = _signal_counts()
+        self._dropped_by_signal: dict[str, int] = _signal_counts()
         self._stats_lock = threading.Lock()
 
     def offer(self, signal: TelemetrySignal) -> bool:
@@ -80,9 +122,11 @@ class TelemetryBuffer:
         except queue.Full:
             with self._stats_lock:
                 self._dropped_total += 1
+                self._dropped_by_signal[_signal_kind(signal)] += 1
             return False
         with self._stats_lock:
             self._accepted_total += 1
+            self._accepted_by_signal[_signal_kind(signal)] += 1
         return True
 
     def drain(self, limit: int) -> tuple[TelemetrySignal, ...]:
@@ -112,6 +156,8 @@ class TelemetryBuffer:
                 capacity=self._capacity,
                 accepted_total=self._accepted_total,
                 dropped_total=self._dropped_total,
+                accepted_by_signal=MappingProxyType(dict(self._accepted_by_signal)),
+                dropped_by_signal=MappingProxyType(dict(self._dropped_by_signal)),
             )
 
 
@@ -134,6 +180,15 @@ class Telemetry:
         """
 
         return _CURRENT_TRACE.get()
+
+    @property
+    def current_attributes(self) -> Attributes:
+        """@brief 返回当前调用链关联属性 / Return active call-chain correlation attributes.
+
+        @return 不可变关联属性 / Immutable correlation attributes.
+        """
+
+        return _CURRENT_ATTRIBUTES.get()
 
     def span(
         self,
@@ -206,7 +261,9 @@ class Telemetry:
                     exception_message[:4096] if exception_message else None
                 ),
                 exception_stack=exception_stack[:16384] if exception_stack else None,
-                attributes=freeze_attributes(attributes),
+                attributes=freeze_attributes(
+                    {**self.current_attributes, **dict(attributes or {})}
+                ),
             )
         )
 
@@ -306,12 +363,16 @@ class SpanScope:
         self._parent_span_id: SpanId | None = parent_span_id
         self._name = name
         self._kind = kind
-        self._attributes: dict[str, object] = dict(attributes or {})
+        self._attributes: dict[str, object] = {
+            **_CURRENT_ATTRIBUTES.get(),
+            **dict(attributes or {}),
+        }
         self._status = SpanStatus.OK
         self._status_message: str | None = None
         self._started_at: datetime | None = None
         self._started_ns: int | None = None
         self._token: Token[TraceContext | None] | None = None
+        self._attributes_token: Token[Attributes] | None = None
 
     def __enter__(self) -> Self:
         """@brief 启动 span 并绑定上下文 / Start the span and bind its context.
@@ -324,6 +385,9 @@ class SpanScope:
         self._started_at = datetime.now(UTC)
         self._started_ns = time.perf_counter_ns()
         self._token = _CURRENT_TRACE.set(self.context)
+        self._attributes_token = _CURRENT_ATTRIBUTES.set(
+            freeze_attributes({**_CURRENT_ATTRIBUTES.get(), **self._attributes})
+        )
         return self
 
     def set_attribute(self, key: str, value: AttributeValue) -> None:
@@ -334,9 +398,12 @@ class SpanScope:
         @return None / None.
         """
 
-        if self._token is None:
-            raise RuntimeError("SpanScope must be entered before mutation")
+        if self._token is None or _CURRENT_TRACE.get() != self.context:
+            raise RuntimeError("SpanScope must be the active scope before mutation")
         self._attributes[key] = value
+        _CURRENT_ATTRIBUTES.set(
+            freeze_attributes({**_CURRENT_ATTRIBUTES.get(), key: value})
+        )
 
     def set_status(self, status: SpanStatus, message: str | None = None) -> None:
         """@brief 显式设置 span 状态 / Set span status explicitly.
@@ -362,9 +429,15 @@ class SpanScope:
 
         del traceback
         token = self._token
+        attributes_token = self._attributes_token
         started_at = self._started_at
         started_ns = self._started_ns
-        if token is None or started_at is None or started_ns is None:
+        if (
+            token is None
+            or attributes_token is None
+            or started_at is None
+            or started_ns is None
+        ):
             raise RuntimeError("SpanScope was not entered")
         ended_ns = time.perf_counter_ns()
         ended_at = datetime.now(UTC)
@@ -375,7 +448,9 @@ class SpanScope:
                 exc_type.__name__ if exc_type else "unknown"
             )
         _CURRENT_TRACE.reset(token)
+        _CURRENT_ATTRIBUTES.reset(attributes_token)
         self._token = None
+        self._attributes_token = None
         self._telemetry._finish_span(
             SpanSignal(
                 started_at=started_at,

@@ -1,4 +1,5 @@
 import asyncio
+import re
 from collections.abc import Iterable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
@@ -18,6 +19,12 @@ _TELEMETRY: Telemetry | None = None
 """@brief 数据库 client span recorder / Database-client span recorder."""
 _INSTRUMENTED_ENGINE_ID: int | None = None
 """@brief 已安装事件 listener 的 sync engine identity / Identity of the instrumented synchronous engine."""
+
+_SQL_TARGET = re.compile(
+    r"\b(?:FROM|INTO|UPDATE)\s+([A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*)?)",
+    re.IGNORECASE,
+)
+"""@brief 仅提取普通 schema.table 的安全 SQL target / Safe extractor for ordinary schema.table SQL targets."""
 
 
 def configure_observability(telemetry: Telemetry) -> None:
@@ -130,13 +137,17 @@ def _instrument_engine(engine: AsyncEngine) -> None:
         if telemetry is None:
             return
         operation = _sql_operation(statement)
+        target = _sql_target(statement)
+        summary = f"{operation} {target}" if target is not None else operation
         scope = telemetry.span(
-            "postgresql.query",
+            summary,
             kind=SpanKind.CLIENT,
             attributes={
                 "db.system.name": "postgresql",
                 "db.operation.name": operation,
                 "db.operation.batch": executemany,
+                **({"db.collection.name": target} if target is not None else {}),
+                "db.query.summary": summary,
             },
         )
         scope.__enter__()
@@ -204,6 +215,21 @@ def _sql_operation(statement: str) -> str:
         return "UNKNOWN"
     verb = normalized.split(None, 1)[0].upper()
     return verb if verb in {"SELECT", "INSERT", "UPDATE", "DELETE", "WITH"} else "OTHER"
+
+
+def _sql_target(statement: str) -> str | None:
+    """@brief 提取无参数、低基数 SQL target / Extract a parameter-free low-cardinality SQL target.
+
+    @param statement SQLAlchemy 发送的 SQL / SQL sent by SQLAlchemy.
+    @return ``schema.table`` 或 ``table``，无法安全识别时为 None /
+        ``schema.table`` or ``table``; None when it cannot be identified safely.
+    @note 不解析引号标识符、CTE 或动态 SQL，宁可缺失 target，也绝不持久化 SQL 文本 /
+        Quoted identifiers, CTEs, and dynamic SQL are deliberately not parsed: missing a target
+        is preferable to persisting SQL text.
+    """
+
+    match = _SQL_TARGET.search(statement)
+    return match.group(1)[:255] if match is not None else None
 
 
 async def dispose_current_engine() -> None:

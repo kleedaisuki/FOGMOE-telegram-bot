@@ -73,6 +73,20 @@ def test_nested_spans_emit_parented_immutable_signals_and_restore_context() -> N
     assert all(span.duration_ns >= 0 for span in spans)
 
 
+def test_nested_spans_inherit_business_correlation_attributes() -> None:
+    """@brief 子 span 继承父业务关联属性 / Child spans inherit parent business-correlation attributes."""
+
+    buffer = TelemetryBuffer(8)
+    telemetry = Telemetry(buffer)
+    with telemetry.span("turn", attributes={"fogmoe.turn.id": "turn-1"}):
+        with telemetry.span("dependency"):
+            pass
+
+    spans = [signal for signal in buffer.drain(8) if isinstance(signal, SpanSignal)]
+    dependency = next(span for span in spans if span.name == "dependency")
+    assert dependency.attributes["fogmoe.turn.id"] == "turn-1"
+
+
 def test_span_records_caught_failure_when_caller_sets_typed_status() -> None:
     """@brief 被业务捕获的异常仍可显式标记 span / A business-caught exception can still mark the span explicitly."""
 
@@ -113,6 +127,29 @@ def test_log_handler_redacts_credentials_and_correlates_with_current_span() -> N
     assert log.span_id == span.context.span_id
 
 
+def test_log_inherits_turn_correlation_attributes_from_active_span() -> None:
+    """@brief 日志继承 active span 的业务关联属性 / Logs inherit active-span business correlation attributes."""
+
+    buffer = TelemetryBuffer(8)
+    telemetry = Telemetry(buffer)
+    handler = TelemetryLogHandler(telemetry)
+    with telemetry.span("turn", attributes={"fogmoe.turn.id": "turn-1"}):
+        handler.emit(
+            logging.LogRecord(
+                "fogmoe.test",
+                logging.INFO,
+                __file__,
+                1,
+                "turn progress",
+                (),
+                None,
+            )
+        )
+
+    log = next(signal for signal in buffer.drain(8) if isinstance(signal, LogSignal))
+    assert log.attributes["fogmoe.turn.id"] == "turn-1"
+
+
 def test_queue_handler_captures_producer_context_before_cross_thread_delivery() -> None:
     """@brief producer context 在跨线程前冻结 / Producer context is frozen before cross-thread delivery."""
 
@@ -136,6 +173,33 @@ def test_queue_handler_captures_producer_context_before_cross_thread_delivery() 
         )
     prepared = records.get_nowait()
     assert prepared.fogmoe_trace_context == span.context
+
+
+def test_queue_handler_captures_producer_correlation_before_cross_thread_delivery() -> (
+    None
+):
+    """@brief 队列日志在生产线程冻结 Turn 关联 / Queue logs freeze Turn correlation in producer thread."""
+
+    import queue
+
+    buffer = TelemetryBuffer(8)
+    telemetry = Telemetry(buffer)
+    records: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=1)
+    handler = ContextQueueHandler(records, telemetry)
+    with telemetry.span("turn", attributes={"fogmoe.turn.id": "turn-1"}):
+        handler.emit(
+            logging.LogRecord(
+                "fogmoe.test",
+                logging.INFO,
+                __file__,
+                1,
+                "hello",
+                (),
+                None,
+            )
+        )
+    prepared = records.get_nowait()
+    assert prepared.fogmoe_telemetry_attributes["fogmoe.turn.id"] == "turn-1"
 
 
 class _FlakySink:
@@ -237,6 +301,8 @@ def test_bounded_buffer_counts_drops_without_blocking() -> None:
     assert telemetry.gauge("fogmoe.first", 1)
     assert not telemetry.gauge("fogmoe.second", 2)
     assert telemetry.snapshot().dropped_total == 1
+    assert telemetry.snapshot().accepted_by_signal == {"log": 0, "span": 0, "metric": 1}
+    assert telemetry.snapshot().dropped_by_signal == {"log": 0, "span": 0, "metric": 1}
 
 
 def test_trace_id_rejects_zero_bytes() -> None:

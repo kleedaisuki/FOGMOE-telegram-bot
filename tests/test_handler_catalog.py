@@ -4,6 +4,7 @@ import re
 from typing import cast
 
 import pytest
+from observability_testkit import make_observability
 from telegram import Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
@@ -207,7 +208,9 @@ def test_capability_assembly_is_named_and_rejects_duplicate_runtime(
         lambda bot: rps_service,
     )
     typed_application = cast(TelegramApplication, application)
-    assemble_handler_capabilities(typed_application)
+    assemble_handler_capabilities(
+        typed_application, telemetry=make_observability().telemetry
+    )
 
     assert application.bot_data[VERIFICATION_SERVICE_DATA_KEY] is verification_service
     assert application.bot_data[VERIFICATION_WORKER_DATA_KEY] is verification_worker
@@ -228,7 +231,9 @@ def test_capability_assembly_is_named_and_rejects_duplicate_runtime(
         TelegramModerationCapability,
     )
     with pytest.raises(RuntimeError, match="verification runtime"):
-        assemble_handler_capabilities(typed_application)
+        assemble_handler_capabilities(
+            typed_application, telemetry=make_observability().telemetry
+        )
 
 
 def test_catalog_rejects_duplicate_commands() -> None:

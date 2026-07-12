@@ -15,6 +15,7 @@ from fogmoe_bot.domain.conversation.payloads import (
 )
 from fogmoe_bot.infrastructure.blocking import AsyncBlockingBulkhead
 from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind
 
 from .litellm_client import create_chat_completion
@@ -79,14 +80,25 @@ class LiteLLMAssistantCompletion:
             kind=SpanKind.CLIENT,
             attributes=attributes,
         ) as span:
-            response = await self._bulkhead.call(
-                lambda: create_chat_completion(
-                    provider,
-                    model,
-                    [dict(message) for message in messages],
-                    **kwargs,
+            try:
+                response = await self._bulkhead.call(
+                    lambda: create_chat_completion(
+                        provider,
+                        model,
+                        [dict(message) for message in messages],
+                        **kwargs,
+                    )
                 )
-            )
+            except Exception:
+                self._telemetry.counter(
+                    MetricName.LLM_OUTCOMES,
+                    attributes={
+                        "outcome": Outcome.FAILURE,
+                        "gen_ai.provider.name": provider,
+                        "gen_ai.request.model": model,
+                    },
+                )
+                raise
             usage = getattr(response, "usage", None)
             for attribute_name, response_name in (
                 ("gen_ai.usage.input_tokens", "prompt_tokens"),
@@ -113,6 +125,14 @@ class LiteLLMAssistantCompletion:
                             ),
                         },
                     )
+            self._telemetry.counter(
+                MetricName.LLM_OUTCOMES,
+                attributes={
+                    "outcome": Outcome.SUCCESS,
+                    "gen_ai.provider.name": provider,
+                    "gen_ai.request.model": model,
+                },
+            )
         choices = getattr(response, "choices", None)
         if not isinstance(choices, Sequence) or not choices:
             raise ValueError("Provider response contains no choices")

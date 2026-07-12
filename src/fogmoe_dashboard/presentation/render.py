@@ -55,6 +55,7 @@ _COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         ("event_name", "Event"),
         ("body", "Body"),
         ("trace_id", "Trace"),
+        ("turn_id", "Turn"),
     ),
     "traces": (
         ("started_at", "Started"),
@@ -68,6 +69,7 @@ _COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         ("name", "Metric"),
         ("kind", "Kind"),
         ("unit", "Unit"),
+        ("attributes", "Attributes"),
         ("points", "Points"),
         ("latest", "Latest"),
         ("minimum", "Min"),

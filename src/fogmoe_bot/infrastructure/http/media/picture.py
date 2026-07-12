@@ -11,6 +11,9 @@ from dataclasses import dataclass
 import aiohttp
 
 from fogmoe_bot.domain.media.picture import PictureCandidate, PictureRating
+from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
+from fogmoe_bot.domain.observability.signals import SpanKind
 from fogmoe_bot.infrastructure.network.proxy import create_aiohttp_session
 
 from .common import HEADERS, optional_str
@@ -38,6 +41,7 @@ class BooruPictureSource:
     def __init__(
         self,
         *,
+        telemetry: Telemetry,
         endpoints: Sequence[str] = _ENDPOINTS,
         timeout_seconds: float = 10,
         retry_count: int = 3,
@@ -56,6 +60,7 @@ class BooruPictureSource:
         self._retry_delay = retry_delay_seconds
         self._forbidden_cooldown = forbidden_cooldown_seconds
         self._circuits = {endpoint: _Circuit() for endpoint in self._endpoints}
+        self._telemetry = telemetry
 
     async def fetch(
         self,
@@ -64,6 +69,47 @@ class BooruPictureSource:
         limit: int,
     ) -> tuple[PictureCandidate, ...]:
         """获取规范图库批次 / Fetch a canonical gallery batch."""
+
+        with self._telemetry.span(
+            "media.picture.fetch",
+            kind=SpanKind.CLIENT,
+            attributes={
+                "fogmoe.dependency.name": "booru",
+                "picture.rating": rating.value,
+            },
+        ):
+            try:
+                value = await self._fetch(rating, limit=limit)
+            except Exception:
+                self._telemetry.counter(
+                    MetricName.DEPENDENCY_OUTCOMES,
+                    attributes={
+                        "outcome": Outcome.FAILURE,
+                        "fogmoe.dependency.name": "booru",
+                    },
+                )
+                raise
+            self._telemetry.counter(
+                MetricName.DEPENDENCY_OUTCOMES,
+                attributes={
+                    "outcome": Outcome.SUCCESS,
+                    "fogmoe.dependency.name": "booru",
+                },
+            )
+            return value
+
+    async def _fetch(
+        self,
+        rating: PictureRating,
+        *,
+        limit: int,
+    ) -> tuple[PictureCandidate, ...]:
+        """@brief 执行实际图库查询 / Execute the actual gallery query.
+
+        @param rating 内容分级 / Content rating.
+        @param limit 最大候选数 / Maximum candidate count.
+        @return 图片候选 / Picture candidates.
+        """
 
         bounded_limit = min(max(limit, 1), 200)
         params = {

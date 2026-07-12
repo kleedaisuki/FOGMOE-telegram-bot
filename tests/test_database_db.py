@@ -54,6 +54,16 @@ def test_sql_operation_is_low_cardinality_and_never_returns_statement() -> None:
     assert db._sql_operation("") == "UNKNOWN"
 
 
+def test_sql_target_exposes_only_safe_schema_table_identity() -> None:
+    """@brief SQL target 只保留低基数表名 / SQL targets retain only low-cardinality table names."""
+
+    assert db._sql_target("SELECT secret FROM conversation.turns WHERE id = :id") == (
+        "conversation.turns"
+    )
+    assert db._sql_target("UPDATE public.users SET token = :token") == "public.users"
+    assert db._sql_target('SELECT * FROM "private users"') is None
+
+
 def test_database_span_stack_finishes_success_and_error() -> None:
     """@brief 数据库事件栈正确结束成功与异常 span / The database event stack completes successful and failed spans."""
 

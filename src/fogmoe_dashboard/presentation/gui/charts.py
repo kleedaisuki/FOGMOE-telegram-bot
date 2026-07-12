@@ -211,7 +211,7 @@ class MetricRangeChart(DashboardCanvas):
             label="latest",
             marker="D",
         )
-        axis.set_yticks(positions, [item.name for item in selected])
+        axis.set_yticks(positions, [_metric_label(item) for item in selected])
         legend = axis.legend(frameon=False, fontsize=8)
         for text in legend.get_texts():
             text.set_color(_FOREGROUND)
@@ -338,6 +338,21 @@ def _span_label(name: str, span_id: str) -> str:
     """@brief 构造可区分的 span 标签 / Build a distinguishable span label."""
 
     return f"{name} · {span_id[:6]}"
+
+
+def _metric_label(metric: MetricStats) -> str:
+    """@brief 构造带低基数属性的 metric 标签 / Build a metric label with low-cardinality attributes.
+
+    @param metric 已聚合 metric / Aggregated metric.
+    @return 可区分的图表标签 / Distinguishable chart label.
+    """
+
+    if not metric.attributes:
+        return metric.name
+    pairs = ", ".join(
+        f"{key}={value}" for key, value in sorted(metric.attributes.items())
+    )
+    return f"{metric.name} · {pairs}"[:100]
 
 
 def _datetime_bar_width(points: Sequence[HealthPoint]) -> float:

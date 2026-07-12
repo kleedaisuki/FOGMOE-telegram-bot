@@ -39,6 +39,7 @@ from fogmoe_bot.domain.conversation.outbox import (
 )
 from fogmoe_bot.domain.conversation.workflow_results import InferenceCompletionResult
 from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.domain.observability.conventions import EventName, MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
 
 
@@ -598,11 +599,19 @@ class InferenceWorker:
                 )
                 span.set_status(SpanStatus.ERROR, str(error))
                 span.set_attribute("error.type", error.__class__.__name__)
+                self._telemetry.counter(
+                    MetricName.INFERENCE_OUTCOMES,
+                    attributes={"outcome": Outcome.TIMEOUT},
+                )
                 await self._finalize_failure(claim, error)
                 return
             except Exception as error:
                 span.set_status(SpanStatus.ERROR, str(error))
                 span.set_attribute("error.type", error.__class__.__name__)
+                self._telemetry.counter(
+                    MetricName.INFERENCE_OUTCOMES,
+                    attributes={"outcome": Outcome.FAILURE},
+                )
                 await self._finalize_failure(claim, error)
                 return
 
@@ -643,6 +652,10 @@ class InferenceWorker:
                 outbounds=outbounds,
                 completed_at=completed_at,
             )
+            self._telemetry.counter(
+                MetricName.INFERENCE_OUTCOMES,
+                attributes={"outcome": Outcome.SUCCESS},
+            )
 
     async def _produce(
         self,
@@ -668,12 +681,17 @@ class InferenceWorker:
                     )
                     if recovered:
                         self._telemetry.counter(
-                            "fogmoe.inference.leases.recovered",
+                            MetricName.LEASE_RECOVERIES,
                             float(recovered),
+                            attributes={"pipeline.stage": "inference"},
                         )
                         logger.warning(
                             "Recovered expired inference leases: count=%s",
                             recovered,
+                            extra={
+                                "event_name": EventName.INFERENCE_LEASE_RECOVERED,
+                                "telemetry_attributes": {"pipeline.stage": "inference"},
+                            },
                         )
                     claims = tuple(
                         await self._repository.claim_inference_activities(
@@ -758,11 +776,19 @@ class InferenceWorker:
                 retry_at=decision.at,
                 error=error_text,
             )
+            self._telemetry.counter(
+                MetricName.INFERENCE_OUTCOMES,
+                attributes={"outcome": Outcome.RETRY},
+            )
             return
         await self._repository.fail_inference_activity(
             claim,
             failed_at=failed_at,
             error=error_text,
+        )
+        self._telemetry.counter(
+            MetricName.INFERENCE_OUTCOMES,
+            attributes={"outcome": Outcome.DROPPED},
         )
 
     @staticmethod

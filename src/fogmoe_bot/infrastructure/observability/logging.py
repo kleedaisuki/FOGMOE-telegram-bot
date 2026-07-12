@@ -7,6 +7,7 @@ import logging
 import os
 import queue
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
@@ -68,6 +69,7 @@ class ContextQueueHandler(QueueHandler):
             exception_stack = logging.Formatter().formatException(record.exc_info)
         prepared = cast(logging.LogRecord, super().prepare(record))
         prepared.fogmoe_trace_context = self._telemetry.current_context
+        prepared.fogmoe_telemetry_attributes = self._telemetry.current_attributes
         prepared.fogmoe_exception_type = exception_type
         prepared.fogmoe_exception_message = exception_message
         prepared.fogmoe_exception_stack = exception_stack
@@ -147,9 +149,22 @@ class TelemetryLogHandler(logging.Handler):
                     logging.Formatter().formatException(record.exc_info)
                 )
             raw_attributes = getattr(record, "telemetry_attributes", {})
-            attributes = raw_attributes if isinstance(raw_attributes, dict) else {}
+            correlation_value = getattr(record, "fogmoe_telemetry_attributes", {})
+            correlation_attributes = (
+                dict(correlation_value)
+                if isinstance(correlation_value, Mapping)
+                else {}
+            )
+            attributes = {
+                **correlation_attributes,
+                **(raw_attributes if isinstance(raw_attributes, dict) else {}),
+            }
             event_value = getattr(record, "event_name", None)
-            event_name = event_value if isinstance(event_value, str) else None
+            event_name = (
+                event_value.strip()
+                if isinstance(event_value, str) and event_value.strip()
+                else f"log.{record.name}"[:255]
+            )
             self._telemetry.log(
                 occurred_at=datetime.fromtimestamp(record.created, tz=UTC),
                 severity=_severity(record.levelno),

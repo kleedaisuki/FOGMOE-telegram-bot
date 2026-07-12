@@ -56,6 +56,7 @@ from fogmoe_bot.application.moderation.verification_worker import (
     VERIFICATION_WORKER_DATA_KEY,
     VerificationTimeoutWorker,
 )
+from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.blocking import AsyncBlockingBulkhead
 from fogmoe_bot.infrastructure.crypto.binance_price import BinanceBtcPriceSource
@@ -215,26 +216,30 @@ def create_verification_runtime(
     return service, VerificationTimeoutWorker(repository=repository, service=service)
 
 
-def create_picture_service(accounts: MediaAccountProfiles) -> PictureService:
+def create_picture_service(
+    accounts: MediaAccountProfiles, *, telemetry: Telemetry
+) -> PictureService:
     """装配图片用例 / Assemble picture use cases."""
 
     return PictureService(
         accounts=accounts,
         repository=PostgresPictureRepository(),
-        source=BooruPictureSource(),
-        binary_fetcher=AiohttpBinaryFetcher(),
+        source=BooruPictureSource(telemetry=telemetry),
+        binary_fetcher=AiohttpBinaryFetcher(telemetry=telemetry),
         runtime=PictureRuntime(),
         preview_outbound=media_picture.TelegramPicturePreviewOutboundFactory(),
     )
 
 
-def create_music_service(accounts: MediaAccountProfiles) -> MusicService:
+def create_music_service(
+    accounts: MediaAccountProfiles, *, telemetry: Telemetry
+) -> MusicService:
     """装配音乐用例 / Assemble music use cases."""
 
     return MusicService(
         accounts=accounts,
         sessions=PostgresMusicSessionRepository(),
-        source=JkyMusicSource(),
+        source=JkyMusicSource(telemetry=telemetry),
         runtime=MusicRuntime(),
     )
 
@@ -299,10 +304,13 @@ def create_moderation_capability(bot: Bot) -> TelegramModerationCapability:
     return create_moderation_ingress_capability(bot)
 
 
-def assemble_handler_capabilities(application: TelegramApplication) -> None:
+def assemble_handler_capabilities(
+    application: TelegramApplication, *, telemetry: Telemetry
+) -> None:
     """@brief 装配 handler 所需服务 / Assemble services required by handlers.
 
     @param application PTB Application / PTB Application.
+    @param telemetry 进程唯一遥测 recorder / Sole process telemetry recorder.
     @return None / None.
     @raise RuntimeError capability 被重复装配时抛出 / Raised when a capability is assembled twice.
     """
@@ -353,8 +361,12 @@ def assemble_handler_capabilities(application: TelegramApplication) -> None:
             ),
             economy_handlers.ECONOMY_SERVICE_DATA_KEY: create_economy_service(),
             ACCOUNT_SERVICE_DATA_KEY: create_account_service(),
-            PICTURE_SERVICE_DATA_KEY: create_picture_service(media_accounts),
-            MUSIC_SERVICE_DATA_KEY: create_music_service(media_accounts),
+            PICTURE_SERVICE_DATA_KEY: create_picture_service(
+                media_accounts, telemetry=telemetry
+            ),
+            MUSIC_SERVICE_DATA_KEY: create_music_service(
+                media_accounts, telemetry=telemetry
+            ),
             CRYPTO_SERVICE_DATA_KEY: create_crypto_service(
                 price_bulkhead=price_bulkhead
             ),

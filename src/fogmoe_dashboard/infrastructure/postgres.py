@@ -285,6 +285,7 @@ class PostgresDashboardRepository:
                 name=str(row["metric_name"]),
                 kind=str(row["metric_kind"]),
                 unit=str(row["unit"]),
+                attributes=freeze_json_object(row["attributes"]),
                 points=int(row["points"]),
                 latest_at=_datetime(row["latest_at"]),
                 latest=float(row["latest"]),
@@ -520,6 +521,7 @@ WITH span_rollup AS (
          count(*) FILTER (WHERE span_name = 'agent.tool.execute') AS tool_calls
   FROM observability.spans
   WHERE started_at >= $1 AND started_at < $2
+    AND coalesce(attributes ->> 'db.system.name', '') <> 'postgresql'
 ), log_rollup AS (
   SELECT count(*) AS logs,
          count(*) FILTER (WHERE severity_number >= 17) AS error_logs
@@ -558,6 +560,7 @@ WITH span_rollup AS (
            AS output_tokens
   FROM observability.spans
   WHERE started_at >= $1 AND started_at < $2
+    AND coalesce(attributes ->> 'db.system.name', '') <> 'postgresql'
   GROUP BY bucket
 ), log_rollup AS (
   SELECT floor(
@@ -652,6 +655,7 @@ SELECT encode(trace_id, 'hex') AS trace_id,
          FILTER (WHERE parent_span_id IS NULL), '{}'::TEXT[]) AS root_operations
 FROM observability.spans
 WHERE started_at >= $1 AND started_at < $2
+  AND coalesce(attributes ->> 'db.system.name', '') <> 'postgresql'
 GROUP BY trace_id
 HAVING NOT $3::BOOLEAN OR count(*) FILTER (WHERE status_code = 'error') > 0
 ORDER BY started_at DESC
@@ -682,7 +686,7 @@ ORDER BY occurred_at
 """@brief Trace 关联日志 SQL / Trace-correlated log SQL."""
 
 _METRICS_SQL = """
-SELECT metric_name, metric_kind, unit, count(*) AS points,
+SELECT metric_name, metric_kind, unit, attributes, count(*) AS points,
        max(observed_at) AS latest_at,
        (array_agg(value ORDER BY observed_at DESC))[1] AS latest,
        min(value) AS minimum, max(value) AS maximum, avg(value) AS average,
@@ -695,8 +699,8 @@ SELECT metric_name, metric_kind, unit, count(*) AS points,
 FROM observability.metric_points
 WHERE observed_at >= $1 AND observed_at < $2
   AND ($3::TEXT IS NULL OR metric_name = $3)
-GROUP BY metric_name, metric_kind, unit
-ORDER BY metric_name
+GROUP BY metric_name, metric_kind, unit, attributes
+ORDER BY metric_name, attributes
 LIMIT $4
 """
 """@brief Metric 窗口统计 SQL / Metric-window statistics SQL."""

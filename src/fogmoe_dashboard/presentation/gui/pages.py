@@ -89,6 +89,21 @@ _SEVERITIES = (
 )
 """@brief OpenTelemetry 严重度筛选项 / OpenTelemetry severity filter choices."""
 
+_RELIABILITY_METRICS = (
+    "fogmoe.inbox.outcomes",
+    "fogmoe.inference.outcomes",
+    "fogmoe.outbox.outcomes",
+    "fogmoe.llm.outcomes",
+    "fogmoe.tool.outcomes",
+    "fogmoe.dependency.outcomes",
+    "fogmoe.pipeline.lease.recoveries",
+    "fogmoe.telemetry.accepted",
+    "fogmoe.telemetry.dropped",
+    "fogmoe.telemetry.export.failures",
+    "fogmoe.runtime.event_loop.lag",
+)
+"""@brief 可靠性工作区的稳定 metric 集合 / Stable metric set for the reliability workspace."""
+
 
 class OverviewPage(QueryPage):
     """@brief RED/USE 总览与 durable pipeline 页面 / RED/USE overview and durable-pipeline page."""
@@ -270,6 +285,7 @@ class EventsPage(QueryPage):
                 TableColumn("Event", lambda row: row.event_name),
                 TableColumn("Body", lambda row: row.body, stretch=True),
                 TableColumn("Trace", lambda row: row.trace_id),
+                TableColumn("Turn", lambda row: row.turn_id),
             )
         )
         self._errors = table_view(self._error_model)
@@ -452,6 +468,7 @@ class MetricsPage(QueryPage):
                 TableColumn("Metric", lambda row: row.name, stretch=True),
                 TableColumn("Kind", lambda row: row.kind),
                 TableColumn("Unit", lambda row: row.unit),
+                TableColumn("Attributes", lambda row: row.attributes, stretch=True),
                 TableColumn("Points", lambda row: row.points, integer, _RIGHT),
                 TableColumn("Latest", lambda row: row.latest, alignment=_RIGHT),
                 TableColumn("Min", lambda row: row.minimum, alignment=_RIGHT),
@@ -489,6 +506,61 @@ class MetricsPage(QueryPage):
             rows = cast(tuple[MetricStats, ...], value)
             self._model.replace(rows)
             self._chart.plot_metrics(rows)
+
+
+class ReliabilityPage(QueryPage):
+    """@brief 用户结果、依赖与遥测健康工作区 / User outcomes, dependencies, and telemetry-health workspace."""
+
+    def __init__(self) -> None:
+        """@brief 组装完整 outcome 表 / Compose the complete outcome table."""
+
+        super().__init__()
+        self._rows: dict[str, tuple[MetricStats, ...]] = {}
+        self._model = ObjectTableModel[MetricStats](
+            (
+                TableColumn("Metric", lambda row: row.name, stretch=True),
+                TableColumn("Attributes", lambda row: row.attributes, stretch=True),
+                TableColumn("Points", lambda row: row.points, integer, _RIGHT),
+                TableColumn("Total", lambda row: row.total, alignment=_RIGHT),
+                TableColumn(
+                    "Rate/s", lambda row: row.rate_per_second, alignment=_RIGHT
+                ),
+                TableColumn("Latest", lambda row: row.latest, alignment=_RIGHT),
+                TableColumn("Max", lambda row: row.maximum, alignment=_RIGHT),
+            )
+        )
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            page_header(
+                "可靠性与依赖",
+                "全量业务 outcome、外部依赖结果、pipeline lease 与遥测自身健康。",
+            )
+        )
+        layout.addWidget(table_view(self._model), stretch=1)
+
+    def queries(self, window: TimeWindow) -> tuple[DashboardQuery, ...]:
+        """@brief 请求全部可靠性 metric / Request all reliability metrics.
+
+        @param window 当前时间窗口 / Current time window.
+        @return 每个稳定 metric 的有界查询 / Bounded query for every stable metric.
+        """
+
+        self._rows.clear()
+        return tuple(
+            MetricsQuery(window, name=name, limit=100) for name in _RELIABILITY_METRICS
+        )
+
+    def accept(self, query: DashboardQuery, value: DashboardResult) -> None:
+        """@brief 合并每个 metric 的独立结果 / Merge independent results for every metric."""
+
+        if not isinstance(query, MetricsQuery):
+            return
+        self._rows[query.name or ""] = cast(tuple[MetricStats, ...], value)
+        self._model.replace(
+            tuple(
+                row for name in _RELIABILITY_METRICS for row in self._rows.get(name, ())
+            )
+        )
 
 
 class AiTurnsPage(QueryPage):

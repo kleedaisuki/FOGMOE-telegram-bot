@@ -11,7 +11,10 @@ from urllib.parse import quote
 import requests
 
 from fogmoe_bot.application.assistant.tool_runtime import ToolEffectRequest
+from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
+from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
+from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
 from fogmoe_bot.infrastructure.blocking import AsyncBlockingBulkhead
 from fogmoe_bot.infrastructure.network.proxy import create_requests_session
 
@@ -40,6 +43,7 @@ class RequestsExternalReadTools:
         settings: ExternalReadSettings,
         *,
         bulkhead: AsyncBlockingBulkhead,
+        telemetry: Telemetry,
     ) -> None:
         """@brief 保存不可变配置 / Store immutable settings.
 
@@ -51,6 +55,7 @@ class RequestsExternalReadTools:
             raise ValueError("timeout_seconds must be positive")
         self._settings = settings
         self._bulkhead = bulkhead
+        self._telemetry = telemetry
 
     async def execute(self, request: ToolEffectRequest) -> JsonValue:
         """@brief 在线程边界执行一个读取 / Execute one read behind a thread boundary.
@@ -59,7 +64,41 @@ class RequestsExternalReadTools:
         @return JSON 结果 / JSON result.
         """
 
-        return await self._bulkhead.call(lambda: self._execute_sync(request))
+        with self._telemetry.span(
+            "external.read",
+            kind=SpanKind.CLIENT,
+            attributes={
+                "gen_ai.tool.name": request.tool_name,
+                "fogmoe.dependency.name": _dependency_name(request.tool_name),
+            },
+        ) as span:
+            try:
+                result = await self._bulkhead.call(lambda: self._execute_sync(request))
+            except Exception:
+                self._telemetry.counter(
+                    MetricName.DEPENDENCY_OUTCOMES,
+                    attributes={
+                        "outcome": Outcome.FAILURE,
+                        "gen_ai.tool.name": request.tool_name,
+                        "fogmoe.dependency.name": _dependency_name(request.tool_name),
+                    },
+                )
+                raise
+            if isinstance(result, dict) and "error" in result:
+                span.set_status(SpanStatus.ERROR, str(result["error"]))
+                span.set_attribute("error.type", "external_dependency_error")
+                outcome = Outcome.FAILURE
+            else:
+                outcome = Outcome.SUCCESS
+            self._telemetry.counter(
+                MetricName.DEPENDENCY_OUTCOMES,
+                attributes={
+                    "outcome": outcome,
+                    "gen_ai.tool.name": request.tool_name,
+                    "fogmoe.dependency.name": _dependency_name(request.tool_name),
+                },
+            )
+            return result
 
     def _execute_sync(self, request: ToolEffectRequest) -> JsonValue:
         """@brief 执行同步请求 / Execute a synchronous request.
@@ -230,3 +269,17 @@ def _decode_base64(value: object) -> str:
         return base64.b64decode(value).decode(errors="replace")
     except ValueError:
         return value
+
+
+def _dependency_name(tool_name: str) -> str:
+    """@brief 映射工具到稳定依赖名称 / Map a tool to a stable dependency name.
+
+    @param tool_name 工具目录名称 / Tool-catalog name.
+    @return 低基数依赖标识 / Low-cardinality dependency identifier.
+    """
+
+    return {
+        "google_search": "serpapi",
+        "fetch_url": "jina_reader",
+        "execute_python_code": "judge0",
+    }.get(tool_name, "unknown")

@@ -22,6 +22,7 @@ from .router import (
     RouteOutcome,
 )
 from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.domain.observability.conventions import EventName, MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
 
 
@@ -340,11 +341,19 @@ class InboxWorker:
             except Exception as error:
                 span.set_status(SpanStatus.ERROR, str(error))
                 span.set_attribute("error.type", error.__class__.__name__)
+                self._telemetry.counter(
+                    MetricName.INBOX_OUTCOMES,
+                    attributes={"outcome": Outcome.FAILURE},
+                )
                 await self._finalize_failure(claim, error)
                 return
             await self._repository.mark_inbound_processed(
                 claim,
                 processed_at=self._clock.now(),
+            )
+            self._telemetry.counter(
+                MetricName.INBOX_OUTCOMES,
+                attributes={"outcome": Outcome.SUCCESS},
             )
 
     async def _produce(
@@ -371,11 +380,17 @@ class InboxWorker:
                     )
                     if recovered:
                         self._telemetry.counter(
-                            "fogmoe.inbox.leases.recovered",
+                            MetricName.LEASE_RECOVERIES,
                             float(recovered),
+                            attributes={"pipeline.stage": "inbox"},
                         )
                         logger.warning(
-                            "Recovered expired inbox leases: count=%s", recovered
+                            "Recovered expired inbox leases: count=%s",
+                            recovered,
+                            extra={
+                                "event_name": EventName.INBOX_LEASE_RECOVERED,
+                                "telemetry_attributes": {"pipeline.stage": "inbox"},
+                            },
                         )
                     claims = tuple(
                         await self._repository.claim_inbound(
@@ -460,16 +475,25 @@ class InboxWorker:
                 decision.at.isoformat(),
                 exc_info=error,
             )
+            self._telemetry.counter(
+                MetricName.INBOX_OUTCOMES,
+                attributes={"outcome": Outcome.RETRY},
+            )
             return
         await self._repository.fail_inbound(
             claim,
             failed_at=failed_at,
             error=error_text,
         )
+        self._telemetry.counter(
+            MetricName.INBOX_OUTCOMES,
+            attributes={"outcome": Outcome.DROPPED},
+        )
         logger.error(
             "Inbox update moved to final-failure quarantine: update_id=%s attempt=%s",
             claim.update.update_id.value,
             claim.update.attempt_count,
+            extra={"event_name": EventName.INBOX_PROCESS_FAILED},
             exc_info=error,
         )
 

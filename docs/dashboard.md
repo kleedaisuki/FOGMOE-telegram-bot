@@ -24,12 +24,19 @@ fogmoe-dashboard-gui --window 24h --auto-refresh 10
 | 事件与日志 | severity/logger 筛选、统一错误流、双击下钻 trace |
 | Traces | error-only 筛选、master-detail、waterfall、关联日志与 attributes |
 | Metrics | 精确 metric 筛选、latest/average/min–max 范围图、Counter rate |
+| 可靠性与依赖 | inbox/inference/outbox/LLM/tool/dependency outcome、lease recovery 与遥测健康 |
 | AI 与 Turn | provider/model token 与 p95、Turn 分阶段延迟及 slow Turns |
 | Resources | service/version/environment/instance 生命周期 |
 
 全局窗口可选 15 分钟至 30 天；手动刷新和 2–300 秒自动刷新使用相同语义。每次刷新
 产生单调的 generation，旧 generation 即使较晚返回也不会覆盖新状态。查询期间界面
 仍可导航、滚动和复制数据。
+
+Metrics 按 metric 名称、种类、单位和完整低基数 attributes 分组。例如同一个
+`fogmoe.outbox.outcomes` 会分别显示 `outcome=success`、`outcome=retry` 和
+`outcome=dropped`，不会把不同结果混为一个平均值。总览与健康趋势刻意排除 PostgreSQL
+client spans；数据库详细操作仍在“操作”视图中可查，避免高频数据库轮询掩盖用户 Turn
+的端到端延迟。完整的数据契约见 [可观测性文档](observability.md)。
 
 ### GUI 并发与层次边界
 

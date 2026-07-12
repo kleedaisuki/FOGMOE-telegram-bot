@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import resource
+from pathlib import Path
 
 from fogmoe_bot.application.runtime.keyed_mailbox import KeyedMailboxRuntime
 
@@ -42,14 +45,18 @@ class RuntimeMetricsService:
         @return None / None.
         """
 
+        loop = asyncio.get_running_loop()
+        expected = loop.time()
         while not stop_event.is_set():
-            self._record()
+            now = loop.time()
+            self._record(loop_lag_seconds=max(0.0, now - expected))
+            expected = now + self._interval
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=self._interval)
             except TimeoutError:
                 continue
 
-    def _record(self) -> None:
+    def _record(self, *, loop_lag_seconds: float = 0.0) -> None:
         """@brief 记录一个一致的进程内快照 / Record one coherent in-process snapshot."""
 
         mailbox = self._execution.snapshot()
@@ -82,11 +89,92 @@ class RuntimeMetricsService:
             float(self._exporter.exported_signals),
             unit="{signal}",
         )
+        for signal_kind, accepted in buffer.accepted_by_signal.items():
+            self._telemetry.gauge(
+                "fogmoe.telemetry.accepted",
+                float(accepted),
+                unit="{signal}",
+                attributes={"telemetry.signal.type": signal_kind},
+            )
+        for signal_kind, dropped in buffer.dropped_by_signal.items():
+            self._telemetry.gauge(
+                "fogmoe.telemetry.dropped",
+                float(dropped),
+                unit="{signal}",
+                attributes={"telemetry.signal.type": signal_kind},
+            )
         self._telemetry.gauge(
-            "fogmoe.telemetry.dropped",
-            float(buffer.dropped_total),
-            unit="{signal}",
+            "fogmoe.runtime.event_loop.lag",
+            loop_lag_seconds,
+            unit="s",
         )
+        self._telemetry.gauge(
+            "process.memory.usage",
+            float(_rss_bytes()),
+            unit="By",
+        )
+        self._telemetry.gauge(
+            "process.cpu.time",
+            _process_cpu_seconds(),
+            unit="s",
+        )
+        self._telemetry.gauge(
+            "process.open_file_descriptors",
+            float(_open_file_descriptors()),
+            unit="{fd}",
+        )
+        load = _load_average_1m()
+        if load is not None:
+            self._telemetry.gauge("system.cpu.load_average.1m", load, unit="1")
+
+
+def _rss_bytes() -> int:
+    """@brief 读取当前 RSS 字节数 / Read current resident-set size in bytes.
+
+    @return Linux ``/proc`` 可用时的当前 RSS，否则返回资源上界近似值 /
+        Current RSS on Linux ``/proc``, otherwise a resource-limit approximation.
+    """
+
+    try:
+        pages = Path("/proc/self/statm").read_text(encoding="utf-8").split()[1]
+        return int(pages) * os.sysconf("SC_PAGE_SIZE")
+    except IndexError, OSError, ValueError:
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        return int(usage.ru_maxrss) * 1024
+
+
+def _process_cpu_seconds() -> float:
+    """@brief 读取进程累计 CPU 时间 / Read cumulative process CPU time.
+
+    @return user 与 system CPU 秒数 / Sum of user and system CPU seconds.
+    """
+
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    return float(usage.ru_utime + usage.ru_stime)
+
+
+def _open_file_descriptors() -> int:
+    """@brief 读取已打开文件描述符数 / Read open file-descriptor count.
+
+    @return Linux ``/proc`` 不可用时为零 / Zero when Linux ``/proc`` is unavailable.
+    """
+
+    try:
+        return sum(1 for _ in Path("/proc/self/fd").iterdir())
+    except OSError:
+        return 0
+
+
+def _load_average_1m() -> float | None:
+    """@brief 读取一分钟系统负载 / Read one-minute system load average.
+
+    @return 支持时的一分钟 load average，否则为 None / One-minute load average when supported.
+    """
+
+    try:
+        return float(os.getloadavg()[0])
+    except OSError:
+        return None
 
 
 __all__ = ["RuntimeMetricsService"]

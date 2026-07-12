@@ -31,6 +31,7 @@ from fogmoe_dashboard.presentation.gui.pages import (
     MetricsPage,
     OperationsPage,
     OverviewPage,
+    ReliabilityPage,
     ResourcesPage,
     TracesPage,
 )
@@ -86,6 +87,7 @@ class DashboardWindow(QMainWindow):
             ("事件与日志", EventsPage()),
             ("Traces", TracesPage()),
             ("Metrics", MetricsPage()),
+            ("可靠性", ReliabilityPage()),
             ("AI 与 Turn", AiTurnsPage()),
             ("Resources", ResourcesPage()),
         )
