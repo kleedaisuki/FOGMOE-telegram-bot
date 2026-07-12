@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from fogmoe_dbctl import cli
-from fogmoe_dbctl.commands import bootstrap, export_csv, migrate
+from fogmoe_dbctl.commands import bootstrap, export_csv, migrate, shell
 from fogmoe_dbctl.postgres import (
     ServiceConfig,
     escape_pgpass_field,
@@ -21,6 +21,8 @@ def test_cli_registers_commands_and_compatibility_aliases():
     assert parser.parse_args(["migrate"]).handler is migrate.execute
     assert parser.parse_args(["upgrade"]).handler is migrate.execute
     assert parser.parse_args(["run-migrations-as-role"]).handler is migrate.execute
+    assert parser.parse_args(["shell"]).handler is shell.execute
+    assert parser.parse_args(["psql"]).handler is shell.execute
     assert (
         parser.parse_args(
             [
@@ -193,3 +195,60 @@ def test_export_csv_writes_atomically_through_psql_service(tmp_path: Path, monke
     assert environment["PGSERVICEFILE"] == str(tmp_path / "psql" / "pg_service.conf")
     assert environment["PGPASSFILE"] == str(tmp_path / "psql" / "pgpass")
     assert check is True
+
+
+def test_shell_uses_automation_service_without_exposing_password(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """@brief shell 通过 service/pgpass 前台启动 / The shell starts through service/pgpass in the foreground."""
+
+    calls = []
+
+    class Result:
+        """@brief 成功 subprocess 结果 / Successful subprocess result."""
+
+        returncode = 0
+
+    def fake_run(command, *, env, check):
+        calls.append((command, env, check))
+        return Result()
+
+    monkeypatch.setattr(shell.subprocess, "run", fake_run)
+    monkeypatch.setenv("PGPASSWORD", "must-not-leak")
+    args = cli.build_parser().parse_args(
+        ["shell", "--config-dir", str(tmp_path), "--no-psqlrc"]
+    )
+    args.handler(args)
+
+    command, environment, check = calls[0]
+    assert command[:3] == ["psql", "--dbname", "fogmoe"]
+    assert "fogmoe_automation" not in command
+    assert environment["PGSERVICE"] == "fogmoe_automation"
+    assert environment["PGSERVICEFILE"] == str(tmp_path / "pg_service.conf")
+    assert environment["PGPASSFILE"] == str(tmp_path / "pgpass")
+    assert "PGPASSWORD" not in environment
+    assert check is False
+
+
+def test_shell_propagates_psql_exit_status(tmp_path: Path, monkeypatch) -> None:
+    """@brief shell 保留 psql 退出状态 / The shell preserves the psql exit status."""
+
+    class Result:
+        """@brief 失败 subprocess 结果 / Failed subprocess result."""
+
+        returncode = 7
+
+    monkeypatch.setattr(
+        shell.subprocess,
+        "run",
+        lambda command, *, env, check: Result(),
+    )
+    args = cli.build_parser().parse_args(["shell", "--config-dir", str(tmp_path)])
+
+    try:
+        args.handler(args)
+    except SystemExit as error:
+        assert error.code == 7
+        return
+    raise AssertionError("expected psql exit status to propagate")

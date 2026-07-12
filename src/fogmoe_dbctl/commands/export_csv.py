@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 import tempfile
@@ -11,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from fogmoe_dbctl.config import DEFAULT_CONFIG_DIR
-from fogmoe_dbctl.postgres import quote_identifier
+from fogmoe_dbctl.postgres import psql_environment, quote_identifier
 
 
 _IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -83,19 +82,6 @@ def build_copy_sql(schema: str, table: str) -> str:
         f"COPY (SELECT * FROM {quote_identifier(schema)}.{quote_identifier(table)}) "
         "TO STDOUT WITH (FORMAT CSV, HEADER TRUE, ENCODING 'UTF8');"
     )
-
-
-def psql_environment(config_dir: Path) -> dict[str, str]:
-    """@brief 构造 psql service 环境 / Build the psql service environment.
-
-    @param config_dir 项目 psql 配置目录 / Project psql configuration directory.
-    @return 供 psql 子进程使用的环境 / Environment for the psql subprocess.
-    """
-
-    environment = os.environ.copy()
-    environment["PGSERVICEFILE"] = str(config_dir / "pg_service.conf")
-    environment["PGPASSFILE"] = str(config_dir / "pgpass")
-    return environment
 
 
 def export_table(

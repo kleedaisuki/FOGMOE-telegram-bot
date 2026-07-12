@@ -7,10 +7,10 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
-from fogmoe_dbctl.commands import bootstrap, export_csv, migrate
+from fogmoe_dbctl.commands import bootstrap, export_csv, migrate, shell
 
 
-COMMAND_MODULES = (bootstrap, migrate, export_csv)
+COMMAND_MODULES = (bootstrap, migrate, export_csv, shell)
 
 
 def build_parser() -> argparse.ArgumentParser:

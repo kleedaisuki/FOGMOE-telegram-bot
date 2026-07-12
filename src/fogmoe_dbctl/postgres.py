@@ -1,8 +1,9 @@
-"""PostgreSQL 配置与转义原语 / PostgreSQL configuration and escaping primitives."""
+"""@brief dbctl PostgreSQL service 与转义原语 / dbctl PostgreSQL service and escaping primitives."""
 
 from __future__ import annotations
 
 import configparser
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -236,3 +237,24 @@ def service_sqlalchemy_url(service: ServiceConfig) -> str:
         user=service.user,
         password=service.password,
     )
+
+
+def psql_environment(
+    config_dir: Path,
+    *,
+    service_name: str | None = None,
+) -> dict[str, str]:
+    """@brief 构造不暴露密码的 libpq 环境 / Build a libpq environment without exposing passwords.
+
+    @param config_dir 项目 psql 配置目录 / Project psql configuration directory.
+    @param service_name 可选 PGSERVICE / Optional PGSERVICE.
+    @return 供 PostgreSQL client 使用的环境 / Environment for PostgreSQL clients.
+    """
+
+    environment = os.environ.copy()
+    environment.pop("PGPASSWORD", None)
+    environment["PGSERVICEFILE"] = str(config_dir / "pg_service.conf")
+    environment["PGPASSFILE"] = str(config_dir / "pgpass")
+    if service_name is not None:
+        environment["PGSERVICE"] = service_name
+    return environment
