@@ -118,11 +118,12 @@ def configure_litellm_proxy(litellm_module: Any) -> None:
     """@brief 配置 LiteLLM 使用统一代理 / Configure LiteLLM to use the unified proxy.
 
     @param litellm_module 已导入的 LiteLLM 模块 / Imported LiteLLM module.
-    @note SOCKS 走 HTTPX transport，以支持 ``socksio`` / SOCKS uses the HTTPX transport.
+    @note 代理环境变量由应用启动阶段设置一次；此处仅选择 LiteLLM transport。/
+    Proxy environment variables are configured once during application startup; this function only selects the LiteLLM transport.
+    SOCKS 走 HTTPX transport，以支持 ``socksio`` / SOCKS uses the HTTPX transport.
     """
     if outbound_proxy_url() is None:
         return
 
-    configure_proxy_environment()
     litellm_module.use_aiohttp_transport = False
     litellm_module.disable_aiohttp_transport = True

@@ -208,6 +208,29 @@ def test_configure_proxy_environment_overrides_all_standard_variables(monkeypatc
     }
 
 
+def test_configure_litellm_proxy_does_not_repeat_startup_environment_setup(monkeypatch):
+    """@brief LiteLLM 调用不重复写入启动期代理环境 / LiteLLM calls do not repeat startup proxy environment setup."""
+    monkeypatch.setattr(config, "NETWORK_PROXY_URL", "socks5://127.0.0.1:7891")
+
+    def fail_if_called() -> None:
+        """@brief 表明启动期环境配置被错误重复调用 / Signal an erroneous repeated startup environment setup.
+
+        @return None / None.
+        """
+        raise AssertionError("proxy environment must be configured only at startup")
+
+    litellm_module = SimpleNamespace(
+        use_aiohttp_transport=True,
+        disable_aiohttp_transport=False,
+    )
+    monkeypatch.setattr(proxy, "configure_proxy_environment", fail_if_called)
+
+    proxy.configure_litellm_proxy(litellm_module)
+
+    assert litellm_module.use_aiohttp_transport is False
+    assert litellm_module.disable_aiohttp_transport is True
+
+
 @pytest.mark.parametrize(
     "proxy_url",
     ["127.0.0.1:7890", "ftp://127.0.0.1:7890", "socks5://"],
