@@ -111,7 +111,7 @@ def test_group_context_tool_reads_only_the_canonical_projection() -> None:
             generated_media=unused,
             stickers=unused,
             outbox=PostgresOutboxRepository(),
-            recall=unused,
+            memory=unused,
             groups=groups,
         )
         result = await operations.execute(_request(is_group=True), connection=None)

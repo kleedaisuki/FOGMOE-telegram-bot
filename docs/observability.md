@@ -68,11 +68,14 @@ Retrieval 使用封闭的低基数 operation 名称形成完整耗时链：
 - `retrieval.recall`：Assistant 语义召回端到端；
 - `retrieval.query.embedding`：Query embedding；
 - `retrieval.search`：租户过滤后的 pgvector exact search。
+- `memory.working.retrieve`：每次实际模型 Query 的 WorkingMemory 换入总耗时；checkpoint
+  replay 不产生该 span。
 
 空 polling 不产生 span 或 metric point，避免闲置实例污染吞吐与延迟分位数。非空工作额外
 记录 `fogmoe.retrieval.batch.size`、`fogmoe.retrieval.source.discovery.duration` 和
 `fogmoe.retrieval.vector.claim.duration`；duration 单位遵循 OpenTelemetry 约定使用秒。
-Dashboard 的 Retrieval 页面将这些时间窗信号与 `retrieval.passage_vectors` 的实时状态
+Dashboard 的 Retrieval 页面将这些时间窗信号（包括 WorkingMemory 换入）与
+`retrieval.passage_vectors` 的实时状态
 组合，呈现每个 Embedding Space 的 pending、processing、retry、completed、failed、最老
 积压年龄与过期 lease。查询使用稳定 operation/metric 精确集合，使分区索引可用于时间窗
 聚合，禁止用前缀模糊扫描扩大监控成本。

@@ -14,6 +14,7 @@ from fogmoe_bot.domain.retrieval import (
     EmbeddingVector,
     RetrievalEvidence,
     RetrievalPassage,
+    RetrievalScope,
 )
 
 
@@ -39,7 +40,7 @@ class _Store:
     async def search(
         self,
         *,
-        owner_user_id: int,
+        scope: RetrievalScope,
         corpus_id: str,
         space: EmbeddingSpace,
         query_vector: EmbeddingVector,
@@ -47,11 +48,15 @@ class _Store:
     ) -> tuple[RetrievalEvidence, ...]:
         """@brief 返回带 provenance 的证据 / Return provenance-bearing evidence."""
 
-        assert (owner_user_id, corpus_id, limit) == (7, "conversation.episodic", 9)
+        assert (scope, corpus_id, limit) == (
+            RetrievalScope("personal", 7),
+            "conversation.episodic",
+            9,
+        )
         query_vector.require_space(space)
         passage = RetrievalPassage.create(
             corpus_id=corpus_id,
-            owner_user_id=owner_user_id,
+            scope=scope,
             source_kind="conversation.turn",
             source_id=UUID("00000000-0000-0000-0000-000000000077"),
             ordinal=0,
@@ -84,7 +89,9 @@ def test_semantic_recall_emits_hierarchical_performance_signals() -> None:
             telemetry=Telemetry(buffer),
         )
 
-        evidence = await recall.recall(SemanticRecallQuery(7, "tea", 3))
+        evidence = await recall.recall(
+            SemanticRecallQuery(RetrievalScope("personal", 7), "tea", 3)
+        )
 
         assert len(evidence) == 1
         signals = buffer.drain(32)

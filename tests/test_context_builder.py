@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+from uuid import UUID
 
 from fogmoe_bot.application.conversation.assistant_ingress import (
     normalize_assistant_personal_info as normalize_personal_info,
@@ -150,6 +151,7 @@ def test_context_state_builds_model_messages_with_runtime_replacements():
         profile=_profile(),
     )
     context_state = build_context_state(
+        context_id=UUID("00000000-0000-4000-8000-000000000042"),
         system_prompt="base system policy",
         history_messages=history,
         scope=ConversationScope(

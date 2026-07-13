@@ -1,4 +1,5 @@
 import asyncio
+from uuid import uuid4
 
 from fogmoe_bot.application.assistant.agent_loop import AgentResponse
 from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
@@ -43,12 +44,16 @@ def _service(*, order, profiles, runner, text_only_patterns=()):
             cooldown_seconds=1800,
         ),
         text_only_model_patterns=text_only_patterns,
+        working_memory_limit=4,
+        working_memory_max_tokens=8192,
+        working_memory_enabled=True,
         agent_loop=_AgentLoop(),
     )
 
 
 def _context(messages, *, text_fallback_messages=None):
     return ContextState(
+        context_id=uuid4(),
         scope=ConversationScope(user_id=123),
         user_state=UserState(coins=10, plan="free", permission=0, profile=None),
         messages=messages,

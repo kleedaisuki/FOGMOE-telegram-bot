@@ -9,19 +9,23 @@ from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.application.retrieval.ports import EmbeddingProvider, RetrievalStore
 from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind
-from fogmoe_bot.domain.retrieval import EmbeddingSpace, RetrievalEvidence
+from fogmoe_bot.domain.retrieval import (
+    EmbeddingSpace,
+    RetrievalEvidence,
+    RetrievalScope,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class SemanticRecallQuery:
     """@brief 有界租户语义查询 / Bounded tenant-scoped semantic query.
 
-    @param owner_user_id 认证所有者 / Authenticated owner.
+    @param scope 个人或群聊检索域 / Personal or group retrieval scope.
     @param text 自然语言 Query / Natural-language query.
     @param limit 最大证据数 / Maximum evidence count.
     """
 
-    owner_user_id: int
+    scope: RetrievalScope
     text: str
     limit: int = 6
 
@@ -33,10 +37,8 @@ class SemanticRecallQuery:
         """
 
         text = self.text.strip()
-        if isinstance(self.owner_user_id, bool) or self.owner_user_id <= 0:
-            raise ValueError("Semantic recall owner_user_id must be positive")
-        if not text or len(text) > 2_000:
-            raise ValueError("Semantic recall text must contain 1-2000 characters")
+        if not text or len(text) > 20_000:
+            raise ValueError("Semantic recall text must contain 1-20000 characters")
         if not 1 <= self.limit <= 20:
             raise ValueError("Semantic recall limit must be between 1 and 20")
         object.__setattr__(self, "text", text)
@@ -101,7 +103,7 @@ class SemanticRecall:
                     attributes={"retrieval.candidate.limit": candidate_limit},
                 ) as search_span:
                     evidence = await self._store.search(
-                        owner_user_id=query.owner_user_id,
+                        scope=query.scope,
                         corpus_id=self._corpus_id,
                         space=self._space,
                         query_vector=vector,

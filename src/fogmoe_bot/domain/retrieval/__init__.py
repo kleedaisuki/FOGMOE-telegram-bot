@@ -5,6 +5,8 @@ from fogmoe_bot.domain.retrieval.models import (
     EmbeddingVector,
     RetrievalEvidence,
     RetrievalPassage,
+    RetrievalScope,
+    RetrievalScopeKind,
     passage_digest,
     passage_identity,
 )
@@ -14,6 +16,8 @@ __all__ = [
     "EmbeddingVector",
     "RetrievalEvidence",
     "RetrievalPassage",
+    "RetrievalScope",
+    "RetrievalScopeKind",
     "passage_digest",
     "passage_identity",
 ]

@@ -571,7 +571,7 @@ stateDiagram-v2
 
 该边界保证业务数据库 mutation 与 downstream outbox intent 不会因 receipt replay 重复，但不把外部媒体 provider 调用包装成虚假的 exactly-once：进程在 provider 已受理、artifact/receipt 尚未完成时崩溃，租约到期后可能重新调用 provider。当前保证是 live lease 防并发、生成过程不持有数据库事务、最终 artifact outbox 幂等；若 provider 支持 idempotency key，应直接使用 `(turn_id, invocation_id, request_hash)`，否则该 ambiguous window 只能作为 at-least-once 风险观测。
 
-消息表取代单行 JSONB；Context Window projector 按 sequence 分页读取，并把 checkpoint 作为显式 artifact。独立 Retrieval worker 从已完成私聊 Turn 形成有 provenance 的 passages，并在外部事务中调用 embedding provider、以 fenced workflow 写入 pgvector。`memory.records` 已删除；User Profile 保留独立扩展边界，不由 compaction 或 Retrieval 隐式形成。
+消息表取代单行 JSONB；Context Window projector 按 sequence 分页读取，并把 checkpoint 作为显式 artifact。独立 Retrieval worker 从已完成 Assistant Turn 形成带 personal/group scope 与 provenance 的 passages，并在外部事务中调用 embedding provider、以 fenced workflow 写入 pgvector。AgentLoop 在每次真实模型 Query 前把独立 WorkingMemory 与 ContextState 共同投影；两者没有对象关系，WorkingMemory 不持久化也不参与 compaction。`memory.records` 已删除；User Profile 保留独立扩展边界，不由 compaction 或 Retrieval 隐式形成。
 
 ### 7.3 Transaction 边界
 

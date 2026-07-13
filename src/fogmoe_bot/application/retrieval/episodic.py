@@ -42,7 +42,7 @@ class EpisodicPassageRenderer:
     def render(self, turn: EpisodicTurn) -> tuple[RetrievalPassage, ...]:
         """@brief 将完整 Turn 渲染为稳定 passages / Render a complete turn into stable passages.
 
-        @param turn 已验证私聊 Turn / Validated private turn.
+        @param turn 已验证 Assistant Turn / Validated Assistant turn.
         @return 至少一个稳定 passage / At least one stable passage.
         """
 
@@ -52,7 +52,7 @@ class EpisodicPassageRenderer:
         return tuple(
             RetrievalPassage.create(
                 corpus_id=EPISODIC_CORPUS_ID,
-                owner_user_id=turn.owner_user_id,
+                scope=turn.scope,
                 source_kind=CONVERSATION_TURN_SOURCE_KIND,
                 source_id=turn.turn_id,
                 ordinal=ordinal,

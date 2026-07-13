@@ -280,6 +280,7 @@ def test_overview_renders_rich_table_and_stable_json() -> None:
     assert "Retrieval operations" in retrieval_text
     assert "Embedding queues" in retrieval_text
     assert "retrieval.recall" in retrieval_text
+    assert "memory.working.retrieve" in retrieval_text
 
 
 def _overview(window: TimeWindow) -> Overview:
@@ -313,6 +314,7 @@ def _retrieval() -> RetrievalSnapshot:
     return RetrievalSnapshot(
         operations=(
             SpanStats("retrieval.recall", "internal", 4, 0.1, 0, 4, 8, 12, 6, 14),
+            SpanStats("memory.working.retrieve", "internal", 4, 0.1, 0, 5, 9, 13, 7, 15),
         ),
         queues=(
             RetrievalQueueStats(

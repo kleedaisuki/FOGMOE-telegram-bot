@@ -15,6 +15,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import cast
 
+from fogmoe_bot.application.memory.ports import (
+    WorkingMemoryQuery,
+    WorkingMemoryReader,
+)
+from fogmoe_bot.application.memory.rendering import compose_model_messages
+from fogmoe_bot.domain.memory.models import GroupMemoryScope, PersonalMemoryScope
 from fogmoe_bot.domain.context import ContextState
 from fogmoe_bot.domain.conversation.payloads import (
     JsonObject,
@@ -37,6 +43,7 @@ from .tool_runtime import (
     ToolResultEvent,
     ToolRuntimeResult,
 )
+from .tools.catalog import ToolResultResidency
 from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind
@@ -49,11 +56,13 @@ class AgentResponse:
     @param text 最终文本 / Final text.
     @param events receipt-backed 事件 / Receipt-backed events.
     @param context_state 已更新 attempt-local 上下文 / Updated attempt-local context.
+    @param history_messages 可进入未来 Conversation 的新增消息 / New messages allowed into future Conversation context.
     """
 
     text: str
     events: Sequence[RuntimeEvent]
     context_state: ContextState | None = None
+    history_messages: Sequence[JsonObject] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +78,9 @@ class AgentExecutionConfig:
     skip_tools: frozenset[str] = field(default_factory=frozenset)
     allow_tools: bool = True
     completion_options: Mapping[str, JsonValue] = field(default_factory=dict)
+    working_memory_limit: int = 4
+    working_memory_max_tokens: int = 16_384
+    working_memory_enabled: bool = True
 
     def __post_init__(self) -> None:
         """@brief 校验显式容量 / Validate explicit bounds.
@@ -80,6 +92,10 @@ class AgentExecutionConfig:
             raise ValueError("provider and model cannot be empty")
         if self.max_tokens < 1 or self.max_iterations < 1:
             raise ValueError("max_tokens and max_iterations must be positive")
+        if not 1 <= self.working_memory_limit <= 20:
+            raise ValueError("working_memory_limit must be between 1 and 20")
+        if self.working_memory_max_tokens < 256:
+            raise ValueError("working_memory_max_tokens must be at least 256")
 
 
 @dataclass(slots=True)
@@ -88,7 +104,9 @@ class AgentExecutionState:
 
     context: ContextState
     config: AgentExecutionConfig
+    base_messages: tuple[JsonObject, ...]
     messages: list[JsonObject]
+    persistable_messages: list[JsonObject] = field(default_factory=list)
     events: list[RuntimeEvent] = field(default_factory=list)
     step: int = 0
 
@@ -106,7 +124,12 @@ class AgentExecutionState:
         """
 
         messages = tuple(_message(value) for value in context.messages)
-        return cls(context, config, list(messages))
+        return cls(
+            context=context,
+            config=config,
+            base_messages=messages,
+            messages=list(messages),
+        )
 
 
 class AgentLoop:
@@ -118,6 +141,7 @@ class AgentLoop:
         runtime: AgentRuntime,
         completion: AssistantCompletionPort,
         checkpoints: AgentCheckpointPersistence,
+        memory: WorkingMemoryReader,
         telemetry: Telemetry,
     ) -> None:
         """@brief 注入全部外部端口 / Inject every external port.
@@ -125,6 +149,7 @@ class AgentLoop:
         @param runtime 无状态工具协调器 / Stateless tool coordinator.
         @param completion 异步 provider port / Async provider port.
         @param checkpoints durable step store / Durable step store.
+        @param memory 每次模型 Query fresh retrieve 的 WorkingMemory / WorkingMemory freshly retrieved for each model query.
         @param telemetry 进程 typed telemetry / Process typed telemetry.
         @return None / None.
         """
@@ -132,6 +157,7 @@ class AgentLoop:
         self._runtime = runtime
         self._completion = completion
         self._checkpoints = checkpoints
+        self._memory = memory
         self._telemetry = telemetry
 
     async def run(
@@ -156,6 +182,8 @@ class AgentLoop:
             raise ValueError("AgentExecutionState belongs to another context/config")
         if config.allow_tools and tool_context is None:
             raise ValueError("tool_context is required when tools are enabled")
+        if config.working_memory_enabled and tool_context is None:
+            raise ValueError("tool_context is required when WorkingMemory is enabled")
         while current.step < config.max_iterations:
             completion = await self._complete_step(
                 current, tool_context=tool_context, expose_tools=config.allow_tools
@@ -196,22 +224,43 @@ class AgentLoop:
 
         route_key = f"{state.config.provider}:{state.config.model}"
         request_hash = _completion_request_hash(state, expose_tools=expose_tools)
-        if tool_context is None:
-            return await self._completion.complete(
-                provider=state.config.provider,
-                model=state.config.model,
-                messages=tuple(state.messages),
-                tools=(),
-                tool_choice=None,
-                max_tokens=state.config.max_tokens,
-                request_options=state.config.completion_options,
+        if tool_context is not None:
+            existing = await self._checkpoints.load_step(
+                tool_context.turn_id, state.step
             )
-        existing = await self._checkpoints.load_step(tool_context.turn_id, state.step)
-        if existing is not None:
-            _validate_checkpoint(
-                existing, request_hash=request_hash, route_key=route_key
+            if existing is not None:
+                _validate_checkpoint(
+                    existing, request_hash=request_hash, route_key=route_key
+                )
+                return existing.completion
+        model_messages: tuple[JsonObject, ...] = tuple(state.messages)
+        if state.config.working_memory_enabled:
+            memory_context = cast(ToolExecutionContext, tool_context)
+            with self._telemetry.span(
+                "memory.working.retrieve",
+                kind=SpanKind.INTERNAL,
+                attributes={
+                    "memory.scope.kind": (
+                        "group" if memory_context.is_group else "personal"
+                    ),
+                    "memory.result.limit": state.config.working_memory_limit,
+                },
+            ) as memory_span:
+                working_memory = await self._memory.retrieve(
+                    WorkingMemoryQuery(
+                        scope=_memory_scope(memory_context),
+                        text=_current_query(state.context.messages),
+                        limit=state.config.working_memory_limit,
+                    )
+                )
+                memory_span.set_attribute(
+                    "memory.result.count", len(working_memory.messages)
+                )
+            model_messages = compose_model_messages(
+                state.messages,
+                working_memory,
+                maximum_tokens=state.config.working_memory_max_tokens,
             )
-            return existing.completion
         definitions = (
             tuple(
                 definition
@@ -225,7 +274,7 @@ class AgentLoop:
             completion = await self._completion.complete(
                 provider=state.config.provider,
                 model=state.config.model,
-                messages=tuple(state.messages),
+                messages=model_messages,
                 tools=definitions,
                 tool_choice=(state.config.tool_choice if expose_tools else None),
                 max_tokens=state.config.max_tokens,
@@ -237,6 +286,8 @@ class AgentLoop:
                     str(error) or error.__class__.__name__
                 ) from error
             raise
+        if tool_context is None:
+            return completion
         checkpoint = AgentStepCheckpoint(
             turn_id=tool_context.turn_id,
             step_no=state.step,
@@ -263,6 +314,7 @@ class AgentLoop:
         @return None / None.
         """
 
+        results: list[ToolRuntimeResult] = []
         for ordinal, call in enumerate(completion.tool_calls):
             if call.name in state.config.skip_tools:
                 continue
@@ -306,6 +358,12 @@ class AgentLoop:
             self._append_call(
                 state, completion=completion, result=result, first=ordinal == 0
             )
+            results.append(result)
+        _append_persistable_tool_exchange(
+            state,
+            completion=completion,
+            results=tuple(results),
+        )
 
     @staticmethod
     def _append_call(
@@ -335,6 +393,9 @@ class AgentLoop:
             call_event["assistant_message"] = dict(completion.message)
         if result.validation_error is not None:
             call_event["validation_error"] = result.validation_error
+        ephemeral = result.result_residency is ToolResultResidency.AGENT_TURN
+        if ephemeral:
+            call_event["ephemeral"] = True
         state.events.append(call_event)
         state.messages.append(
             {
@@ -356,11 +417,13 @@ class AgentLoop:
             "effect_kind": result.effect_kind,
             "replayed": result.replayed,
         }
+        if ephemeral:
+            result_event["ephemeral"] = True
         state.events.append(result_event)
 
 
 def _completion_request_hash(state: AgentExecutionState, *, expose_tools: bool) -> str:
-    """@brief 摘要一个模型 step 输入 / Digest one model-step input.
+    """@brief 摘要不含瞬时 WorkingMemory 的稳定模型 step / Digest a stable model step excluding ephemeral WorkingMemory.
 
     @param state 当前状态 / Current state.
     @param expose_tools 是否暴露工具 / Whether tools are exposed.
@@ -443,9 +506,112 @@ def _final_response(
     @return Agent response / Agent response.
     """
 
-    state.messages.append(dict(completion.message))
-    state.context.messages = cast(list[dict[str, object]], state.messages)
-    return AgentResponse(completion.content, tuple(state.events), state.context)
+    final_message = dict(completion.message)
+    state.messages.append(final_message)
+    state.persistable_messages.append(final_message)
+    context_messages = [
+        *state.base_messages,
+        *state.persistable_messages,
+    ]
+    state.context.messages = cast(list[dict[str, object]], context_messages)
+    return AgentResponse(
+        completion.content,
+        tuple(state.events),
+        state.context,
+        tuple(state.persistable_messages),
+    )
+
+
+def _memory_scope(
+    context: ToolExecutionContext,
+) -> PersonalMemoryScope | GroupMemoryScope:
+    """@brief 从可信工具上下文派生唯一 Memory 域 / Derive the sole Memory scope from trusted tool context.
+
+    @param context durable 授权上下文 / Durable authorization context.
+    @return 个人或当前群聊域 / Personal or current-group scope.
+    @raise ValueError 群聊上下文缺少 group_id / Group context lacks a group identifier.
+    """
+
+    if not context.is_group:
+        return PersonalMemoryScope(context.user_id)
+    if context.group_id is None:
+        raise ValueError("Group Memory requires group_id")
+    return GroupMemoryScope(context.group_id)
+
+
+def _current_query(messages: Sequence[Mapping[str, object]]) -> str:
+    """@brief 原样提取当前用户 Query，不做 rewrite / Extract the current user query verbatim without rewriting.
+
+    @param messages ContextState 消息 / ContextState messages.
+    @return 原始文本 Query / Raw text query.
+    @raise ValueError ContextState 不含可嵌入用户文本 / ContextState has no embeddable user text.
+    """
+
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if isinstance(content, list):
+            parts = [
+                str(part.get("text")).strip()
+                for part in content
+                if isinstance(part, Mapping)
+                and part.get("type") == "text"
+                and isinstance(part.get("text"), str)
+                and str(part.get("text")).strip()
+            ]
+            if parts:
+                return "\n".join(parts)
+    raise ValueError("ContextState has no current user query for WorkingMemory")
+
+
+def _append_persistable_tool_exchange(
+    state: AgentExecutionState,
+    *,
+    completion: AssistantCompletion,
+    results: tuple[ToolRuntimeResult, ...],
+) -> None:
+    """@brief 仅保留 Conversation 驻留的工具交换 / Retain only conversation-resident tool exchanges.
+
+    @param state 当前执行状态 / Current execution state.
+    @param completion 原始 Assistant tool-call 消息 / Original Assistant tool-call message.
+    @param results 已执行结果 / Executed results.
+    @return None / None.
+    """
+
+    persistent = tuple(
+        result
+        for result in results
+        if result.result_residency is ToolResultResidency.CONVERSATION
+    )
+    persistent_ids = {result.provider_call_id for result in persistent}
+    message = dict(completion.message)
+    calls = message.get("tool_calls")
+    if isinstance(calls, list):
+        message["tool_calls"] = [
+            dict(call)
+            for call in calls
+            if isinstance(call, Mapping) and call.get("id") in persistent_ids
+        ]
+    content = message.get("content")
+    has_content = isinstance(content, str) and bool(content.strip())
+    if persistent or has_content:
+        state.persistable_messages.append(message)
+    for result in persistent:
+        state.persistable_messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": result.provider_call_id,
+                "name": result.name,
+                "content": json.dumps(
+                    result.public_result,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            }
+        )
 
 
 __all__ = [

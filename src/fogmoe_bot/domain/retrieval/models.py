@@ -7,6 +7,7 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 from uuid import UUID, uuid5
 
 from fogmoe_bot.domain.temporal import ensure_utc
@@ -17,6 +18,36 @@ _IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,99}$")
 
 _PASSAGE_NAMESPACE = UUID("37b67af8-b1f7-5d40-87c6-97b7ed33e352")
 """@brief Passage UUIDv5 命名空间 / Namespace for deterministic passage UUIDv5 identities."""
+
+
+type RetrievalScopeKind = Literal["personal", "group"]
+"""@brief 检索隔离域类别 / Retrieval-isolation scope kind."""
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalScope:
+    """@brief 不可混读的检索隔离域 / Non-interchangeable retrieval isolation scope.
+
+    @param kind 个人或群聊 / Personal or group.
+    @param scope_id 用户 ID 或群 ID / User identifier or group identifier.
+    """
+
+    kind: RetrievalScopeKind
+    scope_id: int
+
+    def __post_init__(self) -> None:
+        """@brief 校验隔离域 / Validate the isolation scope.
+
+        @return None / None.
+        @raise ValueError kind 与 ID 不一致 / Inconsistent kind and identifier.
+        """
+
+        if self.kind not in {"personal", "group"}:
+            raise ValueError("Retrieval scope kind must be personal or group")
+        if isinstance(self.scope_id, bool) or self.scope_id == 0:
+            raise ValueError("Retrieval scope_id must be a non-zero integer")
+        if self.kind == "personal" and self.scope_id < 0:
+            raise ValueError("Personal retrieval scope_id must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +141,7 @@ class RetrievalPassage:
 
     @param passage_id 确定性 passage identity / Deterministic passage identity.
     @param corpus_id 逻辑语料库 / Logical corpus.
-    @param owner_user_id 强租户边界 / Strong tenant boundary.
+    @param scope 强个人/群聊隔离边界 / Strong personal/group isolation boundary.
     @param source_kind 来源类别 / Source kind.
     @param source_id 不透明来源 UUID / Opaque source UUID.
     @param ordinal 来源内顺序 / Ordinal within the source.
@@ -122,7 +153,7 @@ class RetrievalPassage:
 
     passage_id: UUID
     corpus_id: str
-    owner_user_id: int
+    scope: RetrievalScope
     source_kind: str
     source_id: UUID
     ordinal: int
@@ -145,8 +176,6 @@ class RetrievalPassage:
             raise ValueError("Retrieval corpus_id has invalid syntax")
         if _IDENTIFIER_PATTERN.fullmatch(source_kind) is None:
             raise ValueError("Retrieval source_kind has invalid syntax")
-        if isinstance(self.owner_user_id, bool) or self.owner_user_id <= 0:
-            raise ValueError("Retrieval owner_user_id must be positive")
         if isinstance(self.ordinal, bool) or self.ordinal < 0:
             raise ValueError("Retrieval ordinal cannot be negative")
         if isinstance(self.format_version, bool) or self.format_version < 1:
@@ -158,6 +187,7 @@ class RetrievalPassage:
             raise ValueError("Retrieval passage digest does not match its text")
         expected_id = passage_identity(
             corpus_id=corpus_id,
+            scope=self.scope,
             source_kind=source_kind,
             source_id=self.source_id,
             format_version=self.format_version,
@@ -175,7 +205,7 @@ class RetrievalPassage:
         cls,
         *,
         corpus_id: str,
-        owner_user_id: int,
+        scope: RetrievalScope,
         source_kind: str,
         source_id: UUID,
         ordinal: int,
@@ -192,13 +222,14 @@ class RetrievalPassage:
         return cls(
             passage_id=passage_identity(
                 corpus_id=corpus_id,
+                scope=scope,
                 source_kind=source_kind,
                 source_id=source_id,
                 format_version=format_version,
                 ordinal=ordinal,
             ),
             corpus_id=corpus_id,
-            owner_user_id=owner_user_id,
+            scope=scope,
             source_kind=source_kind,
             source_id=source_id,
             ordinal=ordinal,
@@ -236,6 +267,7 @@ class RetrievalEvidence:
 def passage_identity(
     *,
     corpus_id: str,
+    scope: RetrievalScope,
     source_kind: str,
     source_id: UUID,
     format_version: int,
@@ -247,7 +279,8 @@ def passage_identity(
     """
 
     identity = (
-        f"{corpus_id}\x1f{source_kind}\x1f{source_id}\x1f{format_version}\x1f{ordinal}"
+        f"{corpus_id}\x1f{scope.kind}\x1f{scope.scope_id}\x1f{source_kind}\x1f"
+        f"{source_id}\x1f{format_version}\x1f{ordinal}"
     )
     return uuid5(_PASSAGE_NAMESPACE, identity)
 
@@ -267,6 +300,8 @@ __all__ = [
     "EmbeddingVector",
     "RetrievalEvidence",
     "RetrievalPassage",
+    "RetrievalScope",
+    "RetrievalScopeKind",
     "passage_digest",
     "passage_identity",
 ]

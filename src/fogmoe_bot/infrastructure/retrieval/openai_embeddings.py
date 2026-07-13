@@ -120,8 +120,8 @@ class OpenAICompatibleEmbeddings:
         """
 
         query = text.strip()
-        if not query or len(query) > 2_000:
-            raise ValueError("Embedding query must contain 1-2000 characters")
+        if not query or len(query) > 20_000:
+            raise ValueError("Embedding query must contain 1-20000 characters")
         instructed = f"Instruct: {space.query_instruction}\nQuery: {query}"
         vectors = await self._request(
             (instructed,),

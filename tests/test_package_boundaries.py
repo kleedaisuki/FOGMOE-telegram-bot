@@ -765,7 +765,7 @@ def test_assistant_tool_operations_have_explicit_feature_ownership() -> None:
         "dispatcher.py",
         "external.py",
         "group.py",
-        "retrieval.py",
+        "memory.py",
         "outbound.py",
         "parsing.py",
         "schedule.py",

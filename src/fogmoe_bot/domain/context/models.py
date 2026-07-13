@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from uuid import UUID
 
 from fogmoe_bot.domain.user_profile.models import UserProfileSnapshot
 
@@ -136,6 +137,7 @@ class RuntimeMessageReplacement:
 class ContextState:
     """@brief 一次推理尝试的独立上下文快照 / Independent context snapshot for one inference attempt.
 
+    @param context_id ContextState 实体标识 / ContextState entity identifier.
     @param scope 本次回合的会话作用域 / Conversation scope for this turn.
     @param user_state 本次回合可见的用户状态 / User state visible to this turn.
     @param messages 已提交或当前回合临时的模型消息链 / Committed or in-turn model message chain.
@@ -143,8 +145,19 @@ class ContextState:
     @param text_fallback_messages 纯文本模型的降级消息链 / Text-only fallback message chain.
     """
 
+    context_id: UUID
     scope: ConversationScope
     user_state: UserState
     messages: list[dict[str, object]]
     tool_context: dict[str, object]
     text_fallback_messages: list[dict[str, object]] | None = None
+
+    def __post_init__(self) -> None:
+        """@brief 校验可变 ContextState 实体标识 / Validate the mutable ContextState entity identity.
+
+        @return None / None.
+        @raise ValueError context_id 为 nil UUID / The context identifier is nil.
+        """
+
+        if self.context_id.int == 0:
+            raise ValueError("ContextState context_id cannot be nil")

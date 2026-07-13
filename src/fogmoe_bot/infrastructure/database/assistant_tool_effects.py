@@ -215,6 +215,18 @@ class PostgresAssistantToolStore:
         @return 规范 receipt 结果 / Canonical receipt result.
         """
 
+        if not request.result_cacheable:
+            if request.mutating:
+                raise ValueError("A mutating tool result cannot bypass durable receipts")
+            if (
+                self._operations.transaction_mode(request)
+                is not ToolTransactionMode.OUTSIDE_TRANSACTION
+            ):
+                raise ValueError("A non-cacheable tool must run outside transactions")
+            result = await self._operations.execute(request, connection=None)
+            await self._after_operation(request, result)
+            return PersistedToolResult(result, False)
+
         token = uuid.uuid4()
         replay = await self._claim(request, token=token)
         if replay is not None:

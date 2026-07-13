@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
 -- Source migrations: 0001_initial through 0043_user_profile_dreaming
--- Alembic head: 0043_user_profile_dreaming
+-- Alembic head: 0044_retrieval_privacy_scopes
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and user-plan backfill) and the
@@ -527,7 +527,9 @@ CREATE TABLE retrieval.source_projections (
   corpus_id VARCHAR(100) NOT NULL CHECK (
     corpus_id ~ '^[a-z][a-z0-9_.-]{0,99}$'
   ),
-  owner_user_id BIGINT NOT NULL
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('personal','group')),
+  scope_id BIGINT NOT NULL,
+  personal_user_id BIGINT NULL
     REFERENCES identity.users(id) ON DELETE CASCADE,
   source_kind VARCHAR(100) NOT NULL CHECK (
     source_kind ~ '^[a-z][a-z0-9_.-]{0,99}$'
@@ -538,18 +540,28 @@ CREATE TABLE retrieval.source_projections (
     source_digest ~ '^[0-9a-f]{64}$'
   ),
   projected_at TIMESTAMPTZ NOT NULL,
+  CONSTRAINT retrieval_source_projections_scope_ck CHECK (
+    (scope_kind = 'personal' AND scope_id > 0 AND personal_user_id = scope_id)
+    OR (scope_kind = 'group' AND scope_id <> 0 AND personal_user_id IS NULL)
+  ),
   PRIMARY KEY (corpus_id, source_kind, source_id, format_version)
 );
 
-CREATE INDEX retrieval_source_projections_owner_idx
-  ON retrieval.source_projections (owner_user_id, projected_at DESC);
+CREATE INDEX retrieval_source_projections_scope_idx
+  ON retrieval.source_projections (
+    scope_kind,
+    scope_id,
+    projected_at DESC
+  );
 
 CREATE TABLE retrieval.passages (
   passage_id UUID PRIMARY KEY,
   corpus_id VARCHAR(100) NOT NULL CHECK (
     corpus_id ~ '^[a-z][a-z0-9_.-]{0,99}$'
   ),
-  owner_user_id BIGINT NOT NULL
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('personal','group')),
+  scope_id BIGINT NOT NULL,
+  personal_user_id BIGINT NULL
     REFERENCES identity.users(id) ON DELETE CASCADE,
   source_kind VARCHAR(100) NOT NULL CHECK (
     source_kind ~ '^[a-z][a-z0-9_.-]{0,99}$'
@@ -565,12 +577,17 @@ CREATE TABLE retrieval.passages (
   ),
   occurred_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL,
+  CONSTRAINT retrieval_passages_scope_ck CHECK (
+    (scope_kind = 'personal' AND scope_id > 0 AND personal_user_id = scope_id)
+    OR (scope_kind = 'group' AND scope_id <> 0 AND personal_user_id IS NULL)
+  ),
   UNIQUE (corpus_id, source_kind, source_id, format_version, ordinal)
 );
 
-CREATE INDEX retrieval_passages_owner_corpus_time_idx
+CREATE INDEX retrieval_passages_scope_corpus_time_idx
   ON retrieval.passages (
-    owner_user_id,
+    scope_kind,
+    scope_id,
     corpus_id,
     format_version,
     occurred_at DESC,

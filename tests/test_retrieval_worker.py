@@ -21,6 +21,7 @@ from fogmoe_bot.domain.retrieval import (
     EmbeddingVector,
     RetrievalEvidence,
     RetrievalPassage,
+    RetrievalScope,
 )
 
 
@@ -179,7 +180,7 @@ class _Store:
     async def search(
         self,
         *,
-        owner_user_id: int,
+        scope: RetrievalScope,
         corpus_id: str,
         space: EmbeddingSpace,
         query_vector: EmbeddingVector,
@@ -187,7 +188,7 @@ class _Store:
     ) -> tuple[RetrievalEvidence, ...]:
         """@brief Worker 测试不执行 search / Worker tests do not execute search."""
 
-        raise AssertionError((owner_user_id, corpus_id, space, query_vector, limit))
+        raise AssertionError((scope, corpus_id, space, query_vector, limit))
 
 
 class _Embeddings:
@@ -232,7 +233,7 @@ def _worker(
 
     turn = EpisodicTurn(
         turn_id=UUID("00000000-0000-0000-0000-000000000042"),
-        owner_user_id=42,
+        scope=RetrievalScope("personal", 42),
         user_text="I prefer tea",
         assistant_text="Noted",
         occurred_at=NOW,

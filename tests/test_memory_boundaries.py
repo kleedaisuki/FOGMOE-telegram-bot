@@ -91,6 +91,26 @@ def test_retrieval_domain_is_provider_and_product_independent() -> None:
     assert violations == []
 
 
+def test_memory_domain_is_context_retrieval_and_storage_independent() -> None:
+    """@brief Memory 产品领域不耦合 Context、Retrieval 或存储 / The Memory product domain is independent of Context, Retrieval, and storage."""
+
+    forbidden = (
+        "fogmoe_bot.domain.context",
+        "fogmoe_bot.domain.context_window",
+        "fogmoe_bot.domain.conversation",
+        "fogmoe_bot.domain.retrieval",
+        "fogmoe_bot.application",
+        "fogmoe_bot.infrastructure",
+    )
+    violations = [
+        (path, target)
+        for path in _python_files(SRC_ROOT / "domain" / "memory")
+        for target in _imports(path)
+        if target.startswith(forbidden)
+    ]
+    assert violations == []
+
+
 def test_user_profile_domain_is_conversation_provider_and_storage_independent() -> None:
     """@brief User Profile 领域不依赖来源、模型或存储 / User Profile domain is independent of source, model, and storage."""
 
@@ -159,11 +179,11 @@ def test_removed_retention_paths_have_no_compatibility_facades() -> None:
     assert [path for path in removed if path.exists()] == []
 
 
-def test_assistant_retrieval_operation_depends_only_on_port_and_dto() -> None:
-    """@brief Assistant retrieval operation 不依赖 provider 或数据库 / Assistant retrieval operation does not depend on provider or database."""
+def test_assistant_memory_operation_depends_only_on_port_and_dto() -> None:
+    """@brief Assistant Memory operation 不依赖 provider 或数据库 / Assistant Memory operation does not depend on provider or database."""
 
     path = (
-        SRC_ROOT / "infrastructure" / "assistant" / "tool_operations" / "retrieval.py"
+        SRC_ROOT / "infrastructure" / "assistant" / "tool_operations" / "memory.py"
     )
     forbidden = (
         "fogmoe_bot.domain.context_window",
@@ -209,6 +229,14 @@ def test_database_snapshot_expresses_retrieval_and_context_ownership() -> None:
     assert "DROP SCHEMA memory" in cleanup_migration
     assert "DROP COLUMN permanent_records_limit" in cleanup_migration
     assert "embedding vector(1024)" in snapshot
+    assert "scope_kind TEXT NOT NULL" in snapshot
+    assert "scope_id BIGINT NOT NULL" in snapshot
+    assert "personal_user_id BIGINT NULL" in snapshot
+    assert "personal_user_id = scope_id" in snapshot
+    retrieval_section = snapshot.split("CREATE TABLE retrieval.source_projections", 1)[1]
+    assert "owner_user_id" not in retrieval_section.split(
+        "CREATE TABLE user_profile.evidence_events", 1
+    )[0]
     assert "CREATE TABLE user_profile.evidence_events" in snapshot
     assert "CREATE TABLE user_profile.profile_revisions" in snapshot
     assert "CREATE TABLE user_profile.dreams" in snapshot

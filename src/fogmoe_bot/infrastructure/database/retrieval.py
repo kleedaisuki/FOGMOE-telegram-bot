@@ -24,19 +24,21 @@ from fogmoe_bot.domain.retrieval import (
     EmbeddingVector,
     RetrievalEvidence,
     RetrievalPassage,
+    RetrievalScope,
+    RetrievalScopeKind,
 )
 from fogmoe_bot.infrastructure.database import connection as db_connection
 
 
 _PASSAGE_COLUMNS = (
-    "passage_id, corpus_id, owner_user_id, source_kind, source_id, ordinal, "
+    "passage_id, corpus_id, scope_kind, scope_id, source_kind, source_id, ordinal, "
     "format_version, content_text, content_digest, occurred_at"
 )
 """@brief RetrievalPassage 映射列 / Columns used to map a RetrievalPassage."""
 
 
 class PostgresEpisodicSource:
-    """@brief 从完整私聊 Assistant Turn 发现未投影情景来源 / Discover unprojected episodes from complete private Assistant turns."""
+    """@brief 从完整 Assistant Turn 发现个人/群聊隔离的情景来源 / Discover personal/group-isolated episodes from complete Assistant turns."""
 
     async def read_unprojected(
         self,
@@ -57,13 +59,18 @@ class PostgresEpisodicSource:
         rows = await db_connection.fetch_all(
             "WITH candidates AS ("
             "SELECT activity.turn_id, "
-            "CAST(activity.request #>> '{user,user_id}' AS BIGINT) AS owner_user_id, "
+            "CASE WHEN COALESCE(activity.request #>> '{scope,is_group}', 'false') = 'true' "
+            "THEN 'group' ELSE 'personal' END AS scope_kind, "
+            "CASE WHEN COALESCE(activity.request #>> '{scope,is_group}', 'false') = 'true' "
+            "THEN CAST(activity.request #>> '{scope,group_id}' AS BIGINT) "
+            "ELSE CAST(activity.request #>> '{user,user_id}' AS BIGINT) END AS scope_id, "
             "activity.completed_at "
             "FROM conversation.inference_activities AS activity "
             "WHERE activity.status = 'completed' "
             "AND COALESCE(activity.request ->> 'task_kind', 'assistant') = 'assistant' "
-            "AND COALESCE(activity.request #>> '{scope,is_group}', 'false') = 'false' "
             "AND activity.request #>> '{user,user_id}' ~ '^[1-9][0-9]*$' "
+            "AND (COALESCE(activity.request #>> '{scope,is_group}', 'false') = 'false' "
+            "OR activity.request #>> '{scope,group_id}' ~ '^-?[1-9][0-9]*$') "
             "AND EXISTS (SELECT 1 FROM conversation.conversation_messages AS source_message "
             "WHERE source_message.turn_id = activity.turn_id "
             "AND source_message.role = 'user' "
@@ -79,7 +86,7 @@ class PostgresEpisodicSource:
             "AND projection.source_id = activity.turn_id "
             "AND projection.format_version = %s"
             ") ORDER BY activity.completed_at, activity.turn_id LIMIT %s"
-            ") SELECT candidate.turn_id, candidate.owner_user_id, "
+            ") SELECT candidate.turn_id, candidate.scope_kind, candidate.scope_id, "
             "user_messages.content_text, assistant_messages.content_text, "
             "candidate.completed_at "
             "FROM candidates AS candidate "
@@ -187,13 +194,15 @@ class PostgresRetrievalStore:
         async with db_connection.transaction() as connection:
             await db_connection.execute(
                 "INSERT INTO retrieval.source_projections "
-                "(corpus_id, owner_user_id, source_kind, source_id, format_version, "
-                "source_digest, projected_at) VALUES (%s, %s, %s, CAST(%s AS UUID), "
-                "%s, %s, %s) ON CONFLICT "
+                "(corpus_id, scope_kind, scope_id, personal_user_id, source_kind, "
+                "source_id, format_version, source_digest, projected_at) "
+                "VALUES (%s, %s, %s, %s, %s, CAST(%s AS UUID), %s, %s, %s) ON CONFLICT "
                 "(corpus_id, source_kind, source_id, format_version) DO NOTHING",
                 (
                     EPISODIC_CORPUS_ID,
-                    turn.owner_user_id,
+                    turn.scope.kind,
+                    turn.scope.scope_id,
+                    _personal_user_id(turn.scope),
                     CONVERSATION_TURN_SOURCE_KIND,
                     str(turn.turn_id),
                     space.passage_format_version,
@@ -203,7 +212,8 @@ class PostgresRetrievalStore:
                 connection=connection,
             )
             existing = await db_connection.fetch_one(
-                "SELECT owner_user_id, source_digest FROM retrieval.source_projections "
+                "SELECT scope_kind, scope_id, personal_user_id, source_digest "
+                "FROM retrieval.source_projections "
                 "WHERE corpus_id = %s AND source_kind = %s "
                 "AND source_id = CAST(%s AS UUID) AND format_version = %s",
                 (
@@ -215,7 +225,9 @@ class PostgresRetrievalStore:
                 connection=connection,
             )
             if existing is None or tuple(existing) != (
-                turn.owner_user_id,
+                turn.scope.kind,
+                turn.scope.scope_id,
+                _personal_user_id(turn.scope),
                 source_digest,
             ):
                 raise RuntimeError(
@@ -244,14 +256,17 @@ class PostgresRetrievalStore:
 
         await db_connection.execute(
             "INSERT INTO retrieval.passages "
-            "(passage_id, corpus_id, owner_user_id, source_kind, source_id, ordinal, "
-            "format_version, content_text, content_digest, occurred_at, created_at) "
-            "VALUES (CAST(%s AS UUID), %s, %s, %s, CAST(%s AS UUID), %s, %s, %s, "
-            "%s, %s, %s) ON CONFLICT (passage_id) DO NOTHING",
+            "(passage_id, corpus_id, scope_kind, scope_id, personal_user_id, source_kind, "
+            "source_id, ordinal, format_version, content_text, content_digest, occurred_at, "
+            "created_at) VALUES (CAST(%s AS UUID), %s, %s, %s, %s, %s, "
+            "CAST(%s AS UUID), %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (passage_id) DO NOTHING",
             (
                 str(passage.passage_id),
                 passage.corpus_id,
-                passage.owner_user_id,
+                passage.scope.kind,
+                passage.scope.scope_id,
+                _personal_user_id(passage.scope),
                 passage.source_kind,
                 str(passage.source_id),
                 passage.ordinal,
@@ -264,7 +279,7 @@ class PostgresRetrievalStore:
             connection=connection,
         )
         row = await db_connection.fetch_one(
-            "SELECT corpus_id, owner_user_id, source_kind, source_id, ordinal, "
+            "SELECT corpus_id, scope_kind, scope_id, source_kind, source_id, ordinal, "
             "format_version, content_text, content_digest, occurred_at "
             "FROM retrieval.passages WHERE passage_id = CAST(%s AS UUID)",
             (str(passage.passage_id),),
@@ -489,7 +504,7 @@ class PostgresRetrievalStore:
     async def search(
         self,
         *,
-        owner_user_id: int,
+        scope: RetrievalScope,
         corpus_id: str,
         space: EmbeddingSpace,
         query_vector: EmbeddingVector,
@@ -500,8 +515,6 @@ class PostgresRetrievalStore:
         @return 距离升序证据 / Evidence in ascending distance order.
         """
 
-        if isinstance(owner_user_id, bool) or owner_user_id <= 0:
-            raise ValueError("Retrieval owner_user_id must be positive")
         if not 1 <= limit <= 100:
             raise ValueError("Retrieval limit must be between 1 and 100")
         query_vector.require_space(space)
@@ -514,14 +527,16 @@ class PostgresRetrievalStore:
             "FROM retrieval.passage_vectors AS vector "
             "JOIN retrieval.passages AS passage ON passage.passage_id = vector.passage_id "
             "WHERE vector.space_id = %s AND vector.status = 'completed' "
-            "AND passage.owner_user_id = %s AND passage.corpus_id = %s "
+            "AND passage.scope_kind = %s AND passage.scope_id = %s "
+            "AND passage.corpus_id = %s "
             "AND passage.format_version = %s "
             "ORDER BY vector.embedding <=> CAST(%s AS vector), passage.occurred_at DESC, "
             "passage.passage_id LIMIT %s",
             (
                 _encode_vector(query_vector),
                 space.space_id,
-                owner_user_id,
+                scope.kind,
+                scope.scope_id,
                 corpus_id,
                 space.passage_format_version,
                 _encode_vector(query_vector),
@@ -530,8 +545,8 @@ class PostgresRetrievalStore:
         )
         return tuple(
             RetrievalEvidence(
-                passage=_map_passage(_row_values(row, 11)[:10]),
-                cosine_distance=_float(_row_values(row, 11)[10]),
+                passage=_map_passage(_row_values(row, 12)[:11]),
+                cosine_distance=_float(_row_values(row, 12)[11]),
             )
             for row in rows
         )
@@ -547,7 +562,7 @@ def _validate_projection(
     for ordinal, passage in enumerate(passages):
         if (
             passage.corpus_id != EPISODIC_CORPUS_ID
-            or passage.owner_user_id != turn.owner_user_id
+            or passage.scope != turn.scope
             or passage.source_kind != CONVERSATION_TURN_SOURCE_KIND
             or passage.source_id != turn.turn_id
             or passage.ordinal != ordinal
@@ -569,48 +584,49 @@ def _projection_digest(passages: Sequence[RetrievalPassage]) -> str:
 def _map_episode(row: object) -> EpisodicTurn:
     """@brief 映射数据库情景 Turn / Map a database episodic turn."""
 
-    values = _row_values(row, 5)
+    values = _row_values(row, 6)
     return EpisodicTurn(
         turn_id=_uuid(values[0]),
-        owner_user_id=_integer(values[1]),
-        user_text=_text(values[2]),
-        assistant_text=_text(values[3]),
-        occurred_at=_datetime(values[4]),
+        scope=_retrieval_scope(values[1], values[2]),
+        user_text=_text(values[3]),
+        assistant_text=_text(values[4]),
+        occurred_at=_datetime(values[5]),
     )
 
 
 def _map_passage(row: object) -> RetrievalPassage:
     """@brief 映射数据库 passage / Map a database passage."""
 
-    values = _row_values(row, 10)
+    values = _row_values(row, 11)
     return RetrievalPassage(
         passage_id=_uuid(values[0]),
         corpus_id=_text(values[1]),
-        owner_user_id=_integer(values[2]),
-        source_kind=_text(values[3]),
-        source_id=_uuid(values[4]),
-        ordinal=_integer(values[5]),
-        format_version=_integer(values[6]),
-        text=_text(values[7]),
-        content_digest=_text(values[8]),
-        occurred_at=_datetime(values[9]),
+        scope=_retrieval_scope(values[2], values[3]),
+        source_kind=_text(values[4]),
+        source_id=_uuid(values[5]),
+        ordinal=_integer(values[6]),
+        format_version=_integer(values[7]),
+        text=_text(values[8]),
+        content_digest=_text(values[9]),
+        occurred_at=_datetime(values[10]),
     )
 
 
 def _passage_semantics(row: object) -> tuple[object, ...]:
     """@brief 规范数据库 passage 语义 tuple / Normalize database-passage semantics."""
 
-    values = _row_values(row, 9)
+    values = _row_values(row, 10)
     return (
         _text(values[0]),
-        _integer(values[1]),
-        _text(values[2]),
-        _uuid(values[3]),
-        _integer(values[4]),
+        _text(values[1]),
+        _integer(values[2]),
+        _text(values[3]),
+        _uuid(values[4]),
         _integer(values[5]),
-        _text(values[6]),
+        _integer(values[6]),
         _text(values[7]),
-        _datetime(values[8]),
+        _text(values[8]),
+        _datetime(values[9]),
     )
 
 
@@ -619,7 +635,8 @@ def _passage_semantics_from_model(passage: RetrievalPassage) -> tuple[object, ..
 
     return (
         passage.corpus_id,
-        passage.owner_user_id,
+        passage.scope.kind,
+        passage.scope.scope_id,
         passage.source_kind,
         passage.source_id,
         passage.ordinal,
@@ -628,6 +645,30 @@ def _passage_semantics_from_model(passage: RetrievalPassage) -> tuple[object, ..
         passage.content_digest,
         passage.occurred_at,
     )
+
+
+def _retrieval_scope(kind: object, scope_id: object) -> RetrievalScope:
+    """@brief 映射并验证持久化隔离域 / Map and validate a persisted isolation scope.
+
+    @param kind 持久化类别 / Persisted kind.
+    @param scope_id 持久化主体 ID / Persisted principal identifier.
+    @return 强类型检索域 / Strongly typed retrieval scope.
+    """
+
+    scope_kind = _text(kind)
+    if scope_kind not in {"personal", "group"}:
+        raise ValueError(f"Unknown retrieval scope kind: {scope_kind}")
+    return RetrievalScope(cast(RetrievalScopeKind, scope_kind), _integer(scope_id))
+
+
+def _personal_user_id(scope: RetrievalScope) -> int | None:
+    """@brief 返回个人域的级联删除锚点 / Return the cascade-deletion anchor for a personal scope.
+
+    @param scope 检索隔离域 / Retrieval isolation scope.
+    @return 个人 user ID；群域为 None / Personal user ID, or None for a group scope.
+    """
+
+    return scope.scope_id if scope.kind == "personal" else None
 
 
 def _encode_vector(vector: EmbeddingVector) -> str:

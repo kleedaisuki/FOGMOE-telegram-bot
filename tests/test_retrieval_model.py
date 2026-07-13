@@ -10,6 +10,7 @@ from fogmoe_bot.domain.retrieval import (
     EmbeddingSpace,
     EmbeddingVector,
     RetrievalPassage,
+    RetrievalScope,
 )
 
 
@@ -51,7 +52,7 @@ def test_passage_identity_is_deterministic_and_content_is_hashed() -> None:
     source_id = UUID("00000000-0000-0000-0000-000000000007")
     first = RetrievalPassage.create(
         corpus_id="conversation.episodic",
-        owner_user_id=7,
+        scope=RetrievalScope("personal", 7),
         source_kind="conversation.turn",
         source_id=source_id,
         ordinal=0,
@@ -61,7 +62,7 @@ def test_passage_identity_is_deterministic_and_content_is_hashed() -> None:
     )
     replay = RetrievalPassage.create(
         corpus_id="conversation.episodic",
-        owner_user_id=7,
+        scope=RetrievalScope("personal", 7),
         source_kind="conversation.turn",
         source_id=source_id,
         ordinal=0,
@@ -74,7 +75,7 @@ def test_passage_identity_is_deterministic_and_content_is_hashed() -> None:
         RetrievalPassage(
             passage_id=first.passage_id,
             corpus_id=first.corpus_id,
-            owner_user_id=first.owner_user_id,
+            scope=first.scope,
             source_kind=first.source_kind,
             source_id=first.source_id,
             ordinal=first.ordinal,
@@ -91,7 +92,7 @@ def test_renderer_uses_natural_turn_boundary_and_hard_bounds_long_text() -> None
     renderer = EpisodicPassageRenderer(max_characters=500)
     turn = EpisodicTurn(
         turn_id=UUID("00000000-0000-0000-0000-000000000008"),
-        owner_user_id=8,
+        scope=RetrievalScope("personal", 8),
         user_text="我喜欢红茶。" * 80,
         assistant_text="记住了。" * 80,
         occurred_at=NOW,
@@ -102,3 +103,27 @@ def test_renderer_uses_natural_turn_boundary_and_hard_bounds_long_text() -> None
     assert passages[0].text.startswith("Time: 2030-01-01T00:00:00Z\nUser:")
     assert [passage.ordinal for passage in passages] == list(range(len(passages)))
     assert all(passage.source_id == turn.turn_id for passage in passages)
+
+
+def test_passage_identity_includes_the_privacy_scope() -> None:
+    """@brief 相同来源在个人与不同群域中绝不共享 identity / The same source never shares identity across personal or group scopes."""
+
+    source_id = UUID("00000000-0000-0000-0000-000000000099")
+    passages = tuple(
+        RetrievalPassage.create(
+            corpus_id="conversation.episodic",
+            scope=scope,
+            source_kind="conversation.turn",
+            source_id=source_id,
+            ordinal=0,
+            format_version=1,
+            text="same content",
+            occurred_at=NOW,
+        )
+        for scope in (
+            RetrievalScope("personal", 7),
+            RetrievalScope("group", -1001),
+            RetrievalScope("group", -1002),
+        )
+    )
+    assert len({passage.passage_id for passage in passages}) == 3

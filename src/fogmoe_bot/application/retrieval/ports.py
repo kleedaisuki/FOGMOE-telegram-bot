@@ -14,6 +14,7 @@ from fogmoe_bot.domain.retrieval import (
     EmbeddingVector,
     RetrievalEvidence,
     RetrievalPassage,
+    RetrievalScope,
 )
 
 
@@ -26,17 +27,17 @@ CONVERSATION_TURN_SOURCE_KIND = "conversation.turn"
 
 @dataclass(frozen=True, slots=True)
 class EpisodicTurn:
-    """@brief 可投影的一次完整私聊 Turn / One complete private turn ready for projection.
+    """@brief 可投影的一次完整 Assistant Turn / One complete Assistant turn ready for projection.
 
     @param turn_id 来源 Turn / Source Turn.
-    @param owner_user_id 认证用户 / Authenticated owner.
+    @param scope 个人或群聊隔离域 / Personal or group isolation scope.
     @param user_text 用户文本 / User text.
     @param assistant_text Assistant 文本 / Assistant text.
     @param occurred_at Turn 事件时间 / Turn event time.
     """
 
     turn_id: UUID
-    owner_user_id: int
+    scope: RetrievalScope
     user_text: str
     assistant_text: str
     occurred_at: datetime
@@ -50,8 +51,6 @@ class EpisodicTurn:
 
         user_text = self.user_text.strip()
         assistant_text = self.assistant_text.strip()
-        if isinstance(self.owner_user_id, bool) or self.owner_user_id <= 0:
-            raise ValueError("Episodic owner_user_id must be positive")
         if not user_text or len(user_text) > 100_000:
             raise ValueError("Episodic user text must contain 1-100000 characters")
         if not assistant_text or len(assistant_text) > 100_000:
@@ -246,13 +245,13 @@ class RetrievalStore(Protocol):
     async def search(
         self,
         *,
-        owner_user_id: int,
+        scope: RetrievalScope,
         corpus_id: str,
         space: EmbeddingSpace,
         query_vector: EmbeddingVector,
         limit: int,
     ) -> Sequence[RetrievalEvidence]:
-        """@brief 在租户过滤后执行精确语义检索 / Run exact semantic search after tenant filtering."""
+        """@brief 在个人/群聊隔离后执行精确语义检索 / Run exact semantic search after personal/group isolation."""
 
         ...
 

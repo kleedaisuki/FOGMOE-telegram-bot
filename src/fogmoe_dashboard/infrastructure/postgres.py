@@ -726,7 +726,8 @@ WHERE started_at >= $1 AND started_at < $2
     'retrieval.embedding.request',
     'retrieval.recall',
     'retrieval.query.embedding',
-    'retrieval.search'
+    'retrieval.search',
+    'memory.working.retrieve'
   )
 GROUP BY span_name, span_kind
 ORDER BY p95_ms DESC, calls DESC

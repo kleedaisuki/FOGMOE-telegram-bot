@@ -98,7 +98,7 @@ def test_diary_schedule_and_kindness_share_atomic_receipt_transactions(
             generated_media=external,
             stickers=external,
             outbox=PostgresOutboxRepository(),
-            recall=external,
+            memory=external,
             groups=PostgresGroupMessageProjection(),
         )
         context = ToolExecutionContext(

@@ -3,7 +3,7 @@
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.application.assistant.tool_runtime import ToolEffectRequest
-from fogmoe_bot.application.retrieval import SemanticRecallReader
+from fogmoe_bot.application.memory.ports import WorkingMemoryReader
 from fogmoe_bot.domain.conversation.payloads import JsonValue
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_STICKER
 from fogmoe_bot.infrastructure.database.assistant_tool_effects import (
@@ -16,7 +16,7 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
 from .diary import execute_diary
 from .external import ExternalReadTools, GeneratedMediaTools, StickerCatalogReader
 from .group import GroupContextReader, fetch_group_context
-from .retrieval import recall_conversation_history
+from .memory import search_memory
 from .outbound import finalize_downstream_effect
 from .parsing import optional_text, required_connection, required_text
 from .schedule import execute_schedule
@@ -34,7 +34,7 @@ class AssistantToolOperationDispatcher:
         generated_media: GeneratedMediaTools,
         stickers: StickerCatalogReader,
         outbox: StandaloneOutboxWriter,
-        recall: SemanticRecallReader,
+        memory: WorkingMemoryReader,
         groups: GroupContextReader,
     ) -> None:
         """注入全部显式 adapter；工具 metadata 仍仅由 ToolCatalog 拥有。"""
@@ -44,7 +44,7 @@ class AssistantToolOperationDispatcher:
         self._generated_media = generated_media
         self._stickers = stickers
         self._outbox = outbox
-        self._recall = recall
+        self._memory = memory
         self._groups = groups
 
     def transaction_mode(self, request: ToolEffectRequest) -> ToolTransactionMode:
@@ -85,8 +85,8 @@ class AssistantToolOperationDispatcher:
                 return await self._external_reads.execute(request)
             case "fetch_group_context":
                 return await fetch_group_context(request, groups=self._groups)
-            case "recall_conversation_history":
-                return await recall_conversation_history(request, recall=self._recall)
+            case "search_memory":
+                return await search_memory(request, memory=self._memory)
             case "user_diary":
                 return await execute_diary(request, connection=connection)
             case "schedule_ai_message":

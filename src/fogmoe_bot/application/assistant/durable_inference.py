@@ -325,6 +325,7 @@ class DurableAssistantInferenceAdapter:
                     category=InferenceErrorCategory.INVALID_REQUEST,
                 )
             return ContextState(
+                context_id=command.typed_turn_id.value,
                 scope=scope,
                 user_state=user_state,
                 messages=[
@@ -336,6 +337,7 @@ class DurableAssistantInferenceAdapter:
             )
 
         return build_context_state(
+            context_id=command.typed_turn_id.value,
             system_prompt=self._system_prompt,
             history_messages=(),
             scope=scope,
@@ -457,7 +459,11 @@ class DurableAssistantInferenceAdapter:
 
         history_messages = [
             _json_object(message)
-            for message in context_state.messages[committed_count:]
+            for message in (
+                response.history_messages
+                if response.history_messages
+                else context_state.messages[committed_count:]
+            )
             if isinstance(message, Mapping)
         ]
         if not history_messages:
@@ -465,7 +471,11 @@ class DurableAssistantInferenceAdapter:
         if final_text and not _history_ends_with_text(history_messages, final_text):
             history_messages.append({"role": "assistant", "content": final_text})
 
-        runtime_events = [_sanitize_runtime_event(event) for event in response.events]
+        runtime_events = [
+            _sanitize_runtime_event(event)
+            for event in response.events
+            if event.get("ephemeral") is not True
+        ]
         assistant_content: JsonObject = {
             "schema_version": 1,
             "task_kind": command.task_kind,

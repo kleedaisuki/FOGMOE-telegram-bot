@@ -30,6 +30,7 @@ from .tools.catalog import (
     ToolCatalog,
     ToolDefinition,
     ToolValidationIssue,
+    ToolResultResidency,
     UnknownTool,
     ValidatedToolInvocation,
 )
@@ -67,6 +68,7 @@ class AssistantToolCallEvent(TypedDict):
     invocation_id: str
     validation_error: NotRequired[ToolValidationFailure]
     assistant_message: NotRequired[JsonObject]
+    ephemeral: NotRequired[bool]
 
 
 class ToolResultEvent(TypedDict):
@@ -80,6 +82,7 @@ class ToolResultEvent(TypedDict):
     invocation_id: str
     effect_kind: str
     replayed: bool
+    ephemeral: NotRequired[bool]
 
 
 type RuntimeEvent = AssistantVisibleEvent | AssistantToolCallEvent | ToolResultEvent
@@ -124,6 +127,7 @@ class ToolEffectRequest:
     @param mutating 是否改变业务事实 / Whether business facts are mutated.
     @param arguments 已校验 JSON 参数 / Validated JSON arguments.
     @param request_hash 身份与参数摘要 / Identity-and-argument digest.
+    @param result_cacheable 结果是否可写 durable receipt / Whether the result may be written to a durable receipt.
     """
 
     context: ToolExecutionContext
@@ -134,6 +138,7 @@ class ToolEffectRequest:
     mutating: bool
     arguments: JsonObject
     request_hash: str
+    result_cacheable: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +190,7 @@ class ToolRuntimeResult:
     @param validation_error 可选校验失败 / Optional validation failure.
     @param public_result 回填模型的安全结果 / Safe result fed back to the model.
     @param replayed 是否 receipt replay / Whether this was a receipt replay.
+    @param result_residency 工具结果驻留期 / Tool-result residency.
     """
 
     invocation_id: str
@@ -195,6 +201,7 @@ class ToolRuntimeResult:
     validation_error: ToolValidationFailure | None
     public_result: JsonValue
     replayed: bool
+    result_residency: ToolResultResidency
 
 
 class AgentRuntime:
@@ -249,26 +256,28 @@ class AgentRuntime:
         validation = self._catalog.validate(tool_name, raw_arguments)
         if isinstance(validation, UnknownTool):
             return ToolRuntimeResult(
-                invocation_id,
-                correlation_id,
-                tool_name,
-                {},
-                f"read.{tool_name}",
-                None,
-                {"error": f"Unknown tool: {tool_name}"},
-                False,
+                invocation_id=invocation_id,
+                provider_call_id=correlation_id,
+                name=tool_name,
+                arguments={},
+                effect_kind=f"read.{tool_name}",
+                validation_error=None,
+                public_result={"error": f"Unknown tool: {tool_name}"},
+                replayed=False,
+                result_residency=ToolResultResidency.CONVERSATION,
             )
         if isinstance(validation, InvalidToolArguments):
             failure = _validation_failure(validation.issues)
             return ToolRuntimeResult(
-                invocation_id,
-                correlation_id,
-                tool_name,
-                {},
-                f"read.{tool_name}",
-                failure,
-                cast(JsonValue, failure),
-                False,
+                invocation_id=invocation_id,
+                provider_call_id=correlation_id,
+                name=tool_name,
+                arguments={},
+                effect_kind=f"read.{tool_name}",
+                validation_error=failure,
+                public_result=cast(JsonValue, failure),
+                replayed=False,
+                result_residency=ToolResultResidency.CONVERSATION,
             )
         if not isinstance(validation, ValidatedToolInvocation):
             raise AssertionError("unhandled tool validation result")
@@ -298,6 +307,7 @@ class AgentRuntime:
                 mutating=validation.mutating,
                 arguments=arguments,
                 request_hash=request_hash,
+                result_cacheable=validation.result_cacheable,
             )
         )
         return ToolRuntimeResult(
@@ -309,6 +319,7 @@ class AgentRuntime:
             validation_error=None,
             public_result=_public_result(tool_name, persisted.result),
             replayed=persisted.replayed,
+            result_residency=validation.result_residency,
         )
 
 

@@ -53,6 +53,9 @@ class AssistantInferenceService:
         profiles: Mapping[str, ProviderRoute],
         circuit: ProviderCircuit,
         text_only_model_patterns: Iterable[str],
+        working_memory_limit: int,
+        working_memory_max_tokens: int,
+        working_memory_enabled: bool,
         agent_loop: AgentRunner,
     ) -> None:
         """@brief 注入 route policy 与 Agent / Inject route policy and Agent.
@@ -61,6 +64,9 @@ class AssistantInferenceService:
         @param profiles route profiles / Route profiles.
         @param circuit runtime-owned circuit / Runtime-owned circuit.
         @param text_only_model_patterns 纯文本模型模式 / Text-only model patterns.
+        @param working_memory_limit 每次模型 Query 的 WorkingMemory 消息上限 / WorkingMemory message limit per model query.
+        @param working_memory_max_tokens 每次换入的硬 token 预算 / Hard token budget for each page-in.
+        @param working_memory_enabled 是否为该任务启用 WorkingMemory / Whether WorkingMemory is enabled for this task.
         @param agent_loop 可恢复 Agent port / Resumable Agent port.
         """
 
@@ -68,6 +74,13 @@ class AssistantInferenceService:
         self._profiles = dict(profiles)
         self._circuit = circuit
         self._text_only_model_patterns = tuple(text_only_model_patterns)
+        if not 1 <= working_memory_limit <= 20:
+            raise ValueError("working_memory_limit must be between 1 and 20")
+        if working_memory_max_tokens < 256:
+            raise ValueError("working_memory_max_tokens must be at least 256")
+        self._working_memory_limit = working_memory_limit
+        self._working_memory_max_tokens = working_memory_max_tokens
+        self._working_memory_enabled = working_memory_enabled
         self._agent_loop = agent_loop
 
     @property
@@ -158,6 +171,7 @@ class AssistantInferenceService:
                 context_state.text_fallback_messages,
             )
             route_context = ContextState(
+                context_id=context_state.context_id,
                 scope=context_state.scope,
                 user_state=context_state.user_state,
                 messages=service_messages,
@@ -190,7 +204,12 @@ class AssistantInferenceService:
                 context_state.text_fallback_messages = (
                     response.context_state.text_fallback_messages
                 )
-                response = AgentResponse(response.text, response.events, context_state)
+                response = AgentResponse(
+                    response.text,
+                    response.events,
+                    context_state,
+                    response.history_messages,
+                )
             return response, None
         return None, last_error
 
@@ -236,6 +255,9 @@ class AssistantInferenceService:
                         provider_name=route.display_name,
                         skip_tools=frozenset(route.skip_tools),
                         allow_tools=allow_tools,
+                        working_memory_limit=self._working_memory_limit,
+                        working_memory_max_tokens=self._working_memory_max_tokens,
+                        working_memory_enabled=self._working_memory_enabled,
                         completion_options=options,
                     ),
                     tool_context=tool_context,

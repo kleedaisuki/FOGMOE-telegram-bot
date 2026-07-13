@@ -12,6 +12,7 @@ from fogmoe_bot.application.assistant.durable_inference import (
 from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
 from fogmoe_bot.application.assistant.tool_runtime import AgentRuntime
 from fogmoe_bot.application.assistant.tools.catalog import DEFAULT_TOOL_CATALOG
+from fogmoe_bot.application.memory.service import RetrievalWorkingMemory
 from fogmoe_bot.application.retrieval import (
     EPISODIC_CORPUS_ID,
     EpisodicPassageRenderer,
@@ -132,6 +133,7 @@ def build_durable_assistant(
         corpus_id=EPISODIC_CORPUS_ID,
         telemetry=telemetry,
     )
+    working_memory = RetrievalWorkingMemory(recall=recall)
     retrieval = RetrievalWorker(
         source=PostgresEpisodicSource(),
         store=retrieval_store,
@@ -217,7 +219,7 @@ def build_durable_assistant(
             bulkhead=sticker_bulkhead,
         ),
         outbox=PostgresOutboxRepository(),
-        recall=recall,
+        memory=working_memory,
         groups=PostgresGroupMessageProjection(),
     )
     store = PostgresAssistantToolStore(operations=operations)
@@ -232,6 +234,7 @@ def build_durable_assistant(
         ),
         completion=completion,
         checkpoints=store,
+        memory=working_memory,
         telemetry=telemetry,
     )
     circuit = ProviderCircuit(
@@ -244,6 +247,9 @@ def build_durable_assistant(
         profiles=build_provider_profiles(),
         circuit=circuit,
         text_only_model_patterns=config.AI_CHAT_TEXT_ONLY_MODELS,
+        working_memory_limit=config.WORKING_MEMORY_RESULT_LIMIT,
+        working_memory_max_tokens=config.WORKING_MEMORY_RESERVED_TOKENS,
+        working_memory_enabled=True,
         agent_loop=agent,
     )
     translation_service = AssistantInferenceService(
@@ -251,6 +257,9 @@ def build_durable_assistant(
         profiles=build_provider_profiles("translate"),
         circuit=circuit,
         text_only_model_patterns=config.AI_CHAT_TEXT_ONLY_MODELS,
+        working_memory_limit=config.WORKING_MEMORY_RESULT_LIMIT,
+        working_memory_max_tokens=config.WORKING_MEMORY_RESERVED_TOKENS,
+        working_memory_enabled=False,
         agent_loop=agent,
     )
     compaction = CompactionWorker(
@@ -295,7 +304,10 @@ def build_durable_assistant(
             history=history,
             system_prompt=system_prompt,
             runtime_limits=runtime_limits,
-            history_reserved_tokens=TokenCount(config.CHAT_RESERVED_TOKENS),
+            history_reserved_tokens=TokenCount(
+                config.CHAT_RESERVED_TOKENS
+                + config.WORKING_MEMORY_RESERVED_TOKENS
+            ),
             inference=service,
             translation_inference=translation_service,
         ),

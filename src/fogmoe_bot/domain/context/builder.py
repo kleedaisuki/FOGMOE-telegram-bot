@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
+from uuid import UUID
 
 from .formatting import (
     format_metadata_attrs,
@@ -123,6 +124,7 @@ def create_runtime_replacement(
 
 def build_context_state(
     *,
+    context_id: UUID,
     system_prompt: str,
     history_messages: Iterable[Mapping[str, object]],
     scope: ConversationScope,
@@ -132,6 +134,7 @@ def build_context_state(
 ) -> ContextState:
     """@brief 构造 Agent 上下文状态 / Build Agent context state.
 
+    @param context_id ContextState 实体标识 / ContextState entity identifier.
     @param system_prompt 静态系统策略 / Static system policy.
     @param history_messages 当前会话历史 / Current conversation history.
     @param scope 对话作用域 / Conversation scope.
@@ -163,6 +166,7 @@ def build_context_state(
         fallback = [dict(system_message), *fallback_history]
 
     return ContextState(
+        context_id=context_id,
         scope=scope,
         user_state=user_state,
         messages=[system_message, *query_history],
