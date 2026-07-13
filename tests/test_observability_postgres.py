@@ -22,15 +22,20 @@ from fogmoe_bot.domain.observability.signals import (
     freeze_attributes,
 )
 from fogmoe_bot.domain.observability.trace import TraceContext
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.observability.postgres import PostgresTelemetrySink
+from postgres_test_support import database_settings_from_url
 
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("RUN_POSTGRES_TESTS") != "1",
-    reason="requires an explicitly migrated PostgreSQL test database",
-)
-"""@brief 防止测试误写非测试数据库 / Prevent accidental writes to a non-test database."""
+def _asyncpg_database_url() -> str:
+    """@brief 读取显式测试 DSN 并转换为 asyncpg URL / Read an explicit test DSN and convert it to an asyncpg URL.
+
+    @return asyncpg 数据库 URL / asyncpg database URL.
+    """
+
+    raw_url = os.environ.get("FOGMOE_TEST_DATABASE_URL")
+    if raw_url:
+        return database_settings_from_url(raw_url).asyncpg_url()
+    pytest.skip("set FOGMOE_TEST_DATABASE_URL to run the real PostgreSQL contract")
 
 
 def test_postgres_sink_atomically_persists_every_signal_kind() -> None:
@@ -39,6 +44,7 @@ def test_postgres_sink_atomically_persists_every_signal_kind() -> None:
     async def scenario() -> None:
         """@brief 执行真实 PostgreSQL 往返 / Execute a real PostgreSQL round trip."""
 
+        database_url = _asyncpg_database_url()
         now = datetime.now(UTC)
         context = TraceContext.new_root()
         resource = Resource(
@@ -51,7 +57,7 @@ def test_postgres_sink_atomically_persists_every_signal_kind() -> None:
             attributes=freeze_attributes({"test.kind": "integration"}),
         )
         sink = PostgresTelemetrySink(
-            dsn=config.asyncpg_database_uri(),
+            dsn=database_url,
             resource=resource,
             command_timeout=5,
             retention_days=30,
@@ -112,7 +118,7 @@ def test_postgres_sink_atomically_persists_every_signal_kind() -> None:
             )
         )
 
-        connection = await asyncpg.connect(config.asyncpg_database_uri())
+        connection = await asyncpg.connect(database_url)
         try:
             counts = await connection.fetchrow(
                 "SELECT "
@@ -127,7 +133,7 @@ def test_postgres_sink_atomically_persists_every_signal_kind() -> None:
             await connection.close()
 
         await sink.close()
-        connection = await asyncpg.connect(config.asyncpg_database_uri())
+        connection = await asyncpg.connect(database_url)
         try:
             stopped_at = await connection.fetchval(
                 "SELECT stopped_at FROM observability.resources WHERE resource_id = $1",

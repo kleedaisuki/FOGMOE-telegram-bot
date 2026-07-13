@@ -74,34 +74,55 @@ cd FOGMOE-telegram-bot
 python -m pip install -e .
 ```
 
-### 配置环境变量
+### 配置文件（JSONC）
 
 ```bash
-# 复制环境变量模板
-cp .env.example .env
+# 复制带完整说明的 JSONC 模板
+cp example.config.json config.json
+chmod 600 config.json
 
-# 编辑 .env 文件，填入你的配置
-nano .env
+# 编辑 config.json，填入你的配置
+nano config.json
 ```
 
-AI 调用统一通过 LiteLLM SDK，provider 和模型需要在 `.env` 中显式配置。示例：
+`config.json` 是唯一的运行时配置入口；它使用 JSON with Comments（JSONC），可在对象
+与字段前写说明性注释。不要把真实密钥提交到仓库。全部字段、默认值和逐项说明见
+[`example.config.json`](example.config.json)；README 只展示最常用的 AI 路由片段，避免成为
+第二份会漂移的配置规范。
 
-```env
-AI_CHAT_ORDER=openai,openrouter,siliconflow,azure,zhipu,gemini
-AI_SUMMARY_PROVIDER=openai
-AI_TRANSLATE_PROVIDER=openai
+AI 调用统一通过 LiteLLM SDK。provider 和模型位于 `ai` 下，路由策略与 provider 凭据分开：
+
+```jsonc
+{
+  "ai": {
+    "routing": {
+      // 按顺序尝试聊天 provider。
+      "chat": {
+        "provider_order": ["openai", "openrouter", "siliconflow"]
+      },
+      "summary": { "provider": "openai" },
+      "translation": { "provider": "openai" }
+    },
+    "providers": {
+      "openai": {
+        "api_key": "替换为真实密钥",
+        "models": { "chat": "gpt-4o" }
+      }
+    }
+  }
+}
 ```
 
 ### 数据库设置
 
 ```bash
-# 本地 PostgreSQL：创建数据库、运行时角色、迁移角色和 psql service 文件
-fogmoe-dbctl bootstrap-postgres
+# 本地 PostgreSQL：根据 config.json 中的 database 配置创建数据库与角色
+fogmoe-dbctl bootstrap
 
-# 已有外部数据库：配置 .env 或 psql service 后直接运行迁移
+# 已有外部数据库：填写 config.json 的 database.endpoint 后直接运行迁移
 fogmoe-dbctl migrate
 
-# 通过受配置保护的 service 导出一张表；不会接受任意 SQL
+# 通过 config.json 中受约束的数据库连接导出一张表；不会接受任意 SQL
 fogmoe-dbctl export-csv --table conversation.conversation_messages --output ./conversation_messages.csv
 ```
 数据库迁移由 `fogmoe-dbctl` 显式管理，机器人启动时不会自动迁移外部数据库。
@@ -160,11 +181,11 @@ fogmoe-dashboard --format json --window 1h errors | jq '.data'
 
 ~~~bash
 pip install -e '.[dashboard-gui]'
-fogmoe-dashboard-gui --window 6h --auto-refresh 10
+fogmoe-dashboard-gui --config ./config.json --window 6h --auto-refresh 10
 ~~~
 
-需要自由查询时，可通过 automation service 打开前台 psql；密码仅从项目 pgpass
-读取：
+需要自由查询时，可通过 `fogmoe-dbctl` 打开前台 psql；连接参数只从根目录
+`config.json` 读取：
 
 ~~~bash
 fogmoe-dbctl shell
@@ -223,7 +244,9 @@ source .venv/bin/activate
 ### 必需配置
 
 #### 获取必要的 API 密钥
-在 `.env` 中配置必需项；不要把真实密钥提交到仓库。
+在根目录 `config.json` 中配置必需项；不要把真实密钥提交到仓库。该文件使用 JSONC，
+所有可配置字段、默认值及说明均在 `example.config.json` 中；首次配置可执行
+`cp example.config.json config.json`。
 
 ---
 
@@ -236,7 +259,10 @@ source .venv/bin/activate
 
 无需在容器内运行 PostgreSQL，只容器化机器人。
 
-1. 复制 `.env.example` 为 `.env`，填好 Telegram/AI/PostgreSQL 配置；`POSTGRES_HOST` 设为外部数据库地址（宿主机 PostgreSQL 可用 `host.docker.internal` 或宿主机 IP）。
+1. 复制 `example.config.json` 为 `config.json`，填好 Telegram、AI 与 PostgreSQL 配置。Docker
+   会把它以只读方式挂载到 `/app/config.json`；将 `database.endpoint.host` 设为容器可访问的
+   外部数据库地址（Docker Desktop 上的宿主机 PostgreSQL 可使用 `host.docker.internal`；Linux
+   Docker Engine 则使用可路由的宿主机 IP 或网关地址）。
 2. 构建镜像：
    ```bash
    docker compose build bot
@@ -345,7 +371,7 @@ PostgreSQL 实例上覆盖 upgrade、downgrade/re-up 与对应真实语义测试
 ## 🔒 安全与隐私
 
 ### 数据安全
-- 所有敏感配置使用环境变量管理
+- 所有敏感配置集中保存在根目录 `config.json`（JSONC）中，并应限制为仅部署账户可读
 - 数据库密码不会硬编码在代码中
 - 支持加密存储用户数据
 

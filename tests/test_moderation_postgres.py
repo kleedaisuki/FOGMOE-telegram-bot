@@ -51,15 +51,13 @@ from fogmoe_bot.infrastructure.database.moderation.reports import (
 from fogmoe_bot.infrastructure.database.repositories.verification_repository import (
     PostgresVerificationRepository,
 )
-from fogmoe_dbctl.postgres import read_service, service_sqlalchemy_url
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 """@brief 项目根目录 / Project root."""
 
 
 def _postgres_url() -> str:
-    """@brief 读取显式测试 DSN 或本地 automation service / Read an explicit test DSN or local automation service.
+    """@brief 读取显式测试 DSN / Read an explicit test DSN.
 
     @return SQLAlchemy asyncpg URL / SQLAlchemy asyncpg URL.
     """
@@ -67,12 +65,7 @@ def _postgres_url() -> str:
     explicit = os.environ.get("FOGMOE_TEST_DATABASE_URL")
     if explicit:
         return explicit
-    if os.environ.get("FOGMOE_TEST_POSTGRES") != "1":
-        pytest.skip("set FOGMOE_TEST_POSTGRES=1 to run the real PostgreSQL contract")
-    config_dir = PROJECT_ROOT / "var/psql"
-    if not (config_dir / "pg_service.conf").is_file():
-        pytest.skip("local PostgreSQL service configuration is unavailable")
-    return service_sqlalchemy_url(read_service(config_dir, "fogmoe_automation"))
+    pytest.skip("set FOGMOE_TEST_DATABASE_URL to run the real PostgreSQL contract")
 
 
 def _statement(

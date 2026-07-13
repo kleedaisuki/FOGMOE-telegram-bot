@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import cast
 
 from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.config import LoggingSettings
 from fogmoe_bot.domain.observability.signals import Severity
 from fogmoe_bot.domain.observability.trace import TraceContext
-from fogmoe_bot.infrastructure import config
 
 
 _LOG_LISTENER: QueueListener | None = None
@@ -213,11 +213,15 @@ def _resolve_log_level(value: str, *, fallback: int = logging.INFO) -> int:
     return getattr(logging, (value or "").upper(), fallback)
 
 
-def _new_log_file_path() -> Path:
-    """@brief 创建当前进程日志路径 / Build the current process log path."""
+def _new_log_file_path(log_directory: Path) -> Path:
+    """@brief 创建当前进程日志路径 / Build the current process log path.
+
+    @param log_directory 已由组合根解析的日志目录 / Log directory resolved by the composition root.
+    @return 带时间戳的进程日志路径 / Timestamped process-log path.
+    """
 
     timestamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
-    return config.LOG_DIR / f"tgbot_{timestamp}_{os.getpid()}.log"
+    return log_directory / f"tgbot_{timestamp}_{os.getpid()}.log"
 
 
 def current_log_file_path() -> Path:
@@ -246,13 +250,14 @@ def prepare_litellm_logging() -> None:
     os.environ["LITELLM_LOG"] = "ERROR"
 
 
-def configure_litellm_logging() -> None:
+def configure_litellm_logging(settings: LoggingSettings) -> None:
     """@brief 让 LiteLLM 继承根日志级别并传播到统一管道 / Inherit the root log level and route LiteLLM through the unified pipeline.
 
+    @param settings 已验证的日志设置 / Validated logging settings.
     @return None / None.
     """
 
-    level = _resolve_log_level(config.LOG_LEVEL)
+    level = _resolve_log_level(settings.level)
     for logger_name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
         third_party_logger = logging.getLogger(logger_name)
         for handler in tuple(third_party_logger.handlers):
@@ -263,9 +268,15 @@ def configure_litellm_logging() -> None:
         third_party_logger.disabled = False
 
 
-def configure_logging(telemetry: Telemetry) -> Path:
+def configure_logging(
+    settings: LoggingSettings,
+    log_directory: Path,
+    telemetry: Telemetry,
+) -> Path:
     """@brief 配置单一异步日志入口与双 sink / Configure one asynchronous logging ingress and two sinks.
 
+    @param settings 已验证的日志设置 / Validated logging settings.
+    @param log_directory 已由组合根解析的日志目录 / Log directory resolved by the composition root.
     @param telemetry PostgreSQL 结构日志入口 / PostgreSQL structured-log ingress.
     @return 当前文件日志路径 / Current file-log path.
     """
@@ -274,16 +285,16 @@ def configure_logging(telemetry: Telemetry) -> Path:
     if _LOG_LISTENER is not None:
         return current_log_file_path()
 
-    config.LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_file_path = _new_log_file_path()
-    log_level = _resolve_log_level(config.LOG_LEVEL)
+    log_directory.mkdir(parents=True, exist_ok=True)
+    log_file_path = _new_log_file_path(log_directory)
+    log_level = _resolve_log_level(settings.level)
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
     file_handler = RotatingFileHandler(
         log_file_path,
-        maxBytes=max(1, int(config.LOG_FILE_MAX_BYTES)),
-        backupCount=max(0, int(config.LOG_FILE_BACKUP_COUNT)),
+        maxBytes=settings.file_max_bytes,
+        backupCount=settings.file_backup_count,
         encoding="utf-8",
     )
     file_handler.setLevel(log_level)
@@ -292,7 +303,7 @@ def configure_logging(telemetry: Telemetry) -> Path:
     telemetry_handler.setLevel(log_level)
 
     log_queue: queue.Queue[logging.LogRecord] = queue.Queue(
-        maxsize=max(1, int(config.LOG_QUEUE_MAX_SIZE))
+        maxsize=settings.queue_capacity
     )
     queue_handler = ContextQueueHandler(log_queue, telemetry)
     queue_handler.setLevel(log_level)

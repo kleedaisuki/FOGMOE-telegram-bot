@@ -31,10 +31,8 @@ from fogmoe_bot.domain.economy import (
     AssistantBillingReservation,
     AssistantBillingStatus,
 )
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database.assistant_billing import (
     AssistantBillingTransactions,
-    PostgresAssistantBilling,
 )
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import (
@@ -44,7 +42,9 @@ from fogmoe_bot.infrastructure.database.repositories import (
 from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
     PostgresTurnRepository,
 )
-from fogmoe_bot.infrastructure.database.user_profile.store import PostgresUserProfileStore
+from fogmoe_bot.infrastructure.database.user_profile.store import (
+    PostgresUserProfileStore,
+)
 
 
 class TransactionalProfileReader(Protocol):
@@ -66,27 +66,32 @@ class PostgresAssistantTurnAcceptanceUoW:
 
     def __init__(
         self,
-        workflow_repository: PostgresTurnRepository | None = None,
-        billing: AssistantBillingTransactions | None = None,
+        workflow_repository: PostgresTurnRepository,
+        billing: AssistantBillingTransactions,
         profiles: TransactionalProfileReader | None = None,
+        *,
+        administrator_id: int,
     ) -> None:
         """@brief 注入 connection-bound workflow 与计费原语 / Inject connection-bound workflow and billing primitives.
 
         @param workflow_repository Conversation workflow adapter / Conversation workflow adapter.
         @param billing reserve/settle/release 计费原语 / Reserve/settle/release billing primitive.
         @param profiles acceptance transaction 内的 Profile reader / Profile reader inside the acceptance transaction.
+        @param administrator_id 管理员 Telegram 用户 ID / Administrator Telegram user ID.
+        @raise TypeError 管理员 ID 不是严格整数时抛出 /
+            Raised when the administrator ID is not a strict integer.
         """
 
-        self._workflow_repository = (
-            workflow_repository
-            if workflow_repository is not None
-            else PostgresTurnRepository()
-        )
+        if isinstance(administrator_id, bool) or not isinstance(administrator_id, int):
+            raise TypeError("administrator_id must be an integer")
+        self._workflow_repository = workflow_repository
         """@brief 同事务 acceptance primitive / Same-transaction acceptance primitive."""
-        self._billing = billing or PostgresAssistantBilling()
+        self._billing = billing
         """@brief 同事务计费预留原语 / Same-transaction billing-reservation primitive."""
         self._profiles = profiles or PostgresUserProfileStore()
         """@brief acceptance-pinned Profile reader / acceptance-pinned Profile reader."""
+        self._administrator_id = administrator_id
+        """@brief 用于套餐判定的管理员 ID / Administrator ID used for plan selection."""
 
     async def accept(
         self,
@@ -167,7 +172,11 @@ class PostgresAssistantTurnAcceptanceUoW:
             )
             account_context = AssistantAccountContext(
                 coins=new_free + new_paid,
-                plan=_resolve_plan(request.user_id, new_paid),
+                plan=_resolve_plan(
+                    request.user_id,
+                    new_paid,
+                    administrator_id=self._administrator_id,
+                ),
                 permission=account.permission,
                 profile=profile,
                 personal_info=(
@@ -215,7 +224,11 @@ class PostgresAssistantTurnAcceptanceUoW:
                 return AssistantTurnAccepted(acceptance=None, replayed=True)
 
             if request.coin_cost > 0:
-                plan = _resolve_plan(request.user_id, new_paid)
+                plan = _resolve_plan(
+                    request.user_id,
+                    new_paid,
+                    administrator_id=self._administrator_id,
+                )
                 await user_repository.set_coin_balances_and_plan(
                     request.user_id,
                     new_free,
@@ -326,15 +339,21 @@ def _deduct_balances(*, free: int, paid: int, amount: int) -> tuple[int, int]:
     return 0, paid - (amount - free)
 
 
-def _resolve_plan(user_id: int, paid: int) -> str:
+def _resolve_plan(
+    user_id: int,
+    paid: int,
+    *,
+    administrator_id: int,
+) -> str:
     """@brief 按旧产品规则解析扣费后计划 / Resolve the post-charge plan using legacy product rules.
 
     @param user_id Telegram 用户 ID / Telegram user ID.
     @param paid 扣费后付费余额 / Paid balance after charging.
+    @param administrator_id 管理员 Telegram 用户 ID / Administrator Telegram user ID.
     @return ``admin``、``paid`` 或 ``free`` / ``admin``, ``paid``, or ``free``.
     """
 
-    if user_id == config.ADMIN_USER_ID:
+    if user_id == administrator_id:
         return "admin"
     return "paid" if paid > 0 else "free"
 

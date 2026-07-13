@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from fogmoe_dbctl.commands import bootstrap, export_csv, migrate, shell
+from fogmoe_dbctl.config import default_config_path, read_dbctl_settings
 
 
 COMMAND_MODULES = (bootstrap, migrate, export_csv, shell)
@@ -22,6 +24,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fogmoe-dbctl",
         description="Manage the external FogMoe PostgreSQL database.",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=default_config_path(),
+        help="Path to the root JSONC configuration file.",
     )
     subparsers = parser.add_subparsers(dest="command", metavar="command")
     for command_module in COMMAND_MODULES:
@@ -46,4 +54,5 @@ def main(argv: Sequence[str] | None = None) -> None:
     handler: Any | None = getattr(args, "handler", None)
     if handler is None:
         parser.error("a command is required")
-    handler(args)
+    settings = read_dbctl_settings(args.config)
+    handler(args, settings=settings)

@@ -7,7 +7,6 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 import os
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -23,11 +22,13 @@ from fogmoe_bot.domain.conversation.identity import (
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.assistant_turn_acceptance import (
     PostgresAssistantTurnAcceptanceUoW,
+)
+from fogmoe_bot.infrastructure.database.assistant_billing import (
+    PostgresAssistantBilling,
 )
 from fogmoe_bot.infrastructure.database.conversation_workflow.inbox import (
     PostgresInboxRepository,
@@ -35,11 +36,10 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.inbox import (
 from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
     PostgresTurnRepository,
 )
-from fogmoe_dbctl.postgres import read_service, service_sqlalchemy_url
+from postgres_test_support import configure_bot_database
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-"""@brief 项目根目录 / Project root."""
+ADMINISTRATOR_ID = 1002288404
+"""@brief 测试管理员 Telegram 用户 ID / Test administrator Telegram user ID."""
 
 
 def _postgres_url() -> str:
@@ -51,12 +51,7 @@ def _postgres_url() -> str:
     explicit = os.environ.get("FOGMOE_TEST_DATABASE_URL")
     if explicit:
         return explicit
-    if os.environ.get("FOGMOE_TEST_POSTGRES") != "1":
-        pytest.skip("set FOGMOE_TEST_POSTGRES=1 to run the real PostgreSQL contract")
-    config_dir = PROJECT_ROOT / "var/psql"
-    if not (config_dir / "pg_service.conf").is_file():
-        pytest.skip("local PostgreSQL service configuration is unavailable")
-    return service_sqlalchemy_url(read_service(config_dir, "fogmoe_automation"))
+    pytest.skip("set FOGMOE_TEST_DATABASE_URL to run the real PostgreSQL contract")
 
 
 def test_translation_charge_turn_and_activity_replay_atomically(
@@ -70,8 +65,8 @@ def test_translation_charge_turn_and_activity_replay_atomically(
     async def scenario() -> None:
         """@brief 执行真实 acceptance 与重放 / Execute real acceptance and replay."""
 
-        monkeypatch.setattr(config, "SQLALCHEMY_DATABASE_URI", _postgres_url())
         await db.dispose_current_engine()
+        configure_bot_database(_postgres_url())
         suffix = uuid4().hex
         discriminator = int(suffix[:12], 16)
         user_id = 6_000_000_000_000_000_000 + discriminator
@@ -85,7 +80,8 @@ def test_translation_charge_turn_and_activity_replay_atomically(
             received_at=now,
         )
         inbox = PostgresInboxRepository()
-        turns = PostgresTurnRepository()
+        billing = PostgresAssistantBilling(ADMINISTRATOR_ID)
+        turns = PostgresTurnRepository(billing)
         target = TranslationReplyTarget(
             update_id=inbound.update_id,
             conversation_id=conversation_id,
@@ -124,7 +120,11 @@ def test_translation_charge_turn_and_activity_replay_atomically(
             pool_before = Decimal(str(pool_before_row[0]))
             posting_before = int(pool_before_row[1])
 
-            acceptance = PostgresAssistantTurnAcceptanceUoW(turns)
+            acceptance = PostgresAssistantTurnAcceptanceUoW(
+                turns,
+                billing,
+                administrator_id=ADMINISTRATOR_ID,
+            )
             first = await acceptance.accept(request, accepted_at=now)
             replay = await acceptance.accept(request, accepted_at=now)
 

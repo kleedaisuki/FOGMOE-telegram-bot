@@ -7,6 +7,8 @@ SRC_DIR="$BOT_DIR/src"
 LOG_DIR="$BOT_DIR/logs"
 VENV_DIR="$BOT_DIR/.venv"
 PYPROJECT_FILE="$BOT_DIR/pyproject.toml"
+CONFIG_FILE="$BOT_DIR/config.json"
+EXAMPLE_CONFIG_FILE="$BOT_DIR/example.config.json"
 STOP_TIMEOUT_SECONDS="${BOT_STOP_TIMEOUT_SECONDS:-40}"
 
 # 颜色输出
@@ -86,22 +88,23 @@ init_environment() {
     # 安装依赖
     install_dependencies
 
-    # 检查 .env 文件
-    if [ ! -f "$BOT_DIR/.env" ]; then
+    # 首次创建操作者配置；example.config.json 是可提交的完整 JSONC 模板。
+    if [ ! -f "$CONFIG_FILE" ]; then
         echo ""
-        echo -e "${YELLOW}警告: .env 文件不存在${NC}"
+        echo -e "${YELLOW}警告: config.json 文件不存在${NC}"
 
-        if [ -f "$BOT_DIR/.env.example" ]; then
-            echo "是否要从 .env.example 创建 .env 文件? (y/n)"
+        if [ -f "$EXAMPLE_CONFIG_FILE" ]; then
+            echo "是否要从 example.config.json 创建 config.json? (y/n)"
             read -r response
             if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
-                cp "$BOT_DIR/.env.example" "$BOT_DIR/.env"
-                echo -e "${GREEN}✓ 已创建 .env 文件${NC}"
-                echo -e "${YELLOW}请编辑 .env 文件并配置必要的环境变量${NC}"
-                echo "  nano $BOT_DIR/.env"
+                cp "$EXAMPLE_CONFIG_FILE" "$CONFIG_FILE"
+                chmod 600 "$CONFIG_FILE"
+                echo -e "${GREEN}✓ 已创建 config.json 文件${NC}"
+                echo -e "${YELLOW}请编辑 config.json（JSONC）并配置必要参数${NC}"
+                echo "  nano $CONFIG_FILE"
             fi
         else
-            echo -e "${RED}错误: .env.example 文件也不存在${NC}"
+            echo -e "${RED}错误: example.config.json 文件也不存在${NC}"
         fi
     fi
 
@@ -109,7 +112,7 @@ init_environment() {
     echo -e "${GREEN}✓ 环境初始化完成！${NC}"
     echo ""
     echo "下一步:"
-    echo "  1. 配置 .env 文件中的必要参数"
+    echo "  1. 配置 config.json（JSONC）中的必要参数"
     echo "  2. 运行数据库迁移: $VENV_DIR/bin/fogmoe-dbctl migrate"
     echo "  3. 启动 bot: $0 start"
 }
@@ -164,11 +167,11 @@ start_bot() {
     echo "激活虚拟环境..."
     source "$VENV_DIR/bin/activate"
 
-    # 检查 .env 文件
-    if [ ! -f "$BOT_DIR/.env" ]; then
-        echo -e "${RED}错误: .env 文件不存在！${NC}"
-        echo "请先创建 .env 文件并配置必要的环境变量"
-        echo "可以参考 .env.example 文件"
+    # 配置只能来自根目录 JSONC 文件，避免启动时隐式读取遗留 .env。
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${RED}错误: config.json 文件不存在！${NC}"
+        echo "请先创建 config.json 并配置必要参数"
+        echo "可以参考 example.config.json 文件"
         exit 1
     fi
 
@@ -353,7 +356,7 @@ show_help() {
     echo ""
     echo "首次使用流程:"
     echo "  1. $0 init                           # 初始化环境"
-    echo "  2. 编辑 .env 文件配置必要参数         # nano .env"
+    echo "  2. 编辑 config.json 配置必要参数       # nano config.json"
     echo "  3. 运行数据库迁移                     # $VENV_DIR/bin/fogmoe-dbctl migrate"
     echo "  4. $0 start                          # 启动bot"
 }

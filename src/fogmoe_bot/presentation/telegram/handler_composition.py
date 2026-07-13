@@ -2,6 +2,7 @@
 
 from telegram import Bot
 
+from fogmoe_bot.config import BotSettings, EconomySettings, IdentitySettings
 from fogmoe_bot.application.accounts.operations import (
     ACCOUNT_SERVICE_DATA_KEY,
     AccountService,
@@ -57,7 +58,6 @@ from fogmoe_bot.application.moderation.verification_worker import (
     VerificationTimeoutWorker,
 )
 from fogmoe_bot.application.observability.telemetry import Telemetry
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.blocking import AsyncBlockingBulkhead
 from fogmoe_bot.infrastructure.crypto.binance_price import BinanceBtcPriceSource
 from fogmoe_bot.infrastructure.database.account_operations import (
@@ -136,6 +136,7 @@ from fogmoe_bot.infrastructure.database.rps_ledger import PostgresRpsLedger
 from fogmoe_bot.infrastructure.http.media.binary import AiohttpBinaryFetcher
 from fogmoe_bot.infrastructure.http.media.music import JkyMusicSource
 from fogmoe_bot.infrastructure.http.media.picture import BooruPictureSource
+from fogmoe_bot.resources import BotResources
 
 from . import (
     economy_handlers,
@@ -156,23 +157,25 @@ from .runtime_settings import TELEGRAM_SETTINGS_DATA_KEY, TelegramRuntimeSetting
 HANDLER_BLOCKING_BULKHEADS_DATA_KEY = "fogmoe.handler_blocking_bulkheads"
 
 
-def create_games_capabilities() -> dict[str, object]:
+def create_games_capabilities(identity: IdentitySettings) -> dict[str, object]:
     """@brief 装配各个窄 Games capability / Assemble the narrow Games capabilities.
 
+    @param identity 管理员身份设置 / Administrator identity settings.
     @return 显式 capability 键到对应服务或 worker 的映射 /
         Explicit capability keys mapped to their services or worker.
     """
 
-    gamble = PostgresGambleOperations(admin_user_id=config.ADMIN_USER_ID)
-    sicbo = PostgresSicBoOperations(admin_user_id=config.ADMIN_USER_ID)
+    administrator_id = identity.administrator.user_id
+    gamble = PostgresGambleOperations(admin_user_id=administrator_id)
+    sicbo = PostgresSicBoOperations(admin_user_id=administrator_id)
     return {
         GAMBLE_SERVICE_DATA_KEY: GambleService(gamble),
         SICBO_SERVICE_DATA_KEY: SicBoService(sicbo),
         OMIKUJI_SERVICE_DATA_KEY: OmikujiService(
-            PostgresOmikujiOperations(admin_user_id=config.ADMIN_USER_ID)
+            PostgresOmikujiOperations(admin_user_id=administrator_id)
         ),
         RPG_CHARACTER_SERVICE_DATA_KEY: RpgCharacterService(
-            PostgresRpgCharacterOperations(admin_user_id=config.ADMIN_USER_ID)
+            PostgresRpgCharacterOperations(admin_user_id=administrator_id)
         ),
         RPG_EQUIPMENT_OPERATIONS_DATA_KEY: PostgresRpgEquipmentOperations(),
         RPG_INVENTORY_SERVICE_DATA_KEY: RpgInventoryService(
@@ -186,15 +189,20 @@ def create_games_capabilities() -> dict[str, object]:
     }
 
 
-def create_rps_service(bot: Bot) -> RpsService:
+def create_rps_service(
+    bot: Bot,
+    *,
+    identity: IdentitySettings,
+) -> RpsService:
     """@brief 装配猜拳服务 / Assemble the RPS service.
 
     @param bot Telegram 投递客户端 / Telegram delivery client.
+    @param identity 管理员身份设置 / Administrator identity settings.
     @return 注入 PostgreSQL 与 Telegram 端口的服务 / Service with PostgreSQL and Telegram ports.
     """
 
     return RpsService(
-        ledger=PostgresRpsLedger(),
+        ledger=PostgresRpsLedger(identity.administrator.user_id),
         lifecycle_sink=rps_handlers.TelegramRpsLifecycleSink(bot),
     )
 
@@ -217,13 +225,22 @@ def create_verification_runtime(
 
 
 def create_picture_service(
-    accounts: MediaAccountProfiles, *, telemetry: Telemetry
+    accounts: MediaAccountProfiles,
+    *,
+    telemetry: Telemetry,
+    identity: IdentitySettings,
 ) -> PictureService:
-    """装配图片用例 / Assemble picture use cases."""
+    """@brief 装配图片用例 / Assemble picture use cases.
+
+    @param accounts 媒体账户资料端口 / Media-account profile port.
+    @param telemetry 进程唯一遥测 recorder / Sole process telemetry recorder.
+    @param identity 管理员身份设置 / Administrator identity settings.
+    @return 图片服务 / Picture service.
+    """
 
     return PictureService(
         accounts=accounts,
-        repository=PostgresPictureRepository(),
+        repository=PostgresPictureRepository(identity.administrator.user_id),
         source=BooruPictureSource(telemetry=telemetry),
         binary_fetcher=AiohttpBinaryFetcher(telemetry=telemetry),
         runtime=PictureRuntime(),
@@ -244,43 +261,55 @@ def create_music_service(
     )
 
 
-def create_economy_service() -> EconomyService:
+def create_economy_service(identity: IdentitySettings) -> EconomyService:
     """@brief 装配经济服务 / Assemble the economy service.
 
+    @param identity 管理员身份设置 / Administrator identity settings.
     @return 注入 PostgreSQL 原子操作的服务 / Service with PostgreSQL atomic operations.
     """
 
     return EconomyService(
         accounts=PostgresAccountLookup(),
-        topups=PostgresTopUpOperations(admin_user_id=config.ADMIN_USER_ID),
+        topups=PostgresTopUpOperations(admin_user_id=identity.administrator.user_id),
         rewards=PostgresRewardOperations(),
-        community=PostgresCommunityOperations(admin_user_id=config.ADMIN_USER_ID),
-        redemption=PostgresRedemptionOperations(admin_user_id=config.ADMIN_USER_ID),
+        community=PostgresCommunityOperations(
+            admin_user_id=identity.administrator.user_id
+        ),
+        redemption=PostgresRedemptionOperations(
+            admin_user_id=identity.administrator.user_id
+        ),
         referrals=PostgresReferralOperations(),
         web_passwords=PostgresWebPasswordOperations(),
-        shop=PostgresShopOperations(admin_user_id=config.ADMIN_USER_ID),
+        shop=PostgresShopOperations(admin_user_id=identity.administrator.user_id),
     )
 
 
-def create_account_service() -> AccountService:
+def create_account_service(
+    identity: IdentitySettings,
+    economy: EconomySettings,
+) -> AccountService:
     """@brief 装配账户服务 / Assemble the account service.
 
+    @param identity 管理员身份设置 / Administrator identity settings.
+    @param economy 经济系统设置 / Economy-system settings.
     @return 注入 PostgreSQL receipts 的服务 / Service backed by PostgreSQL receipts.
     """
 
     return AccountService(
         PostgresAccountOperations(),
-        initial_coins=config.NEW_USER_BONUS_COINS,
-        admin_user_id=config.ADMIN_USER_ID,
+        initial_coins=economy.new_user_bonus_coins,
+        admin_user_id=identity.administrator.user_id,
     )
 
 
 def create_crypto_service(
     *,
     price_bulkhead: AsyncBlockingBulkhead,
+    identity: IdentitySettings,
 ) -> CryptoService:
     """@brief 装配加密货币服务 / Assemble the crypto service.
 
+    @param identity 管理员身份设置 / Administrator identity settings.
     @return 注入原子操作与有界 Binance adapter 的服务 /
         Service with atomic operations and a bounded Binance adapter.
     """
@@ -288,29 +317,45 @@ def create_crypto_service(
     return CryptoService(
         accounts=PostgresCryptoAccountReader(),
         charts=PostgresChartOperations(),
-        predictions=PostgresPredictionOperations(admin_user_id=config.ADMIN_USER_ID),
-        swaps=PostgresSwapOperations(admin_user_id=config.ADMIN_USER_ID),
+        predictions=PostgresPredictionOperations(
+            admin_user_id=identity.administrator.user_id
+        ),
+        swaps=PostgresSwapOperations(admin_user_id=identity.administrator.user_id),
         prices=BinanceBtcPriceSource(bulkhead=price_bulkhead),
     )
 
 
-def create_moderation_capability(bot: Bot) -> TelegramModerationCapability:
+def create_moderation_capability(
+    bot: Bot,
+    *,
+    resources: BotResources,
+) -> TelegramModerationCapability:
     """@brief 装配治理 capability / Assemble the moderation capability.
 
     @param bot Telegram 投递客户端 / Telegram delivery client.
+    @param resources 组合根加载的只读资源 / Read-only resources loaded by the composition root.
     @return runtime-owned 治理 capability / Runtime-owned moderation capability.
     """
 
-    return create_moderation_ingress_capability(bot)
+    return create_moderation_ingress_capability(
+        bot,
+        wordlist_path=resources.moderation_wordlist_path,
+    )
 
 
 def assemble_handler_capabilities(
-    application: TelegramApplication, *, telemetry: Telemetry
+    application: TelegramApplication,
+    *,
+    telemetry: Telemetry,
+    settings: BotSettings,
+    resources: BotResources,
 ) -> None:
     """@brief 装配 handler 所需服务 / Assemble services required by handlers.
 
     @param application PTB Application / PTB Application.
     @param telemetry 进程唯一遥测 recorder / Sole process telemetry recorder.
+    @param settings 已验证的 Bot 设置 / Validated Bot settings.
+    @param resources 组合根加载的只读资源 / Read-only resources loaded by the composition root.
     @return None / None.
     @raise RuntimeError capability 被重复装配时抛出 / Raised when a capability is assembled twice.
     """
@@ -342,7 +387,8 @@ def assemble_handler_capabilities(
     verification_service, verification_worker = create_verification_runtime(
         application.bot
     )
-    games_capabilities = create_games_capabilities()
+    identity = settings.identity
+    games_capabilities = create_games_capabilities(identity)
     media_accounts = PostgresMediaAccountProfiles()
     price_bulkhead = AsyncBlockingBulkhead(
         capacity=4,
@@ -354,31 +400,40 @@ def assemble_handler_capabilities(
         {
             VERIFICATION_SERVICE_DATA_KEY: verification_service,
             VERIFICATION_WORKER_DATA_KEY: verification_worker,
-            RPS_SERVICE_DATA_KEY: create_rps_service(application.bot),
+            RPS_SERVICE_DATA_KEY: create_rps_service(
+                application.bot,
+                identity=identity,
+            ),
             stake_handlers.STAKING_SERVICE_DATA_KEY: StakingService(
                 PostgresStakeTransactions(),
-                admin_user_id=config.ADMIN_USER_ID,
+                admin_user_id=identity.administrator.user_id,
             ),
-            economy_handlers.ECONOMY_SERVICE_DATA_KEY: create_economy_service(),
-            ACCOUNT_SERVICE_DATA_KEY: create_account_service(),
+            economy_handlers.ECONOMY_SERVICE_DATA_KEY: create_economy_service(identity),
+            ACCOUNT_SERVICE_DATA_KEY: create_account_service(
+                identity, settings.economy
+            ),
             PICTURE_SERVICE_DATA_KEY: create_picture_service(
-                media_accounts, telemetry=telemetry
+                media_accounts,
+                telemetry=telemetry,
+                identity=identity,
             ),
             MUSIC_SERVICE_DATA_KEY: create_music_service(
                 media_accounts, telemetry=telemetry
             ),
             CRYPTO_SERVICE_DATA_KEY: create_crypto_service(
-                price_bulkhead=price_bulkhead
+                price_bulkhead=price_bulkhead,
+                identity=identity,
             ),
             HANDLER_BLOCKING_BULKHEADS_DATA_KEY: (price_bulkhead,),
             **games_capabilities,
             MODERATION_CAPABILITY_DATA_KEY: create_moderation_capability(
-                application.bot
+                application.bot,
+                resources=resources,
             ),
             TELEGRAM_SETTINGS_DATA_KEY: TelegramRuntimeSettings(
-                administrator_id=config.ADMIN_USER_ID,
-                administrator_contact_name=config.ADMIN_CONTACT_NAME,
-                new_user_bonus=config.NEW_USER_BONUS_COINS,
+                administrator_id=identity.administrator.user_id,
+                administrator_contact_name=identity.administrator.contact_name,
+                new_user_bonus=settings.economy.new_user_bonus_coins,
             ),
         }
     )

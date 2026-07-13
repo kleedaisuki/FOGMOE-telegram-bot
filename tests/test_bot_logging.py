@@ -4,24 +4,24 @@ import logging
 import os
 import re
 
-from fogmoe_bot.infrastructure import config
+from fogmoe_bot.config import LoggingSettings
 from fogmoe_bot.infrastructure.observability import logging as bot_logging
 from observability_testkit import make_telemetry
 
 
-def test_configure_logging_uses_timestamped_file_and_queue_consumer(
-    monkeypatch, tmp_path
-):
+def test_configure_logging_uses_timestamped_file_and_queue_consumer(tmp_path):
     """@brief 日志生产者异步写入带时间戳文件 / Producer writes asynchronously to timestamped file."""
     root_logger = logging.getLogger()
     original_handlers = list(root_logger.handlers)
     original_level = root_logger.level
-    monkeypatch.setattr(config, "LOG_DIR", tmp_path)
-    monkeypatch.setattr(config, "LOG_LEVEL", "INFO")
-    monkeypatch.setattr(config, "LOG_QUEUE_MAX_SIZE", 10)
+    settings = LoggingSettings(level="INFO", queue_capacity=10)
 
     try:
-        log_path = bot_logging.configure_logging(make_telemetry())
+        log_path = bot_logging.configure_logging(
+            settings,
+            tmp_path,
+            make_telemetry(),
+        )
         logging.getLogger("fogmoe.test.logging").info("queued log record")
         bot_logging.shutdown_logging()
     finally:
@@ -34,7 +34,7 @@ def test_configure_logging_uses_timestamped_file_and_queue_consumer(
     assert "queued log record" in log_path.read_text(encoding="utf-8")
 
 
-def test_configure_litellm_logging_removes_private_handlers(monkeypatch):
+def test_configure_litellm_logging_removes_private_handlers():
     """@brief LiteLLM 删除私有 handler 并继承根等级 / LiteLLM removes private handlers and inherits the root level."""
     litellm_logger = logging.getLogger("LiteLLM")
     original_handlers = list(litellm_logger.handlers)
@@ -43,10 +43,10 @@ def test_configure_litellm_logging_removes_private_handlers(monkeypatch):
     original_disabled = litellm_logger.disabled
     private_handler = logging.StreamHandler()
     litellm_logger.addHandler(private_handler)
-    monkeypatch.setattr(config, "LOG_LEVEL", "WARNING")
+    settings = LoggingSettings(level="WARNING")
 
     try:
-        bot_logging.configure_litellm_logging()
+        bot_logging.configure_litellm_logging(settings)
 
         assert litellm_logger.handlers == []
         assert litellm_logger.level == logging.WARNING
@@ -64,7 +64,6 @@ def test_configure_litellm_logging_removes_private_handlers(monkeypatch):
 def test_prepare_litellm_logging_silences_import_time_stdout(monkeypatch):
     """@brief LiteLLM import 环境禁止私有 stdout handler / LiteLLM import environment silences private stdout handlers."""
 
-    monkeypatch.setattr(config, "LOG_LEVEL", "DEBUG")
     monkeypatch.delenv("LITELLM_LOG", raising=False)
 
     bot_logging.prepare_litellm_logging()

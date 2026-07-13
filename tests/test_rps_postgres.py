@@ -35,6 +35,10 @@ from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.rps_ledger import PostgresRpsLedger
 
 
+ADMINISTRATOR_ID = 1002288404
+"""@brief 测试管理员 Telegram 用户 ID / Test administrator Telegram user ID."""
+
+
 class RecordingSink:
     """@brief 记录恢复后的超时事件 / Record timeout events after recovery."""
 
@@ -85,7 +89,7 @@ def test_rps_match_settlement_timeout_and_restart_are_atomic() -> None:
         first_id, second_id = _user_id(1), _user_id(2)
         users = (first_id, second_id)
         now = datetime.now(UTC)
-        adapter = PostgresRpsLedger()
+        adapter = PostgresRpsLedger(ADMINISTRATOR_ID)
         first = Player(UserId(first_id), "first")
         second = Player(UserId(second_id), "second")
         try:
@@ -174,7 +178,7 @@ def test_rps_match_settlement_timeout_and_restart_are_atomic() -> None:
             assert persisted.code is RpsMutationCode.APPLIED
 
             recovered_service = RpsService(
-                ledger=PostgresRpsLedger(),
+                ledger=PostgresRpsLedger(ADMINISTRATOR_ID),
                 clock=lambda: session.started_at + timedelta(seconds=2),
             )
             stop, task = await _run_service(recovered_service)
@@ -223,7 +227,7 @@ def test_rps_match_settlement_timeout_and_restart_are_atomic() -> None:
             assert timeout_started.code is RpsMatchCode.STARTED
             sink = RecordingSink()
             timeout_service = RpsService(
-                ledger=PostgresRpsLedger(),
+                ledger=PostgresRpsLedger(ADMINISTRATOR_ID),
                 lifecycle_sink=sink,
                 clock=lambda: timeout_session.expires_at + timedelta(seconds=1),
             )

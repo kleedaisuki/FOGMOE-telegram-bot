@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -11,7 +10,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import QApplication
 
 from fogmoe_dashboard.api import DashboardClient
-from fogmoe_dashboard.config import DEFAULT_CONFIG_DIR
+from fogmoe_dashboard.config import default_config_path, read_dashboard_settings
 from fogmoe_dashboard.presentation.duration import parse_duration
 from fogmoe_dashboard.presentation.gui.window import DashboardWindow
 from fogmoe_dashboard.presentation.gui.worker import DashboardFactory
@@ -28,15 +27,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Explore FogMoe observability data in a native Qt dashboard.",
     )
     parser.add_argument(
-        "--database-url",
-        help="Explicit PostgreSQL URL; overrides service files.",
+        "--config",
+        type=Path,
+        default=default_config_path(),
+        help="Path to the root JSONC configuration file.",
     )
-    parser.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG_DIR)
-    parser.add_argument("--service", default="fogmoe_automation")
     parser.add_argument(
         "--window", default="1h", help="Initial window such as 15m or 7d."
     )
-    parser.add_argument("--timeout", type=float, default=5.0)
     parser.add_argument(
         "--auto-refresh",
         type=int,
@@ -82,20 +80,8 @@ def main(argv: Sequence[str] | None = None) -> None:
 def _client_factory(args: argparse.Namespace) -> DashboardFactory:
     """@brief 构造仅在 worker 调用的 client 工厂 / Build a client factory invoked only by the worker."""
 
-    database_url = args.database_url or os.environ.get("DATABASE_URL")
-    if database_url:
-        return lambda: DashboardClient.from_database_url(
-            database_url,
-            command_timeout=args.timeout,
-        )
-    config_dir = args.config_dir.resolve()
-    service = str(args.service)
-    timeout = float(args.timeout)
-    return lambda: DashboardClient.from_environment(
-        config_dir=config_dir,
-        service_name=service,
-        command_timeout=timeout,
-    )
+    settings = read_dashboard_settings(args.config)
+    return lambda: DashboardClient.from_database_settings(settings=settings)
 
 
 __all__ = ["build_parser", "main"]

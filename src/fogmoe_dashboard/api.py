@@ -2,17 +2,11 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from types import TracebackType
 from typing import Self
 
 from fogmoe_dashboard.application.dashboard import Dashboard
-from fogmoe_dashboard.config import (
-    DEFAULT_CONFIG_DIR,
-    load_project_env,
-    service_database_url,
-)
+from fogmoe_dashboard.config import DashboardSettings
 from fogmoe_dashboard.infrastructure.postgres import PostgresDashboardRepository
 
 
@@ -20,7 +14,7 @@ class DashboardClient(Dashboard):
     """@brief 拥有 PostgreSQL 生命周期的脚本 API / Script API owning the PostgreSQL lifecycle.
 
     @example
-        ``async with DashboardClient.from_environment() as dashboard:``
+        ``async with DashboardClient.from_database_settings(settings=settings) as dashboard:``
         ``    overview = await dashboard.overview(TimeWindow.last(timedelta(hours=1)))``
         / Use the asynchronous context manager so connections are always closed.
     """
@@ -50,60 +44,21 @@ class DashboardClient(Dashboard):
         )
 
     @classmethod
-    def from_service(
+    def from_database_settings(
         cls,
         *,
-        config_dir: Path = DEFAULT_CONFIG_DIR,
-        service_name: str = "fogmoe_automation",
-        pool_size: int = 4,
-        command_timeout: float = 5.0,
+        settings: DashboardSettings,
     ) -> DashboardClient:
-        """@brief 从项目 libpq service 创建 client / Create a client from a project libpq service.
+        """@brief 从类型化 Dashboard 设置创建 client / Create a client from typed Dashboard settings.
 
-        @param config_dir pg_service.conf 与 pgpass 目录 / Directory containing pg_service.conf and pgpass.
-        @param service_name service section 名 / Service section name.
-        @param pool_size 最大连接数 / Maximum connections.
-        @param command_timeout 单条命令超时 / Per-command timeout.
+        @param settings Dashboard 拥有的数据库与查询设置 / Dashboard-owned database and query settings.
         @return 尚未连接的 client / Client not yet connected.
         """
 
         return cls.from_database_url(
-            service_database_url(config_dir.resolve(), service_name),
-            pool_size=pool_size,
-            command_timeout=command_timeout,
-        )
-
-    @classmethod
-    def from_environment(
-        cls,
-        *,
-        config_dir: Path = DEFAULT_CONFIG_DIR,
-        service_name: str = "fogmoe_automation",
-        pool_size: int = 4,
-        command_timeout: float = 5.0,
-    ) -> DashboardClient:
-        """@brief 优先从 DATABASE_URL，否则从 service 创建 / Create from DATABASE_URL first, then from a service.
-
-        @param config_dir service 配置目录 / Service configuration directory.
-        @param service_name fallback service 名 / Fallback service name.
-        @param pool_size 最大连接数 / Maximum connections.
-        @param command_timeout 单条命令超时 / Per-command timeout.
-        @return 尚未连接的 client / Client not yet connected.
-        """
-
-        load_project_env()
-        database_url = os.environ.get("DATABASE_URL")
-        if database_url:
-            return cls.from_database_url(
-                database_url,
-                pool_size=pool_size,
-                command_timeout=command_timeout,
-            )
-        return cls.from_service(
-            config_dir=config_dir,
-            service_name=service_name,
-            pool_size=pool_size,
-            command_timeout=command_timeout,
+            settings.database_url(),
+            pool_size=settings.query.pool_size,
+            command_timeout=settings.query.command_timeout_seconds,
         )
 
     async def __aenter__(self) -> Self:

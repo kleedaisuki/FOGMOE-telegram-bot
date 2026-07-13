@@ -6,9 +6,15 @@ from fogmoe_bot.presentation.telegram.moderation_composition import (
     TelegramModerationCapability,
     create_moderation_ingress_capability,
 )
+from fogmoe_bot.resources import PROJECT_ROOT
 
 
 def test_catalog_preserves_enabled_commands_and_spam_help_namespace() -> None:
+    """@brief 治理命令目录保留受支持命名空间 / The moderation catalog preserves supported namespaces.
+
+    @return None / None.
+    """
+
     commands = {
         definition.filter_namespace: definition.handler.callback
         for definition in HANDLER_CATALOG
@@ -28,7 +34,15 @@ def test_catalog_preserves_enabled_commands_and_spam_help_namespace() -> None:
 
 
 def test_composition_exposes_typed_ingress_capability_without_global_state() -> None:
-    capability = create_moderation_ingress_capability(Bot("123456:test-token"))
+    """@brief 组合根显式注入词表资源 / The composition root injects the word-list resource explicitly.
+
+    @return None / None.
+    """
+
+    capability = create_moderation_ingress_capability(
+        Bot("123456:test-token"),
+        wordlist_path=PROJECT_ROOT / "resources" / "spam_words.txt",
+    )
 
     assert isinstance(capability, TelegramModerationCapability)
     assert capability.guard.name == "moderation-content-policy"

@@ -15,14 +15,12 @@ dependencies = [
     "asyncpg",
     "alembic",
     "litellm>=1.80.5",
-    "pydantic>=2",
-    "pydantic-settings>=2",
+    "pydantic>=2.12,<3",
     "binance-futures-connector",
     "aiohttp",
     "aiohttp-socks>=0.10",
     "requests[socks]",
     "telegramify-markdown",
-    "python-dotenv",
     "rich>=14.1",
 ]
 

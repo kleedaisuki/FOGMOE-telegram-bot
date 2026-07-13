@@ -41,7 +41,6 @@ from fogmoe_bot.domain.conversation.errors import (
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.assistant_billing import (
     AssistantBillingTransactions,
-    PostgresAssistantBilling,
 )
 
 from .common import (
@@ -118,12 +117,12 @@ class PostgresInferenceRepository:
 
     def __init__(
         self,
-        billing: AssistantBillingTransactions | None = None,
+        billing: AssistantBillingTransactions,
         outbox: InferenceOutboxWriter | None = None,
     ) -> None:
         """@brief 注入 billing 与同事务 outbox writer / Inject billing and the same-transaction outbox writer."""
 
-        self._billing = billing or PostgresAssistantBilling()
+        self._billing = billing
         self._outbox = outbox or PostgresOutboxRepository()
 
     async def get_inference_activity(

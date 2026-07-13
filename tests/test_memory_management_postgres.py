@@ -6,7 +6,6 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 import json
 import os
-from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -30,7 +29,6 @@ from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE, OutboundDraft
 from fogmoe_bot.domain.retrieval import EmbeddingSpace, RetrievalScope
 from fogmoe_bot.domain.user_profile.models import ProfileEvidence, ProfileMetadata
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.conversation_workflow.inbox import (
@@ -53,15 +51,11 @@ from fogmoe_bot.infrastructure.database.user_profile.source import (
 from fogmoe_bot.infrastructure.database.user_profile.store import (
     PostgresUserProfileStore,
 )
-from fogmoe_dbctl.postgres import read_service, service_sqlalchemy_url
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-"""@brief 项目根目录 / Project root."""
+from postgres_test_support import configure_bot_database
 
 
 def _postgres_url() -> str:
-    """@brief 读取显式 DSN 或本地 automation service / Read an explicit DSN or local automation service.
+    """@brief 读取显式 DSN / Read an explicit DSN.
 
     @return SQLAlchemy URL / SQLAlchemy URL.
     """
@@ -69,12 +63,7 @@ def _postgres_url() -> str:
     explicit = os.environ.get("FOGMOE_TEST_DATABASE_URL")
     if explicit:
         return explicit
-    if os.environ.get("FOGMOE_TEST_POSTGRES") != "1":
-        pytest.skip("set FOGMOE_TEST_POSTGRES=1 to run the real PostgreSQL contract")
-    config_dir = PROJECT_ROOT / "var/psql"
-    if not (config_dir / "pg_service.conf").is_file():
-        pytest.skip("local PostgreSQL service configuration is unavailable")
-    return service_sqlalchemy_url(read_service(config_dir, "fogmoe_automation"))
+    pytest.skip("set FOGMOE_TEST_DATABASE_URL to run the real PostgreSQL contract")
 
 
 def _draft(
@@ -259,8 +248,8 @@ def test_real_postgres_forgetting_boundaries_prevent_resurrection_and_replay(
         @return None / None.
         """
 
-        monkeypatch.setattr(config, "SQLALCHEMY_DATABASE_URI", _postgres_url())
         await db.dispose_current_engine()
+        configure_bot_database(_postgres_url())
         suffix = uuid4().hex
         user_id = 6_500_000_000_000_000_000 + int(suffix[:10], 16)
         group_id = -(user_id + 100)
@@ -276,9 +265,7 @@ def test_real_postgres_forgetting_boundaries_prevent_resurrection_and_replay(
             passage_format_version=int(suffix[:7], 16) + 2,
         )
         retrieval = PostgresRetrievalStore()
-        renderer = EpisodicPassageRenderer(
-            format_version=space.passage_format_version
-        )
+        renderer = EpisodicPassageRenderer(format_version=space.passage_format_version)
         profile_store = PostgresUserProfileStore()
         profile_management = PostgresUserProfileManagementUoW()
         memory_management = PostgresMemoryForgetUoW()
@@ -481,9 +468,7 @@ def test_real_postgres_forgetting_boundaries_prevent_resurrection_and_replay(
             delayed_profiles = await PostgresProfileEvidenceSource().read_unprojected(
                 limit=128
             )
-            assert delayed_turn not in {
-                str(item.turn_id) for item in delayed_retrieval
-            }
+            assert delayed_turn not in {str(item.turn_id) for item in delayed_retrieval}
             assert delayed_turn not in {
                 str(item.source_turn_id) for item in delayed_profiles
             }
@@ -534,7 +519,9 @@ def test_real_postgres_forgetting_boundaries_prevent_resurrection_and_replay(
                 requested_at=cutoff,
             )
             requested = await profile_management.request_regeneration(regeneration)
-            replay_requested = await profile_management.request_regeneration(regeneration)
+            replay_requested = await profile_management.request_regeneration(
+                regeneration
+            )
             assert requested.applied is True and replay_requested.applied is False
             due = await db_connection.fetch_one(
                 "SELECT next_eligible_at, forgotten_through "

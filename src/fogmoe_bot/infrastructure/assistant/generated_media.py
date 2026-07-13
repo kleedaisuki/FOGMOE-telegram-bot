@@ -31,6 +31,21 @@ _MAX_IMAGE_BYTES = 16 * 1024 * 1024
 _MAX_AUDIO_BYTES = 24 * 1024 * 1024
 """@brief 单音频字节上限 / Per-audio byte limit."""
 
+_OPENROUTER_IMAGE_ASPECT_RATIOS = (
+    (1, 1),
+    (1, 2),
+    (2, 1),
+    (2, 3),
+    (3, 2),
+    (3, 4),
+    (4, 3),
+    (4, 5),
+    (5, 4),
+    (9, 16),
+    (16, 9),
+)
+"""@brief OpenRouter 图片 API 的通用宽高比候选 / Common aspect-ratio candidates for the OpenRouter Images API."""
+
 
 @dataclass(frozen=True, slots=True)
 class GeneratedMediaSettings:
@@ -38,6 +53,7 @@ class GeneratedMediaSettings:
 
     image_url: str
     image_token: str
+    image_model: str
     fish_audio_key: str
     fish_audio_model: str
     fish_audio_reference_id: str
@@ -159,14 +175,20 @@ class RequestsGeneratedMediaTools:
         if not self._settings.image_url or not self._settings.image_token:
             return {"error": "Image generation is not configured"}
         prompt = str(request.arguments["prompt"])
-        item: JsonObject = {
-            "prompt": prompt,
-            "width": int(cast(int, request.arguments.get("width", 1024))),
-            "height": int(cast(int, request.arguments.get("height", 1024))),
-            "steps": int(cast(int, request.arguments.get("steps", 9))),
-        }
+        width = int(cast(int, request.arguments.get("width", 1024)))
+        height = int(cast(int, request.arguments.get("height", 1024)))
         if isinstance(request.arguments.get("seed"), int):
-            item["seed"] = cast(int, request.arguments["seed"])
+            seed = cast(int, request.arguments["seed"])
+        else:
+            seed = None
+        payload = _image_request_payload(
+            model=self._settings.image_model,
+            prompt=prompt,
+            width=width,
+            height=height,
+            steps=int(cast(int, request.arguments.get("steps", 9))),
+            seed=seed,
+        )
         timeout = int(
             cast(
                 int,
@@ -180,7 +202,7 @@ class RequestsGeneratedMediaTools:
                 response = session.post(
                     self._settings.image_url,
                     headers={"Authorization": f"Bearer {self._settings.image_token}"},
-                    json={"items": [item]},
+                    json=payload,
                     timeout=timeout,
                     stream=True,
                 )
@@ -275,6 +297,80 @@ class RequestsGeneratedMediaTools:
                 }
             ],
         }
+
+
+def _image_request_payload(
+    *,
+    model: str,
+    prompt: str,
+    width: int,
+    height: int,
+    steps: int,
+    seed: int | None,
+) -> JsonObject:
+    """@brief 构造图片服务请求体 / Build an image-provider request payload.
+
+    @param model OpenRouter 图片模型；为空时使用旧 items 协议 / OpenRouter image model; empty uses the legacy items protocol.
+    @param prompt 图片描述 / Image prompt.
+    @param width 目标宽度（像素） / Target width in pixels.
+    @param height 目标高度（像素） / Target height in pixels.
+    @param steps 旧协议采样步数 / Legacy-protocol sampling steps.
+    @param seed 可选随机种子 / Optional random seed.
+    @return 可 JSON 编码的请求体 / JSON-serializable request payload.
+    """
+
+    if model:
+        payload: JsonObject = {
+            "model": model,
+            "prompt": prompt,
+            "resolution": _openrouter_image_resolution(width, height),
+            "aspect_ratio": _openrouter_image_aspect_ratio(width, height),
+        }
+        if seed is not None:
+            payload["seed"] = seed
+        return payload
+
+    item: JsonObject = {
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "steps": steps,
+    }
+    if seed is not None:
+        item["seed"] = seed
+    return {"items": [item]}
+
+
+def _openrouter_image_resolution(width: int, height: int) -> str:
+    """@brief 将像素尺寸映射为 OpenRouter 分辨率档位 / Map pixel dimensions to an OpenRouter resolution tier.
+
+    @param width 目标宽度（像素） / Target width in pixels.
+    @param height 目标高度（像素） / Target height in pixels.
+    @return 1K、2K 或 4K 分辨率档位 / The 1K, 2K, or 4K resolution tier.
+    """
+
+    longest_edge = max(width, height)
+    if longest_edge <= 1024:
+        return "1K"
+    if longest_edge <= 2048:
+        return "2K"
+    return "4K"
+
+
+def _openrouter_image_aspect_ratio(width: int, height: int) -> str:
+    """@brief 选择最接近的 OpenRouter 宽高比 / Select the closest OpenRouter aspect ratio.
+
+    @param width 目标宽度（像素） / Target width in pixels.
+    @param height 目标高度（像素） / Target height in pixels.
+    @return n:m 格式的宽高比 / Aspect ratio in n:m form.
+    """
+
+    requested_ratio = width / height
+    numerator, denominator = min(
+        _OPENROUTER_IMAGE_ASPECT_RATIOS,
+        key=lambda ratio: abs((ratio[0] / ratio[1]) - requested_ratio),
+    )
+    return f"{numerator}:{denominator}"
 
 
 def _image_values(value: object) -> list[str]:

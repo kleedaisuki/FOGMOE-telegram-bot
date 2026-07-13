@@ -38,7 +38,6 @@ from fogmoe_bot.domain.conversation.errors import (
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.assistant_billing import (
     AssistantBillingTransactions,
-    PostgresAssistantBilling,
 )
 
 from .common import (
@@ -83,14 +82,14 @@ class PostgresTurnRepository:
 
     def __init__(
         self,
-        billing: AssistantBillingTransactions | None = None,
+        billing: AssistantBillingTransactions,
     ) -> None:
         """@brief 注入同事务 Assistant 计费原语 / Inject the same-transaction Assistant billing primitive.
 
         @param billing reserve/settle/release 事务端口 / Reserve/settle/release transaction port.
         """
 
-        self._billing = billing or PostgresAssistantBilling()
+        self._billing = billing
         """@brief 推理终结与取消共享的计费状态机 / Billing state machine shared by inference finalization and cancellation."""
 
     async def create_and_accept_turn(

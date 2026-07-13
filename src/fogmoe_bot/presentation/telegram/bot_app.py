@@ -13,6 +13,7 @@ import telegram.error
 from telegram import Update
 from telegram.ext import ApplicationBuilder
 
+from fogmoe_bot.config import BotSettings, reveal_secret
 from fogmoe_bot.application.accounts.operations import (
     ACCOUNT_SERVICE_DATA_KEY,
     AccountService,
@@ -71,7 +72,6 @@ from fogmoe_bot.application.scheduling.prompt_turn import PromptTurnHandler
 from fogmoe_bot.application.telegram import DurableGroupAdministratorAuthorization
 from fogmoe_bot.application.scheduling.runtime import SchedulingWorkLoop
 from fogmoe_bot.application.observability.runtime_metrics import RuntimeMetricsService
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.blocking import (
     AsyncBlockingBulkhead,
     BlockingBulkheadLifecycle,
@@ -89,6 +89,9 @@ from fogmoe_bot.infrastructure.database.standalone_outbound import (
 )
 from fogmoe_bot.infrastructure.database.assistant_turn_acceptance import (
     PostgresAssistantTurnAcceptanceUoW,
+)
+from fogmoe_bot.infrastructure.database.assistant_billing import (
+    PostgresAssistantBilling,
 )
 from fogmoe_bot.infrastructure.database.conversation_reset import (
     PostgresConversationResetUoW,
@@ -131,6 +134,7 @@ from fogmoe_bot.infrastructure.telegram.group_authorization import (
 from fogmoe_bot.infrastructure.telegram.outbox_delivery import (
     TelegramOutboxDeliveryAdapter,
 )
+from fogmoe_bot.resources import BotResources
 
 from .account_handlers import AccountTelegramCommandHandler
 from .admin_handlers import (
@@ -179,6 +183,7 @@ class _RuntimePrimitives:
     """@brief 跨运行时切片共享的进程级资源 / Process resources shared across runtime slices."""
 
     execution: KeyedMailboxRuntime
+    billing: PostgresAssistantBilling
     inbox: PostgresInboxRepository
     turns: PostgresTurnRepository
     inference: PostgresInferenceRepository
@@ -222,22 +227,29 @@ def _required_capability[T](
 
 def _compose_primitives(
     observability: ObservabilityAssembly,
+    *,
+    settings: BotSettings,
 ) -> _RuntimePrimitives:
     """@brief 装配事务共享资源和执行器 / Compose transaction-sharing resources and the executor.
 
     @param observability 进程唯一可观测性装配 / Sole process observability assembly.
+    @param settings 已验证的 Bot 设置 / Validated Bot settings.
     @return 基础运行时资源 / Primitive runtime resources.
     """
 
     db.configure_observability(observability.telemetry)
+    mailbox = settings.runtime.mailbox
+    inference_runtime = settings.runtime.inference
+    identity = settings.identity
     execution = KeyedMailboxRuntime(
-        max_concurrency=config.RUNTIME_MAX_CONCURRENCY,
-        global_capacity=config.RUNTIME_GLOBAL_CAPACITY,
-        per_key_capacity=config.RUNTIME_PER_KEY_CAPACITY,
-        idle_ttl=config.RUNTIME_MAILBOX_IDLE_TTL_SECONDS,
+        max_concurrency=mailbox.max_concurrency,
+        global_capacity=mailbox.global_capacity,
+        per_key_capacity=mailbox.per_key_capacity,
+        idle_ttl=mailbox.idle_ttl_seconds,
     )
     outbox_repository = PostgresOutboxRepository()
-    turns = PostgresTurnRepository()
+    billing = PostgresAssistantBilling(identity.administrator.user_id)
+    turns = PostgresTurnRepository(billing)
     outbound = PostgresStandaloneOutboundCapability(
         outbox_repository,
         telemetry=observability.telemetry,
@@ -245,21 +257,28 @@ def _compose_primitives(
     admin_operations = PostgresAdminAnnouncementOperations()
     return _RuntimePrimitives(
         execution=execution,
+        billing=billing,
         inbox=PostgresInboxRepository(),
         turns=turns,
-        inference=PostgresInferenceRepository(outbox=outbox_repository),
+        inference=PostgresInferenceRepository(billing, outbox=outbox_repository),
         outbox_repository=outbox_repository,
         outbound=outbound,
-        acceptance=PostgresAssistantTurnAcceptanceUoW(turns),
+        acceptance=PostgresAssistantTurnAcceptanceUoW(
+            turns,
+            billing,
+            administrator_id=identity.administrator.user_id,
+        ),
         inference_limits=InferenceRuntimeLimits(
             provider_timeout=timedelta(
-                seconds=config.INFERENCE_PROVIDER_TIMEOUT_SECONDS
+                seconds=inference_runtime.provider_timeout_seconds
             ),
-            attempt_timeout=timedelta(seconds=config.INFERENCE_ATTEMPT_TIMEOUT_SECONDS),
-            lease_for=timedelta(seconds=config.INFERENCE_LEASE_SECONDS),
+            attempt_timeout=timedelta(
+                seconds=inference_runtime.attempt_timeout_seconds
+            ),
+            lease_for=timedelta(seconds=inference_runtime.lease_seconds),
         ),
         admin_service=AdminService(
-            administrator_id=config.ADMIN_USER_ID,
+            administrator_id=identity.administrator.user_id,
             stats=PostgresAdminStatsProjection(),
             logs=AsyncBoundedLogSource(current_log_file_path),
             announcements=admin_operations,
@@ -278,8 +297,17 @@ def _compose_ingress(
     *,
     bot_user_id: int,
     bot_username: str,
+    resources: BotResources,
 ) -> IngressRouter:
-    """@brief 装配 Update 的 guard、主路由与观察者 / Compose update guards, primary routes, and observers."""
+    """@brief 装配 Update 的 guard、主路由与观察者 / Compose update guards, primary routes, and observers.
+
+    @param application 已初始化的 Telegram Application / Initialized Telegram Application.
+    @param primitives 共享事务和执行资源 / Shared transaction and execution resources.
+    @param bot_user_id 当前 Bot 用户 ID / Current Bot user ID.
+    @param bot_username 当前 Bot 用户名 / Current Bot username.
+    @param resources 组合根加载的只读资源 / Read-only resources loaded by the composition root.
+    @return 已装配的 ingress router / Composed ingress router.
+    """
 
     assistant_route = TelegramAssistantPrimaryRoute(
         coordinator=AssistantIngressCoordinator(
@@ -290,7 +318,10 @@ def _compose_ingress(
         bot_username=bot_username,
     )
     reset_route = TelegramConversationResetPrimaryRoute(
-        persistence=PostgresConversationResetUoW(primitives.outbox_repository),
+        persistence=PostgresConversationResetUoW(
+            primitives.billing,
+            outbox=primitives.outbox_repository,
+        ),
         bot_username=bot_username,
     )
     moderation = _required_capability(
@@ -307,13 +338,11 @@ def _compose_ingress(
         handlers=(
             StaticTelegramCommandHandler(
                 outbound=primitives.outbound,
-                help_text=config.HELP_TEXT,
+                help_text=resources.help_text,
             ),
             MemoryManagementTelegramCommandHandler(
                 memories=PostgresMemoryForgetUoW(primitives.outbox_repository),
-                profiles=PostgresUserProfileManagementUoW(
-                    primitives.outbox_repository
-                ),
+                profiles=PostgresUserProfileManagementUoW(primitives.outbox_repository),
                 group_authorization=DurableGroupAdministratorAuthorization(
                     source=TelegramGroupAdministratorSource(application.bot),
                     store=PostgresGroupAdministratorDecisionStore(),
@@ -385,37 +414,51 @@ def _compose_services(
     primitives: _RuntimePrimitives,
     ingress: IngressRouter,
     observability: ObservabilityAssembly,
+    *,
+    settings: BotSettings,
+    resources: BotResources,
 ) -> _ServiceAssembly:
-    """@brief 装配并按排空阶段排序所有长驻服务 / Compose and drain-order every resident service."""
+    """@brief 装配并按排空阶段排序所有长驻服务 / Compose and drain-order every resident service.
 
+    @param application 已初始化的 Telegram Application / Initialized Telegram Application.
+    @param primitives 共享事务和执行资源 / Shared transaction and execution resources.
+    @param ingress 已装配的 ingress router / Composed ingress router.
+    @param observability 进程唯一可观测性装配 / Sole process observability assembly.
+    @param settings 已验证的 Bot 设置 / Validated Bot settings.
+    @param resources 组合根加载的只读资源 / Read-only resources loaded by the composition root.
+    @return 排好 shutdown phase 的服务装配 / Service assembly ordered by shutdown phase.
+    """
+
+    runtime = settings.runtime
+    polling = settings.telegram.polling
     listener = TelegramPollingListener(
         source=TelegramBotUpdateSource(application.bot),
         sink=primitives.inbox,
-        poll_timeout=float(config.TELEGRAM_GET_UPDATES_TIMEOUT),
+        poll_timeout=float(polling.get_updates_timeout_seconds),
         allowed_updates=Update.ALL_TYPES,
         backoff=PollingBackoff(
-            initial_delay=config.TELEGRAM_POLLING_RETRY_INITIAL_DELAY,
-            max_delay=config.TELEGRAM_POLLING_RETRY_MAX_DELAY,
+            initial_delay=polling.retry_initial_delay_seconds,
+            max_delay=polling.retry_max_delay_seconds,
         ),
     )
     inbox = InboxWorker(
         repository=primitives.inbox,
         router=ingress,
-        worker_count=config.INBOX_WORKER_COUNT,
-        poll_interval=config.INBOX_POLL_INTERVAL,
-        lease_for=timedelta(seconds=config.INBOX_LEASE_SECONDS),
+        worker_count=runtime.inbox.worker_count,
+        poll_interval=runtime.inbox.poll_interval_seconds,
+        lease_for=timedelta(seconds=runtime.inbox.lease_seconds),
         telemetry=observability.telemetry,
     )
     assistant = build_durable_assistant(
-        system_prompt=config.SYSTEM_PROMPT,
-        runtime_limits=primitives.inference_limits,
+        settings=settings,
+        resources=resources,
         telemetry=observability.telemetry,
     )
     inference = InferenceWorker(
         repository=primitives.inference,
         inference=assistant.inference,
-        worker_count=config.INFERENCE_WORKER_COUNT,
-        poll_interval=config.INFERENCE_POLL_INTERVAL,
+        worker_count=runtime.inference.worker_count,
+        poll_interval=runtime.inference.poll_interval_seconds,
         runtime_limits=primitives.inference_limits,
         telemetry=observability.telemetry,
     )
@@ -425,10 +468,10 @@ def _compose_services(
             application.bot,
             artifacts=assistant.artifacts,
         ),
-        worker_count=config.OUTBOX_WORKER_COUNT,
-        poll_interval=config.OUTBOX_POLL_INTERVAL,
-        lease_for=timedelta(seconds=config.OUTBOX_LEASE_SECONDS),
-        attempt_timeout=timedelta(seconds=config.OUTBOX_ATTEMPT_TIMEOUT_SECONDS),
+        worker_count=runtime.outbox.worker_count,
+        poll_interval=runtime.outbox.poll_interval_seconds,
+        lease_for=timedelta(seconds=runtime.outbox.lease_seconds),
+        attempt_timeout=timedelta(seconds=runtime.outbox.attempt_timeout_seconds),
         telemetry=observability.telemetry,
     )
     scheduling = SchedulingWorkLoop(
@@ -440,12 +483,12 @@ def _compose_services(
                     profiles=PostgresScheduledAssistantProfileReader(),
                 ),
             ),
-            batch_size=config.SCHEDULING_WORKER_COUNT,
-            stale_after=timedelta(seconds=config.SCHEDULING_LEASE_SECONDS),
+            batch_size=runtime.scheduling.worker_count,
+            stale_after=timedelta(seconds=runtime.scheduling.lease_seconds),
         ),
         maintenance=(),
-        poll_interval=config.SCHEDULING_POLL_INTERVAL,
-        worker_count=config.SCHEDULING_WORKER_COUNT,
+        poll_interval=runtime.scheduling.poll_interval_seconds,
+        worker_count=runtime.scheduling.worker_count,
     )
     btc_bulkhead = AsyncBlockingBulkhead(
         capacity=4,
@@ -536,7 +579,7 @@ def _compose_services(
                 telemetry=observability.telemetry,
                 exporter=observability.runtime,
                 execution=primitives.execution,
-                interval=config.OBSERVABILITY_METRIC_INTERVAL_SECONDS,
+                interval=settings.observability.metric_interval_seconds,
             ),
             shutdown_phase=90,
         ),
@@ -563,11 +606,16 @@ def _required_blocking_bulkheads(
 def compose_bot_runtime(
     application: TelegramApplication,
     observability: ObservabilityAssembly,
+    *,
+    settings: BotSettings,
+    resources: BotResources,
 ) -> BotRuntime:
     """@brief 装配 Listener、Conversation workers 与所有长驻服务 / Compose the Listener, Conversation workers, and every long-running service.
 
     @param application 已初始化且运行中的 PTB Application / Initialized and running PTB Application.
     @param observability 进程唯一可观测性装配 / Sole process observability assembly.
+    @param settings 已验证的 Bot 设置 / Validated Bot settings.
+    @param resources 组合根加载的只读资源 / Read-only resources loaded by the composition root.
     @return 单一顶层 BotRuntime / Sole top-level BotRuntime.
     @raise RuntimeError Bot identity/capability 缺失或重复装配 / Missing identity/capability or duplicate composition.
     @note 所有服务共享一个 event loop、Bot 与数据库引擎；只有组合根可以依赖所有层。/
@@ -583,14 +631,22 @@ def compose_bot_runtime(
         raise RuntimeError("Initialized Telegram Bot requires a username")
     bot_user_id = application.bot.id
 
-    primitives = _compose_primitives(observability)
+    primitives = _compose_primitives(observability, settings=settings)
     ingress = _compose_ingress(
         application,
         primitives,
         bot_user_id=bot_user_id,
         bot_username=bot_username,
+        resources=resources,
     )
-    services = _compose_services(application, primitives, ingress, observability)
+    services = _compose_services(
+        application,
+        primitives,
+        ingress,
+        observability,
+        settings=settings,
+        resources=resources,
+    )
     runtime = BotRuntime(
         execution_runtime=primitives.execution,
         services=services.bindings,
@@ -603,9 +659,10 @@ def compose_bot_runtime(
     return runtime
 
 
-def create_application() -> TelegramApplication:
+def create_application(*, settings: BotSettings) -> TelegramApplication:
     """@brief 创建无 PTB Updater/JobQueue 的 handler capability 容器 / Create the handler-capability container without a PTB Updater or JobQueue.
 
+    @param settings 已验证的 Bot 设置 / Validated Bot settings.
     @return 已装配 capability 与 error policy 的 PTB Application /
         PTB Application with capabilities and error policy assembled.
     @raise ValueError Telegram token 缺失 / Missing Telegram token.
@@ -614,27 +671,27 @@ def create_application() -> TelegramApplication:
         no second poller.
     """
 
-    token = config.TELEGRAM_BOT_TOKEN
+    token = reveal_secret(settings.telegram.bot_token)
     if not token:
-        raise ValueError("TELEGRAM_BOT_TOKEN is required")
+        raise ValueError("telegram.bot_token is required")
+    http = settings.telegram.http
+    polling = settings.telegram.polling
     builder = (
         ApplicationBuilder()
         .token(token)
-        .connect_timeout(config.TELEGRAM_CONNECT_TIMEOUT)
-        .read_timeout(config.TELEGRAM_READ_TIMEOUT)
-        .write_timeout(config.TELEGRAM_WRITE_TIMEOUT)
-        .pool_timeout(config.TELEGRAM_POOL_TIMEOUT)
-        .get_updates_connect_timeout(config.TELEGRAM_GET_UPDATES_CONNECT_TIMEOUT)
-        .get_updates_read_timeout(config.TELEGRAM_GET_UPDATES_READ_TIMEOUT)
-        .get_updates_write_timeout(config.TELEGRAM_GET_UPDATES_WRITE_TIMEOUT)
-        .get_updates_pool_timeout(config.TELEGRAM_GET_UPDATES_POOL_TIMEOUT)
-        .get_updates_connection_pool_size(
-            config.TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE
-        )
+        .connect_timeout(http.connect_timeout_seconds)
+        .read_timeout(http.read_timeout_seconds)
+        .write_timeout(http.write_timeout_seconds)
+        .pool_timeout(http.pool_timeout_seconds)
+        .get_updates_connect_timeout(polling.get_updates_connect_timeout_seconds)
+        .get_updates_read_timeout(polling.get_updates_read_timeout_seconds)
+        .get_updates_write_timeout(polling.get_updates_write_timeout_seconds)
+        .get_updates_pool_timeout(polling.get_updates_pool_timeout_seconds)
+        .get_updates_connection_pool_size(polling.get_updates_connection_pool_size)
         .job_queue(None)
         .updater(None)
     )
-    proxy_url = config.NETWORK_PROXY_URL
+    proxy_url = settings.network.proxy_url
     if proxy_url:
         builder = builder.proxy(proxy_url).get_updates_proxy(proxy_url)
     application = builder.build()
@@ -705,15 +762,20 @@ async def _wait_for_stop_or_runtime_failure(
         await asyncio.gather(stop_waiter, runtime_waiter, return_exceptions=True)
 
 
-async def _shutdown_runtime(runtime: BotRuntime) -> None:
+async def _shutdown_runtime(
+    runtime: BotRuntime,
+    *,
+    shutdown_grace_seconds: float,
+) -> None:
     """@brief 在 grace 期内分阶段排空，超时后强制取消 / Drain in phases within the grace period, then cancel on timeout.
 
     @param runtime 待停止运行时 / Runtime to stop.
+    @param shutdown_grace_seconds 优雅排空的最长秒数 / Maximum seconds for graceful draining.
     @return None / None.
     """
 
     try:
-        async with asyncio.timeout(config.RUNTIME_SHUTDOWN_GRACE_SECONDS):
+        async with asyncio.timeout(shutdown_grace_seconds):
             await runtime.shutdown(ShutdownMode.DRAIN)
     except TimeoutError:
         logger.warning("BotRuntime drain timed out; forcing cancellation")
@@ -724,12 +786,17 @@ async def serve_application(
     application: TelegramApplication,
     stop_event: asyncio.Event,
     observability: ObservabilityAssembly,
+    *,
+    settings: BotSettings,
+    resources: BotResources,
 ) -> None:
     """@brief 在一个 event loop 中运行并完整清理 Application / Run and fully clean up the Application on one event loop.
 
     @param application 待运行 PTB Application / PTB Application to run.
     @param stop_event 外部停止事件 / External stop event.
     @param observability 进程唯一可观测性装配 / Sole process observability assembly.
+    @param settings 已验证的 Bot 设置 / Validated Bot settings.
+    @param resources 组合根加载的只读资源 / Read-only resources loaded by the composition root.
     @return None / None.
     @raise BaseExceptionGroup 主流程与清理同时失败 / Main execution and cleanup both fail.
     @note 关停顺序是 Listener → Inbox/Scheduling → Inference/feature workers
@@ -746,11 +813,21 @@ async def serve_application(
     try:
         await application.initialize()
         initialized = True
-        assemble_handler_capabilities(application, telemetry=observability.telemetry)
+        assemble_handler_capabilities(
+            application,
+            telemetry=observability.telemetry,
+            settings=settings,
+            resources=resources,
+        )
         await _resolve_administrator_contact(application)
         await application.start()
         started = True
-        runtime = compose_bot_runtime(application, observability)
+        runtime = compose_bot_runtime(
+            application,
+            observability,
+            settings=settings,
+            resources=resources,
+        )
         await runtime.start()
         await _wait_for_stop_or_runtime_failure(runtime, stop_event)
     except BaseException as error:
@@ -758,7 +835,10 @@ async def serve_application(
 
     if runtime is not None:
         try:
-            await _shutdown_runtime(runtime)
+            await _shutdown_runtime(
+                runtime,
+                shutdown_grace_seconds=settings.runtime.mailbox.shutdown_grace_seconds,
+            )
         except BaseException as error:
             cleanup_failures.append(error)
     if started:
@@ -814,18 +894,29 @@ def _install_signal_handlers(stop_event: asyncio.Event) -> tuple[signal.Signals,
 async def _run_application(
     application: TelegramApplication,
     observability: ObservabilityAssembly,
+    *,
+    settings: BotSettings,
+    resources: BotResources,
 ) -> None:
     """@brief 安装信号并运行一个 Application 实例 / Install signals and run one Application instance.
 
     @param application 待运行实例 / Instance to run.
     @param observability 进程唯一可观测性装配 / Sole process observability assembly.
+    @param settings 已验证的 Bot 设置 / Validated Bot settings.
+    @param resources 组合根加载的只读资源 / Read-only resources loaded by the composition root.
     @return None / None.
     """
 
     stop_event = asyncio.Event()
     registered = _install_signal_handlers(stop_event)
     try:
-        await serve_application(application, stop_event, observability)
+        await serve_application(
+            application,
+            stop_event,
+            observability,
+            settings=settings,
+            resources=resources,
+        )
     finally:
         loop = asyncio.get_running_loop()
         for process_signal in registered:
@@ -849,30 +940,50 @@ def _is_recoverable_bootstrap_error(error: BaseException) -> bool:
     )
 
 
-def _bootstrap_retry_delay(attempt: int) -> float:
+def _bootstrap_retry_delay(
+    attempt: int,
+    *,
+    settings: BotSettings,
+) -> float:
     """@brief 计算 bootstrap capped exponential backoff / Calculate capped exponential backoff for bootstrap.
 
     @param attempt 从 1 开始的连续失败次数 / Consecutive failure count starting at one.
+    @param settings 已验证的 Bot 设置 / Validated Bot settings.
     @return 延迟秒数 / Delay in seconds.
     """
 
-    initial_delay = max(0.0, float(config.TELEGRAM_POLLING_RETRY_INITIAL_DELAY))
-    max_delay = max(initial_delay, float(config.TELEGRAM_POLLING_RETRY_MAX_DELAY))
+    polling = settings.telegram.polling
+    initial_delay = max(0.0, float(polling.retry_initial_delay_seconds))
+    max_delay = max(initial_delay, float(polling.retry_max_delay_seconds))
     return float(min(max_delay, initial_delay * (2 ** max(0, attempt - 1))))
 
 
-def run(observability: ObservabilityAssembly) -> None:
+def run(
+    observability: ObservabilityAssembly,
+    *,
+    settings: BotSettings,
+    resources: BotResources,
+) -> None:
     """@brief 运行唯一自控 long-poll listener，并恢复瞬态 bootstrap 失败 / Run the sole self-controlled long-poll listener and recover transient bootstrap failures.
 
     @param observability 进程唯一可观测性装配 / Sole process observability assembly.
+    @param settings 已验证的 Bot 设置 / Validated Bot settings.
+    @param resources 组合根加载的只读资源 / Read-only resources loaded by the composition root.
     @return None / None.
     """
 
     attempt = 0
     while True:
-        application = create_application()
+        application = create_application(settings=settings)
         try:
-            asyncio.run(_run_application(application, observability))
+            asyncio.run(
+                _run_application(
+                    application,
+                    observability,
+                    settings=settings,
+                    resources=resources,
+                )
+            )
             return
         except KeyboardInterrupt:
             logger.info("Bot shutdown requested by keyboard interrupt")
@@ -881,7 +992,7 @@ def run(observability: ObservabilityAssembly) -> None:
             if not _is_recoverable_bootstrap_error(error):
                 raise
             attempt += 1
-            delay = _bootstrap_retry_delay(attempt)
+            delay = _bootstrap_retry_delay(attempt, settings=settings)
             logger.warning(
                 "Telegram bootstrap failed transiently; rebuilding in %.1fs "
                 "(attempt %s): %s",

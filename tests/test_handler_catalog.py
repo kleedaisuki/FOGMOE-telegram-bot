@@ -1,5 +1,6 @@
 from collections import Counter
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 import re
 from typing import cast
 
@@ -8,6 +9,7 @@ from observability_testkit import make_observability
 from telegram import Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
+from fogmoe_bot.config import BotSettings
 from fogmoe_bot.application.games.gamble.service import (
     GAMBLE_SERVICE_DATA_KEY,
     GambleService,
@@ -67,6 +69,7 @@ from fogmoe_bot.presentation.telegram.handler_catalog import (
 from fogmoe_bot.presentation.telegram.handler_composition import (
     assemble_handler_capabilities,
 )
+from fogmoe_bot.resources import load_resources
 
 
 class FakeApplication:
@@ -85,6 +88,15 @@ class FakeApplication:
 
 async def _noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     del update, context
+
+
+def _settings() -> BotSettings:
+    """@brief 构造 capability 装配需要的最小设置 / Build minimum settings for capability composition.
+
+    @return 具有测试 Bot token 的设置 / Settings with a test Bot token.
+    """
+
+    return BotSettings.model_validate({"telegram": {"bot_token": "test-token"}})
 
 
 def test_catalog_explicitly_declares_stable_primary_handlers() -> None:
@@ -192,6 +204,7 @@ def test_callback_patterns_preserve_existing_callback_data_protocols() -> None:
 
 def test_capability_assembly_is_named_and_rejects_duplicate_runtime(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     application = FakeApplication()
     verification_service = object()
@@ -205,11 +218,14 @@ def test_capability_assembly_is_named_and_rejects_duplicate_runtime(
     monkeypatch.setattr(
         handler_composition,
         "create_rps_service",
-        lambda bot: rps_service,
+        lambda bot, *, identity: rps_service,
     )
     typed_application = cast(TelegramApplication, application)
     assemble_handler_capabilities(
-        typed_application, telemetry=make_observability().telemetry
+        typed_application,
+        telemetry=make_observability().telemetry,
+        settings=_settings(),
+        resources=load_resources(log_directory=tmp_path / "logs"),
     )
 
     assert application.bot_data[VERIFICATION_SERVICE_DATA_KEY] is verification_service
@@ -232,7 +248,10 @@ def test_capability_assembly_is_named_and_rejects_duplicate_runtime(
     )
     with pytest.raises(RuntimeError, match="verification runtime"):
         assemble_handler_capabilities(
-            typed_application, telemetry=make_observability().telemetry
+            typed_application,
+            telemetry=make_observability().telemetry,
+            settings=_settings(),
+            resources=load_resources(log_directory=tmp_path / "logs"),
         )
 
 

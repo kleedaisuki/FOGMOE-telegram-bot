@@ -89,14 +89,33 @@ def _render_template(sql: str) -> str:
     if "{{" not in sql:
         return sql
 
-    from fogmoe_dbctl import config
-
     replacements = {
-        "{{ admin_user_id }}": str(config.admin_user_id()),
+        "{{ admin_user_id }}": str(_injected_admin_user_id()),
     }
     for token, value in replacements.items():
         sql = sql.replace(token, value)
     return sql
+
+
+def _injected_admin_user_id() -> int:
+    """@brief 读取命令注入的管理员身份 / Read the administrator identity injected by the command.
+
+    @return 正的 Telegram 管理员用户 ID / Positive Telegram administrator user ID.
+    @raise MigrationSqlError Alembic 未收到显式配置时抛出 /
+        Raised when Alembic did not receive explicit configuration.
+    """
+
+    alembic_config = op.get_context().config
+    if alembic_config is None:
+        raise MigrationSqlError(
+            "migration requires an Alembic config with injected admin_user_id"
+        )
+    value = alembic_config.attributes.get("admin_user_id")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise MigrationSqlError(
+            "fogmoe-dbctl migrate must inject a positive admin_user_id"
+        )
+    return value
 
 
 def _sections(sql_text: str, path: Path) -> dict[str, str]:

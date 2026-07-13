@@ -1,4 +1,4 @@
-"""@brief Durable Assistant tools 的基础设施 composition / Infrastructure composition for durable Assistant tools."""
+"""@brief Durable Assistant 的基础设施装配 / Infrastructure composition for the durable Assistant."""
 
 from __future__ import annotations
 
@@ -12,7 +12,12 @@ from fogmoe_bot.application.assistant.durable_inference import (
 from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
 from fogmoe_bot.application.assistant.tool_runtime import AgentRuntime
 from fogmoe_bot.application.assistant.tools.catalog import DEFAULT_TOOL_CATALOG
+from fogmoe_bot.application.context_window.cache import ContextWindowCache
+from fogmoe_bot.application.context_window.projection import ContextWindowProjector
+from fogmoe_bot.application.context_window.worker import CompactionWorker
+from fogmoe_bot.application.conversation.inference_worker import InferenceRuntimeLimits
 from fogmoe_bot.application.memory.service import RetrievalWorkingMemory
+from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.application.retrieval import (
     EPISODIC_CORPUS_ID,
     EpisodicPassageRenderer,
@@ -20,26 +25,44 @@ from fogmoe_bot.application.retrieval import (
     SemanticRecall,
 )
 from fogmoe_bot.application.user_profile.worker import DreamingWorker
-from fogmoe_bot.application.context_window.worker import (
-    CompactionWorker,
-)
-from fogmoe_bot.application.context_window.projection import (
-    ContextWindowProjector,
-)
-from fogmoe_bot.application.context_window.cache import ContextWindowCache
-from fogmoe_bot.application.conversation.inference_worker import InferenceRuntimeLimits
+from fogmoe_bot.config import AssistantSettings, BotSettings, reveal_secret
 from fogmoe_bot.domain.assistant.routing.circuit import ProviderCircuit
 from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
 from fogmoe_bot.domain.retrieval import EmbeddingSpace
-from fogmoe_bot.infrastructure import config
-from fogmoe_bot.infrastructure.blocking import (
-    AsyncBlockingBulkhead,
+from fogmoe_bot.infrastructure.assistant.external_reads import (
+    ExternalReadSettings,
+    RequestsExternalReadTools,
+)
+from fogmoe_bot.infrastructure.assistant.generated_media import (
+    GeneratedMediaSettings,
+    RequestsGeneratedMediaTools,
+)
+from fogmoe_bot.infrastructure.assistant.routing_config import (
+    build_provider_profiles,
+    configured_service_order,
+)
+from fogmoe_bot.infrastructure.assistant.sticker_catalog import (
+    TelegramStickerCatalogReader,
+)
+from fogmoe_bot.infrastructure.assistant.tool_operations.dispatcher import (
+    AssistantToolOperationDispatcher,
+)
+from fogmoe_bot.infrastructure.blocking import AsyncBlockingBulkhead
+from fogmoe_bot.infrastructure.context_window.summary import (
+    ProviderCompactionSummaryGenerator,
+)
+from fogmoe_bot.infrastructure.context_window.token_counter import (
+    ConservativeHistoryTokenCounter,
 )
 from fogmoe_bot.infrastructure.database.assistant_tool_effects import (
     PostgresAssistantToolStore,
 )
-from fogmoe_bot.infrastructure.database.context_window import (
-    PostgresContextWindowStore,
+from fogmoe_bot.infrastructure.database.context_window import PostgresContextWindowStore
+from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
+    PostgresOutboxRepository,
+)
+from fogmoe_bot.infrastructure.database.group_message_projection import (
+    PostgresGroupMessageProjection,
 )
 from fogmoe_bot.infrastructure.database.retrieval import (
     PostgresEpisodicSource,
@@ -48,41 +71,26 @@ from fogmoe_bot.infrastructure.database.retrieval import (
 from fogmoe_bot.infrastructure.database.user_profile.source import (
     PostgresProfileEvidenceSource,
 )
-from fogmoe_bot.infrastructure.database.user_profile.store import PostgresUserProfileStore
-from fogmoe_bot.infrastructure.database.group_message_projection import (
-    PostgresGroupMessageProjection,
-)
-from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
-    PostgresOutboxRepository,
+from fogmoe_bot.infrastructure.database.user_profile.store import (
+    PostgresUserProfileStore,
 )
 from fogmoe_bot.infrastructure.llm.assistant_completion import (
     LiteLLMAssistantCompletion,
 )
-from fogmoe_bot.infrastructure.context_window.token_counter import (
-    ConservativeHistoryTokenCounter,
-)
+from fogmoe_bot.infrastructure.llm.litellm_client import LiteLLMChatClient
 from fogmoe_bot.infrastructure.media.file_artifact_store import FileArtifactStore
 from fogmoe_bot.infrastructure.media.file_rate_limiter import FileSlidingWindowLimiter
 from fogmoe_bot.infrastructure.retrieval import OpenAICompatibleEmbeddings
 from fogmoe_bot.infrastructure.user_profile.dreaming_model import ProviderDreamingModel
-
-from fogmoe_bot.infrastructure.context_window.summary import (
-    ProviderCompactionSummaryGenerator,
-)
-from .external_reads import ExternalReadSettings, RequestsExternalReadTools
-from .generated_media import GeneratedMediaSettings, RequestsGeneratedMediaTools
-from .routing_config import build_provider_profiles, configured_service_order
-from .sticker_catalog import TelegramStickerCatalogReader
-from .tool_operations.dispatcher import AssistantToolOperationDispatcher
-from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.resources import BotResources
 
 
 @dataclass(frozen=True, slots=True)
 class DurableAssistantComposition:
-    """@brief composition root 返回的共享 resources / Shared resources returned by the composition root.
+    """@brief 顶层运行时拥有的 Assistant 资源 / Assistant resources owned by the top-level runtime.
 
     @param inference durable inference adapter / Durable inference adapter.
-    @param compaction durable conversation compaction worker / Durable conversation-compaction worker.
+    @param compaction durable conversation-compaction worker / Durable conversation-compaction worker.
     @param retrieval durable episodic-retrieval worker / Durable episodic-retrieval worker.
     @param dreaming durable User Profile consolidation worker / Durable User Profile consolidation worker.
     @param embedding_client 共享 embedding HTTP client 与生命周期 / Shared embedding HTTP client and lifecycle.
@@ -102,29 +110,34 @@ class DurableAssistantComposition:
 
 def build_durable_assistant(
     *,
-    system_prompt: str,
-    runtime_limits: InferenceRuntimeLimits,
+    settings: BotSettings,
+    resources: BotResources,
     context_window: PostgresContextWindowStore | None = None,
     telemetry: Telemetry,
 ) -> DurableAssistantComposition:
-    """@brief 组合 async Agent、receipts、adapters 与 durable inference / Compose the async Agent, receipts, adapters, and durable inference.
+    """@brief 装配 durable Assistant 及其外部 adapters / Compose the durable Assistant and its external adapters.
 
-    @param system_prompt system prompt / System prompt.
-    @param runtime_limits inference worker budgets / Inference-worker budgets.
-    @param context_window 可替换 Context Window store / Replaceable context-window store.
+    @param settings Bot 配置边界验证后的不可变投影 /
+        Immutable projection validated by the Bot configuration boundary.
+    @param resources 组合根加载的只读资源 / Read-only resources loaded by the composition root.
+    @param context_window 可替换 Context Window store / Replaceable Context Window store.
     @param telemetry 进程 typed telemetry / Process typed telemetry.
-    @return inference 与 artifact store / Inference and artifact store.
+    @return 推理、后台 worker 与需关停资源 / Inference, background workers, and resources requiring shutdown.
+    @note 本函数是外层 composition，不读取文件或环境；secret 仅在第三方 SDK 边界揭示。/
+        This outer composition reads no files or environment; secrets are revealed only at third-party SDK boundaries.
     """
 
+    assistant_settings = settings.assistant
+    runtime = settings.runtime
     context_window_store = context_window or PostgresContextWindowStore()
     retrieval_store = PostgresRetrievalStore()
-    embedding_space = _retrieval_space()
+    embedding_space = _retrieval_space(assistant_settings)
     embedding_client = OpenAICompatibleEmbeddings(
-        api_key=_retrieval_api_key(),
-        api_base=config.RETRIEVAL_EMBEDDING_API_BASE,
-        timeout_seconds=config.RETRIEVAL_EMBEDDING_TIMEOUT_SECONDS,
+        api_key=_retrieval_api_key(settings),
+        api_base=assistant_settings.retrieval.embedding.api_base,
+        timeout_seconds=assistant_settings.retrieval.embedding.timeout_seconds,
         telemetry=telemetry,
-        proxy_url=config.NETWORK_PROXY_URL,
+        proxy_url=settings.network.proxy_url,
     )
     recall = SemanticRecall(
         embeddings=embedding_client,
@@ -134,6 +147,7 @@ def build_durable_assistant(
         telemetry=telemetry,
     )
     working_memory = RetrievalWorkingMemory(recall=recall)
+    retrieval_worker = assistant_settings.retrieval.worker
     retrieval = RetrievalWorker(
         source=PostgresEpisodicSource(),
         store=retrieval_store,
@@ -141,36 +155,38 @@ def build_durable_assistant(
         space=embedding_space,
         renderer=EpisodicPassageRenderer(),
         telemetry=telemetry,
-        worker_count=config.RETRIEVAL_WORKER_COUNT,
-        batch_size=config.RETRIEVAL_BATCH_SIZE,
-        poll_interval=config.RETRIEVAL_POLL_INTERVAL,
-        lease_for=timedelta(seconds=config.RETRIEVAL_LEASE_SECONDS),
+        worker_count=retrieval_worker.worker_count,
+        batch_size=retrieval_worker.batch_size,
+        poll_interval=retrieval_worker.poll_interval_seconds,
+        lease_for=timedelta(seconds=retrieval_worker.lease_seconds),
     )
-    budget = _context_window_budget()
+    budget = _context_window_budget(assistant_settings)
     history = ContextWindowProjector(
         persistence=context_window_store,
         token_counter=ConservativeHistoryTokenCounter(guard_ratio=budget.guard_ratio),
         budget=budget,
         cache=ContextWindowCache(
-            capacity=config.CONVERSATION_HISTORY_CACHE_CAPACITY,
-            ttl_seconds=config.CONVERSATION_HISTORY_CACHE_TTL_SECONDS,
+            capacity=assistant_settings.history_cache.capacity,
+            ttl_seconds=assistant_settings.history_cache.ttl_seconds,
         ),
     )
-    artifact_root = config.BASE_DIR / "logs" / "generated_artifacts"
-    rate_limit_root = config.BASE_DIR / "logs" / "media_rate_limits"
-    artifacts = FileArtifactStore(artifact_root)
+    artifacts = FileArtifactStore(resources.generated_artifact_directory)
     external_settings = ExternalReadSettings(
-        serpapi_key=config.SERPAPI_API_KEY or "",
-        judge0_url=config.JUDGE0_API_URL,
-        judge0_key=config.JUDGE0_API_KEY or "",
+        serpapi_key=reveal_secret(settings.integrations.search.serpapi_api_key) or "",
+        judge0_url=settings.integrations.code_execution.judge0_api_url,
+        judge0_key=reveal_secret(settings.integrations.code_execution.judge0_api_key)
+        or "",
     )
+    image_settings = settings.integrations.image_generation
+    image_model = image_settings.model or ""
     generated_settings = GeneratedMediaSettings(
-        image_url=config.IMAGE_GEN_API_URL,
-        image_token=config.IMAGE_GEN_API_TOKEN,
-        fish_audio_key=config.FISH_AUDIO_API_KEY or "",
-        fish_audio_model=config.FISH_AUDIO_MODEL,
-        fish_audio_reference_id=config.FISH_AUDIO_REFERENCE_ID,
-        image_timeout_seconds=config.IMAGE_GEN_TIMEOUT,
+        image_url=image_settings.api_url or "",
+        image_token=_image_api_token(settings),
+        image_model=image_model,
+        fish_audio_key=reveal_secret(settings.integrations.audio.api_key) or "",
+        fish_audio_model=settings.integrations.audio.model,
+        fish_audio_reference_id=settings.integrations.audio.reference_id,
+        image_timeout_seconds=image_settings.timeout_seconds,
     )
     external_bulkhead = AsyncBlockingBulkhead(
         capacity=4,
@@ -200,12 +216,12 @@ def build_durable_assistant(
     generated_media = RequestsGeneratedMediaTools(
         settings=generated_settings,
         artifacts=artifacts,
-        limiter=FileSlidingWindowLimiter(rate_limit_root),
+        limiter=FileSlidingWindowLimiter(resources.media_rate_limit_directory),
         bulkhead=media_bulkhead,
         telemetry=telemetry,
     )
     operations = AssistantToolOperationDispatcher(
-        help_text=config.HELP_TEXT,
+        help_text=resources.help_text,
         external_reads=RequestsExternalReadTools(
             external_settings,
             bulkhead=external_bulkhead,
@@ -213,8 +229,8 @@ def build_durable_assistant(
         ),
         generated_media=generated_media,
         stickers=TelegramStickerCatalogReader(
-            config_path=config.BASE_DIR / "resources" / "ai_sticker_packs.json",
-            bot_token=config.TELEGRAM_BOT_TOKEN or "",
+            config_path=resources.sticker_catalog_path,
+            bot_token=reveal_secret(settings.telegram.bot_token) or "",
             timeout_seconds=sticker_timeout_seconds,
             bulkhead=sticker_bulkhead,
         ),
@@ -226,6 +242,7 @@ def build_durable_assistant(
     completion = LiteLLMAssistantCompletion(
         bulkhead=provider_bulkhead,
         telemetry=telemetry,
+        client=LiteLLMChatClient(providers=settings.ai.providers),
     )
     agent = AgentLoop(
         runtime=AgentRuntime(
@@ -243,70 +260,81 @@ def build_durable_assistant(
         cooldown_seconds=30 * 60,
     )
     service = AssistantInferenceService(
-        service_order=configured_service_order(),
-        profiles=build_provider_profiles(),
+        service_order=configured_service_order(settings.ai),
+        profiles=build_provider_profiles(settings.ai),
         circuit=circuit,
-        text_only_model_patterns=config.AI_CHAT_TEXT_ONLY_MODELS,
-        working_memory_limit=config.WORKING_MEMORY_RESULT_LIMIT,
-        working_memory_max_tokens=config.WORKING_MEMORY_RESERVED_TOKENS,
+        text_only_model_patterns=settings.ai.routing.chat.text_only_models,
+        working_memory_limit=assistant_settings.working_memory.result_limit,
+        working_memory_max_tokens=assistant_settings.working_memory.reserved_tokens,
         working_memory_enabled=True,
         agent_loop=agent,
     )
     translation_service = AssistantInferenceService(
-        service_order=configured_service_order("translate"),
-        profiles=build_provider_profiles("translate"),
+        service_order=configured_service_order(settings.ai, "translation"),
+        profiles=build_provider_profiles(settings.ai, "translation"),
         circuit=circuit,
-        text_only_model_patterns=config.AI_CHAT_TEXT_ONLY_MODELS,
-        working_memory_limit=config.WORKING_MEMORY_RESULT_LIMIT,
-        working_memory_max_tokens=config.WORKING_MEMORY_RESERVED_TOKENS,
+        text_only_model_patterns=settings.ai.routing.chat.text_only_models,
+        working_memory_limit=assistant_settings.working_memory.result_limit,
+        working_memory_max_tokens=assistant_settings.working_memory.reserved_tokens,
         working_memory_enabled=False,
         agent_loop=agent,
     )
+    compaction_runtime = runtime.compaction
     compaction = CompactionWorker(
         persistence=context_window_store,
         generator=ProviderCompactionSummaryGenerator(
             completion=completion,
-            service_order=configured_service_order("summary"),
-            profiles=build_provider_profiles("summary"),
-            request_timeout_seconds=config.COMPACTION_PROVIDER_TIMEOUT_SECONDS,
+            service_order=configured_service_order(settings.ai, "summary"),
+            profiles=build_provider_profiles(settings.ai, "summary"),
+            request_timeout_seconds=compaction_runtime.provider_timeout_seconds,
             budget=budget,
         ),
-        worker_count=config.COMPACTION_WORKER_COUNT,
-        poll_interval=config.COMPACTION_POLL_INTERVAL,
-        attempt_timeout=timedelta(seconds=config.COMPACTION_ATTEMPT_TIMEOUT_SECONDS),
-        lease_for=timedelta(seconds=config.COMPACTION_LEASE_SECONDS),
+        worker_count=compaction_runtime.worker_count,
+        poll_interval=compaction_runtime.poll_interval_seconds,
+        attempt_timeout=timedelta(seconds=compaction_runtime.attempt_timeout_seconds),
+        lease_for=timedelta(seconds=compaction_runtime.lease_seconds),
     )
+    dreaming_runtime = runtime.dreaming
     profile_store = PostgresUserProfileStore()
     dreaming = DreamingWorker(
         source=PostgresProfileEvidenceSource(),
         store=profile_store,
         model=ProviderDreamingModel(
             completion=completion,
-            service_order=configured_service_order("dreaming"),
-            profiles=build_provider_profiles("dreaming"),
-            request_timeout_seconds=config.DREAMING_PROVIDER_TIMEOUT_SECONDS,
+            service_order=configured_service_order(settings.ai, "dreaming"),
+            profiles=build_provider_profiles(settings.ai, "dreaming"),
+            request_timeout_seconds=dreaming_runtime.provider_timeout_seconds,
             telemetry=telemetry,
         ),
         telemetry=telemetry,
-        worker_count=config.DREAMING_WORKER_COUNT,
-        batch_size=config.DREAMING_BATCH_SIZE,
-        source_batch_size=config.DREAMING_SOURCE_BATCH_SIZE,
-        max_events_per_dream=config.DREAMING_MAX_EVENTS_PER_JOB,
-        max_evidence_chars=config.DREAMING_MAX_EVIDENCE_CHARS,
-        poll_interval=config.DREAMING_POLL_INTERVAL,
-        refresh_after=timedelta(seconds=config.DREAMING_REFRESH_SECONDS),
-        attempt_timeout=timedelta(seconds=config.DREAMING_ATTEMPT_TIMEOUT_SECONDS),
-        lease_for=timedelta(seconds=config.DREAMING_LEASE_SECONDS),
-        max_attempts=config.DREAMING_MAX_ATTEMPTS,
+        worker_count=dreaming_runtime.worker_count,
+        batch_size=dreaming_runtime.batch_size,
+        source_batch_size=dreaming_runtime.source_batch_size,
+        max_events_per_dream=dreaming_runtime.max_events_per_job,
+        max_evidence_chars=dreaming_runtime.max_evidence_characters,
+        poll_interval=dreaming_runtime.poll_interval_seconds,
+        refresh_after=timedelta(seconds=dreaming_runtime.refresh_seconds),
+        attempt_timeout=timedelta(seconds=dreaming_runtime.attempt_timeout_seconds),
+        lease_for=timedelta(seconds=dreaming_runtime.lease_seconds),
+        max_attempts=dreaming_runtime.max_attempts,
     )
+    inference_runtime = runtime.inference
     return DurableAssistantComposition(
         inference=DurableAssistantInferenceAdapter(
             history=history,
-            system_prompt=system_prompt,
-            runtime_limits=runtime_limits,
+            system_prompt=resources.system_prompt,
+            runtime_limits=InferenceRuntimeLimits(
+                provider_timeout=timedelta(
+                    seconds=inference_runtime.provider_timeout_seconds
+                ),
+                attempt_timeout=timedelta(
+                    seconds=inference_runtime.attempt_timeout_seconds
+                ),
+                lease_for=timedelta(seconds=inference_runtime.lease_seconds),
+            ),
             history_reserved_tokens=TokenCount(
-                config.CHAT_RESERVED_TOKENS
-                + config.WORKING_MEMORY_RESERVED_TOKENS
+                assistant_settings.context_window.reserved_tokens
+                + assistant_settings.working_memory.reserved_tokens
             ),
             inference=service,
             translation_inference=translation_service,
@@ -325,47 +353,72 @@ def build_durable_assistant(
     )
 
 
-def _context_window_budget() -> ContextTokenBudget:
-    """@brief 从显式配置构造严格 token budget / Build a strict token budget from explicit configuration.
+def _context_window_budget(settings: AssistantSettings) -> ContextTokenBudget:
+    """@brief 从 Assistant 设置构造 token budget / Build a token budget from Assistant settings.
 
-    @return validated context token budget / Validated context token budget.
+    @param settings 已验证的 Assistant 设置 / Validated Assistant settings.
+    @return 已验证的上下文 token budget / Validated context token budget.
     """
 
-    warning = config.CHAT_TOKEN_WARN_LIMIT
+    warning = settings.context_window.warning_tokens
     return ContextTokenBudget(
         warning_tokens=TokenCount(warning),
-        hard_tokens=TokenCount(config.CHAT_TOKEN_LIMIT),
+        hard_tokens=TokenCount(settings.context_window.hard_tokens),
         summary_output_tokens=TokenCount(2_500),
         segment_input_tokens=TokenCount(min(64_000, warning)),
     )
 
 
-def _retrieval_api_key() -> str:
-    """@brief 解析独立 embedding 凭据并允许显式复用 OpenRouter key / Resolve embedding credentials with explicit OpenRouter fallback.
+def _retrieval_api_key(settings: BotSettings) -> str:
+    """@brief 解析独立 embedding 凭据 / Resolve the independent embedding credential.
 
-    @return 非空 API key / Non-empty API key.
-    @raise RuntimeError 未配置凭据 / Missing credentials.
+    @param settings 已验证的 Bot 设置 / Validated Bot settings.
+    @return 非空 embedding API key / Non-empty embedding API key.
+    @raise RuntimeError embedding 与 OpenRouter 均未提供密钥时抛出 /
+        Raised when neither embedding nor OpenRouter provides a key.
     """
 
-    key = config.RETRIEVAL_EMBEDDING_API_KEY or config.OPENROUTER_API_KEY
+    key = reveal_secret(
+        settings.assistant.retrieval.embedding.api_key
+    ) or reveal_secret(settings.ai.providers.openrouter.api_key)
     if not key:
         raise RuntimeError(
-            "RETRIEVAL_EMBEDDING_API_KEY or OPENROUTER_API_KEY is required"
+            "assistant.retrieval.embedding.api_key or ai.providers.openrouter.api_key "
+            "is required"
         )
     return key
 
 
-def _retrieval_space() -> EmbeddingSpace:
-    """@brief 从显式配置构造活跃 embedding space / Build the active embedding space from explicit configuration.
+def _image_api_token(settings: BotSettings) -> str:
+    """@brief 解析图片服务令牌 / Resolve the image-service token.
 
-    @return 已验证空间 / Validated space.
+    @param settings 已验证的 Bot 设置 / Validated Bot settings.
+    @return 图片 API 令牌；未配置时为空字符串 / Image API token, or an empty string when unset.
+    @note 选择 OpenRouter 图片模型时，未单独给出令牌会复用 OpenRouter 密钥。/
+        When an OpenRouter image model is selected, its key is reused if no dedicated token exists.
     """
 
+    dedicated = reveal_secret(settings.integrations.image_generation.api_token)
+    if dedicated:
+        return dedicated
+    if settings.integrations.image_generation.model:
+        return reveal_secret(settings.ai.providers.openrouter.api_key) or ""
+    return ""
+
+
+def _retrieval_space(settings: AssistantSettings) -> EmbeddingSpace:
+    """@brief 从 Assistant 设置构造 embedding space / Build the active embedding space from Assistant settings.
+
+    @param settings 已验证的 Assistant 设置 / Validated Assistant settings.
+    @return 已验证的 embedding space / Validated embedding space.
+    """
+
+    embedding = settings.retrieval.embedding
     return EmbeddingSpace(
-        space_id=config.RETRIEVAL_EMBEDDING_SPACE_ID,
-        model=config.RETRIEVAL_EMBEDDING_MODEL,
-        dimensions=config.RETRIEVAL_EMBEDDING_DIMENSIONS,
-        query_instruction=config.RETRIEVAL_QUERY_INSTRUCTION,
+        space_id=embedding.space_id,
+        model=embedding.model,
+        dimensions=embedding.dimensions,
+        query_instruction=embedding.query_instruction,
         passage_format_version=1,
     )
 

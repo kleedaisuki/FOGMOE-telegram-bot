@@ -4,17 +4,10 @@ from __future__ import annotations
 
 import argparse
 import subprocess
-from pathlib import Path
 from typing import Any
 
-from fogmoe_dbctl.config import DEFAULT_CONFIG_DIR
-from fogmoe_dbctl.postgres import psql_environment
-
-
-_DATABASE = "fogmoe"
-"""@brief shell 唯一目标数据库 / Sole shell target database."""
-_SERVICE = "fogmoe_automation"
-"""@brief shell 唯一 automation service / Sole shell automation service."""
+from fogmoe_dbctl.config import DbctlSettings, reveal_secret
+from fogmoe_dbctl.postgres import direct_psql_environment
 
 
 def configure_parser(subparsers: Any) -> None:
@@ -26,14 +19,12 @@ def configure_parser(subparsers: Any) -> None:
 
     parser = subparsers.add_parser(
         "shell",
-        aliases=["psql"],
-        help="Open psql on the FogMoe database through fogmoe_automation.",
+        help="Open psql through the configured maintenance connection.",
         description=(
-            "Open an interactive psql session on database fogmoe. Connection host, "
-            "port, role, and password come from the configured libpq service."
+            "Open an interactive psql session using the endpoint and maintenance "
+            "credentials from config.json."
         ),
     )
-    parser.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG_DIR)
     parser.add_argument(
         "--no-psqlrc",
         action="store_true",
@@ -42,20 +33,15 @@ def configure_parser(subparsers: Any) -> None:
     parser.set_defaults(handler=execute)
 
 
-def build_command(
-    *,
-    no_psqlrc: bool,
-) -> list[str]:
+def build_command(*, no_psqlrc: bool) -> list[str]:
     """@brief 构造交互 psql 命令 / Build the interactive psql command.
 
     @param no_psqlrc 是否忽略 psqlrc / Whether to ignore psqlrc.
-    @return subprocess argv / Subprocess argv.
+    @return 不含连接或密码参数的 subprocess argv / Subprocess argv without connection or password arguments.
     """
 
     command = [
         "psql",
-        "--dbname",
-        _DATABASE,
         "--set",
         "ON_ERROR_STOP=1",
         "--set",
@@ -68,22 +54,34 @@ def build_command(
     return command
 
 
-def execute(args: argparse.Namespace) -> None:
+def execute(args: argparse.Namespace, *, settings: DbctlSettings) -> None:
     """@brief 以前台 TTY 启动 psql / Start psql attached to the foreground TTY.
 
     @param args CLI 参数 / CLI arguments.
+    @param settings CLI 组合根注入的已验证配置 / Validated settings injected by the CLI composition root.
     @return None / None.
-    @note 密码仅由 PGPASSFILE 读取，不进入 argv 或 PGPASSWORD。/
-        Passwords are read only through PGPASSFILE, never argv or PGPASSWORD.
+    @note 密码仅存在于子进程环境，永不进入 argv。/
+        The password exists only in the child environment and never enters argv.
+    @note 命令层绝不读取配置文件；配置只在 CLI 根入口读取一次。/
+        The command layer never reads a configuration file; configuration is read once at the CLI root.
     """
 
-    config_dir = args.config_dir.resolve()
-    environment = psql_environment(config_dir, service_name=_SERVICE)
-    environment["PGAPPNAME"] = "fogmoe-dbctl-shell"
-    command = build_command(
-        no_psqlrc=args.no_psqlrc,
+    environment = direct_psql_environment(
+        host=settings.endpoint.host,
+        port=settings.endpoint.port,
+        database=settings.endpoint.name,
+        user=settings.maintenance.username,
+        password=reveal_secret(
+            settings.maintenance.password,
+            field_name="database.maintenance.password",
+        ),
     )
-    result = subprocess.run(command, env=environment, check=False)
+    environment["PGAPPNAME"] = "fogmoe-dbctl-shell"
+    result = subprocess.run(
+        build_command(no_psqlrc=args.no_psqlrc),
+        env=environment,
+        check=False,
+    )
     if result.returncode != 0:
         raise SystemExit(result.returncode)
 

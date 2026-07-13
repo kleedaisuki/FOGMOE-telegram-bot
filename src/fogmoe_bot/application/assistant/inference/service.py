@@ -169,16 +169,11 @@ class AssistantInferenceService:
             route = self._profiles.get(service_name)
             if route is None or self._circuit.is_open(service_name):
                 continue
-            service_messages = self._messages_for_route(
-                route,
-                messages or context_state.messages,
-                context_state.text_fallback_messages,
-            )
             route_context = ContextState(
                 context_id=context_state.context_id,
                 scope=context_state.scope,
                 user_state=context_state.user_state,
-                messages=service_messages,
+                messages=list(messages or context_state.messages),
                 tool_context=context_state.tool_context,
                 text_fallback_messages=context_state.text_fallback_messages,
                 current_user_text=context_state.current_user_text,
@@ -243,8 +238,19 @@ class AssistantInferenceService:
             )
         last_error: Exception | None = None
         original_messages = list(context_state.messages)
-        for model in route.models:
-            context_state.messages = list(original_messages)
+        models = list(route.models)
+        if messages_have_images(original_messages):
+            models.sort(
+                key=lambda model: (
+                    not model_supports_vision(model, self._text_only_model_patterns)
+                )
+            )
+        for model in models:
+            context_state.messages = self._messages_for_model(
+                model,
+                original_messages,
+                context_state.text_fallback_messages,
+            )
             options: dict[str, JsonValue] = {
                 key: cast(JsonValue, value)
                 for key, value in route.completion_kwargs.items()
@@ -281,22 +287,22 @@ class AssistantInferenceService:
             f"All models failed for provider: {route.service_name}"
         ) from last_error
 
-    def _messages_for_route(
+    def _messages_for_model(
         self,
-        route: ProviderRoute,
+        model: str,
         messages: list[dict[str, object]],
         text_fallback_messages: list[dict[str, object]] | None,
     ) -> list[dict[str, object]]:
-        """@brief 为 route 选择 multimodal 或文本消息 / Select multimodal or text messages for a route.
+        """@brief 为模型选择多模态或文本消息 / Select multimodal or text messages for a model.
 
-        @param route route profile / Route profile.
+        @param model 当前候选模型 / Candidate model.
         @param messages 原消息 / Original messages.
         @param text_fallback_messages 文本降级 / Text fallback.
-        @return route 消息 / Route messages.
+        @return 适合候选模型的消息 / Messages suitable for the candidate model.
         """
 
         if not messages_have_images(messages) or model_supports_vision(
-            route.models[0] if route.models else None,
+            model,
             self._text_only_model_patterns,
         ):
             return list(messages)

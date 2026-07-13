@@ -1,0 +1,562 @@
+// FogMoe 配置模板（JSON with Comments / JSONC）。
+// 复制为项目根目录的 config.json 后填写所需值；所有密钥均保持 null，避免把凭据提交到版本库。
+// 每个非密钥值均与三个本地 reader 声明的实际默认值逐字段一致；即使保留默认值也建议显式保留，便于审阅与升级。
+// 本文件只使用标准 JSON 的双引号、对象和数组；额外语法仅为 // 注释，且刻意不使用尾逗号。
+{
+  // 配置文档版本；升级程序会据此识别兼容的配置形状。
+  "schema_version": 1,
+
+  // 人员与权限身份，而非 Telegram 传输参数。
+  "identity": {
+    // 具有全局管理权限的 Telegram 身份。
+    "administrator": {
+      // 管理员的 Telegram 数字用户 ID；请替换为实际值。
+      "user_id": 1002288404,
+      // Telegram 无法读取资料时展示的管理员联系方式；不需要时保持 null。
+      "contact_name": null
+    }
+  },
+
+  // Telegram Bot 接入与长轮询行为。
+  "telegram": {
+    // 从 BotFather 获得的 Bot Token。
+    "bot_token": null,
+    // 普通 Telegram API 请求的 HTTP 超时。
+    "http": {
+      // 建立 TCP/TLS 连接的最长秒数。
+      "connect_timeout_seconds": 10.0,
+      // 读取响应的最长秒数。
+      "read_timeout_seconds": 30.0,
+      // 写入请求体的最长秒数。
+      "write_timeout_seconds": 30.0,
+      // 从连接池取得连接的最长秒数。
+      "pool_timeout_seconds": 10.0
+    },
+    // getUpdates 长轮询专用参数，与普通 API 调用分开调优。
+    "polling": {
+      // Telegram 服务端保持一次 long-poll 的最长秒数。
+      "get_updates_timeout_seconds": 30,
+      // 长轮询建立连接的最长秒数。
+      "get_updates_connect_timeout_seconds": 10.0,
+      // 长轮询读取响应的最长秒数，必须大于 get_updates_timeout_seconds。
+      "get_updates_read_timeout_seconds": 35.0,
+      // 长轮询写入请求体的最长秒数。
+      "get_updates_write_timeout_seconds": 30.0,
+      // 长轮询从连接池取得连接的最长秒数。
+      "get_updates_pool_timeout_seconds": 10.0,
+      // 为 getUpdates 预留的连接池大小。
+      "get_updates_connection_pool_size": 2,
+      // 网络错误后首次重试前等待的秒数。
+      "retry_initial_delay_seconds": 1.0,
+      // 网络错误后重试等待时间的上限秒数。
+      "retry_max_delay_seconds": 30.0
+    }
+  },
+
+  // 进程内持久化工作流的并发、轮询和租约设置。
+  "runtime": {
+    // 按会话键串行化工作的 keyed mailbox 参数。
+    "mailbox": {
+      // 同时执行的业务协程上限。
+      "max_concurrency": 32,
+      // 已领取但尚未结束工作的全局容量。
+      "global_capacity": 512,
+      // 单一会话键可排队工作的容量。
+      "per_key_capacity": 8,
+      // 空闲 mailbox 从内存回收前的秒数。
+      "idle_ttl_seconds": 300.0,
+      // 关闭进程时等待在途工作的最长秒数。
+      "shutdown_grace_seconds": 30.0
+    },
+    // 定时任务调度器。
+    "scheduling": {
+      // 调度 worker 数量。
+      "worker_count": 3,
+      // 轮询待调度任务的间隔秒数。
+      "poll_interval_seconds": 1.0,
+      // 执行租约超时秒数，过期任务会在重启后回收。
+      "lease_seconds": 1800
+    },
+    // Telegram 入站消息的 durable inbox worker。
+    "inbox": {
+      // 入站 worker 数量。
+      "worker_count": 16,
+      // 轮询待处理入站消息的间隔秒数。
+      "poll_interval_seconds": 0.1,
+      // 入站处理租约秒数。
+      "lease_seconds": 60
+    },
+    // AI 推理工作队列。
+    "inference": {
+      // 推理 worker 数量。
+      "worker_count": 8,
+      // 轮询待推理作业的间隔秒数。
+      "poll_interval_seconds": 0.25,
+      // 单个 provider 调用的超时秒数。
+      "provider_timeout_seconds": 90,
+      // 推理作业租约秒数。
+      "lease_seconds": 180,
+      // 包含 provider fallback 的单次尝试总超时秒数。
+      "attempt_timeout_seconds": 120
+    },
+    // Telegram 出站投递工作队列。
+    "outbox": {
+      // 出站 worker 数量。
+      "worker_count": 16,
+      // 轮询待发送消息的间隔秒数。
+      "poll_interval_seconds": 0.1,
+      // 出站投递租约秒数。
+      "lease_seconds": 60,
+      // 单次 Telegram 投递尝试总超时秒数。
+      "attempt_timeout_seconds": 25
+    },
+    // 上下文压缩（compaction）工作队列。
+    "compaction": {
+      // 压缩 worker 数量。
+      "worker_count": 2,
+      // 轮询待压缩作业的间隔秒数。
+      "poll_interval_seconds": 0.5,
+      // 单个摘要 provider 调用的超时秒数。
+      "provider_timeout_seconds": 30,
+      // 包含 fallback 的压缩尝试总超时秒数。
+      "attempt_timeout_seconds": 120,
+      // 压缩作业租约秒数。
+      "lease_seconds": 180
+    },
+    // 用户画像 dreaming 工作队列。
+    "dreaming": {
+      // dreaming worker 数量。
+      "worker_count": 2,
+      // 一次 dreaming 作业聚合的用户批大小。
+      "batch_size": 4,
+      // 读取候选来源事件的批大小。
+      "source_batch_size": 32,
+      // 单一作业最多消费的事件数。
+      "max_events_per_job": 64,
+      // 送入模型前最多保留的证据字符数。
+      "max_evidence_characters": 60000,
+      // 轮询待处理 dreaming 作业的间隔秒数。
+      "poll_interval_seconds": 1.0,
+      // 同一用户画像重新计算前的最短秒数。
+      "refresh_seconds": 21600,
+      // 单个 dreaming provider 调用的超时秒数。
+      "provider_timeout_seconds": 60,
+      // 包含 fallback 的 dreaming 尝试总超时秒数。
+      "attempt_timeout_seconds": 90,
+      // dreaming 作业租约秒数。
+      "lease_seconds": 120,
+      // 失败前允许的最大尝试次数。
+      "max_attempts": 5
+    }
+  },
+
+  // 大语言模型（LLM）路由与各 provider 的连接、模型配置。
+  "ai": {
+    // 任务到 provider 的路由规则。
+    "routing": {
+      // 对话任务的 provider 顺序和图像兼容策略。
+      "chat": {
+        // 按优先级尝试的 provider 名称；数组替代旧 CSV 字符串。
+        "provider_order": [
+          "gemini",
+          "zai",
+          "siliconflow"
+        ],
+        // 命中这些 shell-style 模式的模型只接收纯文本历史。
+        "text_only_models": [
+          "deepseek-ai/DeepSeek-V4-Flash"
+        ]
+      },
+      // 上下文摘要任务的 provider 链。
+      "summary": {
+        // 首选摘要 provider。
+        "provider": "gemini",
+        // 首选 provider 失败时的可选回退 provider。
+        "fallback_provider": null
+      },
+      // 用户画像 dreaming 任务的 provider 链。
+      "dreaming": {
+        // 首选 dreaming provider。
+        "provider": "gemini",
+        // 首选 provider 失败时的可选回退 provider。
+        "fallback_provider": null
+      },
+      // 翻译任务的 provider 链。
+      "translation": {
+        // 首选翻译 provider。
+        "provider": "zai",
+        // 首选 provider 失败时的可选回退 provider。
+        "fallback_provider": null
+      }
+    },
+    // 每个 provider 的私钥、端点和任务模型；未启用的 provider 可整段保留。
+    "providers": {
+      // OpenAI 或兼容 OpenAI API 的服务。
+      "openai": {
+        // OpenAI API 密钥；兼容端点若无需密钥仍可保持 null。
+        "api_key": null,
+        // 可选 OpenAI-compatible 基础 URL；null 表示官方默认端点。
+        "api_base": null,
+        // 各 AI 任务使用的 OpenAI 模型。
+        "models": {
+          // 主对话模型。
+          "chat": "gpt-4o",
+          // 对话模型失败时的同 provider 回退模型；null 表示不配置。
+          "chat_fallback": null,
+          // 处理含图片消息时优先尝试的视觉模型；null 表示不配置独立视觉模型。
+          "vision": null,
+          // 上下文摘要模型。
+          "summary": "gpt-4o-mini",
+          // 摘要模型失败时的同 provider 回退模型；null 表示不配置。
+          "summary_fallback": null,
+          // 用户画像 dreaming 模型。
+          "dreaming": "gpt-4o-mini",
+          // 翻译模型。
+          "translation": "gpt-4o-mini"
+        }
+      },
+      // OpenRouter 聚合网关。
+      "openrouter": {
+        // OpenRouter API 密钥。
+        "api_key": null,
+        // OpenRouter 的 OpenAI-compatible 基础 URL。
+        "api_base": "https://openrouter.ai/api/v1",
+        // 各 AI 任务使用的 OpenRouter 模型。
+        "models": {
+          // 主对话模型。
+          "chat": "anthropic/claude-sonnet-4.5",
+          // 对话模型失败时的同 provider 回退模型；null 表示不配置。
+          "chat_fallback": null,
+          // 处理含图片消息时优先尝试的视觉模型；null 表示沿用 chat 模型。
+          "vision": null,
+          // 上下文摘要模型。
+          "summary": "openai/gpt-4o-mini",
+          // 摘要模型失败时的同 provider 回退模型；null 表示不配置。
+          "summary_fallback": null,
+          // 用户画像 dreaming 模型。
+          "dreaming": "openai/gpt-4o-mini",
+          // 翻译模型。
+          "translation": "openai/gpt-4o-mini"
+        }
+      },
+      // Google Gemini。
+      "gemini": {
+        // Gemini API 密钥。
+        "api_key": null,
+        // 可选 Gemini 基础 URL；null 表示 Google AI Studio 原生端点。
+        "api_base": null,
+        // api_base 是否是 OpenAI-compatible Gemini 代理。
+        "openai_compatible": false,
+        // 各 AI 任务使用的 Gemini 模型。
+        "models": {
+          // 主对话模型。
+          "chat": "gemini-3.5-flash",
+          // 对话模型失败时的同 provider 回退模型。
+          "chat_fallback": "gemini-2.5-flash-lite",
+          // 处理含图片消息时优先尝试的 Gemini 模型；null 表示沿用 chat 模型。
+          "vision": null,
+          // 上下文摘要模型。
+          "summary": "gemini-3-flash-preview",
+          // 摘要模型失败时的同 provider 回退模型。
+          "summary_fallback": "gemini-2.5-flash-lite",
+          // 用户画像 dreaming 模型；null 时复用 summary 模型。
+          "dreaming": null,
+          // 翻译模型；null 时该 provider 不参与翻译。
+          "translation": null
+        }
+      },
+      // Azure OpenAI；deployment 与模型名可相同。
+      "azure": {
+        // Azure OpenAI API 密钥。
+        "api_key": null,
+        // Azure 资源端点，例如 https://example.openai.azure.com/。
+        "endpoint": null,
+        // Azure OpenAI API 版本。
+        "api_version": "2024-12-01-preview",
+        // Azure deployment 名称。
+        "deployment": null,
+        // 各 AI 任务使用的 Azure deployment 名称。
+        "models": {
+          // 主对话 deployment。
+          "chat": null,
+          // 对话 deployment 失败时的同 provider 回退 deployment。
+          "chat_fallback": null,
+          // 处理含图片消息时优先尝试的 Azure deployment。
+          "vision": null,
+          // 上下文摘要 deployment。
+          "summary": null,
+          // 摘要 deployment 失败时的同 provider 回退 deployment。
+          "summary_fallback": null,
+          // 用户画像 dreaming deployment。
+          "dreaming": null,
+          // 翻译 deployment。
+          "translation": null
+        }
+      },
+      // SiliconFlow 的 OpenAI-compatible API。
+      "siliconflow": {
+        // SiliconFlow API 密钥。
+        "api_key": null,
+        // SiliconFlow API 基础 URL。
+        "api_base": "https://api.siliconflow.cn/v1",
+        // 各 AI 任务使用的 SiliconFlow 模型。
+        "models": {
+          // 主对话模型。
+          "chat": "deepseek-ai/DeepSeek-V4-Flash",
+          // 对话模型失败时的同 provider 回退模型；null 表示不配置。
+          "chat_fallback": null,
+          // 处理含图片消息时优先尝试的视觉模型；null 表示沿用 chat 模型。
+          "vision": null,
+          // 上下文摘要模型。
+          "summary": "deepseek-ai/DeepSeek-V4-Flash",
+          // 摘要模型失败时的同 provider 回退模型；null 表示不配置。
+          "summary_fallback": null,
+          // 用户画像 dreaming 模型；null 时复用 summary 模型。
+          "dreaming": null,
+          // 翻译模型。
+          "translation": "deepseek-ai/DeepSeek-V4-Flash"
+        }
+      },
+      // Z.ai（原智谱）在 LiteLLM 中使用 zai provider。
+      "zai": {
+        // Z.ai API 密钥。
+        "api_key": null,
+        // Z.ai API 基础 URL。
+        "api_base": "https://open.bigmodel.cn/api/paas/v4",
+        // 各 AI 任务使用的 Z.ai 模型。
+        "models": {
+          // 主对话模型。
+          "chat": "glm-4.7-flash",
+          // 对话模型失败时的同 provider 回退模型；null 表示不配置。
+          "chat_fallback": null,
+          // 处理含图片消息时优先尝试的视觉模型；null 表示沿用 chat 模型。
+          "vision": null,
+          // 上下文摘要模型。
+          "summary": null,
+          // 摘要模型失败时的同 provider 回退模型；null 表示不配置。
+          "summary_fallback": null,
+          // 用户画像 dreaming 模型；null 时复用 summary 模型。
+          "dreaming": null,
+          // 翻译模型。
+          "translation": "glm-4.7-flash"
+        }
+      }
+    }
+  },
+
+  // 助手的上下文、记忆和检索行为。
+  "assistant": {
+    // 对话上下文窗口预算。
+    "context_window": {
+      // token 估算达到此阈值时开始预警或压缩。
+      "warning_tokens": 114000,
+      // token 估算达到此阈值时拒绝继续扩张历史。
+      "hard_tokens": 120000,
+      // 为模型输出、工具 schema 和 provider framing 预留的 token 数。
+      "reserved_tokens": 8192
+    },
+    // 写入当前 prompt 的检索记忆预算。
+    "working_memory": {
+      // 单次查询最多返回的记忆条数。
+      "result_limit": 64,
+      // 为检索证据预留的 token 数。
+      "reserved_tokens": 16384
+    },
+    // 情景记忆嵌入、索引与查询策略。
+    "retrieval": {
+      // 将情景记忆事件写入向量索引的 worker。
+      "worker": {
+        // 检索 worker 数量。
+        "worker_count": 2,
+        // 单次领取的检索作业数。
+        "batch_size": 16,
+        // 轮询待处理检索作业的间隔秒数。
+        "poll_interval_seconds": 0.5,
+        // 检索作业租约秒数。
+        "lease_seconds": 120
+      },
+      // 生成 embedding 的 OpenAI-compatible API。
+      "embedding": {
+        // embedding API 密钥。
+        "api_key": null,
+        // embedding API 基础 URL。
+        "api_base": "https://openrouter.ai/api/v1",
+        // embedding 模型名称。
+        "model": "qwen/qwen3-embedding-8b",
+        // 用于防止不同 embedding 空间混用的稳定标识。
+        "space_id": "qwen3-embedding-8b.1024.episodic-v1",
+        // 向量维度；当前 schema 仅允许 1024。
+        "dimensions": 1024,
+        // embedding HTTP 请求超时秒数。
+        "timeout_seconds": 30.0,
+        // 将当前问题改写为检索意图时使用的指令。
+        "query_instruction": "Retrieve prior conversation evidence relevant to the user's current question, including events, decisions, preferences, corrections, and temporal context."
+      }
+    },
+    // 已提交会话历史的进程内 LRU + TTL 缓存。
+    "history_cache": {
+      // 最多缓存的会话前缀数。
+      "capacity": 256,
+      // 缓存条目的生存秒数。
+      "ttl_seconds": 900.0
+    }
+  },
+
+  // PostgreSQL 连接、运行时访问、迁移、报表和初始化职责。
+  "database": {
+    // 所有组件共享的数据库连接端点。
+    "endpoint": {
+      // PostgreSQL 主机名或 IP。
+      "host": "localhost",
+      // PostgreSQL 端口。
+      "port": 5432,
+      // PostgreSQL 数据库名称。
+      "name": "fogmoe"
+    },
+    // Bot 正常业务访问数据库的连接池与 schema 搜索路径。
+    "application": {
+      // Bot 运行时使用的最小权限数据库角色名。
+      "username": "fogmoe-bot",
+      // Bot 运行时数据库角色的密码。
+      "password": null,
+      // SQLAlchemy 常驻连接数。
+      "pool_size": 5,
+      // SQLAlchemy 在 pool_size 外允许创建的临时连接数。
+      "max_overflow": 10,
+      // 连接回收前的最长秒数。
+      "pool_recycle_seconds": 1800,
+      // 建立数据库连接的最长秒数。
+      "connect_timeout_seconds": 10,
+      // PostgreSQL search_path；数组替代旧 CSV 字符串。
+      "search_path": [
+        "identity",
+        "conversation",
+        "context_window",
+        "retrieval",
+        "user_profile",
+        "assistant",
+        "economy",
+        "moderation",
+        "crypto",
+        "game",
+        "media",
+        "admin",
+        "public"
+      ]
+    },
+    // 迁移与受控运维使用的独立数据库身份。
+    "maintenance": {
+      // 执行迁移与授权的最小权限数据库角色名。
+      "username": "fogmoe-maintenance",
+      // 迁移与维护数据库角色的密码。
+      "password": null,
+      // Alembic 版本表所在的 schema。
+      "migration_schema": "infra"
+    },
+    // Dashboard 只读报表使用的独立数据库身份。
+    "reporting": {
+      // Dashboard 最小权限只读数据库角色名。
+      "username": "fogmoe-dashboard",
+      // Dashboard 数据库角色的密码。
+      "password": null
+    },
+    // 首次创建数据库与角色时的本机 PostgreSQL 管理身份。
+    "bootstrap": {
+      // 本机 PostgreSQL 超级用户账户名。
+      "system_user": "postgres"
+    }
+  },
+
+  // 统一出站网络策略，适用于 Telegram、AI 和外部集成。
+  "network": {
+    // http://、https://、socks5:// 或 socks5h:// 代理 URL；null 表示直连。
+    "proxy_url": null
+  },
+
+  // 非 LLM 的外部能力服务。
+  "integrations": {
+    // 网络搜索服务（SerpApi）。
+    "search": {
+      // SerpApi API 密钥。
+      "serpapi_api_key": null
+    },
+    // 代码执行服务（Judge0）。
+    "code_execution": {
+      // Judge0 API 基础 URL。
+      "judge0_api_url": "https://ce.judge0.com",
+      // Judge0 API 密钥。
+      "judge0_api_key": null
+    },
+    // 图片生成服务。
+    "image_generation": {
+      // 图片生成 API URL；null 表示禁用图片生成。
+      "api_url": null,
+      // 图片生成 API 令牌。
+      "api_token": null,
+      // 可选 OpenRouter 图片模型；null 时使用该 API 的原生 items 协议。
+      "model": null,
+      // 一次图片生成请求的超时秒数。
+      "timeout_seconds": 30
+    },
+    // Fish Audio 语音生成服务。
+    "audio": {
+      // Fish Audio API 密钥。
+      "api_key": null,
+      // Fish Audio 模型名称。
+      "model": "s2.1-pro-free",
+      // Fish Audio 参考音色 ID。
+      "reference_id": "dc020cb237df4248907565718715b20b"
+    }
+  },
+
+  // 用户经济系统的初始激励。
+  "economy": {
+    // 新用户首次创建账户获得的金币数。
+    "new_user_bonus_coins": 10
+  },
+
+  // 本地文件日志行为。
+  "logging": {
+    // 应用日志最低级别，例如 DEBUG、INFO、WARNING、ERROR 或 CRITICAL。
+    "level": "INFO",
+    // 相对项目根目录的日志目录。
+    "directory": "logs",
+    // 单个日志文件滚动前允许的最大字节数。
+    "file_max_bytes": 1048576,
+    // 每个日志文件保留的滚动备份数。
+    "file_backup_count": 5,
+    // 异步日志队列的最大事件数。
+    "queue_capacity": 10000
+  },
+
+  // PostgreSQL 可观测性信号与 Dashboard 查询性能。
+  "observability": {
+    // 是否写入 PostgreSQL traces、logs 和 metrics。
+    "enabled": true,
+    // 部署环境标签，例如 development、staging 或 production。
+    "environment": "production",
+    // 非阻塞信号队列容量，满时会丢弃并计数。
+    "queue_capacity": 20000,
+    // 单批写入数据库的最大信号数。
+    "batch_size": 250,
+    // 后台刷写信号的间隔秒数。
+    "flush_interval_seconds": 1.0,
+    // 数据库重试退避的最大秒数。
+    "retry_max_delay_seconds": 30.0,
+    // 进程关闭时等待刷写的最长秒数。
+    "shutdown_flush_timeout_seconds": 3.0,
+    // 可观测性专用数据库命令的超时秒数。
+    "database_command_timeout_seconds": 2.0,
+    // 采集进程指标的间隔秒数。
+    "metric_interval_seconds": 15.0,
+    // 日志、span 和原始 metric point 的保留天数。
+    "retention_days": 30,
+    // Dashboard 自身的查询资源边界。
+    "dashboard": {
+      // Dashboard PostgreSQL 查询连接池大小。
+      "pool_size": 4,
+      // Dashboard 单条查询的最长秒数。
+      "command_timeout_seconds": 5.0
+    }
+  }
+}

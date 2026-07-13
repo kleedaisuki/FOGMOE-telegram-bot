@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -20,7 +19,6 @@ from fogmoe_bot.domain.conversation.identity import (
     DeliveryStreamId,
     TurnId,
 )
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.assistant.tool_operations.dispatcher import (
     AssistantToolOperationDispatcher,
 )
@@ -36,11 +34,7 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
 from fogmoe_bot.infrastructure.database.group_message_projection import (
     PostgresGroupMessageProjection,
 )
-from fogmoe_dbctl.postgres import read_service, service_sqlalchemy_url
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-"""@brief 项目根目录 / Project root."""
+from postgres_test_support import configure_bot_database
 
 
 class _External:
@@ -71,12 +65,7 @@ def _postgres_url() -> str:
     explicit = os.environ.get("FOGMOE_TEST_DATABASE_URL")
     if explicit:
         return explicit
-    if os.environ.get("FOGMOE_TEST_POSTGRES") != "1":
-        pytest.skip("set FOGMOE_TEST_POSTGRES=1 to run the real PostgreSQL contract")
-    config_dir = PROJECT_ROOT / "var/psql"
-    if not (config_dir / "pg_service.conf").is_file():
-        pytest.skip("local PostgreSQL service configuration is unavailable")
-    return service_sqlalchemy_url(read_service(config_dir, "fogmoe_automation"))
+    pytest.skip("set FOGMOE_TEST_DATABASE_URL to run the real PostgreSQL contract")
 
 
 def test_diary_schedule_and_kindness_share_atomic_receipt_transactions(
@@ -85,8 +74,8 @@ def test_diary_schedule_and_kindness_share_atomic_receipt_transactions(
     """三类业务 mutation 与 succeeded receipt 原子提交且重放不重复。"""
 
     async def scenario() -> None:
-        monkeypatch.setattr(config, "SQLALCHEMY_DATABASE_URI", _postgres_url())
         await db.dispose_current_engine()
+        configure_bot_database(_postgres_url())
         suffix = uuid4().hex
         user_id = 6_100_000_000_000_000_000 + int(suffix[:12], 16)
         turn_id = TurnId.new()

@@ -18,7 +18,7 @@ from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind
 
-from .litellm_client import create_chat_completion
+from .litellm_client import LiteLLMChatClient
 from .protocol import assistant_message_to_plain, normalise_tool_calls
 
 
@@ -30,16 +30,20 @@ class LiteLLMAssistantCompletion:
         *,
         bulkhead: AsyncBlockingBulkhead,
         telemetry: Telemetry,
+        client: LiteLLMChatClient,
     ) -> None:
         """@brief 注入独立的 provider 隔舱 / Inject a dedicated provider bulkhead.
 
         @param bulkhead 同步 LiteLLM 调用隔舱 / Synchronous LiteLLM call bulkhead.
         @param telemetry 进程 typed telemetry / Process typed telemetry.
+        @param client 绑定显式 provider 设置的 LiteLLM 客户端 /
+            LiteLLM client bound to explicit provider settings.
         @return None / None.
         """
 
         self._bulkhead = bulkhead
         self._telemetry = telemetry
+        self._client = client
 
     async def complete(
         self,
@@ -82,7 +86,7 @@ class LiteLLMAssistantCompletion:
         ) as span:
             try:
                 response = await self._bulkhead.call(
-                    lambda: create_chat_completion(
+                    lambda: self._client.complete(
                         provider,
                         model,
                         [dict(message) for message in messages],

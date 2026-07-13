@@ -169,6 +169,44 @@ def test_vision_capable_route_keeps_multimodal_messages():
     assert calls == [image_messages]
 
 
+def test_image_messages_prioritize_the_vision_model_within_one_route():
+    image_messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.test/a.png"},
+                }
+            ],
+        }
+    ]
+    calls = []
+
+    def runner(provider, model, messages, **kwargs):
+        calls.append((model, messages))
+        return AgentResponse("ok", [])
+
+    route = ProviderRoute(
+        service_name="openrouter",
+        provider_name="openrouter",
+        display_name="OpenRouter",
+        models=("deepseek-text", "qwen-vision"),
+        completion_kwargs={},
+    )
+    service = _service(
+        order=("openrouter",),
+        profiles={"openrouter": route},
+        runner=runner,
+        text_only_patterns=("deepseek-*",),
+    )
+
+    response = asyncio.run(service.infer(_context(image_messages)))
+
+    assert response.text == "ok"
+    assert calls == [("qwen-vision", image_messages)]
+
+
 def test_provider_circuit_opens_after_three_failures_and_resets_on_success():
     circuit = ProviderCircuit(
         failure_threshold=3, window_seconds=300, cooldown_seconds=1800

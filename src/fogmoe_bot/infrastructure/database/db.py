@@ -10,12 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 from sqlalchemy.sql.elements import TextClause
 
 from fogmoe_bot.application.observability.telemetry import SpanScope, Telemetry
+from fogmoe_bot.config import BotDatabaseSettings
 from fogmoe_bot.domain.observability.signals import SpanKind
-from fogmoe_bot.infrastructure import config
 
 _ENGINE: AsyncEngine | None = None
 _ENGINE_OWNER_LOOP: asyncio.AbstractEventLoop | None = None
 _TELEMETRY: Telemetry | None = None
+_DATABASE_SETTINGS: BotDatabaseSettings | None = None
+"""@brief 由组合根注入的数据库设置 / Database settings injected by the composition root."""
 """@brief 数据库 client span recorder / Database-client span recorder."""
 _INSTRUMENTED_ENGINE_ID: int | None = None
 """@brief 已安装事件 listener 的 sync engine identity / Identity of the instrumented synchronous engine."""
@@ -42,6 +44,21 @@ def configure_observability(telemetry: Telemetry) -> None:
         _instrument_engine(_ENGINE)
 
 
+def configure_database(settings: BotDatabaseSettings) -> None:
+    """@brief 注入进程唯一数据库设置 / Inject process-wide database settings.
+
+    @param settings Bot 已验证的数据库设置 / Validated Bot database settings.
+    @return None / None.
+    @raise RuntimeError 引擎已创建后试图切换配置时抛出 /
+        Raised when attempting to replace settings after engine creation.
+    """
+
+    global _DATABASE_SETTINGS
+    if _ENGINE is not None and _DATABASE_SETTINGS != settings:
+        raise RuntimeError("Database settings cannot change after engine creation")
+    _DATABASE_SETTINGS = settings
+
+
 def _quote_identifier(identifier: str) -> str:
     """@brief 引用 PostgreSQL 标识符 / Quote a PostgreSQL identifier.
 
@@ -52,30 +69,43 @@ def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-def _search_path() -> str:
+def _search_path(settings: BotDatabaseSettings) -> str:
     """@brief 构造 PostgreSQL search_path / Build PostgreSQL search_path.
 
     @return 逗号分隔的 schema 搜索路径 / Comma-separated schema search path.
     """
 
     schemas = [
-        item.strip() for item in config.DB_SEARCH_PATH.split(",") if item.strip()
+        item.strip() for item in settings.application.search_path if item.strip()
     ]
     return ", ".join(_quote_identifier(schema) for schema in schemas)
 
 
-def _connect_args() -> dict[str, Any]:
+def _connect_args(settings: BotDatabaseSettings) -> dict[str, Any]:
     """@brief 构造 PostgreSQL 连接参数 / Build PostgreSQL connection args.
 
     @return SQLAlchemy connect_args / SQLAlchemy connect_args.
     """
 
     return {
-        "timeout": config.DB_CONNECT_TIMEOUT,
+        "timeout": settings.application.connect_timeout_seconds,
         "server_settings": {
-            "search_path": _search_path(),
+            "search_path": _search_path(settings),
         },
     }
+
+
+def _configured_database() -> BotDatabaseSettings:
+    """@brief 返回已注入数据库设置 / Return injected database settings.
+
+    @return 组合根已验证的数据库设置 / Database settings validated by the composition root.
+    @raise RuntimeError 组合根尚未配置数据库时抛出 /
+        Raised when the composition root has not configured the database.
+    """
+
+    if _DATABASE_SETTINGS is None:
+        raise RuntimeError("Database is not configured; call configure_database first")
+    return _DATABASE_SETTINGS
 
 
 def get_engine() -> AsyncEngine:
@@ -90,6 +120,7 @@ def get_engine() -> AsyncEngine:
 
     global _ENGINE, _ENGINE_OWNER_LOOP
 
+    settings = _configured_database()
     loop = asyncio.get_running_loop()
     if _ENGINE is not None:
         if _ENGINE_OWNER_LOOP is not loop:
@@ -97,12 +128,12 @@ def get_engine() -> AsyncEngine:
         return _ENGINE
 
     _ENGINE = create_async_engine(
-        config.SQLALCHEMY_DATABASE_URI,
+        settings.sqlalchemy_url(),
         pool_pre_ping=True,
-        pool_recycle=config.DB_POOL_RECYCLE,
-        pool_size=config.DB_POOL_SIZE,
-        max_overflow=config.DB_MAX_OVERFLOW,
-        connect_args=_connect_args(),
+        pool_recycle=settings.application.pool_recycle_seconds,
+        pool_size=settings.application.pool_size,
+        max_overflow=settings.application.max_overflow,
+        connect_args=_connect_args(settings),
     )
     _instrument_engine(_ENGINE)
     _ENGINE_OWNER_LOOP = loop

@@ -17,7 +17,8 @@ from fogmoe_dashboard.application.queries import (
     SpansQuery,
     execute_query,
 )
-from fogmoe_dashboard.config import service_database_url
+from fogmoe_dashboard.api import DashboardClient
+from fogmoe_dashboard.config import read_dashboard_settings
 from fogmoe_dashboard.domain.models import (
     Overview,
     PipelineStage,
@@ -26,6 +27,7 @@ from fogmoe_dashboard.domain.models import (
     SpanStats,
     TimeWindow,
 )
+from fogmoe_dashboard.infrastructure.postgres import PostgresDashboardRepository
 from fogmoe_dashboard.presentation.cli import build_parser
 from fogmoe_dashboard.presentation.duration import parse_duration
 from fogmoe_dashboard.presentation.render import print_json, render, to_jsonable
@@ -100,29 +102,58 @@ def test_time_window_normalizes_utc_and_rejects_unbounded_queries() -> None:
         TimeWindow(now - timedelta(days=91), now)
 
 
-def test_dashboard_reads_its_own_service_config_with_pgpass_escaping(
+def test_dashboard_reads_its_jsonc_projection_and_builds_typed_client(
     tmp_path: Path,
 ) -> None:
-    """@brief Dashboard 配置不依赖 dbctl package / Dashboard configuration does not depend on the dbctl package."""
+    """@brief Dashboard 从根 JSONC 读取自身投影 / Dashboard reads its own projection from root JSONC.
 
-    (tmp_path / "pg_service.conf").write_text(
-        "[analytics]\nhost=localhost\nport=5432\ndbname=fogmoe\nuser=reader\n",
+    @param tmp_path pytest 临时目录 / pytest temporary directory.
+    @return None / None.
+    @note 配置边界只接受显式根配置文件路径。/
+        The configuration boundary accepts only an explicit root-configuration path.
+    """
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        """
+        {
+          // Dashboard 只消费这些语义字段。
+          "schema_version": 1,
+          "database": {
+            "endpoint": {
+              "host": "analytics.internal",
+              "port": 5544,
+              "name": "fogmoe-analytics"
+            },
+            "reporting": {
+              "username": "read+only",
+              "password": "p:ass\\\\word"
+            }
+          },
+          "observability": {
+            "dashboard": {"pool_size": 7, "command_timeout_seconds": 9.5}
+          }
+        }
+        """,
         encoding="utf-8",
     )
-    pgpass = tmp_path / "pgpass"
-    pgpass.write_text(
-        r"localhost:5432:fogmoe:reader:p\:ass\\word" + "\n",
-        encoding="utf-8",
-    )
-    pgpass.chmod(0o600)
 
-    assert service_database_url(tmp_path, "analytics") == (
-        "postgresql+asyncpg://reader:p%3Aass%5Cword@localhost:5432/fogmoe"
-    )
+    settings = read_dashboard_settings(config_path)
+    client = DashboardClient.from_database_settings(settings=settings)
 
-    pgpass.chmod(0o644)
-    with pytest.raises(RuntimeError, match="0600"):
-        service_database_url(tmp_path, "analytics")
+    assert settings.endpoint.host == "analytics.internal"
+    assert settings.query.pool_size == 7
+    assert settings.database_url() == (
+        "postgresql+asyncpg://read%2Bonly:p%3Aass%5Cword@"
+        "analytics.internal:5544/fogmoe-analytics"
+    )
+    assert isinstance(client._repository, PostgresDashboardRepository)
+    assert client._repository._dsn == (
+        "postgresql://read%2Bonly:p%3Aass%5Cword@"
+        "analytics.internal:5544/fogmoe-analytics"
+    )
+    assert client._repository._pool_size == 7
+    assert client._repository._command_timeout == 9.5
 
 
 def test_dashboard_enforces_limits_filters_and_trace_identity() -> None:
@@ -225,8 +256,11 @@ def test_dashboard_layer_dependencies_point_inward() -> None:
     assert violations == []
 
 
-def test_dashboard_cli_registers_all_builtin_views_and_parses_duration() -> None:
-    """@brief CLI 暴露完整内建视图 / The CLI exposes every built-in view."""
+def test_dashboard_cli_registers_views_and_root_config_argument() -> None:
+    """@brief CLI 暴露完整内建视图与根配置参数 / CLI exposes built-in views and root-config argument.
+
+    @return None / None.
+    """
 
     parser = build_parser()
     views = {
@@ -249,6 +283,14 @@ def test_dashboard_cli_registers_all_builtin_views_and_parses_duration() -> None
         parser.parse_args([view, *(["0" * 32] if view == "trace" else [])]).view
         for view in views
     } == views
+    arguments = parser.parse_args(["--config", "operator.json", "overview"])
+    assert arguments.config == Path("operator.json")
+    assert not {
+        "database_url",
+        "config_dir",
+        "service",
+        "timeout",
+    }.intersection(vars(arguments))
     assert parse_duration("15m") == timedelta(minutes=15)
     assert parse_duration("1.5h") == timedelta(minutes=90)
     with pytest.raises(ValueError):
@@ -314,7 +356,9 @@ def _retrieval() -> RetrievalSnapshot:
     return RetrievalSnapshot(
         operations=(
             SpanStats("retrieval.recall", "internal", 4, 0.1, 0, 4, 8, 12, 6, 14),
-            SpanStats("memory.working.retrieve", "internal", 4, 0.1, 0, 5, 9, 13, 7, 15),
+            SpanStats(
+                "memory.working.retrieve", "internal", 4, 0.1, 0, 5, 9, 13, 7, 15
+            ),
         ),
         queues=(
             RetrievalQueueStats(

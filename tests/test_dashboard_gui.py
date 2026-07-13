@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -25,6 +26,8 @@ from fogmoe_dashboard.domain.models import (
     SpanStats,
     TimeWindow,
 )
+from fogmoe_dashboard.infrastructure.postgres import PostgresDashboardRepository
+from fogmoe_dashboard.presentation.gui.app import _client_factory, build_parser
 from fogmoe_dashboard.presentation.gui.pages import OverviewPage, RetrievalPage
 from fogmoe_dashboard.presentation.gui.table import ObjectTableModel, TableColumn
 from fogmoe_dashboard.presentation.gui.window import DashboardWindow
@@ -209,6 +212,49 @@ def test_worker_coalesces_queued_refresh_generations() -> None:
     assert repository.overview_calls == 1
     assert [result.request.generation for result in results] == [2]
     assert repository.closed
+
+
+def test_gui_factory_reads_root_jsonc_configuration(
+    tmp_path: Path,
+) -> None:
+    """@brief GUI 工厂从根 JSONC 构造只读客户端 / GUI factory builds a read-only client from root JSONC.
+
+    @param tmp_path pytest 临时目录 / pytest temporary directory.
+    @return None / None.
+    """
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        """
+        {
+          /* GUI 与 CLI 共用同一用户配置文件。 */
+          "schema_version": 1,
+          "database": {
+            "endpoint": {"host": "db.example", "port": 6432, "name": "fogmoe"},
+            "reporting": {"username": "dashboard", "password": "secret"}
+          },
+          "observability": {
+            "dashboard": {"pool_size": 3, "command_timeout_seconds": 4.5}
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    arguments = build_parser().parse_args(["--config", str(config_path)])
+    factory = _client_factory(arguments)
+    client = factory()
+
+    assert not {"database_url", "config_dir", "service", "timeout"}.intersection(
+        vars(arguments)
+    )
+    assert isinstance(client._repository, PostgresDashboardRepository)
+    assert (
+        client._repository._dsn
+        == "postgresql://dashboard:secret@db.example:6432/fogmoe"
+    )
+    assert client._repository._pool_size == 3
+    assert client._repository._command_timeout == 4.5
 
 
 def _overview(window: TimeWindow) -> Overview:

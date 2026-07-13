@@ -13,6 +13,7 @@ from fogmoe_bot.application.observability.telemetry import (
     TelemetryBuffer,
     TelemetryRuntime,
 )
+from fogmoe_bot.config import BotDatabaseSettings, ObservabilitySettings
 from fogmoe_bot.domain.observability.signals import (
     LogSignal,
     SpanSignal,
@@ -24,6 +25,25 @@ from fogmoe_bot.infrastructure.observability.logging import (
     ContextQueueHandler,
     TelemetryLogHandler,
 )
+from fogmoe_bot.infrastructure.observability.composition import build_observability
+
+
+def test_observability_composition_uses_explicit_typed_settings() -> None:
+    """@brief 装配只使用显式强类型设置 / Composition uses only explicit typed settings."""
+
+    settings = ObservabilitySettings(
+        enabled=False,
+        environment="test-explicit-settings",
+        queue_capacity=7,
+    )
+
+    assembly = build_observability(
+        settings=settings,
+        database=BotDatabaseSettings(),
+    )
+
+    assert assembly.resource.deployment_environment == "test-explicit-settings"
+    assert assembly.telemetry.snapshot().capacity == 7
 
 
 def test_traceparent_round_trip_and_child_preserve_trace_identity() -> None:

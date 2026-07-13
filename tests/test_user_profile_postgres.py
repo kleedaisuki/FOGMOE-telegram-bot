@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -21,29 +20,21 @@ from fogmoe_bot.domain.user_profile.models import (
     UpsertProfileClaim,
     apply_profile_patch,
 )
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
-from fogmoe_bot.infrastructure.database.user_profile.store import PostgresUserProfileStore
-from fogmoe_dbctl.postgres import read_service, service_sqlalchemy_url
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-"""@brief 项目根目录 / Project root."""
+from fogmoe_bot.infrastructure.database.user_profile.store import (
+    PostgresUserProfileStore,
+)
+from postgres_test_support import configure_bot_database
 
 
 def _postgres_url() -> str:
-    """@brief 读取显式隔离 DSN 或本地 automation service / Read an isolated DSN or local automation service."""
+    """@brief 读取显式隔离 DSN / Read an explicit isolated DSN."""
 
     explicit = os.environ.get("FOGMOE_TEST_DATABASE_URL")
     if explicit:
         return explicit
-    if os.environ.get("FOGMOE_TEST_POSTGRES") != "1":
-        pytest.skip("set FOGMOE_TEST_POSTGRES=1 to run the real PostgreSQL contract")
-    config_dir = PROJECT_ROOT / "var/psql"
-    if not (config_dir / "pg_service.conf").is_file():
-        pytest.skip("local PostgreSQL service configuration is unavailable")
-    return service_sqlalchemy_url(read_service(config_dir, "fogmoe_automation"))
+    pytest.skip("set FOGMOE_TEST_DATABASE_URL to run the real PostgreSQL contract")
 
 
 def test_projection_job_claim_and_revision_converge_under_concurrency(
@@ -54,8 +45,8 @@ def test_projection_job_claim_and_revision_converge_under_concurrency(
     async def scenario() -> None:
         """@brief 执行真实 PostgreSQL 状态机 / Execute the real PostgreSQL state machine."""
 
-        monkeypatch.setattr(config, "SQLALCHEMY_DATABASE_URI", _postgres_url())
         await db.dispose_current_engine()
+        configure_bot_database(_postgres_url())
         suffix = uuid4().hex
         user_id = 7_000_000_000_000_000_000 + int(suffix[:12], 16)
         turn_id = uuid4()

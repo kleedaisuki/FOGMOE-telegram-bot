@@ -1,28 +1,45 @@
+from __future__ import annotations
+
+import inspect
 from pathlib import Path
+
+import pytest
 
 from fogmoe_dbctl import cli
 from fogmoe_dbctl.commands import bootstrap, export_csv, migrate, shell
-from fogmoe_dbctl.postgres import (
-    ServiceConfig,
-    escape_pgpass_field,
-    find_pgpass_password,
-    service_sqlalchemy_url,
-    split_pgpass_line,
-)
+from fogmoe_dbctl.config import DbctlSettings
+from fogmoe_dbctl.postgres import sqlalchemy_url
 
 
-def test_cli_registers_commands_and_compatibility_aliases():
-    """@brief 验证统一 CLI 的命令与兼容别名 / Verify commands and compatibility aliases."""
+def _settings() -> DbctlSettings:
+    """@brief 构造测试用 dbctl 配置 / Build dbctl settings for tests.
+
+    @return 含显式应用与维护凭据的配置 / Settings with explicit application and maintenance credentials.
+    """
+
+    return DbctlSettings.model_validate(
+        {
+            "endpoint": {"host": "db.example.test", "port": 5544, "name": "fogmoe"},
+            "application": {"username": "fogmoe-app", "password": "app-secret"},
+            "maintenance": {
+                "username": "fogmoe-maintenance",
+                "password": "maintenance-secret",
+                "migration_schema": "infra",
+            },
+            "bootstrap": {"system_user": "postgres"},
+            "administrator": {"user_id": 42},
+        }
+    )
+
+
+def test_cli_registers_commands() -> None:
+    """@brief 验证统一 CLI 的规范命令 / Verify unified CLI canonical commands."""
 
     parser = cli.build_parser()
 
     assert parser.parse_args(["bootstrap"]).handler is bootstrap.execute
-    assert parser.parse_args(["bootstrap-postgres"]).handler is bootstrap.execute
     assert parser.parse_args(["migrate"]).handler is migrate.execute
-    assert parser.parse_args(["upgrade"]).handler is migrate.execute
-    assert parser.parse_args(["run-migrations-as-role"]).handler is migrate.execute
     assert parser.parse_args(["shell"]).handler is shell.execute
-    assert parser.parse_args(["psql"]).handler is shell.execute
     assert (
         parser.parse_args(
             [
@@ -35,58 +52,63 @@ def test_cli_registers_commands_and_compatibility_aliases():
         ).handler
         is export_csv.execute
     )
-    assert (
-        parser.parse_args(
-            [
-                "export",
-                "--table",
-                "conversation.chat_records",
-                "--output",
-                "records.csv",
-            ]
-        ).handler
-        is export_csv.execute
-    )
 
 
-def test_cli_without_command_prints_help(capsys):
-    """@brief 验证空命令打印帮助 / Verify that an empty command prints help."""
+def test_cli_reads_root_configuration_once_and_injects_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief 根组合器只读取一次配置并注入处理函数 / The composition root reads configuration once and injects it into the handler."""
+
+    settings = _settings()
+    calls: list[object] = []
+
+    def fake_reader(path: Path) -> DbctlSettings:
+        calls.append(path)
+        return settings
+
+    def fake_handler(*_args: object, **kwargs: object) -> None:
+        calls.append(kwargs["settings"])
+
+    monkeypatch.setattr(cli, "read_dbctl_settings", fake_reader)
+    monkeypatch.setattr(bootstrap, "execute", fake_handler)
+    config_path = tmp_path / "config.json"
+
+    cli.main(["--config", str(config_path), "bootstrap"])
+
+    assert calls == [config_path, settings]
+
+
+def test_commands_require_settings_injected_by_the_cli_root() -> None:
+    """@brief 命令只接受根入口注入的配置 / Commands accept only settings injected by the CLI root.
+
+    @return None / None.
+    @note 这条边界防止子命令重新读取配置，从而产生多份不一致的配置快照。/
+        This boundary prevents subcommands from re-reading configuration and creating inconsistent snapshots.
+    """
+
+    for command_module in (bootstrap, migrate, shell, export_csv):
+        settings_parameter = inspect.signature(command_module.execute).parameters[
+            "settings"
+        ]
+        assert settings_parameter.default is inspect.Parameter.empty
+        assert not hasattr(command_module, "read_dbctl_settings")
+
+
+def test_cli_without_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
+    """@brief 验证空命令打印帮助且不读取配置 / Verify an empty command prints help without reading configuration."""
 
     cli.main([])
 
     output = capsys.readouterr().out
-    assert "bootstrap-postgres" in output
+    assert "bootstrap" in output
     assert "migrate" in output
 
 
-def test_pgpass_round_trip_and_first_match(tmp_path: Path):
-    """@brief 验证共享 pgpass 解析 / Verify shared pgpass parsing."""
+def test_sqlalchemy_url_uses_escaping() -> None:
+    """@brief 验证 URL 原语正确转义 / Verify the URL primitive escapes correctly."""
 
-    password = r"secret:with\\escapes"
-    line = ":".join(
-        escape_pgpass_field(value)
-        for value in ("localhost", "5432", "fogmoe", "fogmoe-bot", password)
-    )
-    pgpass = tmp_path / "pgpass"
-    pgpass.write_text(f"{line}\n*:*:*:*:fallback\n", encoding="utf-8")
-
-    assert split_pgpass_line(line)[4] == password
-    assert (
-        find_pgpass_password(
-            pgpass,
-            host="localhost",
-            port=5432,
-            database="fogmoe",
-            user="fogmoe-bot",
-        )
-        == password
-    )
-
-
-def test_service_url_uses_sqlalchemy_escaping():
-    """@brief 验证 URL 由共享基础层正确转义 / Verify shared URL escaping."""
-
-    service = ServiceConfig(
+    url = sqlalchemy_url(
         host="localhost",
         port=5432,
         database="fog/moe",
@@ -94,56 +116,51 @@ def test_service_url_uses_sqlalchemy_escaping():
         password="p@ss/word",
     )
 
-    assert service_sqlalchemy_url(service) == (
+    assert url == (
         "postgresql+asyncpg://fogmoe%40bot:p%40ss%2Fword@localhost:5432/fog/moe"
     )
 
 
-def test_migrate_calls_alembic_programmatically(monkeypatch):
-    """@brief 验证迁移不再启动 Alembic 子进程 / Verify direct Alembic invocation."""
+def test_migrate_injects_all_migration_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief 验证迁移显式注入 URL、schema 与管理员 ID / Verify migrations receive an explicit URL, schema, and administrator ID."""
 
-    calls = []
-    service = ServiceConfig("localhost", 5432, "fogmoe", "automation", "secret")
+    calls: list[tuple[object, str]] = []
     monkeypatch.setattr(
         migrate.command,
         "upgrade",
         lambda config, revision: calls.append((config, revision)),
     )
 
-    migrate.run_alembic(service=service, revision="head", dry_run=False)
+    migrate.run_alembic(settings=_settings(), revision="head", dry_run=False)
 
     config, revision = calls[0]
     assert revision == "head"
     assert Path(config.get_main_option("script_location")).is_absolute()
-    assert config.attributes["database_url"].startswith(
-        "postgresql+asyncpg://automation:secret@localhost:5432/fogmoe"
+    assert config.attributes["database_url"] == (
+        "postgresql+asyncpg://fogmoe-maintenance:maintenance-secret@"
+        "db.example.test:5544/fogmoe"
     )
+    assert config.attributes["migration_schema"] == "infra"
+    assert config.attributes["admin_user_id"] == 42
 
 
-def test_bootstrap_dry_run_redacts_passwords(tmp_path: Path, capsys):
-    """@brief 验证预演不会泄露密码 / Verify dry-run password redaction."""
+def test_bootstrap_dry_run_redacts_passwords(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """@brief 验证预演不会泄露配置密码 / Verify a dry run does not expose configured passwords."""
 
-    cli.main(
-        [
-            "bootstrap",
-            "--config-dir",
-            str(tmp_path),
-            "--bot-password",
-            "bot-secret",
-            "--automation-password",
-            "automation-secret",
-            "--dry-run",
-        ]
-    )
+    args = cli.build_parser().parse_args(["bootstrap", "--dry-run"])
+    args.handler(args, settings=_settings())
 
     output = capsys.readouterr().out
-    assert "bot-secret" not in output
-    assert "automation-secret" not in output
+    assert "app-secret" not in output
+    assert "maintenance-secret" not in output
     assert "***" in output
-    assert not (tmp_path / "pgpass").exists()
 
 
-def test_export_csv_accepts_only_schema_qualified_identifiers():
+def test_export_csv_accepts_only_schema_qualified_identifiers() -> None:
     """@brief 导出命令拒绝任意 SQL / Export command rejects arbitrary SQL."""
 
     assert export_csv.parse_table_name("conversation.chat_records") == (
@@ -160,28 +177,35 @@ def test_export_csv_accepts_only_schema_qualified_identifiers():
         "conversation.chat-records",
         "conversation.chat_records;DROP TABLE users",
     ):
-        try:
+        with pytest.raises(ValueError):
             export_csv.parse_table_name(invalid_name)
-        except ValueError:
-            continue
-        raise AssertionError(f"expected invalid table name to fail: {invalid_name}")
 
 
-def test_export_csv_writes_atomically_through_psql_service(tmp_path: Path, monkeypatch):
-    """@brief CSV 经 service 原子写入，失败不会毁坏旧文件 / CSV writes atomically via service."""
+def test_export_csv_writes_atomically_through_explicit_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief CSV 通过显式子进程环境原子写入 / CSV writes atomically through an explicit child environment."""
 
     output = tmp_path / "records.csv"
     output.write_text("old\n", encoding="utf-8")
-    calls = []
+    calls: list[tuple[list[str], dict[str, str], bool]] = []
 
-    def fake_run(command, *, stdout, env, check):
+    def fake_run(
+        command: list[str],
+        *,
+        stdout: object,
+        env: dict[str, str],
+        check: bool,
+    ) -> None:
         calls.append((command, env, check))
-        stdout.write(b"id\n1\n")
+        stdout.write(b"id\n1\n")  # type: ignore[attr-defined]
 
     monkeypatch.setattr(export_csv.subprocess, "run", fake_run)
+    monkeypatch.setenv("PGHOST", "ambient-host")
+    monkeypatch.setenv("PGOPTIONS", "--search_path=wrong")
     export_csv.export_table(
-        config_dir=tmp_path / "psql",
-        service_name="fogmoe_automation",
+        settings=_settings(),
         schema="conversation",
         table="chat_records",
         output_path=output,
@@ -191,48 +215,54 @@ def test_export_csv_writes_atomically_through_psql_service(tmp_path: Path, monke
     assert output.read_text(encoding="utf-8") == "id\n1\n"
     command, environment, check = calls[0]
     assert command[0] == "psql"
-    assert "service=fogmoe_automation" in command
-    assert environment["PGSERVICEFILE"] == str(tmp_path / "psql" / "pg_service.conf")
-    assert environment["PGPASSFILE"] == str(tmp_path / "psql" / "pgpass")
+    assert "--dbname" not in command
+    assert "service=fogmoe_automation" not in command
+    assert environment["PGHOST"] == "db.example.test"
+    assert environment["PGPORT"] == "5544"
+    assert environment["PGDATABASE"] == "fogmoe"
+    assert environment["PGUSER"] == "fogmoe-maintenance"
+    assert environment["PGPASSWORD"] == "maintenance-secret"
+    assert "PGOPTIONS" not in environment
     assert check is True
 
 
-def test_shell_uses_automation_service_without_exposing_password(
-    tmp_path: Path,
-    monkeypatch,
-):
-    """@brief shell 通过 service/pgpass 前台启动 / The shell starts through service/pgpass in the foreground."""
+def test_shell_uses_explicit_maintenance_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief shell 使用显式维护连接且密码不进入 argv / Shell uses the explicit maintenance connection and keeps its password out of argv."""
 
-    calls = []
+    calls: list[tuple[list[str], dict[str, str], bool]] = []
 
     class Result:
         """@brief 成功 subprocess 结果 / Successful subprocess result."""
 
         returncode = 0
 
-    def fake_run(command, *, env, check):
+    def fake_run(
+        command: list[str],
+        *,
+        env: dict[str, str],
+        check: bool,
+    ) -> Result:
         calls.append((command, env, check))
         return Result()
 
     monkeypatch.setattr(shell.subprocess, "run", fake_run)
-    monkeypatch.setenv("PGPASSWORD", "must-not-leak")
-    args = cli.build_parser().parse_args(
-        ["shell", "--config-dir", str(tmp_path), "--no-psqlrc"]
-    )
-    args.handler(args)
+    args = cli.build_parser().parse_args(["shell", "--no-psqlrc"])
+    args.handler(args, settings=_settings())
 
     command, environment, check = calls[0]
-    assert command[:3] == ["psql", "--dbname", "fogmoe"]
-    assert "fogmoe_automation" not in command
-    assert environment["PGSERVICE"] == "fogmoe_automation"
-    assert environment["PGSERVICEFILE"] == str(tmp_path / "pg_service.conf")
-    assert environment["PGPASSFILE"] == str(tmp_path / "pgpass")
-    assert "PGPASSWORD" not in environment
+    assert command[0] == "psql"
+    assert "--dbname" not in command
+    assert "maintenance-secret" not in command
+    assert environment["PGUSER"] == "fogmoe-maintenance"
+    assert environment["PGPASSWORD"] == "maintenance-secret"
+    assert environment["PGAPPNAME"] == "fogmoe-dbctl-shell"
     assert check is False
 
 
-def test_shell_propagates_psql_exit_status(tmp_path: Path, monkeypatch) -> None:
-    """@brief shell 保留 psql 退出状态 / The shell preserves the psql exit status."""
+def test_shell_propagates_psql_exit_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """@brief shell 保留 psql 退出状态 / Shell preserves the psql exit status."""
 
     class Result:
         """@brief 失败 subprocess 结果 / Failed subprocess result."""
@@ -244,11 +274,8 @@ def test_shell_propagates_psql_exit_status(tmp_path: Path, monkeypatch) -> None:
         "run",
         lambda command, *, env, check: Result(),
     )
-    args = cli.build_parser().parse_args(["shell", "--config-dir", str(tmp_path)])
+    args = cli.build_parser().parse_args(["shell"])
 
-    try:
-        args.handler(args)
-    except SystemExit as error:
-        assert error.code == 7
-        return
-    raise AssertionError("expected psql exit status to propagate")
+    with pytest.raises(SystemExit) as error:
+        args.handler(args, settings=_settings())
+    assert error.value.code == 7

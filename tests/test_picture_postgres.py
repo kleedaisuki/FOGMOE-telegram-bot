@@ -35,6 +35,10 @@ from fogmoe_bot.infrastructure.database.media.picture import (
 )
 
 
+ADMINISTRATOR_ID = 1002288404
+"""@brief 测试管理员 Telegram 用户 ID / Test administrator Telegram user ID."""
+
+
 def _preview_commit(
     offer: HdOffer,
     *,
@@ -84,7 +88,7 @@ def test_picture_charge_claim_and_reward_postings_are_atomic() -> None:
         second_clicker = UserId(int(requester) + 2)
         offer_id = ArtifactId(uuid4().hex)
         now = datetime.now(UTC)
-        repository = PostgresPictureRepository()
+        repository = PostgresPictureRepository(ADMINISTRATOR_ID)
         posting_keys = (f"media:preview:{offer_id}", f"media:hd:{offer_id}")
         try:
             for user_id in (requester, first_clicker, second_clicker):
@@ -135,7 +139,7 @@ def test_picture_charge_claim_and_reward_postings_are_atomic() -> None:
             assert sorted(claim.code for claim in claims) == ["busy", "claimed"]
             charged = next(claim for claim in claims if claim.code == "claimed")
             assert charged.offer is not None
-            recovered = await PostgresPictureRepository().claim_hd(
+            recovered = await PostgresPictureRepository(ADMINISTRATOR_ID).claim_hd(
                 offer_id,
                 user_id=requester,
                 cost=10,
@@ -212,7 +216,7 @@ def test_preview_pending_recovers_from_callback_evidence_or_stale_refund() -> No
         visible_offer_id = ArtifactId(uuid4().hex)
         stale_offer_id = ArtifactId(uuid4().hex)
         now = datetime.now(UTC)
-        repository = PostgresPictureRepository()
+        repository = PostgresPictureRepository(ADMINISTRATOR_ID)
         accounts = PostgresMediaAccountProfiles()
         posting_key = f"media:preview:{visible_offer_id}"
 
@@ -365,7 +369,7 @@ def test_picture_receipt_serializes_concurrency_and_rolls_back_outbox_failure() 
         now = datetime.now(UTC)
         key = f"media-concurrent:{uuid4().hex}"
         fingerprint = "a" * 64
-        repository = PostgresPictureRepository()
+        repository = PostgresPictureRepository(ADMINISTRATOR_ID)
         accounts = PostgresMediaAccountProfiles()
 
         def offer(offer_id: ArtifactId, requester: UserId) -> HdOffer:
@@ -477,7 +481,7 @@ def test_picture_receipt_serializes_concurrency_and_rolls_back_outbox_failure() 
 
             with pytest.raises(RuntimeError, match="injected outbox failure"):
                 await PostgresPictureRepository(
-                    outbox=FailingOutbox()
+                    ADMINISTRATOR_ID, outbox=FailingOutbox()
                 ).charge_preview_and_store_offer(
                     offer=failed_offer,
                     cost=5,

@@ -6,7 +6,6 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import os
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -35,7 +34,6 @@ from fogmoe_bot.domain.conversation.outbox import (
     SEND_TELEGRAM_MESSAGE,
     OutboundDraft,
 )
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.assistant_billing import (
@@ -59,15 +57,14 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
 from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
     PostgresTurnRepository,
 )
-from fogmoe_dbctl.postgres import read_service, service_sqlalchemy_url
+from postgres_test_support import configure_bot_database
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-"""@brief 项目根目录 / Project root."""
+ADMINISTRATOR_ID = 1002288404
+"""@brief 测试管理员 Telegram 用户 ID / Test administrator Telegram user ID."""
 
 
 def _postgres_url() -> str:
-    """@brief 读取显式隔离 DSN 或本地测试 service / Read an explicit isolated DSN or the local test service.
+    """@brief 读取显式隔离 DSN / Read an explicit isolated DSN.
 
     @return async SQLAlchemy URL / Async SQLAlchemy URL.
     """
@@ -75,12 +72,7 @@ def _postgres_url() -> str:
     explicit = os.environ.get("FOGMOE_TEST_DATABASE_URL")
     if explicit:
         return explicit
-    if os.environ.get("FOGMOE_TEST_POSTGRES") != "1":
-        pytest.skip("set FOGMOE_TEST_POSTGRES=1 to run the real PostgreSQL contract")
-    config_dir = PROJECT_ROOT / "var/psql"
-    if not (config_dir / "pg_service.conf").is_file():
-        pytest.skip("local PostgreSQL service configuration is unavailable")
-    return service_sqlalchemy_url(read_service(config_dir, "fogmoe_automation"))
+    pytest.skip("set FOGMOE_TEST_DATABASE_URL to run the real PostgreSQL contract")
 
 
 def _request(
@@ -152,19 +144,25 @@ async def _create_account_and_inbound(request: AssistantTurnRequest) -> None:
 
 async def _accept(
     turns: PostgresTurnRepository,
+    billing: PostgresAssistantBilling,
     request: AssistantTurnRequest,
     *,
     accepted_at: datetime,
 ) -> TurnId:
     """@brief 接受一次 Turn 并返回 identity / Accept one Turn and return its identity.
 
-    @param repository 真实 workflow adapter / Real workflow adapter.
+    @param turns 真实 workflow adapter / Real workflow adapter.
+    @param billing 共享的 Assistant 计费端口 / Shared Assistant billing port.
     @param request acceptance 请求 / Acceptance request.
     @param accepted_at 接受时刻 / Acceptance time.
     @return 新 Turn ID / New Turn ID.
     """
 
-    result = await PostgresAssistantTurnAcceptanceUoW(turns).accept(
+    result = await PostgresAssistantTurnAcceptanceUoW(
+        turns,
+        billing,
+        administrator_id=ADMINISTRATOR_ID,
+    ).accept(
         request,
         accepted_at=accepted_at,
     )
@@ -312,14 +310,14 @@ def test_real_postgres_reserve_settle_release_cancel_and_reset(
     async def scenario() -> None:
         """@brief 执行成功、失败、取消与 reset 场景 / Execute success, failure, cancellation, and reset scenarios."""
 
-        monkeypatch.setattr(config, "SQLALCHEMY_DATABASE_URI", _postgres_url())
         await db.dispose_current_engine()
+        configure_bot_database(_postgres_url())
         discriminator = int(uuid4().hex[:11], 16)
         base_user = 7_000_000_000_000_000_000 + discriminator * 10
         base_update = 4_000_000_000_000_000_000 + discriminator * 10
         user_ids = [base_user + offset for offset in range(4)]
         now = datetime.now(UTC)
-        billing = PostgresAssistantBilling()
+        billing = PostgresAssistantBilling(ADMINISTRATOR_ID)
         inbox = PostgresInboxRepository()
         outbox = PostgresOutboxRepository()
         turns = PostgresTurnRepository(billing=billing)
@@ -334,7 +332,12 @@ def test_real_postgres_reserve_settle_release_cancel_and_reset(
                 cost=4,
             )
             await _create_account_and_inbound(success_request)
-            success_turn = await _accept(turns, success_request, accepted_at=now)
+            success_turn = await _accept(
+                turns,
+                billing,
+                success_request,
+                accepted_at=now,
+            )
             assert await _account_and_billing(user_ids[0], success_turn) == (
                 (0, 3),
                 (4, 2, 2, Decimal("0.80"), "reserved"),
@@ -412,7 +415,12 @@ def test_real_postgres_reserve_settle_release_cancel_and_reset(
                 cost=4,
             )
             await _create_account_and_inbound(failure_request)
-            failure_turn = await _accept(turns, failure_request, accepted_at=now)
+            failure_turn = await _accept(
+                turns,
+                billing,
+                failure_request,
+                accepted_at=now,
+            )
             failure_claims = await inference.claim_inference_activities(
                 now=now + timedelta(seconds=5),
                 limit=32,
@@ -447,7 +455,12 @@ def test_real_postgres_reserve_settle_release_cancel_and_reset(
                 cost=4,
             )
             await _create_account_and_inbound(cancel_request)
-            cancel_turn = await _accept(turns, cancel_request, accepted_at=now)
+            cancel_turn = await _accept(
+                turns,
+                billing,
+                cancel_request,
+                accepted_at=now,
+            )
             current = await turns.get_turn(cancel_turn)
             assert current is not None
             await turns.cancel_turn(
@@ -469,7 +482,12 @@ def test_real_postgres_reserve_settle_release_cancel_and_reset(
                 cost=4,
             )
             await _create_account_and_inbound(reset_request)
-            reset_turn = await _accept(turns, reset_request, accepted_at=now)
+            reset_turn = await _accept(
+                turns,
+                billing,
+                reset_request,
+                accepted_at=now,
+            )
             zero_request = _request(
                 user_id=user_ids[3],
                 update_id=base_update + 4,
@@ -486,6 +504,7 @@ def test_real_postgres_reserve_settle_release_cancel_and_reset(
             )
             zero_turn = await _accept(
                 turns,
+                billing,
                 zero_request,
                 accepted_at=now + timedelta(microseconds=1),
             )
@@ -500,7 +519,7 @@ def test_real_postgres_reserve_settle_release_cancel_and_reset(
                 )
             )
             reset_key = f"update:{reset_update_id.value}:billing-reset-confirmation"
-            reset_result = await PostgresConversationResetUoW().reset(
+            reset_result = await PostgresConversationResetUoW(billing).reset(
                 ResetConversation(
                     source=TurnSource.telegram(reset_update_id),
                     conversation_id=reset_request.conversation_id,
@@ -556,8 +575,8 @@ def test_real_postgres_concurrent_acceptance_cannot_overreserve(
     async def scenario() -> None:
         """@brief 并发执行两个不同 Update / Concurrently execute two distinct Updates."""
 
-        monkeypatch.setattr(config, "SQLALCHEMY_DATABASE_URI", _postgres_url())
         await db.dispose_current_engine()
+        configure_bot_database(_postgres_url())
         discriminator = int(uuid4().hex[:11], 16)
         user_id = 7_500_000_000_000_000_000 + discriminator
         base_update = 4_500_000_000_000_000_000 + discriminator * 2
@@ -567,7 +586,8 @@ def test_real_postgres_concurrent_acceptance_cannot_overreserve(
             _request(user_id=user_id, update_id=base_update + 1, now=now, cost=1),
         )
         inbox = PostgresInboxRepository()
-        turns = PostgresTurnRepository()
+        billing = PostgresAssistantBilling(ADMINISTRATOR_ID)
+        turns = PostgresTurnRepository(billing)
         try:
             async with db_connection.transaction() as connection:
                 await db_connection.execute(
@@ -586,7 +606,11 @@ def test_real_postgres_concurrent_acceptance_cannot_overreserve(
                         received_at=now,
                     )
                 )
-            acceptance = PostgresAssistantTurnAcceptanceUoW(turns)
+            acceptance = PostgresAssistantTurnAcceptanceUoW(
+                turns,
+                billing,
+                administrator_id=ADMINISTRATOR_ID,
+            )
             results = await asyncio.gather(
                 *(acceptance.accept(request, accepted_at=now) for request in requests)
             )

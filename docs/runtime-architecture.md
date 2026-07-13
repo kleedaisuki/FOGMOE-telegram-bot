@@ -85,7 +85,7 @@
 | `application.telegram.bot_conversation` | fan-out 23 | 单文件同时拥有批处理、计费、持久化、推理和投递 |
 | `application.assistant.prompt_job_handler` | fan-out 17 | 调度任务重建了一套对话执行路径 |
 | `infrastructure.database.connection` | fan-in 34 | 原始 SQL facade 成为事实上的全局总线 |
-| `infrastructure.config` | fan-in 29 | 全局配置读取替代依赖注入 |
+| ~~`infrastructure.config`~~ | 原 fan-in 29 | 已删除；配置现在由各可执行程序的组合根读取并显式注入 |
 | `application.telegram.command_cooldown` | fan-in 26 | 横切策略以全局函数渗入所有功能 |
 | `application.accounts.service` | fan-in 24 | sync/async facade、规则和 repository delegation 混合 |
 

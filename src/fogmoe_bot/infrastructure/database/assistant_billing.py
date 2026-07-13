@@ -17,7 +17,6 @@ from fogmoe_bot.domain.economy import (
     AssistantBillingStateError,
     AssistantBillingStatus,
 )
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
 
 
@@ -106,6 +105,20 @@ class AssistantBillingTransactions(Protocol):
 
 class PostgresAssistantBilling:
     """@brief 用行锁、CAS 与稳定 posting 实现 reserve→settle/release / Implement reserve-to-settle-or-release with row locks, CAS, and stable postings."""
+
+    def __init__(self, administrator_id: int) -> None:
+        """@brief 注入管理员身份以恢复账户套餐 / Inject the administrator identity for restoring account plans.
+
+        @param administrator_id 管理员 Telegram 用户 ID / Administrator Telegram user ID.
+        @return None / None.
+        @raise TypeError 管理员 ID 不是严格整数时抛出 /
+            Raised when the administrator ID is not a strict integer.
+        """
+
+        if isinstance(administrator_id, bool) or not isinstance(administrator_id, int):
+            raise TypeError("administrator_id must be an integer")
+        self._administrator_id = administrator_id
+        """@brief 用于套餐恢复的管理员 ID / Administrator ID used for plan restoration."""
 
     async def reserve(
         self,
@@ -283,7 +296,7 @@ class PostgresAssistantBilling:
             (
                 current.free_reserved,
                 current.paid_reserved,
-                config.ADMIN_USER_ID,
+                self._administrator_id,
                 current.paid_reserved,
                 current.user_id,
             ),

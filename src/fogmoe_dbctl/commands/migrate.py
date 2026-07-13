@@ -1,9 +1,8 @@
-"""Alembic 数据库迁移子命令 / Alembic database migration subcommand."""
+"""@brief Alembic 数据库迁移子命令 / Alembic database migration subcommand."""
 
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -11,13 +10,33 @@ from typing import Any
 from alembic import command
 from alembic.config import Config
 
-from fogmoe_dbctl.config import APPLICATION_SCHEMAS, DEFAULT_CONFIG_DIR, PROJECT_ROOT
+from fogmoe_dbctl.config import DbctlSettings, reveal_secret
 from fogmoe_dbctl.postgres import (
-    ServiceConfig,
+    direct_psql_environment,
     quote_identifier,
-    read_service,
-    service_sqlalchemy_url,
+    sqlalchemy_url,
 )
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+"""@brief 仓库根目录 / Repository root directory."""
+
+_APPLICATION_SCHEMAS = (
+    "identity",
+    "conversation",
+    "context_window",
+    "retrieval",
+    "user_profile",
+    "assistant",
+    "economy",
+    "moderation",
+    "crypto",
+    "game",
+    "media",
+    "admin",
+    "observability",
+)
+"""@brief 迁移拥有且应用需要访问的 schema / Schemas owned by migrations and used by the application."""
 
 
 def configure_parser(subparsers: Any) -> None:
@@ -29,22 +48,17 @@ def configure_parser(subparsers: Any) -> None:
 
     parser = subparsers.add_parser(
         "migrate",
-        aliases=["upgrade", "run-migrations-as-role"],
-        help="Run Alembic migrations through the automation role and grant runtime access.",
+        help="Run Alembic migrations and grant configured application access.",
         description=(
-            "Upgrade the database with the configured automation psql service, "
-            "then grant runtime privileges to the bot role."
+            "Upgrade the configured database with the maintenance role, then grant "
+            "the configured application role runtime privileges."
         ),
     )
-    parser.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG_DIR)
-    parser.add_argument("--service", default="fogmoe_automation")
-    parser.add_argument("--bot-role", default="fogmoe-bot")
-    parser.add_argument("--schemas", default=",".join(APPLICATION_SCHEMAS))
     parser.add_argument("--revision", default="head")
     parser.add_argument(
         "--skip-grants",
         action="store_true",
-        help="Run migrations without granting runtime privileges to the bot role.",
+        help="Run migrations without granting runtime privileges to the application role.",
     )
     parser.add_argument(
         "--dry-run",
@@ -54,69 +68,93 @@ def configure_parser(subparsers: Any) -> None:
     parser.set_defaults(handler=execute)
 
 
+def maintenance_database_url(settings: DbctlSettings) -> str:
+    """@brief 构造维护角色的 SQLAlchemy URL / Build the maintenance-role SQLAlchemy URL.
+
+    @param settings dbctl 配置投影 / dbctl configuration projection.
+    @return asyncpg SQLAlchemy URL / asyncpg SQLAlchemy URL.
+    """
+
+    return sqlalchemy_url(
+        host=settings.endpoint.host,
+        port=settings.endpoint.port,
+        database=settings.endpoint.name,
+        user=settings.maintenance.username,
+        password=reveal_secret(
+            settings.maintenance.password,
+            field_name="database.maintenance.password",
+        ),
+    )
+
+
 def run_alembic(
     *,
-    service: ServiceConfig,
+    settings: DbctlSettings,
     revision: str,
     dry_run: bool,
 ) -> None:
     """@brief 通过程序化 API 执行 Alembic / Run Alembic through its programmatic API.
 
-    @param service 自动化角色连接配置 / Automation-role connection configuration.
+    @param settings dbctl 配置投影 / dbctl configuration projection.
     @param revision Alembic 目标 revision / Alembic target revision.
     @param dry_run 是否只打印 / Whether to print only.
     @return None / None.
+    @note 所有迁移输入显式写入 Alembic attributes，迁移环境不读取环境变量。/
+        All migration inputs are injected into Alembic attributes; the migration environment reads no environment variables.
     """
 
     if dry_run:
         print(f"alembic upgrade {revision}")
-        print("DATABASE_URL=postgresql+asyncpg://***:***@***")
         return
 
-    alembic_config = Config(str(PROJECT_ROOT / "alembic.ini"))
-    alembic_config.attributes["database_url"] = service_sqlalchemy_url(service)
+    alembic_config = Config(str(_PROJECT_ROOT / "alembic.ini"))
+    alembic_config.attributes["database_url"] = maintenance_database_url(settings)
+    alembic_config.attributes["migration_schema"] = (
+        settings.maintenance.migration_schema
+    )
+    alembic_config.attributes["admin_user_id"] = settings.administrator.user_id
     command.upgrade(alembic_config, revision)
 
 
 def build_runtime_grant_sql(
     *,
-    schemas: list[str],
-    bot_role: str,
+    schemas: tuple[str, ...],
+    application_role: str,
     owner_role: str,
 ) -> str:
     """@brief 构造运行时授权 SQL / Build runtime grant SQL.
 
     @param schemas 应用 schema 列表 / Application schema list.
-    @param bot_role bot 角色名 / Bot role name.
+    @param application_role 应用角色名 / Application role name.
     @param owner_role 对象 owner 角色名 / Object owner role name.
     @return 可执行 SQL / Executable SQL.
     """
 
-    bot_ident = quote_identifier(bot_role)
+    application_ident = quote_identifier(application_role)
     owner_ident = quote_identifier(owner_role)
     statements: list[str] = []
     for schema in schemas:
         schema_ident = quote_identifier(schema)
         statements.extend(
             [
-                f"GRANT USAGE ON SCHEMA {schema_ident} TO {bot_ident};",
+                f"GRANT USAGE ON SCHEMA {schema_ident} TO {application_ident};",
                 (
                     "GRANT SELECT, INSERT, UPDATE, DELETE "
-                    f"ON ALL TABLES IN SCHEMA {schema_ident} TO {bot_ident};"
+                    f"ON ALL TABLES IN SCHEMA {schema_ident} TO {application_ident};"
                 ),
                 (
                     "GRANT USAGE, SELECT, UPDATE "
-                    f"ON ALL SEQUENCES IN SCHEMA {schema_ident} TO {bot_ident};"
+                    f"ON ALL SEQUENCES IN SCHEMA {schema_ident} TO {application_ident};"
                 ),
                 (
                     f"ALTER DEFAULT PRIVILEGES FOR ROLE {owner_ident} "
                     f"IN SCHEMA {schema_ident} "
-                    f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {bot_ident};"
+                    f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {application_ident};"
                 ),
                 (
                     f"ALTER DEFAULT PRIVILEGES FOR ROLE {owner_ident} "
                     f"IN SCHEMA {schema_ident} "
-                    f"GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO {bot_ident};"
+                    f"GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO {application_ident};"
                 ),
             ]
         )
@@ -125,67 +163,69 @@ def build_runtime_grant_sql(
 
 def run_psql_grants(
     *,
-    config_dir: Path,
-    service_name: str,
+    settings: DbctlSettings,
     sql: str,
     dry_run: bool,
 ) -> None:
     """@brief 用 psql 执行运行时授权 / Run runtime grants through psql.
 
-    @param config_dir psql 配置目录 / psql configuration directory.
-    @param service_name psql service 名 / psql service name.
+    @param settings dbctl 配置投影 / dbctl configuration projection.
     @param sql SQL 文本 / SQL text.
     @param dry_run 是否只打印 / Whether to print only.
     @return None / None.
     """
 
-    env = os.environ.copy()
-    env["PGSERVICEFILE"] = str(config_dir / "pg_service.conf")
-    env["PGPASSFILE"] = str(config_dir / "pgpass")
-    command_line = [
-        "psql",
-        "--no-psqlrc",
-        "--set",
-        "ON_ERROR_STOP=1",
-        f"service={service_name}",
-    ]
+    command_line = ["psql", "--no-psqlrc", "--set", "ON_ERROR_STOP=1"]
     if dry_run:
-        print(" ".join(command_line))
+        print("psql --set ON_ERROR_STOP=1")
         print(sql)
         return
-    subprocess.run(command_line, input=sql, text=True, env=env, check=True)
+    environment = direct_psql_environment(
+        host=settings.endpoint.host,
+        port=settings.endpoint.port,
+        database=settings.endpoint.name,
+        user=settings.maintenance.username,
+        password=reveal_secret(
+            settings.maintenance.password,
+            field_name="database.maintenance.password",
+        ),
+    )
+    subprocess.run(command_line, input=sql, text=True, env=environment, check=True)
 
 
-def parse_schemas(raw_schemas: str) -> list[str]:
-    """@brief 解析 schema 列表 / Parse a schema list.
-
-    @param raw_schemas 逗号分隔 schema / Comma-separated schemas.
-    @return 清洗后的 schema 列表 / Normalized schema list.
-    """
-
-    return [schema.strip() for schema in raw_schemas.split(",") if schema.strip()]
-
-
-def execute(args: argparse.Namespace) -> None:
+def execute(args: argparse.Namespace, *, settings: DbctlSettings) -> None:
     """@brief 执行迁移用例 / Execute the migration use case.
 
     @param args CLI 参数 / CLI arguments.
+    @param settings CLI 组合根注入的已验证配置 / Validated settings injected by the CLI composition root.
     @return None / None.
+    @note 命令层绝不读取配置文件；配置只在 CLI 根入口读取一次。/
+        The command layer never reads a configuration file; configuration is read once at the CLI root.
     """
 
-    config_dir = args.config_dir.resolve()
-    service = read_service(config_dir, args.service)
-    run_alembic(service=service, revision=args.revision, dry_run=args.dry_run)
-    if args.skip_grants:
-        return
-    grant_sql = build_runtime_grant_sql(
-        schemas=parse_schemas(args.schemas),
-        bot_role=args.bot_role,
-        owner_role=service.user,
-    )
-    run_psql_grants(
-        config_dir=config_dir,
-        service_name=args.service,
-        sql=grant_sql,
+    run_alembic(
+        settings=settings,
+        revision=args.revision,
         dry_run=args.dry_run,
     )
+    if args.skip_grants:
+        return
+    run_psql_grants(
+        settings=settings,
+        sql=build_runtime_grant_sql(
+            schemas=_APPLICATION_SCHEMAS,
+            application_role=settings.application.username,
+            owner_role=settings.maintenance.username,
+        ),
+        dry_run=args.dry_run,
+    )
+
+
+__all__ = [
+    "build_runtime_grant_sql",
+    "configure_parser",
+    "execute",
+    "maintenance_database_url",
+    "run_alembic",
+    "run_psql_grants",
+]

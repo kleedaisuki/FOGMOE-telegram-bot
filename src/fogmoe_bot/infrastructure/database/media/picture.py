@@ -68,9 +68,24 @@ class HdClaimResult:
 class PostgresPictureRepository:
     """以短事务持久化图片 callback 与精确一次扣退款 / Persist picture callbacks and exactly-once charges/refunds with short transactions."""
 
-    def __init__(self, outbox: StandaloneOutboxWriter | None = None) -> None:
-        """@brief 注入共享的 transactional outbox 原语 / Inject the shared transactional-outbox primitive."""
+    def __init__(
+        self,
+        administrator_id: int,
+        outbox: StandaloneOutboxWriter | None = None,
+    ) -> None:
+        """@brief 注入管理员身份与共享 outbox 原语 / Inject administrator identity and shared transactional outbox primitive.
 
+        @param administrator_id 管理员 Telegram 用户 ID / Administrator Telegram user ID.
+        @param outbox 可选的同事务 outbox writer / Optional same-transaction outbox writer.
+        @return None / None.
+        @raise TypeError 管理员 ID 不是严格整数时抛出 /
+            Raised when the administrator ID is not a strict integer.
+        """
+
+        if isinstance(administrator_id, bool) or not isinstance(administrator_id, int):
+            raise TypeError("administrator_id must be an integer")
+        self._administrator_id = administrator_id
+        """@brief 用于套餐判定的管理员 ID / Administrator ID used for plan selection."""
         self._outbox = outbox or PostgresOutboxRepository()
 
     async def charge_preview_and_store_offer(
@@ -112,7 +127,12 @@ class PostgresPictureRepository:
             balance = account.total_coins if account is not None else 0
             if account is None or balance < cost:
                 return PreviewChargeResult(False, balance, cost=cost)
-            await spend(account, cost=cost, connection=connection)
+            await spend(
+                account,
+                cost=cost,
+                connection=connection,
+                administrator_id=self._administrator_id,
+            )
             picture = offer.picture
             await db_connection.execute(
                 "INSERT INTO media.picture_offers "
@@ -261,7 +281,12 @@ class PostgresPictureRepository:
             balance = account.total_coins if account is not None else 0
             if account is None or balance < cost:
                 return HdClaimResult("insufficient", balance=balance)
-            await spend(account, cost=cost, connection=connection)
+            await spend(
+                account,
+                cost=cost,
+                connection=connection,
+                administrator_id=self._administrator_id,
+            )
             await db_connection.execute(
                 "UPDATE media.picture_offers SET state = 'charged', charged_user_id = %s, hd_cost = %s, "
                 "claim_expires_at = %s, updated_at = %s WHERE offer_id = CAST(%s AS UUID)",

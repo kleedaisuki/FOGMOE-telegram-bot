@@ -5,7 +5,6 @@ from decimal import ROUND_DOWN, Decimal
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import user_repository
 
@@ -27,14 +26,22 @@ async def spend(
     *,
     cost: int,
     connection: AsyncConnection,
+    administrator_id: int,
 ) -> None:
-    """在已锁账户上优先扣免费金币 / Spend free coins first on an already locked account."""
+    """@brief 在已锁账户上优先扣免费金币 / Spend free coins first on an already locked account.
+
+    @param account 已锁定账户快照 / Locked account snapshot.
+    @param cost 待扣除的金币数 / Coin cost to deduct.
+    @param connection 调用方事务连接 / Caller-owned transaction connection.
+    @param administrator_id 管理员 Telegram 用户 ID / Administrator Telegram user ID.
+    @return None / None.
+    """
 
     if cost <= 0 or account.total_coins < cost:
         raise ValueError("account cannot cover cost")
     free = max(account.coins - cost, 0)
     paid = account.coins_paid - max(cost - account.coins, 0)
-    if account.user_id == config.ADMIN_USER_ID:
+    if account.user_id == administrator_id:
         plan = "admin"
     else:
         plan = "paid" if paid > 0 else "free"

@@ -47,19 +47,30 @@ def configure_logging() -> None:
         fileConfig(config.config_file_name)
 
 
+def _required_attribute(name: str) -> str:
+    """@brief 读取命令注入的 Alembic 属性 / Read an Alembic attribute injected by the command.
+
+    @param name 属性名 / Attribute name.
+    @return 非空字符串属性 / Non-empty string attribute.
+    @raise RuntimeError 迁移不是由 dbctl 命令显式配置时抛出 /
+        Raised when migrations were not explicitly configured by the dbctl command.
+    """
+
+    value = config.attributes.get(name)
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(
+            f"fogmoe-dbctl migrate must inject Alembic attribute {name!r}"
+        )
+    return value
+
+
 def get_url() -> str:
     """@brief 获取数据库连接 URL / Get database connection URL.
 
     @return 数据库连接 URL / Database connection URL.
     """
 
-    injected_url = config.attributes.get("database_url")
-    if injected_url:
-        return str(injected_url)
-
-    from fogmoe_dbctl import config as dbctl_config
-
-    return dbctl_config.sqlalchemy_database_uri()
+    return _required_attribute("database_url")
 
 
 def get_migration_schema() -> str:
@@ -68,9 +79,7 @@ def get_migration_schema() -> str:
     @return Alembic 版本表 schema / Alembic version table schema.
     """
 
-    from fogmoe_dbctl import config as dbctl_config
-
-    return dbctl_config.migration_schema()
+    return _required_attribute("migration_schema")
 
 
 def configure_context(connection: Connection | None = None) -> None:

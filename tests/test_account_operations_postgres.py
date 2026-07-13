@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -13,21 +12,16 @@ from fogmoe_bot.application.accounts.operations import (
     PersonalInfoCommand,
     RegisterAccount,
 )
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.account_operations import (
     PostgresAccountOperations,
 )
-from fogmoe_dbctl.postgres import read_service, service_sqlalchemy_url
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-"""@brief 项目根目录 / Project root."""
+from postgres_test_support import configure_bot_database
 
 
 def _postgres_url() -> str:
-    """@brief 读取显式测试 DSN 或 automation service / Read an explicit test DSN or automation service.
+    """@brief 读取显式测试 DSN / Read an explicit test DSN.
 
     @return async SQLAlchemy URL / Async SQLAlchemy URL.
     """
@@ -35,12 +29,7 @@ def _postgres_url() -> str:
     explicit = os.environ.get("FOGMOE_TEST_DATABASE_URL")
     if explicit:
         return explicit
-    if os.environ.get("FOGMOE_TEST_POSTGRES") != "1":
-        pytest.skip("set FOGMOE_TEST_POSTGRES=1 to run the real PostgreSQL contract")
-    config_dir = PROJECT_ROOT / "var/psql"
-    if not (config_dir / "pg_service.conf").is_file():
-        pytest.skip("local PostgreSQL service configuration is unavailable")
-    return service_sqlalchemy_url(read_service(config_dir, "fogmoe_automation"))
+    pytest.skip("set FOGMOE_TEST_DATABASE_URL to run the real PostgreSQL contract")
 
 
 def _test_user_id() -> int:
@@ -66,8 +55,8 @@ def test_real_postgres_registration_and_personal_info_have_stable_receipts(
         @return None / None.
         """
 
-        monkeypatch.setattr(config, "SQLALCHEMY_DATABASE_URI", _postgres_url())
         await db.dispose_current_engine()
+        configure_bot_database(_postgres_url())
         user_id = _test_user_id()
         suffix = uuid4().hex
         register_key = f"pg-account:register:{suffix}"

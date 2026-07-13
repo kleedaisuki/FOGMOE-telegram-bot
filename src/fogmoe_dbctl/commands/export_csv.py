@@ -1,4 +1,4 @@
-"""PostgreSQL 表 CSV 导出子命令 / PostgreSQL table CSV export subcommand."""
+"""@brief PostgreSQL 表 CSV 导出子命令 / PostgreSQL table CSV export subcommand."""
 
 from __future__ import annotations
 
@@ -9,11 +9,15 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from fogmoe_dbctl.config import DEFAULT_CONFIG_DIR
-from fogmoe_dbctl.postgres import psql_environment, quote_identifier
+from fogmoe_dbctl.config import DbctlSettings, reveal_secret
+from fogmoe_dbctl.postgres import (
+    direct_psql_environment,
+    quote_identifier,
+)
 
 
 _IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+"""@brief 支持的 PostgreSQL 标识符模式 / Supported PostgreSQL identifier pattern."""
 
 
 def configure_parser(subparsers: Any) -> None:
@@ -25,11 +29,10 @@ def configure_parser(subparsers: Any) -> None:
 
     parser = subparsers.add_parser(
         "export-csv",
-        aliases=["export"],
         help="Export one PostgreSQL table to a UTF-8 CSV file.",
         description=(
-            "Export one schema-qualified PostgreSQL table through a configured "
-            "psql service. Arbitrary SQL is intentionally not accepted."
+            "Export one schema-qualified PostgreSQL table through the configured "
+            "maintenance connection. Arbitrary SQL is intentionally not accepted."
         ),
     )
     parser.add_argument(
@@ -40,8 +43,6 @@ def configure_parser(subparsers: Any) -> None:
     parser.add_argument(
         "--output", required=True, type=Path, help="Destination CSV path."
     )
-    parser.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG_DIR)
-    parser.add_argument("--service", default="fogmoe_automation")
     parser.add_argument(
         "--force",
         action="store_true",
@@ -56,7 +57,7 @@ def parse_table_name(raw_table: str) -> tuple[str, str]:
     @param raw_table 原始表名 / Raw table name.
     @return schema 与表名 / Schema and table name.
     @raise ValueError 表名不是受支持的 schema.table 标识符时抛出 /
-    Raised when the name is not a supported schema.table identifier.
+        Raised when the name is not a supported schema.table identifier.
     """
 
     parts = raw_table.split(".")
@@ -86,8 +87,7 @@ def build_copy_sql(schema: str, table: str) -> str:
 
 def export_table(
     *,
-    config_dir: Path,
-    service_name: str,
+    settings: DbctlSettings,
     schema: str,
     table: str,
     output_path: Path,
@@ -95,15 +95,14 @@ def export_table(
 ) -> None:
     """@brief 原子导出一张表 / Export one table atomically.
 
-    @param config_dir 项目 psql 配置目录 / Project psql configuration directory.
-    @param service_name psql service 名 / psql service name.
+    @param settings dbctl 配置投影 / dbctl configuration projection.
     @param schema PostgreSQL schema 名 / PostgreSQL schema name.
-    @param table PostgreSQL table 名 / PostgreSQL table name.
+    @param table PostgreSQL 表名 / PostgreSQL table name.
     @param output_path 目标 CSV 路径 / Destination CSV path.
     @param force 是否替换已有文件 / Whether to replace an existing file.
     @return None / None.
     @note 失败时保留原有目标文件，临时文件会被删除。/
-    On failure, an existing destination is preserved and the temporary file is removed.
+        On failure, an existing destination is preserved and the temporary file is removed.
     """
 
     if output_path.exists() and not force:
@@ -118,11 +117,19 @@ def export_table(
         "--quiet",
         "--set",
         "ON_ERROR_STOP=1",
-        "--dbname",
-        f"service={service_name}",
         "--command",
         sql,
     ]
+    environment = direct_psql_environment(
+        host=settings.endpoint.host,
+        port=settings.endpoint.port,
+        database=settings.endpoint.name,
+        user=settings.maintenance.username,
+        password=reveal_secret(
+            settings.maintenance.password,
+            field_name="database.maintenance.password",
+        ),
+    )
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -136,7 +143,7 @@ def export_table(
             subprocess.run(
                 command,
                 stdout=output_file,
-                env=psql_environment(config_dir),
+                env=environment,
                 check=True,
             )
         temporary_path.replace(output_path)
@@ -146,21 +153,32 @@ def export_table(
         raise
 
 
-def execute(args: argparse.Namespace) -> None:
+def execute(args: argparse.Namespace, *, settings: DbctlSettings) -> None:
     """@brief 执行 CSV 导出用例 / Execute the CSV export use case.
 
     @param args CLI 参数 / CLI arguments.
+    @param settings CLI 组合根注入的已验证配置 / Validated settings injected by the CLI composition root.
     @return None / None.
+    @note 命令层绝不读取配置文件；配置只在 CLI 根入口读取一次。/
+        The command layer never reads a configuration file; configuration is read once at the CLI root.
     """
 
     schema, table = parse_table_name(args.table)
     output_path = args.output.resolve()
     export_table(
-        config_dir=args.config_dir.resolve(),
-        service_name=args.service,
+        settings=settings,
         schema=schema,
         table=table,
         output_path=output_path,
         force=args.force,
     )
     print(f"Exported {schema}.{table} to {output_path}")
+
+
+__all__ = [
+    "build_copy_sql",
+    "configure_parser",
+    "execute",
+    "export_table",
+    "parse_table_name",
+]

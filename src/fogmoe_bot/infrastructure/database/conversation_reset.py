@@ -29,7 +29,6 @@ from fogmoe_bot.infrastructure.database.command_source import (
 )
 from fogmoe_bot.infrastructure.database.assistant_billing import (
     AssistantBillingTransactions,
-    PostgresAssistantBilling,
 )
 from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
     PostgresOutboxRepository,
@@ -42,8 +41,8 @@ class PostgresConversationResetUoW:
 
     def __init__(
         self,
+        billing: AssistantBillingTransactions,
         outbox: StandaloneOutboxWriter | None = None,
-        billing: AssistantBillingTransactions | None = None,
     ) -> None:
         """@brief 注入 connection-bound outbox 与计费原语 / Inject connection-bound outbox and billing primitives.
 
@@ -53,7 +52,7 @@ class PostgresConversationResetUoW:
 
         self._outbox = outbox or PostgresOutboxRepository()
         """@brief 同事务 standalone outbox primitive / Same-transaction standalone-outbox primitive."""
-        self._billing = billing or PostgresAssistantBilling()
+        self._billing = billing
         """@brief reset 释放未结算 Turn 的计费原语 / Billing primitive releasing unsettled Turns during reset."""
 
     async def reset(self, command: ResetConversation) -> ConversationResetResult:

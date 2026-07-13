@@ -2,13 +2,10 @@ services:
   bot:
     build: .
     image: fogmoe-telegram-bot:latest
-    env_file:
-      - .env
-    environment:
-      # 让容器使用宿主机/外部数据库；根据你的 PostgreSQL 地址修改
-      POSTGRES_HOST: ${POSTGRES_HOST:-host.docker.internal}
+    # 配置含有密钥；由操作者在仓库根目录维护，绝不烘焙进镜像。
     # outbox artifact、跨进程媒体限流状态与日志必须跨容器重建保留。
     volumes:
+      - ./config.json:/app/config.json:ro
       - fogmoe-runtime:/app/logs
     # 必须覆盖 BotRuntime 默认 30 秒 drain grace，避免 Compose 提前 SIGKILL。
     stop_grace_period: 40s

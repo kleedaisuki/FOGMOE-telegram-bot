@@ -63,11 +63,13 @@ plotly.js；在桌面 Qt 内通常还要引入 Qt WebEngine/Chromium。当前数
 
 ## 连接与安全边界
 
-连接优先级如下：
+Dashboard 只从根目录 `config.json` 的 `database.endpoint` 与 `database.reporting` 读取连接身份，
+并从 `observability.dashboard` 读取查询资源边界。默认配置路径为当前仓库的 `./config.json`；
+从其他工作目录启动时，显式传入 `--config /绝对或相对路径/config.json`。
 
-1. 显式 --database-url；
-2. 项目 .env 中的 DATABASE_URL；
-3. var/psql/pg_service.conf 中的 fogmoe_automation service 与对应 pgpass。
+它由自己的 `fogmoe_dashboard.config` 解释这些字段并构造只读连接，不依赖 bot 或
+`fogmoe-dbctl` 的配置服务。三者共享的是面向操作者的 `config.json`，而不是跨包的全局配置
+对象。完整字段、默认值和 JSONC 注释见 [`example.config.json`](../example.config.json)。
 
 Dashboard 连接设置 default_transaction_read_only=on，并具有独立连接池、默认五秒
 statement timeout、一秒 lock timeout、最多 1,000 行的 API limit，以及最长 90 天的
@@ -75,9 +77,7 @@ statement timeout、一秒 lock timeout、最多 1,000 行的 API limit，以及
 
 ~~~bash
 fogmoe-dashboard \
-  --config-dir ./var/psql \
-  --service fogmoe_automation \
-  --timeout 10 \
+  --config ./config.json \
   --window 24h \
   overview
 ~~~
@@ -122,13 +122,16 @@ fogmoe-dashboard --format json --window 15m watch --interval 5 | jq -c '.data'
 
 ~~~python
 from datetime import timedelta
+from pathlib import Path
 
 from fogmoe_dashboard import DashboardClient, TimeWindow
+from fogmoe_dashboard.config import read_dashboard_settings
 
 
 async def inspect() -> None:
     window = TimeWindow.last(timedelta(hours=6))
-    async with DashboardClient.from_environment() as dashboard:
+    settings = read_dashboard_settings(Path("config.json"))
+    async with DashboardClient.from_database_settings(settings=settings) as dashboard:
         overview = await dashboard.overview(window)
         slow_operations = await dashboard.spans(window, limit=20)
         failures = await dashboard.errors(window, limit=100)
@@ -140,15 +143,8 @@ async def inspect() -> None:
     print(retrieval.queues)
 ~~~
 
-也可显式使用 URL：
-
-~~~python
-dashboard = DashboardClient.from_database_url(
-    "postgresql://user:password@localhost/fogmoe",
-    pool_size=2,
-    command_timeout=3,
-)
-~~~
+脚本与 CLI 都应通过 `read_dashboard_settings()` 读取 JSONC 配置投影，再把显式类型化的
+`settings` 传给 client；不要把数据库 URL、密码或旧式环境变量作为另一条配置入口。
 
 公开方法均返回 fogmoe_dashboard.domain.models 中的 frozen、slotted dataclass，
 包括 Overview、SpanStats、ErrorEvent、TraceDetail、MetricStats、GenAiStats、
@@ -177,7 +173,5 @@ fogmoe-dbctl shell
 fogmoe-dbctl shell --no-psqlrc
 ~~~
 
-该命令设置 PGSERVICE=fogmoe_automation、PGSERVICEFILE、PGPASSFILE 和
-PGAPPNAME=fogmoe-dbctl-shell，前台继承当前 TTY，并把 psql 的退出状态原样返回。
-数据库参数默认且显式为 fogmoe；host、port 和 role 仍来自 service。密码不会出现
-在 argv、日志或 PGPASSWORD 中。
+该命令以前台方式继承当前 TTY，并把 psql 的退出状态原样返回。数据库参数由
+`fogmoe-dbctl` 自己从根目录 `config.json` 读取；密码不会出现于 argv 或日志。

@@ -30,7 +30,6 @@ from fogmoe_bot.domain.games import (
     UserId,
     WaitingRoom,
 )
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.repositories import user_repository
 from fogmoe_bot.infrastructure.database.repositories.user_repository import UserAccount
@@ -56,6 +55,20 @@ class PostgresRpsLedger:
     @note 所有写事务采用 ``session -> accounts(sorted)`` 锁序；Telegram I/O 不属于此端口。/
     Every write transaction uses ``session -> accounts(sorted)`` lock ordering; Telegram I/O is outside this port.
     """
+
+    def __init__(self, administrator_id: int) -> None:
+        """@brief 注入管理员身份以保存套餐状态 / Inject the administrator identity for persisted plan state.
+
+        @param administrator_id 管理员 Telegram 用户 ID / Administrator Telegram user ID.
+        @return None / None.
+        @raise TypeError 管理员 ID 不是严格整数时抛出 /
+            Raised when the administrator ID is not a strict integer.
+        """
+
+        if isinstance(administrator_id, bool) or not isinstance(administrator_id, int):
+            raise TypeError("administrator_id must be an integer")
+        self._administrator_id = administrator_id
+        """@brief 用于套餐判定的管理员 ID / Administrator ID used for plan selection."""
 
     async def status(self, user_id: UserId) -> AccountStatus:
         """@brief 读取账户快照 / Read an account snapshot.
@@ -239,8 +252,16 @@ class PostgresRpsLedger:
             if guest_slot is None:
                 return RpsMatchResult(RpsMatchCode.PLAYER_BUSY, room.version)
 
-            await _spend_entry(first_account, connection)
-            await _spend_entry(second_account, connection)
+            await _spend_entry(
+                first_account,
+                connection,
+                administrator_id=self._administrator_id,
+            )
+            await _spend_entry(
+                second_account,
+                connection,
+                administrator_id=self._administrator_id,
+            )
             affected = await db_connection.execute(
                 "UPDATE game.rps_sessions SET status = 'choosing', version = %s, "
                 "player_two_id = %s, state = CAST(%s AS JSONB), expires_at = %s, "
@@ -481,8 +502,16 @@ async def _lock_accounts(
 async def _spend_entry(
     account: UserAccount,
     connection: AsyncConnection,
+    *,
+    administrator_id: int,
 ) -> None:
-    """@brief 以免费优先规则扣一枚入场费 / Spend one entry coin with free-first semantics."""
+    """@brief 以免费优先规则扣一枚入场费 / Spend one entry coin with free-first semantics.
+
+    @param account 已锁定的账户快照 / Locked account snapshot.
+    @param connection 调用方事务连接 / Caller-owned transaction connection.
+    @param administrator_id 管理员 Telegram 用户 ID / Administrator Telegram user ID.
+    @return None / None.
+    """
 
     if account.total_coins < ENTRY_FEE:
         raise ValueError("account cannot fund the RPS entry fee")
@@ -496,7 +525,11 @@ async def _spend_entry(
         account.user_id,
         free_coins,
         paid_coins,
-        _resolve_user_plan(account.user_id, paid_coins),
+        _resolve_user_plan(
+            account.user_id,
+            paid_coins,
+            administrator_id=administrator_id,
+        ),
         connection=connection,
     )
 
@@ -594,9 +627,20 @@ def _row_integer(row: RowMapping, key: str) -> int:
     return value
 
 
-def _resolve_user_plan(user_id: int, paid_coins: int) -> str:
-    """@brief 按持久化账户规则解析套餐 / Resolve the persisted account plan."""
+def _resolve_user_plan(
+    user_id: int,
+    paid_coins: int,
+    *,
+    administrator_id: int,
+) -> str:
+    """@brief 按持久化账户规则解析套餐 / Resolve the persisted account plan.
 
-    if user_id == config.ADMIN_USER_ID:
+    @param user_id 用户 ID / User ID.
+    @param paid_coins 付费金币余额 / Paid-coin balance.
+    @param administrator_id 管理员 Telegram 用户 ID / Administrator Telegram user ID.
+    @return ``admin``、``paid`` 或 ``free`` / ``admin``, ``paid``, or ``free``.
+    """
+
+    if user_id == administrator_id:
         return "admin"
     return "paid" if paid_coins > 0 else "free"

@@ -53,6 +53,9 @@ from fogmoe_bot.infrastructure.database.repositories.user_repository import User
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定测试时刻 / Fixed test instant."""
 
+ADMINISTRATOR_ID = 1002288404
+"""@brief 测试管理员 Telegram 用户 ID / Test administrator Telegram user ID."""
+
 
 class RecordingTransaction:
     """@brief 记录事务连接与异常 / Record transaction connection and exception."""
@@ -320,9 +323,7 @@ def _group_request(*, update_id: int = 101, cost: int = 0) -> AssistantTurnReque
         is_group=True,
         message_id=7 + update_id,
         message_thread_id=23,
-        delivery_stream_id=DeliveryStreamId(
-            "telegram:primary:chat:-1001:thread:23"
-        ),
+        delivery_stream_id=DeliveryStreamId("telegram:primary:chat:-1001:thread:23"),
         user_content={"text": "hello group"},
         coin_cost=cost,
     )
@@ -437,6 +438,7 @@ def test_success_locks_rows_and_commits_charge_pool_and_acceptance_on_one_connec
             workflow,
             billing=billing,  # type: ignore[arg-type]
             profiles=profiles,  # type: ignore[arg-type]
+            administrator_id=ADMINISTRATOR_ID,
         ).accept(_request(), accepted_at=NOW)
 
         assert isinstance(result, AssistantTurnAccepted)
@@ -574,6 +576,7 @@ def test_group_acceptance_never_reads_or_freezes_private_user_state(
             workflow,
             billing=billing,  # type: ignore[arg-type]
             profiles=profiles,  # type: ignore[arg-type]
+            administrator_id=ADMINISTRATOR_ID,
         ).accept(_group_request(), accepted_at=NOW)
 
         assert isinstance(result, AssistantTurnAccepted)
@@ -676,6 +679,7 @@ def test_zero_cost_translation_accepts_without_balance_or_pool_write(
         result = await PostgresAssistantTurnAcceptanceUoW(  # type: ignore[arg-type]
             workflow,
             billing=billing,  # type: ignore[arg-type]
+            administrator_id=ADMINISTRATOR_ID,
         ).accept(request, accepted_at=NOW)
 
         assert isinstance(result, AssistantTurnAccepted)
@@ -752,6 +756,7 @@ def test_duplicate_update_returns_replay_before_account_or_pool_mutation(
         result = await PostgresAssistantTurnAcceptanceUoW(  # type: ignore[arg-type]
             workflow,
             billing=billing,  # type: ignore[arg-type]
+            administrator_id=ADMINISTRATOR_ID,
         ).accept(_request(), accepted_at=NOW)
 
         assert isinstance(result, AssistantTurnAccepted)
@@ -819,7 +824,9 @@ def test_insufficient_balance_does_not_create_turn_or_mutate_pool(
         )
 
         result = await PostgresAssistantTurnAcceptanceUoW(  # type: ignore[arg-type]
-            workflow
+            workflow,
+            RecordingBilling(),  # type: ignore[arg-type]
+            administrator_id=ADMINISTRATOR_ID,
         ).accept(_request(cost=1), accepted_at=NOW)
 
         assert isinstance(result, AssistantInsufficientCoins)
@@ -915,6 +922,7 @@ def test_concurrent_requests_for_one_account_cannot_overspend(monkeypatch: Any) 
         uow = PostgresAssistantTurnAcceptanceUoW(
             workflow,  # type: ignore[arg-type]
             billing=billing,  # type: ignore[arg-type]
+            administrator_id=ADMINISTRATOR_ID,
         )
 
         results = await asyncio.gather(
@@ -1005,7 +1013,9 @@ def test_workflow_failure_rolls_back_before_balance_or_pool_write(
         )
         with pytest.raises(RuntimeError, match="activity insert failed"):
             await PostgresAssistantTurnAcceptanceUoW(  # type: ignore[arg-type]
-                workflow
+                workflow,
+                RecordingBilling(),  # type: ignore[arg-type]
+                administrator_id=ADMINISTRATOR_ID,
             ).accept(_request(), accepted_at=NOW)
 
         assert writes == []
@@ -1091,7 +1101,9 @@ def test_partial_acceptance_receipt_is_invariant_conflict_and_rolls_back(
         )
         with pytest.raises(IdempotencyConflictError, match="partial durable effect"):
             await PostgresAssistantTurnAcceptanceUoW(  # type: ignore[arg-type]
-                workflow
+                workflow,
+                RecordingBilling(),  # type: ignore[arg-type]
+                administrator_id=ADMINISTRATOR_ID,
             ).accept(_request(), accepted_at=NOW)
 
         assert writes == []

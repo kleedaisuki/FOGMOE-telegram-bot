@@ -25,6 +25,10 @@ from fogmoe_bot.infrastructure.database.rps_ledger import PostgresRpsLedger
 from fogmoe_bot.infrastructure.database.rps_codec import encode_session
 
 
+ADMINISTRATOR_ID = 1002288404
+"""@brief 测试管理员 Telegram 用户 ID / Test administrator Telegram user ID."""
+
+
 class RecordingTransaction:
     """@brief 记录事务退出状态 / Record transaction exit state."""
 
@@ -176,7 +180,7 @@ def test_start_game_locks_both_accounts_before_writes_and_commits_one_state(
         monkeypatch.setattr(rps_ledger.db_connection, "fetch_one", fake_fetch_one)
         monkeypatch.setattr(rps_ledger.db_connection, "execute", fake_execute)
 
-        result = await PostgresRpsLedger().start_game(
+        result = await PostgresRpsLedger(ADMINISTRATOR_ID).start_game(
             room,
             session,
             started_at=session.started_at,
@@ -260,7 +264,7 @@ def test_terminal_choice_replay_does_not_pay_twice(monkeypatch: Any) -> None:
         monkeypatch.setattr(rps_ledger, "_credit", fake_credit)
         monkeypatch.setattr(rps_ledger.db_connection, "execute", fake_execute)
 
-        adapter = PostgresRpsLedger()
+        adapter = PostgresRpsLedger(ADMINISTRATOR_ID)
         applied = await adapter.commit_choice(
             first_choice,
             finished,

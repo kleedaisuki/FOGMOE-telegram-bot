@@ -82,7 +82,9 @@ def test_inference_claim_preserves_conversation_causality_across_workers(
         )
         monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
 
-        claims = await PostgresInferenceRepository().claim_inference_activities(
+        claims = await PostgresInferenceRepository(
+            _Billing()  # type: ignore[arg-type]
+        ).claim_inference_activities(
             now=NOW,
             limit=8,
             lease_for=timedelta(seconds=30),
@@ -105,7 +107,7 @@ def test_expired_inference_recovery_returns_a_complete_activity_projection(
     """@brief 过期推理租约恢复返回含 traceparent 的完整活动行 / Expired inference recovery returns a complete activity row including traceparent."""
 
     connection = object()
-    repository = PostgresInferenceRepository()
+    repository = PostgresInferenceRepository(_Billing())  # type: ignore[arg-type]
     activity = _activity()
     captured: dict[str, object] = {}
 
@@ -459,7 +461,7 @@ def test_inference_uow_replay_returns_existing_atomic_effects(
         repository.complete_inference_activity(
             claim,
             assistant_message=assistant_message,
-                outbounds=(outbound,),
+            outbounds=(outbound,),
             completed_at=NOW,
         )
     )

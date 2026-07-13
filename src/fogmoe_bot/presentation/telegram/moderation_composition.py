@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from telegram import Bot
 
@@ -28,7 +29,6 @@ from fogmoe_bot.application.moderation.service import ModerationService
 from fogmoe_bot.application.runtime import SystemUtcClock
 from fogmoe_bot.domain.moderation.aggregate import GroupModeration
 from fogmoe_bot.domain.moderation.models import ChatId
-from fogmoe_bot.infrastructure.config import BASE_DIR
 from fogmoe_bot.infrastructure.database.moderation.effects import (
     PostgresModerationEffectRepository,
 )
@@ -78,10 +78,14 @@ class TelegramModerationCapability:
 
 def create_moderation_ingress_capability(
     bot: Bot,
+    *,
+    wordlist_path: Path,
 ) -> TelegramModerationCapability:
     """@brief 构造治理 bounded context / Compose the moderation bounded context.
 
     @param bot 共享 Telegram Bot / Shared Telegram Bot.
+    @param wordlist_path 受版本控制的治理词表路径 /
+        Version-controlled moderation-word-list path.
     @return 完整治理 capability / Complete moderation capability.
     @note 调用方应将 ``guard`` 与 ``observer`` 直接加入 ``IngressRouter``；不应再声明
     legacy PTB message guard/observer。/ Callers should add ``guard`` and ``observer``
@@ -106,7 +110,7 @@ def create_moderation_ingress_capability(
     moderation = ModerationService(
         configuration,
         configuration,
-        FileModerationRuleProvider(BASE_DIR / "resources" / "spam_words.txt"),
+        FileModerationRuleProvider(wordlist_path),
     )
     automation = KeywordAutomationService(
         configuration=configuration,

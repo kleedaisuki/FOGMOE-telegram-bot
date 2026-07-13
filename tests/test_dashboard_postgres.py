@@ -22,17 +22,23 @@ from fogmoe_bot.domain.observability.signals import (
     freeze_attributes,
 )
 from fogmoe_bot.domain.observability.trace import TraceContext
-from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.observability.postgres import PostgresTelemetrySink
 from fogmoe_dashboard.api import DashboardClient
 from fogmoe_dashboard.domain.models import TimeWindow
 from fogmoe_dashboard.infrastructure.postgres import PostgresDashboardRepository
+from postgres_test_support import database_settings_from_url
 
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("RUN_POSTGRES_TESTS") != "1",
-    reason="requires an explicitly migrated PostgreSQL test database",
-)
+def _asyncpg_database_url() -> str:
+    """@brief 读取显式测试 DSN 并转换为 asyncpg URL / Read an explicit test DSN and convert it to an asyncpg URL.
+
+    @return asyncpg 数据库 URL / asyncpg database URL.
+    """
+
+    raw_url = os.environ.get("FOGMOE_TEST_DATABASE_URL")
+    if raw_url:
+        return database_settings_from_url(raw_url).asyncpg_url()
+    pytest.skip("set FOGMOE_TEST_DATABASE_URL to run the real PostgreSQL contract")
 
 
 def test_dashboard_queries_every_signal_family_through_read_only_pool() -> None:
@@ -41,6 +47,7 @@ def test_dashboard_queries_every_signal_family_through_read_only_pool() -> None:
     async def scenario() -> None:
         """@brief 执行完整数据库往返 / Execute the complete database round trip."""
 
+        database_url = _asyncpg_database_url()
         now = datetime.now(UTC)
         trace = TraceContext.new_root()
         retrieval_trace = trace.child()
@@ -54,7 +61,7 @@ def test_dashboard_queries_every_signal_family_through_read_only_pool() -> None:
             attributes=freeze_attributes({"test.kind": "dashboard"}),
         )
         sink = PostgresTelemetrySink(
-            dsn=config.asyncpg_database_uri(),
+            dsn=database_url,
             resource=resource,
             command_timeout=5,
             retention_days=30,
@@ -133,9 +140,7 @@ def test_dashboard_queries_every_signal_family_through_read_only_pool() -> None:
         )
 
         window = TimeWindow(now - timedelta(minutes=1), now + timedelta(minutes=1))
-        async with DashboardClient.from_database_url(
-            config.asyncpg_database_uri()
-        ) as dashboard:
+        async with DashboardClient.from_database_url(database_url) as dashboard:
             overview = await dashboard.overview(window)
             assert overview.spans >= 1
             assert overview.error_spans >= 1
@@ -187,13 +192,13 @@ def test_dashboard_queries_every_signal_family_through_read_only_pool() -> None:
             await dashboard.latency(window)
             await dashboard.slow_turns(window)
 
-        repository = PostgresDashboardRepository(config.asyncpg_database_uri())
+        repository = PostgresDashboardRepository(database_url)
         read_only = await repository._fetch("SHOW default_transaction_read_only")
         assert read_only[0]["default_transaction_read_only"] == "on"
         await repository.close()
         await sink.close()
 
-        connection = await asyncpg.connect(config.asyncpg_database_uri())
+        connection = await asyncpg.connect(database_url)
         try:
             async with connection.transaction():
                 await connection.execute(

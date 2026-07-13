@@ -30,7 +30,7 @@ from fogmoe_dashboard.application.queries import (
     TracesQuery,
     execute_query,
 )
-from fogmoe_dashboard.config import DEFAULT_CONFIG_DIR
+from fogmoe_dashboard.config import default_config_path, read_dashboard_settings
 from fogmoe_dashboard.domain.models import TimeWindow
 from fogmoe_dashboard.presentation.duration import parse_duration
 from fogmoe_dashboard.presentation.render import print_json, render
@@ -51,15 +51,15 @@ def build_parser() -> argparse.ArgumentParser:
         description="Explore FogMoe traces, logs, metrics, pipeline health, and Turn latency.",
     )
     parser.add_argument(
-        "--database-url", help="Explicit PostgreSQL URL; overrides service files."
+        "--config",
+        type=Path,
+        default=default_config_path(),
+        help="Path to the root JSONC configuration file.",
     )
-    parser.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG_DIR)
-    parser.add_argument("--service", default="fogmoe_automation")
     parser.add_argument(
         "--window", default="1h", help="Lookback such as 15m, 1h, or 7d."
     )
     parser.add_argument("--format", choices=("table", "json"), default="table")
-    parser.add_argument("--timeout", type=float, default=5.0)
     subparsers = parser.add_subparsers(dest="view", metavar="view")
 
     subparsers.add_parser("overview", help="RED/USE overview and durable pipeline.")
@@ -137,7 +137,9 @@ async def _run(args: argparse.Namespace) -> None:
     """@brief 创建 client 并执行视图 / Create a client and execute a view."""
 
     duration = parse_duration(args.window)
-    client = _client(args)
+    client = DashboardClient.from_database_settings(
+        settings=read_dashboard_settings(args.config)
+    )
     console = Console()
     async with client:
         if args.view == "watch":
@@ -151,21 +153,6 @@ async def _run(args: argparse.Namespace) -> None:
             print_json(console, view, value)
         else:
             console.print(render(view, value))
-
-
-def _client(args: argparse.Namespace) -> DashboardClient:
-    """@brief 从 CLI 配置装配 client / Compose a client from CLI configuration."""
-
-    if args.database_url:
-        return DashboardClient.from_database_url(
-            args.database_url,
-            command_timeout=args.timeout,
-        )
-    return DashboardClient.from_environment(
-        config_dir=args.config_dir,
-        service_name=args.service,
-        command_timeout=args.timeout,
-    )
 
 
 def _query(

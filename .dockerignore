@@ -12,6 +12,7 @@ tgbot.log
 *.log.*
 logs/
 
-# Local env & configs
+# Local runtime configuration (the documented example.config.json remains tracked)
 .env
 .env.local
+config.json
