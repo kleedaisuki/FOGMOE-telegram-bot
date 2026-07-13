@@ -543,8 +543,8 @@ class PostgresRetrievalStore:
         @return 距离升序证据 / Evidence in ascending distance order.
         """
 
-        if not 1 <= limit <= 100:
-            raise ValueError("Retrieval limit must be between 1 and 100")
+        if not 1 <= limit <= 384:
+            raise ValueError("Retrieval limit must be between 1 and 384")
         query_vector.require_space(space)
         rows = await db_connection.fetch_all(
             "SELECT "

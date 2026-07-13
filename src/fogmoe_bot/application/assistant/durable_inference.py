@@ -308,6 +308,7 @@ class DurableAssistantInferenceAdapter:
             is_group=command.scope.is_group,
             group_id=command.scope.group_id,
             message_id=command.scope.message_id,
+            message_thread_id=command.scope.message_thread_id,
         )
         user_state = UserState(
             coins=command.user.coins,
@@ -361,6 +362,7 @@ class DurableAssistantInferenceAdapter:
         """
 
         self._validate_anchor(command, projection)
+        base_context.current_user_text = _anchor_user_text(projection)
         if command.task_kind == "translation":
             return base_context
         history: list[JsonObject] = []
@@ -667,6 +669,29 @@ def _last_assistant_texts(messages: Sequence[Mapping[str, object]]) -> list[str]
         if isinstance(content, str) and content.strip():
             return [content.strip()]
     return []
+
+
+def _anchor_user_text(projection: ContextWindowReady) -> str:
+    """@brief 从 anchor row 读取未改写 Query / Read the unrewritten query from the anchor row.
+
+    @param projection 已验证的 Context Window / Validated Context Window projection.
+    @return 当前 Turn 原始用户文本 / Raw user text for the current Turn.
+    @raise PermanentInferenceError anchor 没有唯一可嵌入文本 / The anchor lacks one embeddable text.
+    """
+
+    values = [
+        text.strip()
+        for message in projection.anchor_messages
+        if message.draft.role is MessageRole.USER
+        and isinstance((text := message.draft.content.get("text")), str)
+        and text.strip()
+    ]
+    if len(values) != 1:
+        raise PermanentInferenceError(
+            "Durable Assistant anchor requires one raw user query",
+            category=InferenceErrorCategory.INVALID_REQUEST,
+        )
+    return values[0]
 
 
 def _profile_from_command(

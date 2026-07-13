@@ -8,6 +8,7 @@ from fogmoe_bot.application.memory.ports import WorkingMemoryQuery, WorkingMemor
 from fogmoe_bot.domain.context.token_estimator import estimate_tokens
 from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
 from fogmoe_bot.domain.memory.models import (
+    MAX_WORKING_MEMORY_MESSAGES,
     GroupMemoryScope,
     PersonalMemoryScope,
     WorkingMemoryMessage,
@@ -33,7 +34,13 @@ async def search_memory(
     """
 
     query = required_text(request.arguments, "query")
-    limit = bounded_int(request.arguments, "limit", minimum=1, maximum=6)
+    limit = bounded_int(
+        request.arguments,
+        "limit",
+        minimum=1,
+        maximum=MAX_WORKING_MEMORY_MESSAGES,
+        default=64,
+    )
     scope = _scope(request)
     working_memory = await memory.retrieve(
         WorkingMemoryQuery(scope=scope, text=query, limit=limit)

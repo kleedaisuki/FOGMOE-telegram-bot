@@ -6,6 +6,8 @@ import asyncio
 from datetime import UTC, datetime
 from uuid import UUID
 
+import pytest
+
 from fogmoe_bot.application.memory.ports import WorkingMemoryQuery
 from fogmoe_bot.application.memory.rendering import (
     compose_model_messages,
@@ -75,6 +77,25 @@ def test_working_memory_projection_is_single_untrusted_and_hard_bounded() -> Non
     )
     assert projected[0] == {"role": "system", "content": "policy"}
     assert sum("<working_memory" in str(item.get("content")) for item in projected) == 1
+
+
+def test_working_memory_count_cap_is_high_but_finite() -> None:
+    """@brief WorkingMemory 允许大量短证据但仍拒绝无界结果 / WorkingMemory admits many short evidence rows while rejecting unbounded results."""
+
+    scope = PersonalMemoryScope(7)
+    query = WorkingMemoryQuery(scope, "query", 128)
+    memory = WorkingMemory(
+        scope,
+        query.text,
+        tuple(
+            _message(ordinal=index, content=f"short {index}")
+            for index in range(1, 129)
+        ),
+    )
+
+    assert len(memory.messages) == 128
+    with pytest.raises(ValueError, match="between 1 and 128"):
+        WorkingMemoryQuery(scope, "query", 129)
 
 
 class _Recall:

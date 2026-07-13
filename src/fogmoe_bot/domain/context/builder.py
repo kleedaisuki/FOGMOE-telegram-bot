@@ -49,6 +49,28 @@ def render_user_state(user_state: UserState) -> str:
     )
 
 
+def render_conversation_scope(scope: ConversationScope) -> str:
+    """@brief 渲染可信的 Context 作用域 / Render the trusted Context scope.
+
+    @param scope 当前 Conversation 作用域 / Current Conversation scope.
+    @return 私聊或共享群 Topic 标记 / Private or shared group-topic marker.
+    """
+
+    if not scope.is_group:
+        return (
+            '<conversation_scope kind="private" shared="false" '
+            f'current_user_id="{scope.user_id}" />'
+        )
+    if scope.group_id is None:
+        raise ValueError("Group ConversationScope requires group_id")
+    thread = scope.message_thread_id or 0
+    return (
+        '<conversation_scope kind="group" shared="true" '
+        f'group_id="{scope.group_id}" thread_id="{thread}" '
+        f'current_user_id="{scope.user_id}" />'
+    )
+
+
 def render_chat_message(context: ChatMessageContext) -> str:
     """@brief 渲染聊天消息 / Render chat message.
 
@@ -58,7 +80,15 @@ def render_chat_message(context: ChatMessageContext) -> str:
     attrs = [
         ("type", context.chat_type),
         ("timestamp", context.timestamp),
-        ("user", f"@{context.user_name}"),
+        ("user", context.user_name),
+        ("username", f"@{context.username}" if context.username else None),
+        ("user_id", str(context.user_id) if context.user_id is not None else None),
+        (
+            "thread_id",
+            str(context.message_thread_id)
+            if context.message_thread_id is not None
+            else None,
+        ),
         (
             "message_id",
             str(context.message_id) if context.message_id is not None else None,
@@ -142,7 +172,16 @@ def build_context_state(
     @param runtime_replacements 运行时消息替换 / Runtime message replacements.
     @param text_fallback_messages 纯文本降级历史 / Text-only fallback history.
     @return 可直接交给 AgentLoop 的领域上下文快照 / Domain context snapshot ready for AgentLoop.
+    @raise ValueError 群聊携带私人 Profile 状态 / A group scope carries private Profile state.
     """
+    if scope.is_group and (
+        user_state.profile is not None
+        or bool(user_state.personal_info)
+        or user_state.diary_exists
+    ):
+        raise ValueError(
+            "Group ContextState cannot contain private User Profile, personal_info, or diary state"
+        )
     history = [
         dict(message) for message in history_messages if isinstance(message, Mapping)
     ]
@@ -153,7 +192,10 @@ def build_context_state(
         "role": "system",
         "content": compose_system_prompt(
             system_prompt=system_prompt,
-            user_state_prompt=render_user_state(user_state),
+            user_state_prompt=join_prompt_sections(
+                render_conversation_scope(scope),
+                render_user_state(user_state),
+            ),
         ),
     }
     fallback: list[dict[str, object]] | None = None
@@ -185,6 +227,7 @@ def build_tool_context(scope: ConversationScope) -> dict[str, object]:
         "is_group": scope.is_group,
         "group_id": scope.group_id,
         "message_id": scope.message_id,
+        "message_thread_id": scope.message_thread_id,
         "user_id": scope.user_id,
     }
 

@@ -20,7 +20,11 @@ from fogmoe_bot.application.memory.ports import (
     WorkingMemoryReader,
 )
 from fogmoe_bot.application.memory.rendering import compose_model_messages
-from fogmoe_bot.domain.memory.models import GroupMemoryScope, PersonalMemoryScope
+from fogmoe_bot.domain.memory.models import (
+    MAX_WORKING_MEMORY_MESSAGES,
+    GroupMemoryScope,
+    PersonalMemoryScope,
+)
 from fogmoe_bot.domain.context import ContextState
 from fogmoe_bot.domain.conversation.payloads import (
     JsonObject,
@@ -78,7 +82,7 @@ class AgentExecutionConfig:
     skip_tools: frozenset[str] = field(default_factory=frozenset)
     allow_tools: bool = True
     completion_options: Mapping[str, JsonValue] = field(default_factory=dict)
-    working_memory_limit: int = 4
+    working_memory_limit: int = 64
     working_memory_max_tokens: int = 16_384
     working_memory_enabled: bool = True
 
@@ -92,8 +96,11 @@ class AgentExecutionConfig:
             raise ValueError("provider and model cannot be empty")
         if self.max_tokens < 1 or self.max_iterations < 1:
             raise ValueError("max_tokens and max_iterations must be positive")
-        if not 1 <= self.working_memory_limit <= 20:
-            raise ValueError("working_memory_limit must be between 1 and 20")
+        if not 1 <= self.working_memory_limit <= MAX_WORKING_MEMORY_MESSAGES:
+            raise ValueError(
+                "working_memory_limit must be between 1 and "
+                f"{MAX_WORKING_MEMORY_MESSAGES}"
+            )
         if self.working_memory_max_tokens < 256:
             raise ValueError("working_memory_max_tokens must be at least 256")
 
@@ -249,7 +256,7 @@ class AgentLoop:
                 working_memory = await self._memory.retrieve(
                     WorkingMemoryQuery(
                         scope=_memory_scope(memory_context),
-                        text=_current_query(state.context.messages),
+                        text=_current_query(state.context),
                         limit=state.config.working_memory_limit,
                     )
                 )
@@ -539,15 +546,17 @@ def _memory_scope(
     return GroupMemoryScope(context.group_id)
 
 
-def _current_query(messages: Sequence[Mapping[str, object]]) -> str:
+def _current_query(context: ContextState) -> str:
     """@brief 原样提取当前用户 Query，不做 rewrite / Extract the current user query verbatim without rewriting.
 
-    @param messages ContextState 消息 / ContextState messages.
+    @param context 当前 ContextState / Current ContextState.
     @return 原始文本 Query / Raw text query.
     @raise ValueError ContextState 不含可嵌入用户文本 / ContextState has no embeddable user text.
     """
 
-    for message in reversed(messages):
+    if context.current_user_text is not None:
+        return context.current_user_text.strip()
+    for message in reversed(context.messages):
         if message.get("role") != "user":
             continue
         content = message.get("content")

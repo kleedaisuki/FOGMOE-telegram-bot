@@ -19,8 +19,8 @@ def _update(payload: str) -> Update:
     return Update.de_json(json.loads(payload), bot=None)
 
 
-def test_mapper_preserves_global_user_conversation_semantics() -> None:
-    """@brief 同一用户跨 chat 映射到相同长期会话 / One user maps to one long-lived conversation across chats."""
+def test_mapper_separates_private_users_and_shares_group_topics() -> None:
+    """@brief 私聊按用户、群聊按 Topic 聚合 / Private chats aggregate by user and groups by topic."""
 
     mapper = TelegramUpdateMapper()
     first = _update(
@@ -33,9 +33,31 @@ def test_mapper_preserves_global_user_conversation_semantics() -> None:
         '"chat": {"id": -20, "type": "group", "title": "Lab"}, '
         '"from": {"id": 7, "is_bot": false, "first_name": "Klee"}, "text": "b"}}'
     )
+    other_member = _update(
+        '{"update_id": 103, "message": {"message_id": 3, "date": 3, '
+        '"message_thread_id": 9, '
+        '"chat": {"id": -20, "type": "supergroup", "title": "Lab"}, '
+        '"from": {"id": 8, "is_bot": false, "first_name": "Alice"}, "text": "c"}}'
+    )
+    same_topic = _update(
+        '{"update_id": 104, "message": {"message_id": 4, "date": 4, '
+        '"message_thread_id": 9, '
+        '"chat": {"id": -20, "type": "supergroup", "title": "Lab"}, '
+        '"from": {"id": 7, "is_bot": false, "first_name": "Klee"}, "text": "d"}}'
+    )
 
     assert mapper.identity_for(first).conversation_id.value == "assistant-user:7"
-    assert mapper.identity_for(second).conversation_id.value == "assistant-user:7"
+    assert (
+        mapper.identity_for(second).conversation_id.value
+        == "assistant-group:-20:thread:0"
+    )
+    assert mapper.identity_for(other_member).conversation_id == mapper.identity_for(
+        same_topic
+    ).conversation_id
+    assert (
+        mapper.identity_for(other_member).conversation_id.value
+        == "assistant-group:-20:thread:9"
+    )
 
 
 def test_mapper_creates_json_safe_pending_inbound() -> None:

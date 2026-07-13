@@ -183,7 +183,18 @@ class AssistantTurnRequest:
         @param account 扣费后上下文 / Post-charge account context.
         @param accepted_at 应用接受时间 / Application acceptance time.
         @return 可交给 ConversationWorkflow.prepare 的命令 / Command for ConversationWorkflow.prepare.
+        @raise ValueError 群聊上下文携带私人状态 / A group context carries private state.
         """
+
+        if self.is_group and (
+            account.profile is not None
+            or bool(account.personal_info)
+            or account.diary_exists
+        ):
+            raise ValueError(
+                "Group Assistant acceptance cannot freeze private User Profile, "
+                "personal_info, or diary state"
+            )
 
         source = TurnSource.telegram(self.update_id)
         turn_id = TurnId.for_source(source)
@@ -216,6 +227,7 @@ class AssistantTurnRequest:
                 is_group=self.is_group,
                 group_id=self.chat_id if self.is_group else None,
                 message_id=self.message_id,
+                message_thread_id=self.message_thread_id,
             ),
             disable_notification=False,
             protect_content=False,

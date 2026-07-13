@@ -9,6 +9,13 @@ from enum import StrEnum
 from typing import Protocol
 
 
+DEFAULT_GROUP_CONTEXT_MESSAGES = 256
+"""@brief 默认群聊短消息窗口 / Default group-context window for short human messages."""
+
+MAX_GROUP_CONTEXT_MESSAGES = 512
+"""@brief 单次群聊上下文条数硬上限 / Hard per-page group-context message limit."""
+
+
 class GroupMessageKind(StrEnum):
     """@brief 可投影的 Telegram 群消息种类 / Projectable Telegram group-message kinds."""
 
@@ -28,7 +35,10 @@ class GroupMessageObservation:
     @param source_update_id Telegram Update 幂等身份 / Telegram Update idempotency identity.
     @param group_id 群 chat ID / Group chat identifier.
     @param message_id 群内消息 ID / Message identifier within the group.
+    @param message_thread_id 可选 Topic ID / Optional topic identifier.
     @param sender_user_id 可选发送者 ID / Optional sender identifier.
+    @param sender_name 可选发送者显示名 / Optional sender display name.
+    @param sender_username 可选 Telegram username / Optional Telegram username.
     @param kind 内容种类 / Content kind.
     @param content 面向上下文的规范文本 / Canonical context text.
     @param created_at 原消息时间 / Original message time.
@@ -45,6 +55,9 @@ class GroupMessageObservation:
     created_at: datetime
     updated_at: datetime
     edited: bool
+    message_thread_id: int | None = None
+    sender_name: str | None = None
+    sender_username: str | None = None
 
     def __post_init__(self) -> None:
         """@brief 校验规范投影输入 / Validate canonical projection input."""
@@ -67,12 +80,28 @@ class GroupMessageObservation:
             or self.message_id <= 0
         ):
             raise ValueError("message_id must be positive")
+        if self.message_thread_id is not None and (
+            isinstance(self.message_thread_id, bool)
+            or not isinstance(self.message_thread_id, int)
+            or self.message_thread_id <= 0
+        ):
+            raise ValueError("message_thread_id must be positive when present")
         if self.sender_user_id is not None and (
             isinstance(self.sender_user_id, bool)
             or not isinstance(self.sender_user_id, int)
             or self.sender_user_id <= 0
         ):
             raise ValueError("sender_user_id must be positive when present")
+        sender_name = self.sender_name.strip() if self.sender_name is not None else None
+        sender_username = (
+            self.sender_username.strip()
+            if self.sender_username is not None
+            else None
+        )
+        if sender_name is not None and not 1 <= len(sender_name) <= 256:
+            raise ValueError("sender_name must contain 1-256 characters")
+        if sender_username is not None and not 1 <= len(sender_username) <= 64:
+            raise ValueError("sender_username must contain 1-64 characters")
         if not isinstance(self.kind, GroupMessageKind):
             raise TypeError("kind must be a GroupMessageKind")
         if not isinstance(self.content, str):
@@ -87,6 +116,8 @@ class GroupMessageObservation:
             raise TypeError("edited must be a bool")
         object.__setattr__(self, "created_at", created_at)
         object.__setattr__(self, "updated_at", updated_at)
+        object.__setattr__(self, "sender_name", sender_name)
+        object.__setattr__(self, "sender_username", sender_username)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,10 +128,12 @@ class GroupMessage:
     @param message_id 群内消息 ID / Message identifier within the group.
     @param sender_user_id 可选发送者 ID / Optional sender identifier.
     @param sender_name 可选已注册名称 / Optional registered sender name.
+    @param sender_username 可选 Telegram username / Optional Telegram username.
     @param kind 内容种类 / Content kind.
     @param content 已解码文本 / Decoded content.
     @param created_at 原消息时间 / Original message time.
     @param edited 是否已经编辑 / Whether the message was edited.
+    @param message_thread_id 可选 Topic ID / Optional topic identifier.
     """
 
     group_id: int
@@ -111,6 +144,8 @@ class GroupMessage:
     content: str
     created_at: datetime
     edited: bool
+    sender_username: str | None = None
+    message_thread_id: int | None = None
 
     def __post_init__(self) -> None:
         """@brief 复用观察值不变量校验读取模型 / Reuse observation invariants for the read model."""
@@ -119,17 +154,16 @@ class GroupMessage:
             source_update_id=0,
             group_id=self.group_id,
             message_id=self.message_id,
+            message_thread_id=self.message_thread_id,
             sender_user_id=self.sender_user_id,
+            sender_name=self.sender_name,
+            sender_username=self.sender_username,
             kind=self.kind,
             content=self.content,
             created_at=self.created_at,
             updated_at=self.created_at,
             edited=self.edited,
         )
-        if self.sender_name is not None and not isinstance(self.sender_name, str):
-            raise TypeError("sender_name must be a string or None")
-
-
 class GroupMessageProjection(Protocol):
     """@brief 群消息规范写入与上下文读取端口 / Port for canonical group-message writes and context reads."""
 
@@ -142,10 +176,11 @@ class GroupMessageProjection(Protocol):
         self,
         group_id: int,
         *,
+        message_thread_id: int | None,
         before_message_id: int | None,
         limit: int,
     ) -> Sequence[GroupMessage]:
-        """@brief 读取指定消息之前的有界上下文 / Read bounded context before a message."""
+        """@brief 读取同一 Topic、指定消息之前的有界上下文 / Read bounded same-topic context before a message."""
 
         ...
 

@@ -16,6 +16,10 @@ from fogmoe_bot.domain.retrieval import (
 )
 
 
+MAX_SEMANTIC_RECALL_RESULTS = 128
+"""@brief 单次通用语义召回结果硬上限 / Hard result limit for one generic semantic recall."""
+
+
 @dataclass(frozen=True, slots=True)
 class SemanticRecallQuery:
     """@brief 有界租户语义查询 / Bounded tenant-scoped semantic query.
@@ -39,8 +43,11 @@ class SemanticRecallQuery:
         text = self.text.strip()
         if not text or len(text) > 20_000:
             raise ValueError("Semantic recall text must contain 1-20000 characters")
-        if not 1 <= self.limit <= 20:
-            raise ValueError("Semantic recall limit must be between 1 and 20")
+        if not 1 <= self.limit <= MAX_SEMANTIC_RECALL_RESULTS:
+            raise ValueError(
+                "Semantic recall limit must be between 1 and "
+                f"{MAX_SEMANTIC_RECALL_RESULTS}"
+            )
         object.__setattr__(self, "text", text)
 
 
@@ -96,7 +103,7 @@ class SemanticRecall:
                         space=self._space,
                     )
                 vector.require_space(self._space)
-                candidate_limit = min(100, query.limit * 3)
+                candidate_limit = min(384, query.limit * 3)
                 with self._telemetry.span(
                     "retrieval.search",
                     kind=SpanKind.CLIENT,

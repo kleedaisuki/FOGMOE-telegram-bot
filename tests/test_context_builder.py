@@ -1,6 +1,8 @@
 from datetime import datetime, timezone, timedelta
 from uuid import UUID
 
+import pytest
+
 from fogmoe_bot.application.conversation.assistant_ingress import (
     normalize_assistant_personal_info as normalize_personal_info,
 )
@@ -59,7 +61,8 @@ def test_context_tools_render_chat_message_metadata_and_escape_content():
             chat_type="supergroup",
             chat_title="Fog <Lab>",
             timestamp="2026-07-06 20:10:00",
-            user_name="kc",
+            user_name="Klee",
+            username="kc",
             message_text='hello <Klee> & "world"',
             message_id=1201,
             forward_type="channel",
@@ -71,7 +74,7 @@ def test_context_tools_render_chat_message_metadata_and_escape_content():
     lines = result.splitlines()
     assert lines[0].startswith(
         '<metadata type="supergroup" title="Fog &lt;Lab&gt;" '
-        'timestamp="2026-07-06 20:10:00" user="@kc"'
+        'timestamp="2026-07-06 20:10:00" user="Klee" username="@kc"'
     )
     assert 'message_id="1201"' in lines[0]
     assert (
@@ -126,6 +129,7 @@ def test_context_tools_render_user_state_and_tool_context():
         "is_group": True,
         "group_id": -100,
         "message_id": 12,
+        "message_thread_id": None,
         "user_id": 42,
     }
 
@@ -148,7 +152,6 @@ def test_context_state_builds_model_messages_with_runtime_replacements():
         coins=7,
         plan="paid",
         permission=2,
-        profile=_profile(),
     )
     context_state = build_context_state(
         context_id=UUID("00000000-0000-4000-8000-000000000042"),
@@ -171,12 +174,10 @@ def test_context_state_builds_model_messages_with_runtime_replacements():
         {
             "role": "system",
             "content": "base system policy\n\n"
+            '<conversation_scope kind="group" shared="true" group_id="-100" '
+            'thread_id="0" current_user_id="42" />\n\n'
             '<user_state coins="7" user_plan="paid" permission="2" '
-            'permission_label="Premium" diary_exists="false" />\n'
-            '<user_profile trust="untrusted_derived_data" revision="3">\n'
-            '  <claim key="interest.cs" kind="preference" confidence="explicit" '
-            'observed_at="2026-07-06T00:00:00+00:00">喜欢计算机科学</claim>\n'
-            "</user_profile>",
+            'permission_label="Premium" diary_exists="false" />',
         },
         {"role": "user", "content": "older"},
         runtime_message,
@@ -189,10 +190,29 @@ def test_context_state_builds_model_messages_with_runtime_replacements():
         "is_group": True,
         "group_id": -100,
         "message_id": 12,
+        "message_thread_id": None,
         "user_id": 42,
     }
     assert context_state.scope.user_id == 42
     assert context_state.user_state is user_state
+
+
+def test_group_context_rejects_private_profile_state() -> None:
+    """@brief 群 Context 不能携带私人画像状态 / Group Context cannot carry private profile state."""
+
+    with pytest.raises(ValueError, match="cannot contain private User Profile"):
+        build_context_state(
+            context_id=UUID("00000000-0000-4000-8000-000000000043"),
+            system_prompt="base",
+            history_messages=(),
+            scope=ConversationScope(user_id=42, is_group=True, group_id=-100),
+            user_state=UserState(
+                coins=7,
+                plan="paid",
+                permission=2,
+                profile=_profile(),
+            ),
+        )
 
 
 def test_context_tools_ignore_empty_runtime_replacement():

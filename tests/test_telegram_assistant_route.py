@@ -44,6 +44,9 @@ from fogmoe_bot.presentation.telegram.assistant_update_models import (
 from fogmoe_bot.presentation.telegram.assistant_update_parser import (
     parse_telegram_assistant_update,
 )
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
+)
 from fogmoe_bot.presentation.telegram.update_mapper import TelegramUpdateMapper
 
 
@@ -235,11 +238,23 @@ def _inbound(payload: JsonObject) -> InboundUpdate:
     user = sender["from"]
     assert isinstance(user, dict)
     user_id = user["id"]
+    chat = sender["chat"]
+    assert isinstance(chat, dict)
+    chat_id = chat["id"]
+    chat_type = chat["type"]
+    thread_id = sender.get("message_thread_id")
     update_id = payload["update_id"]
     assert isinstance(user_id, int) and isinstance(update_id, int)
+    assert isinstance(chat_id, int) and isinstance(chat_type, str)
+    assert thread_id is None or isinstance(thread_id, int)
     return InboundUpdate.pending(
         update_id=UpdateId(update_id),
-        conversation_id=ConversationId(f"assistant-user:{user_id}"),
+        conversation_id=TelegramConversationAddress(
+            chat_type=chat_type,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_thread_id=thread_id,
+        ).conversation_id,
         payload=payload,
         received_at=NOW,
     )
@@ -414,8 +429,8 @@ def test_request_contains_strict_adapter_metadata_and_normalized_user_content() 
             plan="paid",
             permission=1,
             profile=None,
-            personal_info="CS student",
-            diary_exists=True,
+            personal_info="",
+            diary_exists=False,
         ),
         accepted_at=NOW + timedelta(seconds=1),
     )
@@ -445,6 +460,7 @@ def test_request_contains_strict_adapter_metadata_and_normalized_user_content() 
         "is_group": True,
         "group_id": -1001,
         "message_id": 7,
+        "message_thread_id": 9,
     }
     assert command.inference_request["user"] == {
         "user_id": 42,
@@ -454,14 +470,20 @@ def test_request_contains_strict_adapter_metadata_and_normalized_user_content() 
         "plan": "paid",
         "permission": 1,
         "profile": None,
-        "personal_info": "CS student",
-        "diary_exists": True,
+        "personal_info": "",
+        "diary_exists": False,
     }
     assert command.user_content["chat"] == {
         "chat_id": -1001,
         "type": "supergroup",
         "title": "Lab",
     }
+    model_message = command.user_content["model_message"]
+    assert isinstance(model_message, dict)
+    assert (
+        'user="Klee Spark" username="@klee" user_id="42" thread_id="9"'
+        in str(model_message["content"])
+    )
     assert command.user_content["reply"] == {
         "message_id": 6,
         "user_id": 50,
@@ -470,6 +492,33 @@ def test_request_contains_strict_adapter_metadata_and_normalized_user_content() 
         "text": "previous",
         "emoji": None,
     }
+
+
+def test_group_request_rejects_private_state_before_durable_serialization() -> None:
+    """@brief 群请求在 durable 序列化前拒绝私人状态 / A group request rejects private state before durable serialization."""
+
+    inbound = _inbound(
+        _message_payload(
+            chat_type="supergroup",
+            chat_id=-1001,
+            text="@FogMoeBot hello",
+            thread_id=9,
+        )
+    )
+    request = parse_telegram_assistant_update(inbound).to_request(inbound)
+
+    with pytest.raises(ValueError, match="cannot freeze private User Profile"):
+        request.to_accept_turn(
+            AssistantAccountContext(
+                coins=9,
+                plan="paid",
+                permission=1,
+                profile=None,
+                personal_info="private",
+                diary_exists=False,
+            ),
+            accepted_at=NOW + timedelta(seconds=1),
+        )
 
 
 @pytest.mark.parametrize(

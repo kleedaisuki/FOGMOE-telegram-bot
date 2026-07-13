@@ -301,6 +301,33 @@ def _request(*, update_id: int = 100, cost: int = 4) -> AssistantTurnRequest:
     )
 
 
+def _group_request(*, update_id: int = 101, cost: int = 0) -> AssistantTurnRequest:
+    """@brief 构造共享群 Topic 请求 / Build a shared group-topic request.
+
+    @param update_id Update ID / Update ID.
+    @param cost 费用 / Charge.
+    @return 群聊 Assistant 请求 / Group Assistant request.
+    """
+
+    return AssistantTurnRequest(
+        update_id=UpdateId(update_id),
+        conversation_id=ConversationId("assistant-group:-1001:thread:23"),
+        received_at=NOW,
+        user_id=42,
+        username="klee",
+        display_name="Klee",
+        chat_id=-1001,
+        is_group=True,
+        message_id=7 + update_id,
+        message_thread_id=23,
+        delivery_stream_id=DeliveryStreamId(
+            "telegram:primary:chat:-1001:thread:23"
+        ),
+        user_content={"text": "hello group"},
+        coin_cost=cost,
+    )
+
+
 def _account(*, free: int = 2, paid: int = 5) -> UserAccount:
     """@brief 构造账户快照 / Build an account snapshot.
 
@@ -463,6 +490,112 @@ def test_success_locks_rows_and_commits_charge_pool_and_acceptance_on_one_connec
         }
         assert profiles.calls == [(42, transaction.connection)]
         assert transaction.exit_exception is None
+
+    asyncio.run(scenario())
+
+
+def test_group_acceptance_never_reads_or_freezes_private_user_state(
+    monkeypatch: Any,
+) -> None:
+    """@brief 群 acceptance 不读取或冻结私人 Profile/日记 / Group acceptance neither reads nor freezes private Profile or diary state."""
+
+    async def scenario() -> None:
+        """@brief 接受一个零费用群 Topic Turn / Accept one zero-cost group-topic Turn."""
+
+        transaction = RecordingTransaction()
+        workflow = FakeWorkflowRepository()
+        billing = RecordingBilling()
+        profiles = FrozenProfileReader(_profile_snapshot())
+
+        async def fake_fetch_one(
+            sql: str,
+            params: tuple[object, ...],
+            *,
+            connection: object,
+        ) -> tuple[object, ...] | None:
+            """@brief 返回群 inbox identity 且无既有 Turn / Return group inbox identity and no existing Turn."""
+
+            del params, connection
+            if "inbound_updates" in sql:
+                return ("assistant-group:-1001:thread:23",)
+            return None
+
+        async def fake_account(
+            user_id: int,
+            *,
+            connection: object,
+            for_update: bool,
+        ) -> UserAccount:
+            """@brief 返回加锁账户 / Return a locked account."""
+
+            del user_id, connection
+            assert for_update is True
+            return _account()
+
+        async def forbidden_diary(*args: object, **kwargs: object) -> bool:
+            """@brief 证明群路径不读取私人日记 / Prove the group path never reads the private diary."""
+
+            del args, kwargs
+            raise AssertionError("group acceptance read a private diary")
+
+        async def forbidden_balance_write(*args: object, **kwargs: object) -> None:
+            """@brief 零费用路径不得写余额 / Zero-cost path must not write balances."""
+
+            del args, kwargs
+            raise AssertionError("zero-cost group acceptance wrote balances")
+
+        monkeypatch.setattr(
+            assistant_turn_acceptance.db_connection,
+            "transaction",
+            lambda: transaction,
+        )
+        monkeypatch.setattr(
+            assistant_turn_acceptance.db_connection,
+            "fetch_one",
+            fake_fetch_one,
+        )
+        monkeypatch.setattr(
+            assistant_turn_acceptance.user_repository,
+            "fetch_user_account",
+            fake_account,
+        )
+        monkeypatch.setattr(
+            assistant_turn_acceptance.conversation_repository,
+            "user_diary_exists",
+            forbidden_diary,
+        )
+        monkeypatch.setattr(
+            assistant_turn_acceptance.user_repository,
+            "set_coin_balances_and_plan",
+            forbidden_balance_write,
+        )
+
+        result = await PostgresAssistantTurnAcceptanceUoW(  # type: ignore[arg-type]
+            workflow,
+            billing=billing,  # type: ignore[arg-type]
+            profiles=profiles,  # type: ignore[arg-type]
+        ).accept(_group_request(), accepted_at=NOW)
+
+        assert isinstance(result, AssistantTurnAccepted)
+        assert profiles.calls == []
+        inference = workflow.calls[0][1].activity.request
+        assert inference["user"] == {
+            "user_id": 42,
+            "username": "klee",
+            "display_name": "Klee",
+            "coins": 7,
+            "plan": "paid",
+            "permission": 1,
+            "profile": None,
+            "personal_info": "",
+            "diary_exists": False,
+        }
+        assert inference["scope"] == {
+            "is_group": True,
+            "group_id": -1001,
+            "message_id": 108,
+            "message_thread_id": 23,
+        }
 
     asyncio.run(scenario())
 

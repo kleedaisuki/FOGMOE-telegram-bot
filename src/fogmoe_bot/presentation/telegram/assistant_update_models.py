@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from fogmoe_bot.application.conversation.assistant_ingress import (
@@ -12,15 +13,16 @@ from fogmoe_bot.application.conversation.assistant_ingress import (
     assistant_text_cost,
 )
 from fogmoe_bot.application.conversation.inbox_worker import PermanentIngressError
-from fogmoe_bot.domain.conversation.identity import ConversationId
+from fogmoe_bot.application.conversation.telegram_identity import (
+    GROUP_CHAT_TYPES,
+    TelegramConversationAddress,
+)
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.domain.context import ChatMessageContext, render_chat_message
 
 from .delivery import delivery_stream_for_chat
 
-
-GROUP_CHAT_TYPES = frozenset({"group", "supergroup"})
-"""Telegram chat types that use Assistant group-trigger semantics."""
 
 SUPPORTED_ASSISTANT_CHAT_TYPES = frozenset({"private", *GROUP_CHAT_TYPES})
 """Telegram chat types accepted by Assistant ingress."""
@@ -189,7 +191,12 @@ class ParsedTelegramAssistantMessage:
         @return 预检请求 / Preflighted request.
         """
 
-        expected_conversation = ConversationId(f"assistant-user:{self.user_id}")
+        expected_conversation = TelegramConversationAddress(
+            chat_type=self.chat_type,
+            chat_id=self.chat_id,
+            user_id=self.user_id,
+            message_thread_id=self.message_thread_id,
+        ).conversation_id
         if inbound.conversation_id != expected_conversation:
             raise MalformedTelegramAssistantUpdate(
                 "Inbound conversation identity does not match Telegram sender"
@@ -227,6 +234,26 @@ class ParsedTelegramAssistantMessage:
             "source": source,
             "media": self.media.to_json() if self.media is not None else None,
         }
+        if self.chat_type in GROUP_CHAT_TYPES:
+            user_content["model_message"] = {
+                "role": "user",
+                "content": render_chat_message(
+                    ChatMessageContext(
+                        chat_type=self.chat_type,
+                        chat_title=self.chat_title,
+                        timestamp=datetime.fromtimestamp(
+                            self.message_date,
+                            tz=UTC,
+                        ).isoformat(),
+                        user_name=self.display_name,
+                        username=self.username,
+                        user_id=self.user_id,
+                        message_text=self.text,
+                        message_id=self.message_id,
+                        message_thread_id=self.message_thread_id,
+                    )
+                ),
+            }
         coin_cost = (
             5
             if self.media is not None or len(self.text) > ASSISTANT_TEXT_LIMIT

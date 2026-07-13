@@ -82,12 +82,13 @@ class _Projection:
         self,
         group_id: int,
         *,
+        message_thread_id: int | None,
         before_message_id: int | None,
         limit: int,
     ) -> tuple[()]:
         """@brief 本测试不读取 / This test performs no reads."""
 
-        del group_id, before_message_id, limit
+        del group_id, message_thread_id, before_message_id, limit
         return ()
 
 
@@ -225,18 +226,21 @@ def test_postgres_reader_filters_canonical_rows_and_decodes_legacy_base64(
                     "group_id": -1001,
                     "message_id": 9,
                     "user_id": 42,
+                    "message_thread_id": None,
                     "message_type": "sticker",
                     "content": base64.b64encode("🔥".encode()).decode(),
                     "content_encoding": "base64",
                     "created_at": NOW,
                     "is_edited": False,
-                    "name": "Klee",
+                    "sender_name": "Klee",
+                    "sender_username": "klee",
                 }
             ]
 
         monkeypatch.setattr(postgres_module.db_connection, "fetch_all", fake_fetch_all)
         messages = await PostgresGroupMessageProjection().fetch_before(
             -1001,
+            message_thread_id=None,
             before_message_id=10,
             limit=5,
         )

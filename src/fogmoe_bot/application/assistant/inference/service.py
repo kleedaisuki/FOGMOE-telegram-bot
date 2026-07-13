@@ -10,6 +10,7 @@ from fogmoe_bot.domain.assistant.routing.circuit import ProviderCircuit
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
 from fogmoe_bot.domain.assistant.routing.policy import model_supports_vision
 from fogmoe_bot.domain.context import ContextState
+from fogmoe_bot.domain.memory.models import MAX_WORKING_MEMORY_MESSAGES
 from fogmoe_bot.domain.conversation.payloads import JsonValue
 
 from ..agent_loop import AgentExecutionConfig, AgentResponse
@@ -74,8 +75,11 @@ class AssistantInferenceService:
         self._profiles = dict(profiles)
         self._circuit = circuit
         self._text_only_model_patterns = tuple(text_only_model_patterns)
-        if not 1 <= working_memory_limit <= 20:
-            raise ValueError("working_memory_limit must be between 1 and 20")
+        if not 1 <= working_memory_limit <= MAX_WORKING_MEMORY_MESSAGES:
+            raise ValueError(
+                "working_memory_limit must be between 1 and "
+                f"{MAX_WORKING_MEMORY_MESSAGES}"
+            )
         if working_memory_max_tokens < 256:
             raise ValueError("working_memory_max_tokens must be at least 256")
         self._working_memory_limit = working_memory_limit
@@ -177,6 +181,7 @@ class AssistantInferenceService:
                 messages=service_messages,
                 tool_context=context_state.tool_context,
                 text_fallback_messages=context_state.text_fallback_messages,
+                current_user_text=context_state.current_user_text,
             )
             try:
                 response = await self._run_route(

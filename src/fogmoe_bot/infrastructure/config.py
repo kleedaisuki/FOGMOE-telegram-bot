@@ -99,7 +99,7 @@ class AppSettings(BaseSettings):
         "Retrieve prior conversation evidence relevant to the user's current question, "
         "including events, decisions, preferences, corrections, and temporal context."
     )
-    WORKING_MEMORY_RESULT_LIMIT: int = 4
+    WORKING_MEMORY_RESULT_LIMIT: int = 64
     WORKING_MEMORY_RESERVED_TOKENS: int = 16_384
     CONVERSATION_HISTORY_CACHE_CAPACITY: int = 256
     CONVERSATION_HISTORY_CACHE_TTL_SECONDS: float = 900.0

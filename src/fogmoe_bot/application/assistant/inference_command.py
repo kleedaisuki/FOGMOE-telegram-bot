@@ -24,6 +24,9 @@ from fogmoe_bot.domain.user_profile.models import (
     ProfileConfidence,
     UserProfileSnapshot,
 )
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
+)
 
 
 ASSISTANT_INFERENCE_SCHEMA_VERSION: Literal[2] = 2
@@ -122,11 +125,13 @@ class DurableAssistantScope(_StrictFrozenModel):
     @param is_group 是否群聊 / Whether this is a group chat.
     @param group_id 可选群聊 ID / Optional group chat identifier.
     @param message_id 可选来源消息 ID / Optional source-message identifier.
+    @param message_thread_id 可选 Telegram Topic ID / Optional Telegram topic identifier.
     """
 
     is_group: bool
     group_id: int | None = None
     message_id: int | None = Field(default=None, ge=1)
+    message_thread_id: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def validate_group_boundary(self) -> Self:
@@ -142,6 +147,8 @@ class DurableAssistantScope(_StrictFrozenModel):
             raise ValueError("group_id is only valid for a group scope")
         if self.group_id == 0:
             raise ValueError("group_id cannot be zero")
+        if not self.is_group and self.message_thread_id is not None:
+            raise ValueError("message_thread_id is only valid for a group scope")
         return self
 
 
@@ -224,9 +231,20 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
             raise ValueError("translation_input is required for translation")
         if self.task_kind == "assistant" and self.translation_input is not None:
             raise ValueError("translation_input is only valid for translation")
-        if self.scope.is_group and isinstance(self.chat_id, int):
+        if self.scope.is_group:
+            if not isinstance(self.chat_id, int):
+                raise ValueError("group scope requires an integer chat_id")
             if self.scope.group_id != self.chat_id:
                 raise ValueError("group scope must target its group chat_id")
+        if self.scope.is_group and (
+            self.user.profile is not None
+            or bool(self.user.personal_info)
+            or self.user.diary_exists
+        ):
+            raise ValueError(
+                "group scope cannot contain private User Profile, personal_info, "
+                "or diary state"
+            )
         if (
             self.scope.message_id is not None
             and self.reply_to_message_id is not None
@@ -235,6 +253,25 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
             raise ValueError(
                 "reply_to_message_id must match the current scope message_id"
             )
+        if self.scope.message_thread_id != self.message_thread_id:
+            raise ValueError(
+                "scope message_thread_id must match the delivery message_thread_id"
+            )
+        if self.task_kind == "assistant":
+            expected_conversation_id = TelegramConversationAddress(
+                chat_type="group" if self.scope.is_group else "private",
+                chat_id=(
+                    self.scope.group_id
+                    if self.scope.is_group
+                    else self.user.user_id
+                ),
+                user_id=self.user.user_id,
+                message_thread_id=self.scope.message_thread_id,
+            ).conversation_id
+            if self.conversation_id != str(expected_conversation_id):
+                raise ValueError(
+                    "conversation_id does not match its Telegram user/group/topic scope"
+                )
         return self
 
     @property

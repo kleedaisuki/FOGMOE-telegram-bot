@@ -366,12 +366,21 @@ class ContextWindowProjector:
             )
         projected_rows = tuple(projected_rows_values)
         messages = tuple(item for row in projected_rows for item in row.messages)
+        message_count = len(messages) + (1 if checkpoint_summary is not None else 0)
         estimated = self._estimate_complete_input(
             request,
             checkpoint_summary=checkpoint_summary,
             history=messages,
         )
-        if int(estimated) <= int(self._budget.warning_tokens):
+        warning_exceeded = (
+            int(estimated) > int(self._budget.warning_tokens)
+            or message_count > self._budget.warning_messages
+        )
+        hard_exceeded = (
+            int(estimated) > int(self._budget.hard_tokens)
+            or message_count > self._budget.hard_messages
+        )
+        if not warning_exceeded:
             ready = ContextWindowReady(
                 checkpoint_summary,
                 messages,
@@ -384,9 +393,9 @@ class ContextWindowProjector:
             return ready
 
         if not request.include_history:
-            if int(estimated) > int(self._budget.hard_tokens):
+            if hard_exceeded:
                 return ContextWindowTooLarge(
-                    "current_turn_exceeds_hard_token_budget",
+                    "current_turn_exceeds_hard_context_budget",
                     estimated,
                     bounds,
                 )
@@ -420,14 +429,14 @@ class ContextWindowProjector:
             CompactionStatus.CANCELLED,
         }
 
-        if int(estimated) > int(self._budget.hard_tokens):
+        if hard_exceeded:
             if active is not None and not terminal_failure:
                 return CompactionPending(active.compaction_id, estimated, bounds)
             return ContextWindowTooLarge(
                 (
                     "compaction_failed_for_current_prefix"
                     if terminal_failure
-                    else "current_turn_or_recent_tail_exceeds_hard_token_budget"
+                    else "current_turn_or_recent_tail_exceeds_hard_context_budget"
                 ),
                 estimated,
                 bounds,

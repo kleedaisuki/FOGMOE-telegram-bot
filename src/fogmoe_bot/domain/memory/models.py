@@ -14,6 +14,9 @@ from fogmoe_bot.domain.temporal import ensure_utc
 _SOURCE_KIND_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,99}$")
 """@brief Memory 来源类别语法 / Memory-source-kind grammar."""
 
+MAX_WORKING_MEMORY_MESSAGES = 128
+"""@brief 单次 Query 的 WorkingMemory 条数硬上限 / Hard WorkingMemory row limit per query."""
+
 
 @dataclass(frozen=True, slots=True)
 class PersonalMemoryScope:
@@ -127,8 +130,11 @@ class WorkingMemory:
         messages = tuple(self.messages)
         if not query or len(query) > 20_000:
             raise ValueError("WorkingMemory query must contain 1-20000 characters")
-        if len(messages) > 20:
-            raise ValueError("WorkingMemory cannot contain more than 20 messages")
+        if len(messages) > MAX_WORKING_MEMORY_MESSAGES:
+            raise ValueError(
+                "WorkingMemory cannot contain more than "
+                f"{MAX_WORKING_MEMORY_MESSAGES} messages"
+            )
         passage_ids = tuple(message.passage_id for message in messages)
         if len(set(passage_ids)) != len(passage_ids):
             raise ValueError("WorkingMemory passage IDs must be unique")
@@ -138,6 +144,7 @@ class WorkingMemory:
 
 __all__ = [
     "GroupMemoryScope",
+    "MAX_WORKING_MEMORY_MESSAGES",
     "MemoryScope",
     "PersonalMemoryScope",
     "WorkingMemory",

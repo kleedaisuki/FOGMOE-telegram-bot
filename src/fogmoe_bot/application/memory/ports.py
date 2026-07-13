@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from fogmoe_bot.domain.memory.models import MemoryScope, WorkingMemory
+from fogmoe_bot.domain.memory.models import (
+    MAX_WORKING_MEMORY_MESSAGES,
+    MemoryScope,
+    WorkingMemory,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,8 +35,11 @@ class WorkingMemoryQuery:
         text = self.text.strip()
         if not text or len(text) > 20_000:
             raise ValueError("WorkingMemory query must contain 1-20000 characters")
-        if not 1 <= self.limit <= 20:
-            raise ValueError("WorkingMemory limit must be between 1 and 20")
+        if not 1 <= self.limit <= MAX_WORKING_MEMORY_MESSAGES:
+            raise ValueError(
+                "WorkingMemory limit must be between 1 and "
+                f"{MAX_WORKING_MEMORY_MESSAGES}"
+            )
         object.__setattr__(self, "text", text)
 
 

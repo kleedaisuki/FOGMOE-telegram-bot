@@ -157,18 +157,31 @@ class PostgresAssistantTurnAcceptanceUoW:
                 paid=account.coins_paid,
                 amount=request.coin_cost,
             )
+            profile = (
+                None
+                if request.is_group
+                else await self._profiles.read_profile_in_transaction(
+                    request.user_id,
+                    connection=connection,
+                )
+            )
             account_context = AssistantAccountContext(
                 coins=new_free + new_paid,
                 plan=_resolve_plan(request.user_id, new_paid),
                 permission=account.permission,
-                profile=await self._profiles.read_profile_in_transaction(
-                    request.user_id,
-                    connection=connection,
+                profile=profile,
+                personal_info=(
+                    ""
+                    if request.is_group
+                    else normalize_assistant_personal_info(account.info)
                 ),
-                personal_info=normalize_assistant_personal_info(account.info),
-                diary_exists=await conversation_repository.user_diary_exists(
-                    request.user_id,
-                    connection=connection,
+                diary_exists=(
+                    False
+                    if request.is_group
+                    else await conversation_repository.user_diary_exists(
+                        request.user_id,
+                        connection=connection,
+                    )
                 ),
             )
             prepared = ConversationWorkflow.prepare(

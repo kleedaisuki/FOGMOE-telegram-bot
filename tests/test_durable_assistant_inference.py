@@ -61,7 +61,7 @@ def _request(turn_id: TurnId, **overrides: object) -> JsonObject:
 
     request: JsonObject = {
         "schema_version": 2,
-        "conversation_id": "assistant-user:7",
+        "conversation_id": "assistant-group:-100:thread:9",
         "turn_id": str(turn_id),
         "delivery_stream_id": "telegram:bot:1:chat:-100:thread:9",
         "chat_id": -100,
@@ -82,6 +82,7 @@ def _request(turn_id: TurnId, **overrides: object) -> JsonObject:
             "is_group": True,
             "group_id": -100,
             "message_id": 42,
+            "message_thread_id": 9,
         },
         "disable_notification": False,
         "protect_content": False,
@@ -113,7 +114,7 @@ def _message(
                 turn_id,
                 f"test.{sequence}.{role.value}",
             ),
-            conversation_id=ConversationId("assistant-user:7"),
+            conversation_id=ConversationId("assistant-group:-100:thread:9"),
             turn_id=turn_id,
             source_update_id=(UpdateId(sequence) if role is MessageRole.USER else None),
             role=role,
@@ -300,7 +301,9 @@ def test_adapter_reads_cutoff_history_and_returns_ordered_durable_outbox_intents
         result = await _adapter(history, inference).infer(_request(turn_id))
 
         assert len(history.calls) == 1
-        assert history.calls[0].conversation_id == ConversationId("assistant-user:7")
+        assert history.calls[0].conversation_id == ConversationId(
+            "assistant-group:-100:thread:9"
+        )
         assert history.calls[0].through_turn_id == turn_id
         assert history.calls[0].include_history is True
         assert inference.context is not None
@@ -573,6 +576,38 @@ def test_command_model_is_frozen_and_validates_cross_field_scope() -> None:
         asyncio.run(
             _adapter(_History(()), _Inference(AgentResponse("ok", []))).infer(
                 invalid_scope
+            )
+        )
+
+    wrong_conversation = _request(
+        turn_id,
+        conversation_id="assistant-user:7",
+    )
+    with pytest.raises(PermanentInferenceError):
+        asyncio.run(
+            _adapter(_History(()), _Inference(AgentResponse("ok", []))).infer(
+                wrong_conversation
+            )
+        )
+
+    private_state_in_group = _request(
+        turn_id,
+        user={
+            "user_id": 7,
+            "username": "klee",
+            "display_name": "Klee",
+            "coins": 91,
+            "plan": "free",
+            "permission": 0,
+            "profile": None,
+            "personal_info": "private",
+            "diary_exists": False,
+        },
+    )
+    with pytest.raises(PermanentInferenceError):
+        asyncio.run(
+            _adapter(_History(()), _Inference(AgentResponse("ok", []))).infer(
+                private_state_in_group
             )
         )
 

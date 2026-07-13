@@ -6,6 +6,7 @@ from .builder import (
     compose_system_prompt,
     create_runtime_replacement,
     render_chat_message,
+    render_conversation_scope,
     render_scheduled_task,
     render_user_state,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "compose_system_prompt",
     "create_runtime_replacement",
     "render_chat_message",
+    "render_conversation_scope",
     "render_scheduled_task",
     "render_user_state",
 ]

@@ -41,6 +41,9 @@ NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)
 CONVERSATION = ConversationId("assistant-user:7")
 """@brief 测试会话 / Test conversation."""
 
+GROUP_CONVERSATION = ConversationId("assistant-group:-1007:thread:23")
+"""@brief 群 Topic 测试会话 / Group-topic test conversation."""
+
 
 class _CharacterCounter:
     """@brief 可预测字符 token counter / Predictable character token counter."""
@@ -121,7 +124,7 @@ class _Persistence:
     ) -> Sequence[ConversationMessage]:
         """@brief 模拟 keyset page / Simulate a keyset page."""
 
-        assert conversation_id == CONVERSATION
+        assert conversation_id == self.bounds.conversation_id
         self.pages.append((after_sequence, through_sequence, limit))
         return tuple(
             message
@@ -147,16 +150,29 @@ def _message(
     text: str,
     *,
     excluded: bool = False,
+    conversation_id: ConversationId = CONVERSATION,
+    model_message: JsonObject | None = None,
 ) -> ConversationMessage:
-    """@brief 构造 append-only user message / Build an append-only user message."""
+    """@brief 构造 append-only user message / Build an append-only user message.
+
+    @param sequence 会话内序号 / Conversation-local sequence.
+    @param turn_id 来源 Turn / Source Turn.
+    @param text 原始用户文本 / Raw user text.
+    @param excluded 是否排除于 Assistant history / Whether to exclude from Assistant history.
+    @param conversation_id 会话边界 / Conversation boundary.
+    @param model_message 可选 speaker-aware 模型消息 / Optional speaker-aware model message.
+    @return 已分配序号的消息 / Sequenced message.
+    """
 
     content: JsonObject = {"text": text}
     if excluded:
         content["exclude_from_assistant"] = True
+    if model_message is not None:
+        content["model_message"] = model_message
     return ConversationMessage(
         MessageDraft(
             message_id=ConversationMessageId.new(),
-            conversation_id=CONVERSATION,
+            conversation_id=conversation_id,
             turn_id=turn_id,
             source_update_id=None,
             role=MessageRole.USER,
@@ -168,17 +184,81 @@ def _message(
     )
 
 
-def _request(turn_id: TurnId) -> ContextWindowRequest:
-    """@brief 构造 projection request / Build a projection request."""
+def _request(
+    turn_id: TurnId,
+    *,
+    conversation_id: ConversationId = CONVERSATION,
+) -> ContextWindowRequest:
+    """@brief 构造 projection request / Build a projection request.
+
+    @param turn_id anchor Turn / Anchor Turn.
+    @param conversation_id 会话边界 / Conversation boundary.
+    @return 历史投影请求 / History-projection request.
+    """
 
     return ContextWindowRequest(
-        conversation_id=CONVERSATION,
+        conversation_id=conversation_id,
         owner_user_id=7,
         through_turn_id=turn_id,
         base_messages=({"role": "system", "content": "S"},),
         reserved_tokens=TokenCount(0),
         requested_at=NOW + timedelta(seconds=1),
     )
+
+
+def test_group_topic_projection_preserves_every_speaker_in_one_shared_context() -> None:
+    """@brief 同群 Topic 的不同成员进入同一 speaker-aware Context / Different members of one group topic enter one speaker-aware Context."""
+
+    async def scenario() -> None:
+        """@brief 投影两个群成员的连续 Turn / Project consecutive Turns from two group members."""
+
+        first_turn = TurnId.new()
+        second_turn = TurnId.new()
+        first_rendered = '<metadata type="supergroup" user="@alice" user_id="11" thread_id="23" />\n<message>red</message>'
+        second_rendered = '<metadata type="supergroup" user="@bob" user_id="12" thread_id="23" />\n<message>blue</message>'
+        messages = (
+            _message(
+                1,
+                first_turn,
+                "red",
+                conversation_id=GROUP_CONVERSATION,
+                model_message={"role": "user", "content": first_rendered},
+            ),
+            _message(
+                2,
+                second_turn,
+                "blue",
+                conversation_id=GROUP_CONVERSATION,
+                model_message={"role": "user", "content": second_rendered},
+            ),
+        )
+        persistence = _Persistence(
+            bounds=ContextWindowBounds(
+                GROUP_CONVERSATION,
+                second_turn,
+                2,
+                2,
+                0,
+            ),
+            messages=messages,
+        )
+        projector = ContextWindowProjector(
+            persistence=persistence,
+            token_counter=_CharacterCounter(),
+        )
+
+        result = await projector.project(
+            _request(second_turn, conversation_id=GROUP_CONVERSATION)
+        )
+
+        assert isinstance(result, ContextWindowReady)
+        assert result.messages == (
+            {"role": "user", "content": first_rendered},
+            {"role": "user", "content": second_rendered},
+        )
+        assert result.anchor_messages == (messages[1],)
+
+    asyncio.run(scenario())
 
 
 def test_more_than_128_tiny_rows_are_not_truncated() -> None:
@@ -215,6 +295,85 @@ def test_more_than_128_tiny_rows_are_not_truncated() -> None:
         assert len(result.messages) == 130
         assert len(persistence.pages) == 5
         assert persistence.enqueued == []
+
+    asyncio.run(scenario())
+
+
+def test_many_tiny_messages_trigger_the_count_window_before_the_token_window() -> None:
+    """@brief 大量短句按条数触发压缩而非绕过 token 窗 / Many short messages trigger compaction by count instead of bypassing the token window."""
+
+    async def scenario() -> None:
+        """@brief 以很高 token 预算隔离条数阈值 / Isolate the count threshold with a high token budget."""
+
+        current_turn = TurnId.new()
+        prior_turn = TurnId.new()
+        messages = tuple(
+            _message(index, current_turn if index == 6 else prior_turn, "x")
+            for index in range(1, 7)
+        )
+        persistence = _Persistence(
+            bounds=ContextWindowBounds(CONVERSATION, current_turn, 6, 6, 0),
+            messages=messages,
+        )
+        projector = ContextWindowProjector(
+            persistence=persistence,
+            token_counter=_CharacterCounter(),
+            budget=ContextTokenBudget(
+                warning_tokens=TokenCount(1_000),
+                hard_tokens=TokenCount(1_200),
+                warning_messages=4,
+                hard_messages=8,
+                summary_output_tokens=TokenCount(10),
+                segment_input_tokens=TokenCount(500),
+                minimum_recent_non_tool_messages=2,
+            ),
+        )
+
+        result = await projector.project(_request(current_turn))
+
+        assert isinstance(result, ContextWindowReady)
+        assert len(result.messages) == 6
+        assert int(result.estimated_tokens) < 1_000
+        assert len(persistence.enqueued) == 1
+        assert persistence.enqueued[0].through_sequence == 4
+
+    asyncio.run(scenario())
+
+
+def test_tiny_message_flood_waits_when_the_hard_count_window_is_exceeded() -> None:
+    """@brief 极短消息洪泛超过条数硬上限时等待压缩 / A tiny-message flood exceeding the hard count window waits for compaction."""
+
+    async def scenario() -> None:
+        """@brief 验证硬条数门限 / Verify the hard message-count gate."""
+
+        current_turn = TurnId.new()
+        prior_turn = TurnId.new()
+        messages = tuple(
+            _message(index, current_turn if index == 6 else prior_turn, "x")
+            for index in range(1, 7)
+        )
+        persistence = _Persistence(
+            bounds=ContextWindowBounds(CONVERSATION, current_turn, 6, 6, 0),
+            messages=messages,
+        )
+        projector = ContextWindowProjector(
+            persistence=persistence,
+            token_counter=_CharacterCounter(),
+            budget=ContextTokenBudget(
+                warning_tokens=TokenCount(1_000),
+                hard_tokens=TokenCount(1_200),
+                warning_messages=3,
+                hard_messages=5,
+                summary_output_tokens=TokenCount(10),
+                segment_input_tokens=TokenCount(500),
+                minimum_recent_non_tool_messages=2,
+            ),
+        )
+
+        result = await projector.project(_request(current_turn))
+
+        assert isinstance(result, CompactionPending)
+        assert len(persistence.enqueued) == 1
 
     asyncio.run(scenario())
 

@@ -51,6 +51,54 @@ from conversation_workflow_testkit import (
 )
 
 
+def test_inference_claim_preserves_conversation_causality_across_workers(
+    monkeypatch: Any,
+) -> None:
+    """@brief 同 Conversation 的后续推理不能越过早期活动 / A later inference cannot overtake an earlier activity in the same Conversation."""
+
+    async def scenario() -> None:
+        """@brief 捕获 claim SQL 的会话头部谓词 / Capture the conversation-head predicate in claim SQL."""
+
+        connection = object()
+        captured: dict[str, object] = {}
+
+        async def fake_fetch_all(
+            sql: str,
+            params: tuple[object, ...],
+            *,
+            connection: object,
+        ) -> list[tuple[object, ...]]:
+            """@brief 记录 claim SQL 且返回空队列 / Record claim SQL and return an empty queue."""
+
+            del params
+            captured["sql"] = sql
+            captured["connection"] = connection
+            return []
+
+        monkeypatch.setattr(
+            db_connection,
+            "transaction",
+            lambda: _TransactionContext(connection),
+        )
+        monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
+
+        claims = await PostgresInferenceRepository().claim_inference_activities(
+            now=NOW,
+            limit=8,
+            lease_for=timedelta(seconds=30),
+        )
+
+        assert claims == ()
+        sql = str(captured["sql"])
+        assert "earlier.conversation_id = candidate.conversation_id" in sql
+        assert "earlier.status IN ('pending', 'processing', 'retry')" in sql
+        assert "(earlier.created_at, earlier.activity_id)" in sql
+        assert "< (candidate.created_at, candidate.activity_id)" in sql
+        assert captured["connection"] is connection
+
+    asyncio.run(scenario())
+
+
 def test_inference_uow_failure_exits_the_single_transaction_for_rollback(
     monkeypatch: Any,
 ) -> None:

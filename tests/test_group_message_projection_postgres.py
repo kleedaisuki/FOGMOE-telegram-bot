@@ -72,6 +72,22 @@ def test_projection_replay_edit_order_and_context_window_are_canonical() -> None
             )
             await projection.project(
                 GroupMessageObservation(
+                    103,
+                    group_id,
+                    3,
+                    None,
+                    GroupMessageKind.TEXT,
+                    "topic message",
+                    now + timedelta(seconds=3),
+                    now + timedelta(seconds=3),
+                    False,
+                    message_thread_id=23,
+                    sender_name="Unregistered Speaker",
+                    sender_username="visitor",
+                )
+            )
+            await projection.project(
+                GroupMessageObservation(
                     99,
                     group_id,
                     1,
@@ -108,16 +124,27 @@ def test_projection_replay_edit_order_and_context_window_are_canonical() -> None
             ] == [
                 (1, 101, "edited", True),
                 (2, 102, "[photo]", False),
+                (3, 103, "topic message", False),
             ]
             context = await projection.fetch_before(
                 group_id,
-                before_message_id=3,
+                message_thread_id=None,
+                before_message_id=4,
                 limit=10,
             )
             assert [message.message_id for message in context] == [1, 2]
             assert context[0].content == "edited"
             assert context[0].sender_name is not None
             assert context[1].sender_user_id is None
+            topic_context = await projection.fetch_before(
+                group_id,
+                message_thread_id=23,
+                before_message_id=4,
+                limit=10,
+            )
+            assert [message.message_id for message in topic_context] == [3]
+            assert topic_context[0].sender_name == "Unregistered Speaker"
+            assert topic_context[0].sender_username == "visitor"
             old_relation = await db_connection.fetch_one(
                 "SELECT to_regclass('conversation.chat_records_group')"
             )

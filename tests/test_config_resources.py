@@ -30,6 +30,10 @@ def test_system_prompt_defines_persona_and_runtime_contract() -> None:
     assert "empty retrieval result does not prove" in config.SYSTEM_PROMPT
     assert "Call `search_memory`" in config.SYSTEM_PROMPT
     assert "Never attempt to cross personal or group boundaries" in config.SYSTEM_PROMPT
+    assert "## Group conversations\n" in config.SYSTEM_PROMPT
+    assert "Preserve speaker attribution" in config.SYSTEM_PROMPT
+    assert "Private User Profile" in config.SYSTEM_PROMPT
+    assert "Use `fetch_group_context`" in config.SYSTEM_PROMPT
 
 
 def test_system_prompt_requires_the_typed_sticker_tool() -> None:

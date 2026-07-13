@@ -26,6 +26,10 @@ from fogmoe_bot.domain.conversation.identity import (
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class TelegramIngressIdentity:
@@ -33,10 +37,9 @@ class TelegramIngressIdentity:
 
     @param update_id Telegram 的全局 Update 序号 / Telegram's global Update sequence.
     @param conversation_id 用于当前产品语义的长期会话身份 / Long-lived conversation identity for current product semantics.
-    @note 用户存在时，会话身份只由 ``user_id`` 决定，从而保持既有“跨 chat 共享 AI
-    记忆”语义；chat/thread 必须作为 turn 或 delivery metadata 单独保存。/
-    When a user exists, only ``user_id`` determines conversation identity, preserving the
-    existing cross-chat AI-memory semantics; chat/thread belong in turn or delivery metadata.
+    @note 私聊按用户聚合；群聊按 ``group_id + message_thread_id`` 聚合，使同一群 Topic
+    的所有成员共享 Context。/ Private chats aggregate by user; group chats aggregate by
+    ``group_id + message_thread_id`` so all members of one topic share Context.
     """
 
     update_id: UpdateId
@@ -83,15 +86,22 @@ class TelegramUpdateMapper:
             raise ValueError("Telegram Update requires an integer update_id")
         update_id = UpdateId(raw_update_id)
 
-        user = update.effective_user
-        if user is not None:
-            conversation_id = ConversationId(f"assistant-user:{user.id}")
+        user = getattr(update, "effective_user", None)
+        chat = getattr(update, "effective_chat", None)
+        message = getattr(update, "effective_message", None)
+        if user is not None or chat is not None:
+            conversation_id = TelegramConversationAddress(
+                chat_type=None if chat is None else str(chat.type),
+                chat_id=None if chat is None else chat.id,
+                user_id=None if user is None else user.id,
+                message_thread_id=(
+                    None
+                    if message is None
+                    else getattr(message, "message_thread_id", None)
+                ),
+            ).conversation_id
         else:
-            chat = update.effective_chat
-            if chat is not None:
-                conversation_id = ConversationId(f"telegram-chat:{chat.id}")
-            else:
-                conversation_id = ConversationId(f"telegram-update:{raw_update_id}")
+            conversation_id = ConversationId(f"telegram-update:{raw_update_id}")
         return TelegramIngressIdentity(
             update_id=update_id,
             conversation_id=conversation_id,

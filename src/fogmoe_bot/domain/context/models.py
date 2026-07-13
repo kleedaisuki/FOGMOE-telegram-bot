@@ -34,9 +34,12 @@ class ChatMessageContext:
     @param chat_type Telegram 聊天类型 / Telegram chat type.
     @param chat_title 群聊标题 / Group chat title.
     @param timestamp 消息时间戳文本 / Message timestamp text.
-    @param user_name Telegram 用户名 / Telegram username.
+    @param user_name 发送者显示名 / Sender display name.
+    @param username 可选 Telegram username / Optional Telegram username.
+    @param user_id Telegram 用户 ID / Telegram user identifier.
     @param message_text 用户消息正文 / User message body.
     @param message_id Telegram 消息 ID / Telegram message id.
+    @param message_thread_id Telegram Topic ID / Telegram topic identifier.
     @param edited 是否为编辑消息 / Whether the message is edited.
     @param edited_at 编辑时间 / Edit timestamp.
     @param forward_type 转发来源类型 / Forward origin type.
@@ -62,7 +65,10 @@ class ChatMessageContext:
     timestamp: str
     user_name: str
     message_text: str
+    username: str | None = None
+    user_id: int | None = None
     message_id: str | int | None = None
+    message_thread_id: int | None = None
     edited: bool = False
     edited_at: str | None = None
     forward_type: str | None = None
@@ -111,12 +117,38 @@ class ConversationScope:
     @param is_group 是否来自群聊 / Whether the turn is from a group chat.
     @param group_id 群聊 ID / Group chat id.
     @param message_id 当前消息 ID / Current message id.
+    @param message_thread_id 当前 Telegram Topic ID / Current Telegram topic identifier.
     """
 
     user_id: int
     is_group: bool = False
     group_id: int | None = None
     message_id: int | None = None
+    message_thread_id: int | None = None
+
+    def __post_init__(self) -> None:
+        """@brief 校验私人/群/Topic 作用域闭集 / Validate the private/group/topic scope sum type.
+
+        @return None / None.
+        @raise ValueError ID 或作用域组合非法 / An identifier or scope combination is invalid.
+        """
+
+        if isinstance(self.user_id, bool) or self.user_id <= 0:
+            raise ValueError("ConversationScope user_id must be positive")
+        if self.is_group != (self.group_id is not None):
+            raise ValueError("Group ConversationScope requires exactly one group_id")
+        if isinstance(self.group_id, bool) or self.group_id == 0:
+            raise ValueError("ConversationScope group_id cannot be zero")
+        if not self.is_group and self.message_thread_id is not None:
+            raise ValueError("Private ConversationScope cannot have a message_thread_id")
+        if self.message_id is not None and (
+            isinstance(self.message_id, bool) or self.message_id <= 0
+        ):
+            raise ValueError("ConversationScope message_id must be positive")
+        if self.message_thread_id is not None and (
+            isinstance(self.message_thread_id, bool) or self.message_thread_id <= 0
+        ):
+            raise ValueError("ConversationScope message_thread_id must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +175,7 @@ class ContextState:
     @param messages 已提交或当前回合临时的模型消息链 / Committed or in-turn model message chain.
     @param tool_context 传给 Agent 工具的显式作用域 / Explicit scope passed to Agent tools.
     @param text_fallback_messages 纯文本模型的降级消息链 / Text-only fallback message chain.
+    @param current_user_text 当前 Turn 未改写的用户文本 / Unrewritten user text for the current Turn.
     """
 
     context_id: UUID
@@ -151,6 +184,7 @@ class ContextState:
     messages: list[dict[str, object]]
     tool_context: dict[str, object]
     text_fallback_messages: list[dict[str, object]] | None = None
+    current_user_text: str | None = None
 
     def __post_init__(self) -> None:
         """@brief 校验可变 ContextState 实体标识 / Validate the mutable ContextState entity identity.
@@ -161,3 +195,5 @@ class ContextState:
 
         if self.context_id.int == 0:
             raise ValueError("ContextState context_id cannot be nil")
+        if self.current_user_text is not None and not self.current_user_text.strip():
+            raise ValueError("ContextState current_user_text cannot be blank")

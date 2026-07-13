@@ -1,4 +1,4 @@
-"""@brief Context Window token 预算值对象 / Context-window token-budget value objects."""
+"""@brief Context Window token 与消息数预算 / Context-window token and message-count budgets."""
 
 from __future__ import annotations
 
@@ -36,10 +36,12 @@ class TokenCount:
 
 @dataclass(frozen=True, slots=True)
 class ContextTokenBudget:
-    """@brief 模型输入投影与摘要的显式 token 预算 / Explicit token budget for model-input projection and summarization.
+    """@brief 模型输入投影的 token/条数双预算 / Dual token/count budget for model-input projection.
 
     @param warning_tokens 后台压缩触发点 / Background-compaction trigger.
     @param hard_tokens 模型输入硬上限 / Hard model-input limit.
+    @param warning_messages 消息数后台压缩触发点 / Message-count compaction trigger.
+    @param hard_messages 消息数硬上限 / Hard model-message limit.
     @param summary_output_tokens 摘要输出上限 / Summary-output limit.
     @param segment_input_tokens 单次摘要输入上限 / Per-summary input limit.
     @param minimum_recent_non_tool_messages 至少保留的近期非工具消息数 / Minimum recent non-tool messages to retain.
@@ -48,6 +50,8 @@ class ContextTokenBudget:
 
     warning_tokens: TokenCount = TokenCount(114_000)
     hard_tokens: TokenCount = TokenCount(120_000)
+    warning_messages: int = 512
+    hard_messages: int = 768
     summary_output_tokens: TokenCount = TokenCount(2_500)
     segment_input_tokens: TokenCount = TokenCount(64_000)
     minimum_recent_non_tool_messages: int = 10
@@ -69,6 +73,14 @@ class ContextTokenBudget:
         if not summary < segment <= warning:
             raise ValueError(
                 "Segment input budget must be above summary output and at most warning"
+            )
+        if (
+            isinstance(self.warning_messages, bool)
+            or isinstance(self.hard_messages, bool)
+            or not 0 < self.warning_messages < self.hard_messages
+        ):
+            raise ValueError(
+                "Message budgets must satisfy 0 < warning_messages < hard_messages"
             )
         if (
             isinstance(self.minimum_recent_non_tool_messages, bool)

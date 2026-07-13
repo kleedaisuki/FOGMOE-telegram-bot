@@ -74,10 +74,30 @@ def test_default_catalog_excludes_stateful_sandbox_and_classifies_action_tools()
     assert "linux_sandbox" not in names
     assert "fetch_group_context" in names
     group_context = DEFAULT_TOOL_CATALOG.validate(
-        "fetch_group_context", {"window_size": 100}
+        "fetch_group_context", {"window_size": 512}
     )
     assert isinstance(group_context, ValidatedToolInvocation)
     assert not group_context.mutating
+    group_default = DEFAULT_TOOL_CATALOG.validate("fetch_group_context", {})
+    assert isinstance(group_default, ValidatedToolInvocation)
+    assert group_default.arguments.model_dump()["window_size"] == 256
+    memory_default = DEFAULT_TOOL_CATALOG.validate(
+        "search_memory", {"query": "old discussion"}
+    )
+    assert isinstance(memory_default, ValidatedToolInvocation)
+    assert memory_default.arguments.model_dump()["limit"] == 64
+    assert isinstance(
+        DEFAULT_TOOL_CATALOG.validate(
+            "search_memory", {"query": "old discussion", "limit": 128}
+        ),
+        ValidatedToolInvocation,
+    )
+    assert isinstance(
+        DEFAULT_TOOL_CATALOG.validate(
+            "search_memory", {"query": "old discussion", "limit": 129}
+        ),
+        InvalidToolArguments,
+    )
     diary_read = DEFAULT_TOOL_CATALOG.validate("user_diary", {"action": "read"})
     diary_write = DEFAULT_TOOL_CATALOG.validate(
         "user_diary",

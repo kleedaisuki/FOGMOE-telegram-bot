@@ -161,12 +161,18 @@ def extract_group_message_observation(
     )
     sender = _object(message.get("from"))
     sender_user_id = None if sender is None else _integer(sender.get("id"), minimum=1)
+    sender_username = None if sender is None else _string(sender.get("username"))
+    sender_name = None if sender is None else _sender_name(sender)
+    message_thread_id = _integer(message.get("message_thread_id"), minimum=1)
     kind, content = _content(message)
     return GroupMessageObservation(
         source_update_id=update.update_id.value,
         group_id=group_id,
         message_id=message_id,
+        message_thread_id=message_thread_id,
         sender_user_id=sender_user_id,
+        sender_name=sender_name,
+        sender_username=sender_username,
         kind=kind,
         content=content,
         created_at=created_at,
@@ -222,6 +228,28 @@ def _integer(value: JsonValue | None, *, minimum: int | None = None) -> int | No
     if minimum is not None and value < minimum:
         return None
     return value
+
+
+def _string(value: JsonValue | None) -> str | None:
+    """@brief 收窄非空字符串 / Narrow a non-empty string.
+
+    @param value JSON 值 / JSON value.
+    @return 去空白字符串或 None / Stripped string or None.
+    """
+
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _sender_name(sender: JsonObject) -> str | None:
+    """@brief 组合 Telegram 发送者显示名 / Compose a Telegram sender display name.
+
+    @param sender 规范 sender object / Canonical sender object.
+    @return 显示名或 None / Display name or None.
+    """
+
+    parts = (_string(sender.get("first_name")), _string(sender.get("last_name")))
+    name = " ".join(part for part in parts if part)
+    return name or None
 
 
 __all__ = [
