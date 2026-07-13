@@ -12,16 +12,17 @@ from fogmoe_bot.application.assistant.durable_inference import (
 from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
 from fogmoe_bot.application.assistant.tool_runtime import AgentRuntime
 from fogmoe_bot.application.assistant.tools.catalog import DEFAULT_TOOL_CATALOG
-from fogmoe_bot.application.conversation.compaction_worker import (
-    ConversationCompactionWorker,
+from fogmoe_bot.application.memory.queries import MemoryReader
+from fogmoe_bot.application.context_window.worker import (
+    CompactionWorker,
 )
-from fogmoe_bot.application.conversation.history_projection import (
-    ConversationHistoryProjector,
+from fogmoe_bot.application.context_window.projection import (
+    ContextWindowProjector,
 )
-from fogmoe_bot.application.conversation.history_cache import ConversationHistoryCache
+from fogmoe_bot.application.context_window.cache import ContextWindowCache
 from fogmoe_bot.application.conversation.inference_worker import InferenceRuntimeLimits
 from fogmoe_bot.domain.assistant.routing.circuit import ProviderCircuit
-from fogmoe_bot.domain.conversation.retention import ContextTokenBudget, TokenCount
+from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.blocking import (
     AsyncBlockingBulkhead,
@@ -29,9 +30,10 @@ from fogmoe_bot.infrastructure.blocking import (
 from fogmoe_bot.infrastructure.database.assistant_tool_effects import (
     PostgresAssistantToolStore,
 )
-from fogmoe_bot.infrastructure.database.conversation_retention import (
-    PostgresConversationRetention,
+from fogmoe_bot.infrastructure.database.context_window import (
+    PostgresContextWindowStore,
 )
+from fogmoe_bot.infrastructure.database.memory import PostgresMemoryReader
 from fogmoe_bot.infrastructure.database.group_message_projection import (
     PostgresGroupMessageProjection,
 )
@@ -41,13 +43,15 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
 from fogmoe_bot.infrastructure.llm.assistant_completion import (
     LiteLLMAssistantCompletion,
 )
-from fogmoe_bot.infrastructure.llm.history_token_counter import (
+from fogmoe_bot.infrastructure.context_window.token_counter import (
     ConservativeHistoryTokenCounter,
 )
 from fogmoe_bot.infrastructure.media.file_artifact_store import FileArtifactStore
 from fogmoe_bot.infrastructure.media.file_rate_limiter import FileSlidingWindowLimiter
 
-from .compaction_summary import ProviderCompactionSummaryGenerator
+from fogmoe_bot.infrastructure.context_window.summary import (
+    ProviderCompactionSummaryGenerator,
+)
 from .external_reads import ExternalReadSettings, RequestsExternalReadTools
 from .generated_media import GeneratedMediaSettings, RequestsGeneratedMediaTools
 from .routing_config import build_provider_profiles, configured_service_order
@@ -68,7 +72,7 @@ class DurableAssistantComposition:
     """
 
     inference: DurableAssistantInferenceAdapter
-    compaction: ConversationCompactionWorker
+    compaction: CompactionWorker
     artifacts: FileArtifactStore
     blocking_bulkheads: tuple[AsyncBlockingBulkhead, ...]
 
@@ -77,25 +81,28 @@ def build_durable_assistant(
     *,
     system_prompt: str,
     runtime_limits: InferenceRuntimeLimits,
-    retention: PostgresConversationRetention | None = None,
+    context_window: PostgresContextWindowStore | None = None,
+    memory: MemoryReader | None = None,
     telemetry: Telemetry,
 ) -> DurableAssistantComposition:
     """@brief 组合 async Agent、receipts、adapters 与 durable inference / Compose the async Agent, receipts, adapters, and durable inference.
 
     @param system_prompt system prompt / System prompt.
     @param runtime_limits inference worker budgets / Inference-worker budgets.
-    @param retention 可替换 retention repository / Replaceable retention repository.
+    @param context_window 可替换 Context Window store / Replaceable context-window store.
+    @param memory 可替换长期记忆 reader / Replaceable long-term-memory reader.
     @param telemetry 进程 typed telemetry / Process typed telemetry.
     @return inference 与 artifact store / Inference and artifact store.
     """
 
-    retention_repository = retention or PostgresConversationRetention()
-    budget = _retention_budget()
-    history = ConversationHistoryProjector(
-        persistence=retention_repository,
+    context_window_store = context_window or PostgresContextWindowStore()
+    memory_reader = memory or PostgresMemoryReader()
+    budget = _context_window_budget()
+    history = ContextWindowProjector(
+        persistence=context_window_store,
         token_counter=ConservativeHistoryTokenCounter(guard_ratio=budget.guard_ratio),
         budget=budget,
-        cache=ConversationHistoryCache(
+        cache=ContextWindowCache(
             capacity=config.CONVERSATION_HISTORY_CACHE_CAPACITY,
             ttl_seconds=config.CONVERSATION_HISTORY_CACHE_TTL_SECONDS,
         ),
@@ -163,7 +170,7 @@ def build_durable_assistant(
             bulkhead=sticker_bulkhead,
         ),
         outbox=PostgresOutboxRepository(),
-        memory=retention_repository,
+        memory=memory_reader,
         groups=PostgresGroupMessageProjection(),
     )
     store = PostgresAssistantToolStore(operations=operations)
@@ -199,8 +206,8 @@ def build_durable_assistant(
         text_only_model_patterns=config.AI_CHAT_TEXT_ONLY_MODELS,
         agent_loop=agent,
     )
-    compaction = ConversationCompactionWorker(
-        persistence=retention_repository,
+    compaction = CompactionWorker(
+        persistence=context_window_store,
         generator=ProviderCompactionSummaryGenerator(
             completion=completion,
             service_order=configured_service_order("summary"),
@@ -233,7 +240,7 @@ def build_durable_assistant(
     )
 
 
-def _retention_budget() -> ContextTokenBudget:
+def _context_window_budget() -> ContextTokenBudget:
     """@brief 从显式配置构造严格 token budget / Build a strict token budget from explicit configuration.
 
     @return validated context token budget / Validated context token budget.

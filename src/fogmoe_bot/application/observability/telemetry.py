@@ -87,8 +87,8 @@ class BufferSnapshot:
     capacity: int
     accepted_total: int
     dropped_total: int
-    accepted_by_signal: Attributes
-    dropped_by_signal: Attributes
+    accepted_by_signal: Mapping[str, int]
+    dropped_by_signal: Mapping[str, int]
 
 
 class TelemetryBuffer:

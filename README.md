@@ -277,6 +277,8 @@ source .venv/bin/activate
 - `src/fogmoe_bot/domain/`：纯领域状态、不变量和值类型，不依赖 Telegram、SQLAlchemy 或 HTTP SDK
 - `src/fogmoe_bot/application/runtime/`：有界 keyed mailbox 与统一后台服务生命周期
 - `src/fogmoe_bot/application/conversation/`：durable inbox、Turn、inference activity 与 outbox 工作流
+- `src/fogmoe_bot/domain/context_window/`、`application/context_window/`：token budget、history projection、checkpoint 与 durable compaction
+- `src/fogmoe_bot/domain/memory/`、`application/memory/`：跨会话 memory identity、provenance、query DTO 与窄端口
 - `src/fogmoe_bot/domain/observability/`：W3C trace identity 与不可变 typed signals
 - `src/fogmoe_bot/application/observability/`：有界 buffer、span scope、export/runtime metrics 生命周期
 - `src/fogmoe_bot/infrastructure/observability/`：结构日志、脱敏、独立 PostgreSQL batch sink 与进程装配
@@ -288,6 +290,8 @@ source .venv/bin/activate
 
 执行模型、状态所有权、幂等边界和迁移决策详见
 [`docs/runtime-architecture.md`](docs/runtime-architecture.md)。
+Memory 与 Context Window 的显式边界、数据所有权和迁移策略详见
+[`docs/memory-architecture.md`](docs/memory-architecture.md)。
 
 ---
 

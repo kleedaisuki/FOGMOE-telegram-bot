@@ -1,4 +1,4 @@
-"""@brief 已提交会话历史的进程内缓存 / Process-local cache for committed conversation history."""
+"""@brief 已提交 Context Window 历史的进程内缓存 / Process-local cache for committed context-window history."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from fogmoe_bot.domain.conversation.message import ConversationMessage
 
 
 @dataclass(frozen=True, slots=True)
-class CachedConversationHistory:
+class CachedContextWindow:
     """@brief 一个 epoch/checkpoint 内连续历史的不可变缓存 / Immutable contiguous history cache within one epoch/checkpoint.
 
     @param conversation_id 所属会话 / Owning conversation.
@@ -65,11 +65,11 @@ class _CacheSlot:
     @param expires_at 单调时钟过期点 / Monotonic-clock expiry point.
     """
 
-    value: CachedConversationHistory
+    value: CachedContextWindow
     expires_at: float
 
 
-class ConversationHistoryCache:
+class ContextWindowCache:
     """@brief 有时空边界的会话历史缓存 / Conversation-history cache with temporal and spatial bounds.
 
     仅缓存已经写入数据库的 append-only history。缓存命中只能复用相同 reset epoch 与
@@ -104,7 +104,7 @@ class ConversationHistoryCache:
         checkpoint_id: str | None,
         include_history: bool,
         through_sequence: int,
-    ) -> CachedConversationHistory | None:
+    ) -> CachedContextWindow | None:
         """@brief 读取能作为当前投影连续前缀的历史 / Get a valid contiguous prefix for the current projection.
 
         @param conversation_id 会话 ID / Conversation identifier.
@@ -134,7 +134,7 @@ class ConversationHistoryCache:
         self._slots.move_to_end(conversation_id)
         return value
 
-    def put(self, value: CachedConversationHistory) -> bool:
+    def put(self, value: CachedContextWindow) -> bool:
         """@brief 提交已完成投影的历史窗口 / Commit a completed projection's history window.
 
         @param value 与数据库已提交记录一致的窗口 / Window consistent with committed database records.
@@ -162,4 +162,4 @@ class ConversationHistoryCache:
         self._slots.pop(conversation_id, None)
 
 
-__all__ = ["CachedConversationHistory", "ConversationHistoryCache"]
+__all__ = ["CachedContextWindow", "ContextWindowCache"]

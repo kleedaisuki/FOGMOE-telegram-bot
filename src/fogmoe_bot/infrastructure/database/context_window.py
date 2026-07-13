@@ -1,4 +1,4 @@
-"""@brief PostgreSQL 会话 retention、compaction queue 与永久记忆投影 / PostgreSQL conversation retention, compaction queue, and permanent-memory projection."""
+"""@brief PostgreSQL Context Window projection 与 compaction queue / PostgreSQL context-window projection and compaction queue."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from fogmoe_bot.application.conversation.history_projection import HistoryBounds
+from fogmoe_bot.application.context_window.projection import ContextWindowBounds
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -26,45 +26,46 @@ from fogmoe_bot.domain.conversation.message import (
     MessageDraft,
     MessageRole,
 )
-from fogmoe_bot.domain.conversation.retention import (
-    RetentionEnqueueResult,
-    RetentionIdempotencyConflictError,
-    RetentionKind,
-    RetentionSegment,
-    RetentionSegmentDraft,
-    RetentionSegmentId,
-    RetentionStatus,
-    RetentionSummary,
-    StaleRetentionClaimError,
-    TokenCount,
+from fogmoe_bot.domain.context_window.budget import TokenCount
+from fogmoe_bot.domain.context_window.compaction import (
+    CompactionEnqueueResult,
+    CompactionIdempotencyConflictError,
+    Compaction,
+    CompactionPlan,
+    CompactionId,
+    CompactionStatus,
+    CompactionSummary,
+    StaleCompactionClaimError,
 )
 from fogmoe_bot.infrastructure.database import connection as db_connection
 
 
-_SEGMENT_COLUMNS = (
-    "segment_id, kind, conversation_id, owner_user_id, epoch_floor_sequence, "
-    "from_sequence, through_sequence, anchor_turn_id, predecessor_segment_id, "
+_COMPACTION_COLUMNS = (
+    "compaction_id, conversation_id, owner_user_id, epoch_floor_sequence, "
+    "from_sequence, through_sequence, anchor_turn_id, predecessor_compaction_id, "
     "projection_version, source_digest, source_snapshot, source_row_count, "
-    "source_token_count, legacy_record_id, status, version, attempt_count, "
-    "next_attempt_at, claim_token, lease_expires_at, completion_token, "
-    "summary_text, summary_token_count, summary_route_key, last_error, "
-    "created_at, updated_at, completed_at"
+    "source_token_count, status, version, attempt_count, next_attempt_at, "
+    "claim_token, lease_expires_at, completion_token, summary_text, "
+    "summary_token_count, summary_route_key, last_error, created_at, updated_at, "
+    "completed_at"
 )
-"""@brief Retention Segment 规范 SELECT 列 / Canonical retention-segment SELECT columns."""
+"""@brief Compaction 规范 SELECT 列 / Canonical compaction SELECT columns."""
 
-_SEGMENT_SELECT = "SELECT " + _SEGMENT_COLUMNS + " FROM conversation.retention_segments"
-"""@brief Retention Segment SELECT 前缀 / Retention-segment SELECT prefix."""
+_COMPACTION_SELECT = (
+    "SELECT " + _COMPACTION_COLUMNS + " FROM context_window.compactions"
+)
+"""@brief Compaction SELECT 前缀 / Compaction SELECT prefix."""
 
 
-class PostgresConversationRetention:
-    """@brief 单表实现 history projection、compaction lifecycle 与 quota view / Single-table history projection, compaction lifecycle, and quota view."""
+class PostgresContextWindowStore:
+    """@brief Context Window history projection 与 compaction lifecycle store / Context-window history-projection and compaction-lifecycle store."""
 
     async def history_bounds(
         self,
         conversation_id: ConversationId,
         *,
         through_turn_id: TurnId,
-    ) -> HistoryBounds | None:
+    ) -> ContextWindowBounds | None:
         """@brief 读取 anchor Turn 边界及其稳定 reset epoch / Load anchor-Turn bounds and its stable reset epoch.
 
         @param conversation_id 会话 ID / Conversation identifier.
@@ -94,7 +95,7 @@ class PostgresConversationRetention:
         )
         if row is None or row[0] is None or row[1] is None:
             return None
-        return HistoryBounds(
+        return ContextWindowBounds(
             conversation_id=conversation_id,
             through_turn_id=through_turn_id,
             first_sequence=_integer(row[0]),
@@ -108,7 +109,7 @@ class PostgresConversationRetention:
         *,
         epoch_floor_sequence: int,
         before_sequence: int,
-    ) -> RetentionSegment | None:
+    ) -> Compaction | None:
         """@brief 读取 anchor 前最新累计 checkpoint / Load the latest cumulative checkpoint before an anchor.
 
         @return completed compaction 或 None / Completed compaction or None.
@@ -117,31 +118,31 @@ class PostgresConversationRetention:
         if epoch_floor_sequence < 0 or before_sequence <= epoch_floor_sequence:
             raise ValueError("Compaction projection bounds are invalid")
         row = await db_connection.fetch_one(
-            _SEGMENT_SELECT + " WHERE kind = 'compaction' AND status = 'completed' "
+            _COMPACTION_SELECT + " WHERE status = 'completed' "
             "AND conversation_id = %s AND epoch_floor_sequence = %s "
             "AND through_sequence < %s "
-            "ORDER BY through_sequence DESC, completed_at DESC, segment_id DESC LIMIT 1",
+            "ORDER BY through_sequence DESC, completed_at DESC, compaction_id DESC LIMIT 1",
             (str(conversation_id), epoch_floor_sequence, before_sequence),
         )
-        return _map_segment(row) if row is not None else None
+        return _map_compaction(row) if row is not None else None
 
     async def active_compaction(
         self,
         conversation_id: ConversationId,
         *,
         epoch_floor_sequence: int,
-    ) -> RetentionSegment | None:
+    ) -> Compaction | None:
         """@brief 读取同 epoch 唯一在途 compaction / Load the sole in-flight compaction for an epoch."""
 
         if epoch_floor_sequence < 0:
             raise ValueError("Compaction epoch floor cannot be negative")
         row = await db_connection.fetch_one(
-            _SEGMENT_SELECT + " WHERE kind = 'compaction' AND conversation_id = %s "
+            _COMPACTION_SELECT + " WHERE conversation_id = %s "
             "AND epoch_floor_sequence = %s "
             "AND status IN ('pending', 'processing', 'retry_wait') LIMIT 1",
             (str(conversation_id), epoch_floor_sequence),
         )
-        return _map_segment(row) if row is not None else None
+        return _map_compaction(row) if row is not None else None
 
     async def read_messages_page(
         self,
@@ -172,27 +173,25 @@ class PostgresConversationRetention:
 
     async def enqueue_compaction(
         self,
-        draft: RetentionSegmentDraft,
-    ) -> RetentionEnqueueResult:
+        draft: CompactionPlan,
+    ) -> CompactionEnqueueResult:
         """@brief 在 epoch advisory lock 下幂等入队 / Idempotently enqueue under an epoch advisory lock.
 
         @param draft 不可变 compaction source / Immutable compaction source.
         @return 新 Segment 或已存在同 epoch work / New segment or existing work for the epoch.
-        @raise RetentionIdempotencyConflictError anchor、predecessor 或同 ID 语义漂移 / Anchor, predecessor, or same-ID semantics drifted.
+        @raise CompactionIdempotencyConflictError anchor、predecessor 或同 ID 语义漂移 / Anchor, predecessor, or same-ID semantics drifted.
         """
 
-        if draft.kind is not RetentionKind.COMPACTION:
-            raise ValueError("enqueue_compaction requires a compaction draft")
-        floor = cast(int, draft.epoch_floor_sequence)
+        floor = draft.epoch_floor_sequence
         async with db_connection.transaction() as connection:
             await db_connection.fetch_one(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                (f"conversation-retention:{draft.conversation_id}:{floor}",),
+                (f"conversation-compaction:{draft.conversation_id}:{floor}",),
                 connection=connection,
             )
             await self._validate_draft_source(draft, connection=connection)
             active_row = await db_connection.fetch_one(
-                _SEGMENT_SELECT + " WHERE kind = 'compaction' AND conversation_id = %s "
+                _COMPACTION_SELECT + " WHERE conversation_id = %s "
                 "AND epoch_floor_sequence = %s "
                 "AND status IN ('pending', 'processing', 'retry_wait') "
                 "FOR UPDATE",
@@ -200,25 +199,25 @@ class PostgresConversationRetention:
                 connection=connection,
             )
             if active_row is not None:
-                active = _map_segment(active_row)
-                if active.segment_id == draft.segment_id:
+                active = _map_compaction(active_row)
+                if active.compaction_id == draft.compaction_id:
                     _validate_same_draft(active.draft, draft)
-                return RetentionEnqueueResult(active, False)
+                return CompactionEnqueueResult(active, False)
 
             row = await db_connection.fetch_one(
-                "INSERT INTO conversation.retention_segments ("
-                "segment_id, kind, conversation_id, owner_user_id, epoch_floor_sequence, "
-                "from_sequence, through_sequence, anchor_turn_id, predecessor_segment_id, "
+                "INSERT INTO context_window.compactions ("
+                "compaction_id, conversation_id, owner_user_id, epoch_floor_sequence, "
+                "from_sequence, through_sequence, anchor_turn_id, predecessor_compaction_id, "
                 "projection_version, source_digest, source_snapshot, source_row_count, "
-                "source_token_count, legacy_record_id, status, version, attempt_count, "
+                "source_token_count, status, version, attempt_count, "
                 "next_attempt_at, created_at, updated_at) VALUES ("
-                "CAST(%s AS UUID), %s, %s, %s, %s, %s, %s, CAST(%s AS UUID), "
-                "CAST(%s AS UUID), %s, %s, CAST(%s AS JSON), %s, %s, NULL, "
+                "CAST(%s AS UUID), %s, %s, %s, %s, %s, CAST(%s AS UUID), "
+                "CAST(%s AS UUID), %s, %s, CAST(%s AS JSON), %s, %s, "
                 "'pending', 0, 0, %s, %s, %s) "
-                "ON CONFLICT (segment_id) DO NOTHING RETURNING " + _SEGMENT_COLUMNS,
+                "ON CONFLICT (compaction_id) DO NOTHING RETURNING "
+                + _COMPACTION_COLUMNS,
                 (
-                    str(draft.segment_id),
-                    draft.kind.value,
+                    str(draft.compaction_id),
                     str(draft.conversation_id),
                     draft.owner_user_id,
                     draft.epoch_floor_sequence,
@@ -226,8 +225,8 @@ class PostgresConversationRetention:
                     draft.through_sequence,
                     str(draft.anchor_turn_id),
                     (
-                        str(draft.predecessor_segment_id)
-                        if draft.predecessor_segment_id is not None
+                        str(draft.predecessor_compaction_id)
+                        if draft.predecessor_compaction_id is not None
                         else None
                     ),
                     draft.projection_version,
@@ -242,36 +241,37 @@ class PostgresConversationRetention:
                 connection=connection,
             )
             if row is not None:
-                return RetentionEnqueueResult(_map_segment(row), True)
+                return CompactionEnqueueResult(_map_compaction(row), True)
             existing_row = await db_connection.fetch_one(
-                _SEGMENT_SELECT + " WHERE segment_id = CAST(%s AS UUID) FOR UPDATE",
-                (str(draft.segment_id),),
+                _COMPACTION_SELECT
+                + " WHERE compaction_id = CAST(%s AS UUID) FOR UPDATE",
+                (str(draft.compaction_id),),
                 connection=connection,
             )
             if existing_row is None:
                 raise RuntimeError(
-                    "Retention segment insert conflicted without a canonical row"
+                    "Compaction segment insert conflicted without a canonical row"
                 )
-            existing = _map_segment(existing_row)
+            existing = _map_compaction(existing_row)
             _validate_same_draft(existing.draft, draft)
-            return RetentionEnqueueResult(existing, False)
+            return CompactionEnqueueResult(existing, False)
 
     async def _validate_draft_source(
         self,
-        draft: RetentionSegmentDraft,
+        draft: CompactionPlan,
         *,
         connection: AsyncConnection,
     ) -> None:
         """@brief 在 enqueue transaction 验证 anchor epoch、range 与 predecessor / Validate anchor epoch, range, and predecessor in the enqueue transaction.
 
         @return None / None.
-        @raise RetentionIdempotencyConflictError durable source 与 draft 不一致 / Durable source differs from the draft.
+        @raise CompactionIdempotencyConflictError durable source 与 draft 不一致 / Durable source differs from the draft.
         """
 
-        anchor = cast(TurnId, draft.anchor_turn_id)
-        floor = cast(int, draft.epoch_floor_sequence)
-        start = cast(int, draft.from_sequence)
-        end = cast(int, draft.through_sequence)
+        anchor = draft.anchor_turn_id
+        floor = draft.epoch_floor_sequence
+        start = draft.from_sequence
+        end = draft.through_sequence
         row = await db_connection.fetch_one(
             "WITH turn_bounds AS ("
             "SELECT MIN(sequence) AS first_sequence, MAX(sequence) AS last_sequence "
@@ -297,7 +297,7 @@ class PostgresConversationRetention:
             or _integer(row[2]) != floor
             or end >= _integer(row[0])
         ):
-            raise RetentionIdempotencyConflictError(
+            raise CompactionIdempotencyConflictError(
                 "Compaction anchor Turn or reset epoch changed semantics"
             )
         count_row = await db_connection.fetch_one(
@@ -307,33 +307,33 @@ class PostgresConversationRetention:
             connection=connection,
         )
         if count_row is None or _integer(count_row[0]) != draft.source_row_count:
-            raise RetentionIdempotencyConflictError(
+            raise CompactionIdempotencyConflictError(
                 "Compaction source row count changed semantics"
             )
-        if draft.predecessor_segment_id is None:
+        if draft.predecessor_compaction_id is None:
             if start != floor + 1:
-                raise RetentionIdempotencyConflictError(
+                raise CompactionIdempotencyConflictError(
                     "First compaction segment must begin at the reset epoch floor"
                 )
             return
         predecessor_row = await db_connection.fetch_one(
-            _SEGMENT_SELECT
-            + " WHERE segment_id = CAST(%s AS UUID) AND status = 'completed' "
+            _COMPACTION_SELECT
+            + " WHERE compaction_id = CAST(%s AS UUID) AND status = 'completed' "
             "FOR UPDATE",
-            (str(draft.predecessor_segment_id),),
+            (str(draft.predecessor_compaction_id),),
             connection=connection,
         )
         if predecessor_row is None:
-            raise RetentionIdempotencyConflictError(
+            raise CompactionIdempotencyConflictError(
                 "Compaction predecessor is missing or incomplete"
             )
-        predecessor = _map_segment(predecessor_row)
+        predecessor = _map_compaction(predecessor_row)
         if (
             predecessor.draft.conversation_id != draft.conversation_id
             or predecessor.draft.epoch_floor_sequence != floor
             or predecessor.draft.through_sequence != start - 1
         ):
-            raise RetentionIdempotencyConflictError(
+            raise CompactionIdempotencyConflictError(
                 "Compaction predecessor changed range semantics"
             )
 
@@ -343,7 +343,7 @@ class PostgresConversationRetention:
         now: datetime,
         limit: int,
         lease_for: timedelta,
-    ) -> tuple[RetentionSegment, ...]:
+    ) -> tuple[Compaction, ...]:
         """@brief 以 SKIP LOCKED 领取 ready Segments / Claim ready segments using SKIP LOCKED.
 
         @return 每行带独立 fencing token 的 claims / Claims carrying an independent fencing token per row.
@@ -355,10 +355,10 @@ class PostgresConversationRetention:
         if lease_for <= timedelta():
             raise ValueError("Compaction lease_for must be positive")
         lease_expires_at = timestamp + lease_for
-        claims: list[RetentionSegment] = []
+        claims: list[Compaction] = []
         async with db_connection.transaction() as connection:
             await db_connection.execute(
-                "UPDATE conversation.retention_segments SET "
+                "UPDATE context_window.compactions SET "
                 "status = 'retry_wait', version = version + 1, "
                 "next_attempt_at = %s, claim_token = NULL, lease_expires_at = NULL, "
                 "updated_at = %s, last_error = COALESCE("
@@ -372,10 +372,10 @@ class PostgresConversationRetention:
                 connection=connection,
             )
             candidates = await db_connection.fetch_all(
-                "SELECT segment_id FROM conversation.retention_segments "
-                "WHERE kind = 'compaction' AND status IN ('pending', 'retry_wait') "
+                "SELECT compaction_id FROM context_window.compactions "
+                "WHERE status IN ('pending', 'retry_wait') "
                 "AND next_attempt_at <= %s "
-                "ORDER BY next_attempt_at ASC, segment_id ASC "
+                "ORDER BY next_attempt_at ASC, compaction_id ASC "
                 "LIMIT %s FOR UPDATE SKIP LOCKED",
                 (timestamp, limit),
                 connection=connection,
@@ -383,14 +383,14 @@ class PostgresConversationRetention:
             for candidate in candidates:
                 token = LeaseToken.new()
                 row = await db_connection.fetch_one(
-                    "UPDATE conversation.retention_segments "
+                    "UPDATE context_window.compactions "
                     "SET status = 'processing', version = version + 1, "
                     "attempt_count = attempt_count + 1, next_attempt_at = NULL, "
                     "claim_token = CAST(%s AS UUID), lease_expires_at = %s, "
                     "updated_at = %s, last_error = NULL "
-                    "WHERE segment_id = CAST(%s AS UUID) "
+                    "WHERE compaction_id = CAST(%s AS UUID) "
                     "AND status IN ('pending', 'retry_wait') RETURNING "
-                    + _SEGMENT_COLUMNS,
+                    + _COMPACTION_COLUMNS,
                     (
                         str(token),
                         lease_expires_at,
@@ -401,55 +401,56 @@ class PostgresConversationRetention:
                 )
                 if row is None:
                     raise RuntimeError("Locked compaction candidate was not claimable")
-                claims.append(_map_segment(row))
+                claims.append(_map_compaction(row))
         return tuple(claims)
 
     async def complete_compaction(
         self,
-        claim: RetentionSegment,
+        claim: Compaction,
         *,
-        summary: RetentionSummary,
+        summary: CompactionSummary,
         completed_at: datetime,
-    ) -> RetentionSegment:
+    ) -> Compaction:
         """@brief 以 fencing token 提交 canonical summary / Commit the canonical summary using a fencing token.
 
         @return completed segment / Completed segment.
-        @raise StaleRetentionClaimError token 已替换 / Claim token was superseded.
+        @raise StaleCompactionClaimError token 已替换 / Claim token was superseded.
         """
 
         token = _claim_token(claim)
         timestamp = ensure_utc(completed_at)
         async with db_connection.transaction() as connection:
             current = await self._load_for_update(
-                claim.segment_id,
+                claim.compaction_id,
                 connection=connection,
             )
             if current is None:
-                raise StaleRetentionClaimError(
-                    f"Retention segment {claim.segment_id} no longer exists"
+                raise StaleCompactionClaimError(
+                    f"Compaction segment {claim.compaction_id} no longer exists"
                 )
             _validate_same_draft(current.draft, claim.draft)
-            if current.status is RetentionStatus.COMPLETED:
+            if current.status is CompactionStatus.COMPLETED:
                 if current.completion_token != token or current.summary != summary:
-                    raise StaleRetentionClaimError(
-                        f"Stale retention completion for {claim.segment_id}"
+                    raise StaleCompactionClaimError(
+                        f"Stale compaction completion for {claim.compaction_id}"
                     )
+                await _project_completed_compaction(current, connection=connection)
                 return current
             if (
-                current.status is not RetentionStatus.PROCESSING
+                current.status is not CompactionStatus.PROCESSING
                 or current.claim_token != token
             ):
-                raise StaleRetentionClaimError(
-                    f"Stale retention completion for {claim.segment_id}"
+                raise StaleCompactionClaimError(
+                    f"Stale compaction completion for {claim.compaction_id}"
                 )
             row = await db_connection.fetch_one(
-                "UPDATE conversation.retention_segments SET "
+                "UPDATE context_window.compactions SET "
                 "status = 'completed', version = version + 1, claim_token = NULL, "
                 "lease_expires_at = NULL, completion_token = CAST(%s AS UUID), "
                 "summary_text = %s, summary_token_count = %s, summary_route_key = %s, "
                 "last_error = NULL, updated_at = %s, completed_at = %s "
-                "WHERE segment_id = CAST(%s AS UUID) AND status = 'processing' "
-                "AND claim_token = CAST(%s AS UUID) RETURNING " + _SEGMENT_COLUMNS,
+                "WHERE compaction_id = CAST(%s AS UUID) AND status = 'processing' "
+                "AND claim_token = CAST(%s AS UUID) RETURNING " + _COMPACTION_COLUMNS,
                 (
                     str(token),
                     summary.text,
@@ -457,20 +458,22 @@ class PostgresConversationRetention:
                     summary.route_key,
                     timestamp,
                     timestamp,
-                    str(claim.segment_id),
+                    str(claim.compaction_id),
                     str(token),
                 ),
                 connection=connection,
             )
             if row is None:
-                raise StaleRetentionClaimError(
-                    f"Stale retention completion for {claim.segment_id}"
+                raise StaleCompactionClaimError(
+                    f"Stale compaction completion for {claim.compaction_id}"
                 )
-            return _map_segment(row)
+            completed = _map_compaction(row)
+            await _project_completed_compaction(completed, connection=connection)
+            return completed
 
     async def retry_compaction(
         self,
-        claim: RetentionSegment,
+        claim: Compaction,
         *,
         failed_at: datetime,
         retry_at: datetime,
@@ -484,24 +487,24 @@ class PostgresConversationRetention:
         if retry_time <= failure_time:
             raise ValueError("Compaction retry_at must follow failed_at")
         rowcount = await db_connection.execute(
-            "UPDATE conversation.retention_segments SET "
+            "UPDATE context_window.compactions SET "
             "status = 'retry_wait', version = version + 1, next_attempt_at = %s, "
             "claim_token = NULL, lease_expires_at = NULL, updated_at = %s, "
-            "last_error = %s WHERE segment_id = CAST(%s AS UUID) "
+            "last_error = %s WHERE compaction_id = CAST(%s AS UUID) "
             "AND status = 'processing' AND claim_token = CAST(%s AS UUID)",
             (
                 retry_time,
                 failure_time,
                 _required_error(error),
-                str(claim.segment_id),
+                str(claim.compaction_id),
                 str(token),
             ),
         )
-        _require_fenced_update(rowcount, claim.segment_id)
+        _require_fenced_update(rowcount, claim.compaction_id)
 
     async def fail_compaction(
         self,
-        claim: RetentionSegment,
+        claim: Compaction,
         *,
         failed_at: datetime,
         error: str,
@@ -511,20 +514,20 @@ class PostgresConversationRetention:
         token = _claim_token(claim)
         timestamp = ensure_utc(failed_at)
         rowcount = await db_connection.execute(
-            "UPDATE conversation.retention_segments SET "
+            "UPDATE context_window.compactions SET "
             "status = 'failed_final', version = version + 1, claim_token = NULL, "
             "lease_expires_at = NULL, updated_at = %s, completed_at = %s, "
-            "last_error = %s WHERE segment_id = CAST(%s AS UUID) "
+            "last_error = %s WHERE compaction_id = CAST(%s AS UUID) "
             "AND status = 'processing' AND claim_token = CAST(%s AS UUID)",
             (
                 timestamp,
                 timestamp,
                 _required_error(error),
-                str(claim.segment_id),
+                str(claim.compaction_id),
                 str(token),
             ),
         )
-        _require_fenced_update(rowcount, claim.segment_id)
+        _require_fenced_update(rowcount, claim.compaction_id)
 
     async def recover_expired_compaction_leases(self, *, now: datetime) -> int:
         """@brief 回收过期 lease 并使旧 token 失效 / Recover expired leases and invalidate stale tokens."""
@@ -532,7 +535,7 @@ class PostgresConversationRetention:
         timestamp = ensure_utc(now)
         retry_at = timestamp + timedelta(microseconds=1)
         return await db_connection.execute(
-            "UPDATE conversation.retention_segments SET "
+            "UPDATE context_window.compactions SET "
             "status = 'retry_wait', version = version + 1, next_attempt_at = %s, "
             "claim_token = NULL, lease_expires_at = NULL, updated_at = %s, "
             "last_error = COALESCE(last_error, 'recovered expired compaction lease') "
@@ -540,179 +543,141 @@ class PostgresConversationRetention:
             (retry_at, timestamp, timestamp),
         )
 
-    async def count_visible_summaries(self, owner_user_id: int) -> int:
-        """@brief 按付费 quota 统计可见永久摘要 / Count visible permanent summaries under the paid quota.
-
-        @return 可见 summary 数 / Visible summary count.
-        """
-
-        _validate_owner(owner_user_id)
-        row = await db_connection.fetch_one(
-            "WITH ranked AS ("
-            "SELECT segment_id, summary_text, ROW_NUMBER() OVER ("
-            "ORDER BY completed_at DESC, segment_id DESC) AS memory_rank, "
-            "GREATEST(account.permanent_records_limit, 0) AS memory_limit "
-            "FROM conversation.retention_segments AS segment "
-            "JOIN identity.users AS account ON account.id = segment.owner_user_id "
-            "WHERE segment.owner_user_id = %s AND segment.status = 'completed'"
-            ") SELECT COUNT(*) FROM ranked WHERE memory_rank <= memory_limit "
-            "AND summary_text IS NOT NULL AND summary_text <> ''",
-            (owner_user_id,),
-        )
-        return _integer(row[0]) if row is not None else 0
-
-    async def fetch_visible_summaries(
-        self,
-        owner_user_id: int,
-        *,
-        limit: int,
-        offset: int,
-    ) -> tuple[RetentionSegment, ...]:
-        """@brief 按 quota 读取 newest-first summaries / Read newest-first summaries under the paid quota."""
-
-        return await self._fetch_visible_segments(
-            owner_user_id,
-            summaries_only=True,
-            newest_first=True,
-            limit=limit,
-            offset=offset,
-        )
-
-    async def fetch_visible_segments(
-        self,
-        owner_user_id: int,
-        *,
-        newest_first: bool,
-        limit: int,
-        offset: int,
-    ) -> tuple[RetentionSegment, ...]:
-        """@brief 按 quota 读取可搜索永久 snapshots / Read searchable permanent snapshots under the paid quota."""
-
-        return await self._fetch_visible_segments(
-            owner_user_id,
-            summaries_only=False,
-            newest_first=newest_first,
-            limit=limit,
-            offset=offset,
-        )
-
-    async def _fetch_visible_segments(
-        self,
-        owner_user_id: int,
-        *,
-        summaries_only: bool,
-        newest_first: bool,
-        limit: int,
-        offset: int,
-    ) -> tuple[RetentionSegment, ...]:
-        """@brief 执行共享 quota-window query / Execute the shared quota-window query."""
-
-        _validate_owner(owner_user_id)
-        if not 1 <= limit <= 500 or offset < 0:
-            raise ValueError("Permanent-memory pagination is outside its bounds")
-        summary_filter = (
-            "AND segment.summary_text IS NOT NULL AND segment.summary_text <> '' "
-            if summaries_only
-            else ""
-        )
-        direction = "DESC" if newest_first else "ASC"
-        rows = await db_connection.fetch_all(
-            "WITH ranked AS ("
-            "SELECT segment.segment_id, ROW_NUMBER() OVER ("
-            "ORDER BY segment.completed_at DESC, segment.segment_id DESC) AS memory_rank, "
-            "GREATEST(account.permanent_records_limit, 0) AS memory_limit "
-            "FROM conversation.retention_segments AS segment "
-            "JOIN identity.users AS account ON account.id = segment.owner_user_id "
-            "WHERE segment.owner_user_id = %s AND segment.status = 'completed'"
-            ") SELECT "
-            + ", ".join(
-                f"segment.{column.strip()}" for column in _SEGMENT_COLUMNS.split(",")
-            )
-            + " FROM conversation.retention_segments AS segment "
-            "JOIN ranked ON ranked.segment_id = segment.segment_id "
-            "WHERE ranked.memory_rank <= ranked.memory_limit "
-            + summary_filter
-            + f"ORDER BY segment.completed_at {direction}, segment.segment_id {direction} "
-            "LIMIT %s OFFSET %s",
-            (owner_user_id, limit, offset),
-        )
-        return tuple(_map_segment(row) for row in rows)
-
     @staticmethod
     async def _load_for_update(
-        segment_id: RetentionSegmentId,
+        compaction_id: CompactionId,
         *,
         connection: AsyncConnection,
-    ) -> RetentionSegment | None:
+    ) -> Compaction | None:
         """@brief 锁定一个 Segment / Lock one segment for mutation."""
 
         row = await db_connection.fetch_one(
-            _SEGMENT_SELECT + " WHERE segment_id = CAST(%s AS UUID) FOR UPDATE",
-            (str(segment_id),),
+            _COMPACTION_SELECT + " WHERE compaction_id = CAST(%s AS UUID) FOR UPDATE",
+            (str(compaction_id),),
             connection=connection,
         )
-        return _map_segment(row) if row is not None else None
+        return _map_compaction(row) if row is not None else None
 
 
-def _map_segment(row: object) -> RetentionSegment:
-    """@brief 将数据库行映射为严格 Segment aggregate / Map a database row to a strict segment aggregate.
+def _map_compaction(row: object) -> Compaction:
+    """@brief 将数据库行映射为严格 Compaction aggregate / Map a database row to a strict compaction aggregate.
 
-    @return RetentionSegment / Retention segment.
+    @param row SQLAlchemy row / SQLAlchemy row.
+    @return Compaction aggregate / Compaction aggregate.
     """
 
-    values = _row_values(row, 29)
-    kind = RetentionKind(_text(values[1]))
-    draft = RetentionSegmentDraft(
-        segment_id=RetentionSegmentId.parse(_uuid(values[0])),
-        kind=kind,
-        conversation_id=ConversationId(_text(values[2])),
-        owner_user_id=_integer(values[3]),
-        epoch_floor_sequence=_optional_integer(values[4]),
-        from_sequence=_optional_integer(values[5]),
-        through_sequence=_optional_integer(values[6]),
-        anchor_turn_id=(
-            TurnId.parse(_uuid(values[7])) if values[7] is not None else None
+    values = _row_values(row, 27)
+    draft = CompactionPlan(
+        compaction_id=CompactionId.parse(_uuid(values[0])),
+        conversation_id=ConversationId(_text(values[1])),
+        owner_user_id=_integer(values[2]),
+        epoch_floor_sequence=_integer(values[3]),
+        from_sequence=_integer(values[4]),
+        through_sequence=_integer(values[5]),
+        anchor_turn_id=TurnId.parse(_uuid(values[6])),
+        predecessor_compaction_id=(
+            CompactionId.parse(_uuid(values[7])) if values[7] is not None else None
         ),
-        predecessor_segment_id=(
-            RetentionSegmentId.parse(_uuid(values[8]))
-            if values[8] is not None
-            else None
-        ),
-        projection_version=_integer(values[9]),
-        source_digest=_text(values[10]),
-        source_snapshot=_snapshot(values[11]),
-        source_row_count=_integer(values[12]),
-        source_token_count=TokenCount(_integer(values[13])),
-        legacy_record_id=_optional_integer(values[14]),
-        created_at=_datetime(values[26]),
+        projection_version=_integer(values[8]),
+        source_digest=_text(values[9]),
+        source_snapshot=_snapshot(values[10]),
+        source_row_count=_integer(values[11]),
+        source_token_count=TokenCount(_integer(values[12])),
+        created_at=_datetime(values[24]),
     )
     summary = None
-    if values[22] is not None:
-        if values[23] is None or values[24] is None:
-            raise RuntimeError("Stored retention summary is missing metadata")
-        summary = RetentionSummary(
+    if values[20] is not None:
+        if values[21] is None or values[22] is None:
+            raise RuntimeError("Stored compaction summary is missing metadata")
+        summary = CompactionSummary(
+            _text(values[20]),
+            TokenCount(_integer(values[21])),
             _text(values[22]),
-            TokenCount(_integer(values[23])),
-            _text(values[24]),
         )
-    return RetentionSegment(
+    return Compaction(
         draft=draft,
-        status=RetentionStatus(_text(values[15])),
-        version=_integer(values[16]),
-        attempt_count=_integer(values[17]),
-        next_attempt_at=_optional_datetime(values[18]),
+        status=CompactionStatus(_text(values[13])),
+        version=_integer(values[14]),
+        attempt_count=_integer(values[15]),
+        next_attempt_at=_optional_datetime(values[16]),
         claim_token=(
+            LeaseToken.parse(_uuid(values[17])) if values[17] is not None else None
+        ),
+        lease_expires_at=_optional_datetime(values[18]),
+        completion_token=(
             LeaseToken.parse(_uuid(values[19])) if values[19] is not None else None
         ),
-        lease_expires_at=_optional_datetime(values[20]),
-        completion_token=(
-            LeaseToken.parse(_uuid(values[21])) if values[21] is not None else None
-        ),
         summary=summary,
-        last_error=_optional_text(values[25]),
-        updated_at=_datetime(values[27]),
-        completed_at=_optional_datetime(values[28]),
+        last_error=_optional_text(values[23]),
+        updated_at=_datetime(values[25]),
+        completed_at=_optional_datetime(values[26]),
     )
+
+
+async def _project_completed_compaction(
+    compaction: Compaction,
+    *,
+    connection: AsyncConnection,
+) -> None:
+    """@brief 同事务投影不可变长期记忆记录 / Transactionally project an immutable long-term-memory record.
+
+    @param compaction 已完成 compaction / Completed compaction.
+    @param connection 调用方事务连接 / Caller-owned transaction connection.
+    @return None / None.
+    @raise RuntimeError 同 identity 的 memory projection 发生漂移 / The memory projection for the identity drifted.
+    @note 这是同部署单元内的同步领域事件投影；memory domain 不依赖 compaction aggregate。/
+        This is a synchronous domain-event projection inside one deployment unit; the
+        memory domain does not depend on the compaction aggregate.
+    """
+
+    if (
+        compaction.status is not CompactionStatus.COMPLETED
+        or compaction.summary is None
+        or compaction.completed_at is None
+    ):
+        raise ValueError("Memory projection requires a completed compaction")
+    draft = compaction.draft
+    inserted = await db_connection.fetch_one(
+        "INSERT INTO memory.records ("
+        "memory_id, owner_user_id, conversation_id, source_kind, source_id, "
+        "source_digest, snapshot, summary_text, legacy_record_id, created_at"
+        ") VALUES (CAST(%s AS UUID), %s, %s, 'compaction_checkpoint', "
+        "CAST(%s AS UUID), %s, CAST(%s AS JSON), %s, NULL, %s) "
+        "ON CONFLICT (memory_id) DO NOTHING RETURNING memory_id",
+        (
+            str(compaction.compaction_id),
+            draft.owner_user_id,
+            str(draft.conversation_id),
+            str(compaction.compaction_id),
+            draft.source_digest,
+            _encode_snapshot(draft.source_snapshot),
+            compaction.summary.text,
+            compaction.completed_at,
+        ),
+        connection=connection,
+    )
+    if inserted is not None:
+        return
+    existing = await db_connection.fetch_one(
+        "SELECT owner_user_id, conversation_id, source_kind, source_id, "
+        "source_digest, summary_text, created_at FROM memory.records "
+        "WHERE memory_id = CAST(%s AS UUID)",
+        (str(compaction.compaction_id),),
+        connection=connection,
+    )
+    expected = (
+        draft.owner_user_id,
+        str(draft.conversation_id),
+        "compaction_checkpoint",
+        compaction.compaction_id.value,
+        draft.source_digest,
+        compaction.summary.text,
+        compaction.completed_at,
+    )
+    if existing is None or tuple(existing) != expected:
+        raise RuntimeError(
+            f"Memory projection drifted for compaction {compaction.compaction_id}"
+        )
 
 
 def _map_message(row: object) -> ConversationMessage:
@@ -735,40 +700,33 @@ def _map_message(row: object) -> ConversationMessage:
 
 
 def _validate_same_draft(
-    actual: RetentionSegmentDraft,
-    expected: RetentionSegmentDraft,
+    actual: CompactionPlan,
+    expected: CompactionPlan,
 ) -> None:
     """@brief 验证重放没有改变不可变 Segment 语义 / Validate replay has not changed immutable segment semantics."""
 
     if actual != expected:
-        raise RetentionIdempotencyConflictError(
-            f"Retention segment {expected.segment_id} changed immutable semantics"
+        raise CompactionIdempotencyConflictError(
+            f"Compaction segment {expected.compaction_id} changed immutable semantics"
         )
 
 
-def _claim_token(claim: RetentionSegment) -> LeaseToken:
+def _claim_token(claim: Compaction) -> LeaseToken:
     """@brief 要求 PROCESSING claim token / Require a processing claim token."""
 
-    if claim.status is not RetentionStatus.PROCESSING or claim.claim_token is None:
-        raise ValueError("Retention operation requires a processing claim")
+    if claim.status is not CompactionStatus.PROCESSING or claim.claim_token is None:
+        raise ValueError("Compaction operation requires a processing claim")
     return claim.claim_token
 
 
 def _require_fenced_update(
     rowcount: int,
-    segment_id: RetentionSegmentId,
+    compaction_id: CompactionId,
 ) -> None:
     """@brief 拒绝影响行数为零的 stale claim / Reject a stale claim whose update affected no row."""
 
     if rowcount != 1:
-        raise StaleRetentionClaimError(f"Stale retention claim for {segment_id}")
-
-
-def _validate_owner(owner_user_id: int) -> None:
-    """@brief 校验永久记忆用户 ID / Validate a permanent-memory user ID."""
-
-    if isinstance(owner_user_id, bool) or owner_user_id <= 0:
-        raise ValueError("Permanent-memory owner_user_id must be positive")
+        raise StaleCompactionClaimError(f"Stale compaction claim for {compaction_id}")
 
 
 def _required_error(error: str) -> str:
@@ -803,7 +761,7 @@ def _snapshot(value: object) -> tuple[JsonObject, ...]:
     if not isinstance(decoded, list) or not all(
         isinstance(item, dict) for item in decoded
     ):
-        raise TypeError("Retention source_snapshot must be a JSON array of objects")
+        raise TypeError("Compaction source_snapshot must be a JSON array of objects")
     return tuple(cast(JsonObject, item) for item in decoded)
 
 
@@ -877,4 +835,4 @@ def _optional_datetime(value: object) -> datetime | None:
     return None if value is None else _datetime(value)
 
 
-__all__ = ["PostgresConversationRetention"]
+__all__ = ["PostgresContextWindowStore"]

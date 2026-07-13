@@ -12,12 +12,12 @@ from fogmoe_bot.application.assistant.durable_inference import (
     DurableAssistantInferenceCommand,
 )
 from fogmoe_bot.application.assistant.errors import AssistantInferenceUnavailableError
-from fogmoe_bot.application.conversation.history_projection import (
-    HistoryBounds,
-    HistoryCompactionPending,
-    HistoryProjectionRequest,
-    HistoryProjectionResult,
-    HistoryReady,
+from fogmoe_bot.application.context_window.projection import (
+    ContextWindowBounds,
+    CompactionPending,
+    ContextWindowRequest,
+    ContextWindowResult,
+    ContextWindowReady,
     project_conversation_message,
 )
 from fogmoe_bot.application.conversation.inference_worker import (
@@ -43,7 +43,8 @@ from fogmoe_bot.domain.conversation.message import (
     MessageRole,
 )
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
-from fogmoe_bot.domain.conversation.retention import RetentionSegmentId, TokenCount
+from fogmoe_bot.domain.context_window.compaction import CompactionId
+from fogmoe_bot.domain.context_window.budget import TokenCount
 
 
 NOW = datetime(2026, 7, 11, 10, tzinfo=timezone.utc)
@@ -131,7 +132,7 @@ class _History:
         self,
         messages: tuple[ConversationMessage, ...],
         *,
-        forced: HistoryProjectionResult | None = None,
+        forced: ContextWindowResult | None = None,
     ) -> None:
         """@brief 保存消息 / Store messages.
 
@@ -140,11 +141,9 @@ class _History:
 
         self.messages = messages
         self.forced = forced
-        self.calls: list[HistoryProjectionRequest] = []
+        self.calls: list[ContextWindowRequest] = []
 
-    async def project(
-        self, request: HistoryProjectionRequest
-    ) -> HistoryProjectionResult:
+    async def project(self, request: ContextWindowRequest) -> ContextWindowResult:
         """@brief 返回固定 summary+tail projection / Return a fixed summary-plus-tail projection."""
 
         self.calls.append(request)
@@ -164,11 +163,11 @@ class _History:
         sequences = [
             int(message.sequence) for message in (anchor or self.messages)
         ] or [1]
-        return HistoryReady(
-            memory_summary=None,
+        return ContextWindowReady(
+            checkpoint_summary=None,
             messages=projected,
             estimated_tokens=TokenCount(1),
-            bounds=HistoryBounds(
+            bounds=ContextWindowBounds(
                 request.conversation_id,
                 request.through_turn_id,
                 min(sequences),
@@ -258,7 +257,9 @@ def _adapter(
     )
 
 
-def test_adapter_reads_cutoff_history_and_returns_ordered_durable_outbox_intents() -> None:
+def test_adapter_reads_cutoff_history_and_returns_ordered_durable_outbox_intents() -> (
+    None
+):
     """@brief Adapter 读取 Turn 截止历史并返回有序 durable outbox / Adapter reads Turn-cutoff history and returns ordered durable outbox intents."""
 
     async def scenario() -> None:
@@ -450,14 +451,14 @@ def test_pending_compaction_uses_the_non_exhausting_dependency_gate() -> None:
     """@brief Hard budget 等待 compaction 时返回不耗尽 provider retry budget 的 durable gate / Waiting for hard-budget compaction returns a durable gate that does not exhaust provider retries."""
 
     turn_id = TurnId.new()
-    bounds = HistoryBounds(
+    bounds = ContextWindowBounds(
         ConversationId("assistant-user:7"),
         turn_id,
         1,
         1,
         0,
     )
-    segment_id = RetentionSegmentId.for_compaction(
+    compaction_id = CompactionId.for_range(
         conversation_id=ConversationId("assistant-user:7"),
         epoch_floor_sequence=0,
         from_sequence=1,
@@ -466,7 +467,7 @@ def test_pending_compaction_uses_the_non_exhausting_dependency_gate() -> None:
     )
     history = _History(
         (),
-        forced=HistoryCompactionPending(segment_id, TokenCount(120_001), bounds),
+        forced=CompactionPending(compaction_id, TokenCount(120_001), bounds),
     )
     inference = _Inference(AgentResponse("must not run", []))
 

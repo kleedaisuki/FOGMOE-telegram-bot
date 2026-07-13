@@ -1,4 +1,4 @@
-"""@brief 无工具的 provider 会话压缩 adapter / Tool-free provider adapter for conversation compaction."""
+"""@brief 无工具的 provider Context Window 压缩 adapter / Tool-free provider adapter for context-window compaction."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from typing import cast
 
 from fogmoe_bot.application.assistant.completion import AssistantCompletionPort
-from fogmoe_bot.application.conversation.compaction_worker import (
+from fogmoe_bot.application.context_window.worker import (
     CompactionSourceError,
     RetryableCompactionError,
 )
@@ -18,12 +18,11 @@ from fogmoe_bot.domain.conversation.payloads import (
     JsonObject,
     JsonValue,
 )
-from fogmoe_bot.domain.conversation.retention import (
-    ContextTokenBudget,
-    RetentionSegment,
-    RetentionStatus,
-    RetentionSummary,
-    TokenCount,
+from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
+from fogmoe_bot.domain.context_window.compaction import (
+    Compaction,
+    CompactionStatus,
+    CompactionSummary,
 )
 
 
@@ -69,7 +68,7 @@ class ProviderCompactionSummaryGenerator:
         self._request_timeout_seconds = request_timeout_seconds
         self._budget = budget or ContextTokenBudget()
 
-    async def summarize(self, segment: RetentionSegment) -> RetentionSummary:
+    async def summarize(self, segment: Compaction) -> CompactionSummary:
         """@brief 在无工具路径中压缩冻结 snapshot / Compact a frozen snapshot on a tool-free path.
 
         @param segment 当前 PROCESSING claim / Current processing claim.
@@ -78,7 +77,7 @@ class ProviderCompactionSummaryGenerator:
         @raise RetryableCompactionError 所有 provider routes 失败 / All provider routes failed.
         """
 
-        if segment.status is not RetentionStatus.PROCESSING:
+        if segment.status is not CompactionStatus.PROCESSING:
             raise CompactionSourceError(
                 "Summary generation requires a processing segment"
             )
@@ -133,7 +132,7 @@ class ProviderCompactionSummaryGenerator:
                 except Exception as error:
                     last_error = error
                     continue
-                return RetentionSummary(
+                return CompactionSummary(
                     text=text,
                     token_count=TokenCount(estimate_tokens(text, guard_ratio=1.0)),
                     route_key=f"{route.service_name}:{model}",

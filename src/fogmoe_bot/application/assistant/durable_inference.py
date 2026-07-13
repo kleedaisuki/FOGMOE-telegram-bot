@@ -30,13 +30,13 @@ from fogmoe_bot.application.conversation.inference_worker import (
     PermanentInferenceError,
     RetryableInferenceError,
 )
-from fogmoe_bot.application.conversation.history_projection import (
-    HistoryCompactionPending,
-    HistoryProjectionRequest,
-    HistoryProjectionResult,
-    HistoryReady,
-    HistoryTooLarge,
-    memory_summary_message,
+from fogmoe_bot.application.context_window.projection import (
+    CompactionPending,
+    ContextWindowRequest,
+    ContextWindowResult,
+    ContextWindowReady,
+    ContextWindowTooLarge,
+    checkpoint_summary_message,
 )
 from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
 from fogmoe_bot.domain.context import (
@@ -52,7 +52,7 @@ from fogmoe_bot.domain.conversation.payloads import (
 from fogmoe_bot.domain.conversation.identity import DeliveryStreamId
 from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
-from fogmoe_bot.domain.conversation.retention import TokenCount
+from fogmoe_bot.domain.context_window.budget import TokenCount
 
 from .agent_loop import AgentResponse
 from .errors import (
@@ -81,13 +81,13 @@ TRANSLATION_SYSTEM_PROMPT = (
 """@brief 与 Assistant 人格隔离的翻译系统策略 / Translation policy isolated from the Assistant persona."""
 
 
-class ConversationHistoryProjection(Protocol):
+class ContextWindowProjection(Protocol):
     """@brief Durable Assistant 所需 token-aware 历史投影端口 / Token-aware history-projection port required by durable Assistant inference."""
 
     async def project(
         self,
-        request: HistoryProjectionRequest,
-    ) -> HistoryProjectionResult:
+        request: ContextWindowRequest,
+    ) -> ContextWindowResult:
         """@brief 构造 summary+tail 历史或返回 compaction gate / Build summary-plus-tail history or return a compaction gate.
 
         @param request anchor-specific projection request / Anchor-specific projection request.
@@ -126,7 +126,7 @@ class DurableAssistantInferenceAdapter:
     def __init__(
         self,
         *,
-        history: ConversationHistoryProjection,
+        history: ContextWindowProjection,
         system_prompt: str,
         runtime_limits: InferenceRuntimeLimits,
         history_reserved_tokens: TokenCount = TokenCount(8_192),
@@ -175,7 +175,7 @@ class DurableAssistantInferenceAdapter:
         base_context = self._base_context(command)
         try:
             projection = await self._history.project(
-                HistoryProjectionRequest(
+                ContextWindowRequest(
                     conversation_id=command.typed_conversation_id,
                     owner_user_id=command.user.user_id,
                     through_turn_id=command.typed_turn_id,
@@ -196,12 +196,12 @@ class DurableAssistantInferenceAdapter:
                 category=InferenceErrorCategory.NETWORK,
             ) from error
 
-        if isinstance(projection, HistoryCompactionPending):
+        if isinstance(projection, CompactionPending):
             raise InferenceDependencyPending(
-                f"Conversation history compaction is pending: {projection.segment_id}",
+                f"Conversation history compaction is pending: {projection.compaction_id}",
                 retry_after=timedelta(seconds=5),
             )
-        if isinstance(projection, HistoryTooLarge):
+        if isinstance(projection, ContextWindowTooLarge):
             raise PermanentInferenceError(
                 f"Conversation context exceeds its token budget: {projection.reason}",
                 category=InferenceErrorCategory.CONTEXT_WINDOW,
@@ -340,7 +340,7 @@ class DurableAssistantInferenceAdapter:
     def _build_context(
         self,
         command: DurableAssistantInferenceCommand,
-        projection: HistoryReady,
+        projection: ContextWindowReady,
         *,
         base_context: ContextState,
     ) -> ContextState:
@@ -357,8 +357,8 @@ class DurableAssistantInferenceAdapter:
         if command.task_kind == "translation":
             return base_context
         history: list[JsonObject] = []
-        if projection.memory_summary is not None:
-            history.append(memory_summary_message(projection.memory_summary))
+        if projection.checkpoint_summary is not None:
+            history.append(checkpoint_summary_message(projection.checkpoint_summary))
         history.extend(dict(message) for message in projection.messages)
         base_context.messages.extend(cast(list[dict[str, object]], history))
         return base_context
@@ -366,7 +366,7 @@ class DurableAssistantInferenceAdapter:
     @staticmethod
     def _validate_anchor(
         command: DurableAssistantInferenceCommand,
-        projection: HistoryReady,
+        projection: ContextWindowReady,
     ) -> None:
         """@brief 验证当前 Turn 恰有一个语义匹配的 user row / Validate exactly one semantically matching user row in the current Turn.
 
@@ -770,7 +770,7 @@ def _classify_unavailable(
 
 __all__ = [
     "AssistantInference",
-    "ConversationHistoryProjection",
+    "ContextWindowProjection",
     "DurableAssistantInferenceAdapter",
     "DurableAssistantInferenceCommand",
     "DurableAssistantScope",

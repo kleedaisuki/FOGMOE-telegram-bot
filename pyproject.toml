@@ -24,12 +24,14 @@ dependencies = [
     "telegramify-markdown",
     "python-dotenv",
     "rich>=14.1",
+    "regex>=2026.7.10",
 ]
 
 [project.optional-dependencies]
 dashboard-gui = [
     "PyQt6>=6.10.1",
     "matplotlib>=3.10.7",
+    "types-regex>=2026.7.10.20260711",
 ]
 dev = [
     "pytest>=8",

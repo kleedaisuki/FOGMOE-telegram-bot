@@ -3,6 +3,7 @@
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.application.assistant.tool_runtime import ToolEffectRequest
+from fogmoe_bot.application.memory.queries import MemoryReader
 from fogmoe_bot.domain.conversation.payloads import JsonValue
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_STICKER
 from fogmoe_bot.infrastructure.database.assistant_tool_effects import (
@@ -16,7 +17,6 @@ from .diary import execute_diary
 from .external import ExternalReadTools, GeneratedMediaTools, StickerCatalogReader
 from .group import GroupContextReader, fetch_group_context
 from .memory import (
-    PermanentMemoryReader,
     fetch_permanent_summaries,
     search_permanent_records,
 )
@@ -37,7 +37,7 @@ class AssistantToolOperationDispatcher:
         generated_media: GeneratedMediaTools,
         stickers: StickerCatalogReader,
         outbox: StandaloneOutboxWriter,
-        memory: PermanentMemoryReader,
+        memory: MemoryReader,
         groups: GroupContextReader,
     ) -> None:
         """注入全部显式 adapter；工具 metadata 仍仅由 ToolCatalog 拥有。"""

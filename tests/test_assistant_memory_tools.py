@@ -1,12 +1,16 @@
 """@brief Retention-backed Assistant memory tool tests / Tests for retention-backed Assistant memory tools."""
 
 import asyncio
-from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectRequest,
     ToolExecutionContext,
+)
+from fogmoe_bot.application.memory.queries import (
+    MemoryPageQuery,
+    MemorySearchQuery,
+    MemorySearchResult,
 )
 from fogmoe_bot.domain.conversation.payloads import JsonValue
 from fogmoe_bot.domain.conversation.identity import (
@@ -14,11 +18,12 @@ from fogmoe_bot.domain.conversation.identity import (
     DeliveryStreamId,
     TurnId,
 )
-from fogmoe_bot.domain.conversation.retention import (
-    RetentionSegment,
-    RetentionSegmentDraft,
-    RetentionSummary,
-    TokenCount,
+from fogmoe_bot.domain.memory.models import (
+    MemoryId,
+    MemoryProvenance,
+    MemoryRecord,
+    MemorySearchHit,
+    MemorySourceKind,
 )
 from fogmoe_bot.infrastructure.assistant.tool_operations.dispatcher import (
     AssistantToolOperationDispatcher,
@@ -38,44 +43,43 @@ NOW = datetime(2030, 1, 1, tzinfo=UTC)
 class _Memory:
     """@brief 已应用 quota 的 memory reader fake / Memory-reader fake with quota already applied."""
 
-    def __init__(self, segments: Sequence[RetentionSegment]) -> None:
-        """@brief 保存可见 segments / Store visible segments."""
+    def __init__(self, records: tuple[MemoryRecord, ...]) -> None:
+        """@brief 保存可见 records / Store visible records."""
 
-        self.segments = tuple(segments)
+        self.records = records
 
-    async def count_visible_summaries(self, owner_user_id: int) -> int:
+    async def count_summaries(self, owner_user_id: int) -> int:
         """@brief 返回可见摘要数 / Return the visible summary count."""
 
         assert owner_user_id == 7
-        return sum(segment.summary is not None for segment in self.segments)
+        return sum(record.summary is not None for record in self.records)
 
-    async def fetch_visible_summaries(
-        self,
-        owner_user_id: int,
-        *,
-        limit: int,
-        offset: int,
-    ) -> Sequence[RetentionSegment]:
-        """@brief 返回 newest-first 摘要窗口 / Return a newest-first summary window."""
+    async def read_page(self, query: MemoryPageQuery) -> tuple[MemoryRecord, ...]:
+        """@brief 返回 quota 内 record window / Return a quota-visible record window."""
 
-        assert owner_user_id == 7
-        return tuple(
-            segment for segment in self.segments if segment.summary is not None
-        )[offset : offset + limit]
+        assert query.owner_user_id == 7
+        records = tuple(
+            record
+            for record in self.records
+            if not query.summaries_only or record.summary is not None
+        )
+        ordered = records if query.newest_first else tuple(reversed(records))
+        return ordered[query.offset : query.offset + query.limit]
 
-    async def fetch_visible_segments(
-        self,
-        owner_user_id: int,
-        *,
-        newest_first: bool,
-        limit: int,
-        offset: int,
-    ) -> Sequence[RetentionSegment]:
-        """@brief 返回 quota 内 snapshot window / Return the snapshot window within quota."""
+    async def search(self, query: MemorySearchQuery) -> MemorySearchResult:
+        """@brief 返回固定测试命中 / Return a deterministic test hit."""
 
-        assert owner_user_id == 7
-        ordered = self.segments if newest_first else tuple(reversed(self.segments))
-        return ordered[offset : offset + limit]
+        assert query.owner_user_id == 7
+        record = self.records[0]
+        return MemorySearchResult(
+            (
+                MemorySearchHit(
+                    memory_id=record.memory_id,
+                    created_at=record.created_at,
+                    excerpt='[{"role": "user", "content": "secret durable fact"}]',
+                ),
+            )
+        )
 
 
 class _UnusedAdapters:
@@ -97,20 +101,22 @@ class _UnusedAdapters:
         raise AssertionError(pack_name)
 
 
-def _segment() -> RetentionSegment:
-    """@brief 构造保留 legacy ID 的 completed archive / Build a completed archive preserving its legacy ID."""
+def _record() -> MemoryRecord:
+    """@brief 构造保留 legacy ID 的 memory record / Build a memory record preserving its legacy ID."""
 
-    draft = RetentionSegmentDraft.legacy_archive(
-        legacy_record_id=41,
-        conversation_id=ConversationId("assistant-user:7"),
+    memory_id = MemoryId(TurnId.new().value, legacy_value=41)
+    return MemoryRecord(
+        memory_id=memory_id,
         owner_user_id=7,
-        source_snapshot=({"role": "user", "content": "secret durable fact"},),
-        source_token_count=TokenCount(4),
+        provenance=MemoryProvenance(
+            conversation_id=ConversationId("assistant-user:7"),
+            source_kind=MemorySourceKind.LEGACY_ARCHIVE,
+            source_id=memory_id.value,
+            source_digest="a" * 64,
+        ),
+        snapshot=({"role": "user", "content": "secret durable fact"},),
+        summary="durable fact",
         created_at=NOW,
-    )
-    return RetentionSegment.imported(
-        draft,
-        summary=RetentionSummary("durable fact", TokenCount(3), "legacy:test"),
     )
 
 
@@ -144,7 +150,7 @@ def test_memory_tools_read_quota_view_and_preserve_legacy_record_identity() -> N
     async def scenario() -> None:
         """@brief 执行两个 memory reads / Execute both memory reads."""
 
-        segment = _segment()
+        record = _record()
         unused = _UnusedAdapters()
         operations = AssistantToolOperationDispatcher(
             help_text="help",
@@ -152,7 +158,7 @@ def test_memory_tools_read_quota_view_and_preserve_legacy_record_identity() -> N
             generated_media=unused,
             stickers=unused,
             outbox=PostgresOutboxRepository(),
-            memory=_Memory((segment,)),
+            memory=_Memory((record,)),
             groups=PostgresGroupMessageProjection(),
         )
 

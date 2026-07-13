@@ -21,21 +21,19 @@ from fogmoe_bot.domain.conversation.message import (
     ConversationMessage,
     MessageRole,
 )
-from fogmoe_bot.domain.conversation.retention import (
-    ContextTokenBudget,
-    RetentionEnqueueResult,
-    RetentionKind,
-    RetentionSegment,
-    RetentionSegmentDraft,
-    RetentionSegmentId,
-    RetentionStatus,
-    TokenCount,
+from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
+from fogmoe_bot.domain.context_window.compaction import (
+    CompactionEnqueueResult,
+    Compaction,
+    CompactionPlan,
+    CompactionId,
+    CompactionStatus,
 )
 
-from .history_cache import CachedConversationHistory, ConversationHistoryCache
+from .cache import CachedContextWindow, ContextWindowCache
 
 
-HISTORY_PROJECTION_VERSION = 1
+CONTEXT_WINDOW_PROJECTION_VERSION = 1
 """@brief 当前 provider-neutral 历史投影版本 / Current provider-neutral history-projection version."""
 
 _DEFAULT_PAGE_SIZE = 256
@@ -43,7 +41,7 @@ _DEFAULT_PAGE_SIZE = 256
 
 
 @dataclass(frozen=True, slots=True)
-class HistoryBounds:
+class ContextWindowBounds:
     """@brief 固定到一个 Turn 的 sequence 与 reset epoch 边界 / Sequence and reset-epoch bounds anchored to one Turn.
 
     @param conversation_id 会话 ID / Conversation identifier.
@@ -75,7 +73,7 @@ class HistoryBounds:
 
 
 @dataclass(frozen=True, slots=True)
-class HistoryProjectionRequest:
+class ContextWindowRequest:
     """@brief 一次 durable inference 的历史投影请求 / History-projection request for one durable inference.
 
     @param conversation_id 长期会话 ID / Long-lived conversation identifier.
@@ -115,43 +113,43 @@ class HistoryProjectionRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class HistoryReady:
+class ContextWindowReady:
     """@brief 可立即交给模型的有界历史 / Bounded history ready for model inference.
 
-    @param memory_summary 累计旧历史摘要 / Cumulative older-history summary.
+    @param checkpoint_summary 累计旧历史摘要 / Cumulative older-history summary.
     @param messages recent raw provider messages / Recent raw provider messages.
     @param estimated_tokens 完整输入加 reserve 的估算 / Estimate including complete input and reserves.
     @param bounds anchor/epoch 边界 / Anchor and epoch bounds.
     @param checkpoint 使用的已完成 checkpoint / Completed checkpoint used by the projection.
     @param anchor_messages 当前 Turn 的规范数据库行 / Canonical database rows belonging to the current Turn.
-    @param scheduled_segment 本次已存在或新入队的后台压缩 / Existing or newly enqueued background compaction.
+    @param scheduled_compaction 本次已存在或新入队的后台压缩 / Existing or newly enqueued background compaction.
     """
 
-    memory_summary: str | None
+    checkpoint_summary: str | None
     messages: tuple[JsonObject, ...]
     estimated_tokens: TokenCount
-    bounds: HistoryBounds
-    checkpoint: RetentionSegment | None
+    bounds: ContextWindowBounds
+    checkpoint: Compaction | None
     anchor_messages: tuple[ConversationMessage, ...]
-    scheduled_segment: RetentionSegment | None = None
+    scheduled_compaction: Compaction | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class HistoryCompactionPending:
+class CompactionPending:
     """@brief 超过 hard budget 且等待 durable compaction / Hard budget exceeded while durable compaction is pending.
 
-    @param segment_id 正在等待的 Segment / Segment being awaited.
+    @param compaction_id 正在等待的 Segment / Segment being awaited.
     @param estimated_tokens 当前输入估算 / Current input estimate.
     @param bounds anchor/epoch 边界 / Anchor and epoch bounds.
     """
 
-    segment_id: RetentionSegmentId
+    compaction_id: CompactionId
     estimated_tokens: TokenCount
-    bounds: HistoryBounds
+    bounds: ContextWindowBounds
 
 
 @dataclass(frozen=True, slots=True)
-class HistoryTooLarge:
+class ContextWindowTooLarge:
     """@brief 无可压缩前缀但输入仍超过 hard budget / Input exceeds the hard budget without an eligible prefix.
 
     @param reason 稳定原因 / Stable reason.
@@ -161,14 +159,16 @@ class HistoryTooLarge:
 
     reason: str
     estimated_tokens: TokenCount
-    bounds: HistoryBounds
+    bounds: ContextWindowBounds
 
 
-type HistoryProjectionResult = HistoryReady | HistoryCompactionPending | HistoryTooLarge
+type ContextWindowResult = (
+    ContextWindowReady | CompactionPending | ContextWindowTooLarge
+)
 """@brief 历史投影的穷尽结果 / Exhaustive history-projection result."""
 
 
-class HistoryMessageTokenCounter(Protocol):
+class ContextWindowTokenCounter(Protocol):
     """@brief provider-neutral 消息 token 计数端口 / Provider-neutral message token-counting port."""
 
     def count_messages(self, messages: Sequence[JsonObject]) -> TokenCount:
@@ -181,7 +181,7 @@ class HistoryMessageTokenCounter(Protocol):
         ...
 
 
-class HistoryProjectionPersistence(Protocol):
+class ContextWindowPersistence(Protocol):
     """@brief history projector 所需最小 durable persistence / Minimal durable persistence required by the history projector."""
 
     async def history_bounds(
@@ -189,7 +189,7 @@ class HistoryProjectionPersistence(Protocol):
         conversation_id: ConversationId,
         *,
         through_turn_id: TurnId,
-    ) -> HistoryBounds | None:
+    ) -> ContextWindowBounds | None:
         """@brief 读取 anchor Turn 与 reset epoch / Load anchor-Turn and reset-epoch bounds."""
 
         ...
@@ -200,7 +200,7 @@ class HistoryProjectionPersistence(Protocol):
         *,
         epoch_floor_sequence: int,
         before_sequence: int,
-    ) -> RetentionSegment | None:
+    ) -> Compaction | None:
         """@brief 读取当前 epoch 最新累计 checkpoint / Load the latest cumulative checkpoint for an epoch."""
 
         ...
@@ -210,7 +210,7 @@ class HistoryProjectionPersistence(Protocol):
         conversation_id: ConversationId,
         *,
         epoch_floor_sequence: int,
-    ) -> RetentionSegment | None:
+    ) -> Compaction | None:
         """@brief 读取同 epoch 在途 compaction / Load in-flight compaction for the same epoch."""
 
         ...
@@ -229,8 +229,8 @@ class HistoryProjectionPersistence(Protocol):
 
     async def enqueue_compaction(
         self,
-        draft: RetentionSegmentDraft,
-    ) -> RetentionEnqueueResult:
+        draft: CompactionPlan,
+    ) -> CompactionEnqueueResult:
         """@brief 幂等入队 compaction Segment / Idempotently enqueue a compaction segment."""
 
         ...
@@ -250,21 +250,21 @@ class _ProjectedRow:
     non_tool_count: int
 
 
-class ConversationHistoryProjector:
+class ContextWindowProjector:
     """@brief 用 token budget 构造 summary+tail projection / Build summary-plus-tail projections using token budgets."""
 
     def __init__(
         self,
         *,
-        persistence: HistoryProjectionPersistence,
-        token_counter: HistoryMessageTokenCounter,
+        persistence: ContextWindowPersistence,
+        token_counter: ContextWindowTokenCounter,
         budget: ContextTokenBudget | None = None,
         page_size: int = _DEFAULT_PAGE_SIZE,
-        cache: ConversationHistoryCache | None = None,
+        cache: ContextWindowCache | None = None,
     ) -> None:
         """@brief 注入 persistence、counter 与产品预算 / Inject persistence, counter, and product budget.
 
-        @param persistence durable history/retention port / Durable history and retention port.
+        @param persistence durable Context Window port / Durable context-window port.
         @param token_counter token counter / Token counter.
         @param budget 可选显式预算 / Optional explicit budget.
         @param page_size keyset page size / Keyset page size.
@@ -279,9 +279,7 @@ class ConversationHistoryProjector:
         self._page_size = page_size
         self._cache = cache
 
-    async def project(
-        self, request: HistoryProjectionRequest
-    ) -> HistoryProjectionResult:
+    async def project(self, request: ContextWindowRequest) -> ContextWindowResult:
         """@brief 投影有界历史并按需入队 compaction / Project bounded history and enqueue compaction when needed.
 
         @param request anchor-specific request / Anchor-specific request.
@@ -293,13 +291,11 @@ class ConversationHistoryProjector:
             through_turn_id=request.through_turn_id,
         )
         if bounds is None:
-            raise HistoryProjectionInvariantError(
+            raise ContextWindowInvariantError(
                 f"Turn {request.through_turn_id} has no durable conversation messages"
             )
         if bounds.conversation_id != request.conversation_id:
-            raise HistoryProjectionInvariantError(
-                "History bounds crossed a conversation"
-            )
+            raise ContextWindowInvariantError("History bounds crossed a conversation")
 
         checkpoint = (
             await self._persistence.latest_completed_compaction(
@@ -315,18 +311,20 @@ class ConversationHistoryProjector:
             if request.include_history
             else bounds.first_sequence - 1
         )
-        memory_summary: str | None = None
+        checkpoint_summary: str | None = None
         if checkpoint is not None:
             _validate_checkpoint(checkpoint, bounds)
             through_sequence = checkpoint.draft.through_sequence
-            if through_sequence is None or checkpoint.summary is None:
-                raise HistoryProjectionInvariantError(
+            if checkpoint.summary is None:
+                raise ContextWindowInvariantError(
                     "Completed compaction checkpoint has no range or summary"
                 )
             start_sequence = through_sequence
-            memory_summary = checkpoint.summary.text
+            checkpoint_summary = checkpoint.summary.text
 
-        checkpoint_id = str(checkpoint.segment_id) if checkpoint is not None else None
+        checkpoint_id = (
+            str(checkpoint.compaction_id) if checkpoint is not None else None
+        )
         cached = (
             self._cache.get(
                 conversation_id=request.conversation_id,
@@ -370,12 +368,12 @@ class ConversationHistoryProjector:
         messages = tuple(item for row in projected_rows for item in row.messages)
         estimated = self._estimate_complete_input(
             request,
-            memory_summary=memory_summary,
+            checkpoint_summary=checkpoint_summary,
             history=messages,
         )
         if int(estimated) <= int(self._budget.warning_tokens):
-            ready = HistoryReady(
-                memory_summary,
+            ready = ContextWindowReady(
+                checkpoint_summary,
                 messages,
                 estimated,
                 bounds,
@@ -387,12 +385,12 @@ class ConversationHistoryProjector:
 
         if not request.include_history:
             if int(estimated) > int(self._budget.hard_tokens):
-                return HistoryTooLarge(
+                return ContextWindowTooLarge(
                     "current_turn_exceeds_hard_token_budget",
                     estimated,
                     bounds,
                 )
-            ready = HistoryReady(
+            ready = ContextWindowReady(
                 None,
                 messages,
                 estimated,
@@ -415,17 +413,17 @@ class ConversationHistoryProjector:
                 rows=projected_rows,
             )
             if draft is not None:
-                active = (await self._persistence.enqueue_compaction(draft)).segment
+                active = (await self._persistence.enqueue_compaction(draft)).compaction
 
         terminal_failure = active is not None and active.status in {
-            RetentionStatus.FAILED_FINAL,
-            RetentionStatus.CANCELLED,
+            CompactionStatus.FAILED_FINAL,
+            CompactionStatus.CANCELLED,
         }
 
         if int(estimated) > int(self._budget.hard_tokens):
             if active is not None and not terminal_failure:
-                return HistoryCompactionPending(active.segment_id, estimated, bounds)
-            return HistoryTooLarge(
+                return CompactionPending(active.compaction_id, estimated, bounds)
+            return ContextWindowTooLarge(
                 (
                     "compaction_failed_for_current_prefix"
                     if terminal_failure
@@ -434,8 +432,8 @@ class ConversationHistoryProjector:
                 estimated,
                 bounds,
             )
-        ready = HistoryReady(
-            memory_summary,
+        ready = ContextWindowReady(
+            checkpoint_summary,
             messages,
             estimated,
             bounds,
@@ -448,8 +446,8 @@ class ConversationHistoryProjector:
 
     def _cache_ready(
         self,
-        request: HistoryProjectionRequest,
-        ready: HistoryReady,
+        request: ContextWindowRequest,
+        ready: ContextWindowReady,
         start_sequence: int,
         checkpoint_id: str | None,
         rows: Sequence[ConversationMessage],
@@ -467,7 +465,7 @@ class ConversationHistoryProjector:
         if self._cache is None:
             return
         self._cache.put(
-            CachedConversationHistory(
+            CachedContextWindow(
                 conversation_id=request.conversation_id,
                 through_turn_id=request.through_turn_id,
                 epoch_floor_sequence=ready.bounds.epoch_floor_sequence,
@@ -507,11 +505,11 @@ class ConversationHistoryProjector:
             for message in page:
                 sequence = int(message.sequence)
                 if sequence <= cursor or sequence > through_sequence:
-                    raise HistoryProjectionInvariantError(
+                    raise ContextWindowInvariantError(
                         "History page is not a valid keyset continuation"
                     )
                 if message.draft.conversation_id != conversation_id:
-                    raise HistoryProjectionInvariantError(
+                    raise ContextWindowInvariantError(
                         "History page crossed a conversation boundary"
                     )
                 cursor = sequence
@@ -519,14 +517,14 @@ class ConversationHistoryProjector:
             if len(page) < self._page_size:
                 break
         if result and int(result[-1].sequence) > through_sequence:
-            raise HistoryProjectionInvariantError("History read exceeded its anchor")
+            raise ContextWindowInvariantError("History read exceeded its anchor")
         return tuple(result)
 
     def _estimate_complete_input(
         self,
-        request: HistoryProjectionRequest,
+        request: ContextWindowRequest,
         *,
-        memory_summary: str | None,
+        checkpoint_summary: str | None,
         history: Sequence[JsonObject],
     ) -> TokenCount:
         """@brief 估算 base、memory、raw 与 reserve / Estimate base, memory, raw history, and reserves.
@@ -535,20 +533,20 @@ class ConversationHistoryProjector:
         """
 
         messages = [*request.base_messages]
-        if memory_summary is not None:
-            messages.append(memory_summary_message(memory_summary))
+        if checkpoint_summary is not None:
+            messages.append(checkpoint_summary_message(checkpoint_summary))
         messages.extend(history)
         counted = self._token_counter.count_messages(messages)
         return TokenCount(int(counted) + int(request.reserved_tokens))
 
     def _plan_compaction(
         self,
-        request: HistoryProjectionRequest,
+        request: ContextWindowRequest,
         *,
-        bounds: HistoryBounds,
-        checkpoint: RetentionSegment | None,
+        bounds: ContextWindowBounds,
+        checkpoint: Compaction | None,
         rows: Sequence[_ProjectedRow],
-    ) -> RetentionSegmentDraft | None:
+    ) -> CompactionPlan | None:
         """@brief 选择连续旧前缀并冻结 snapshot / Select a contiguous old prefix and freeze its snapshot.
 
         @return compaction draft；无安全前缀时为 None / Compaction draft, or None without a safe prefix.
@@ -580,7 +578,7 @@ class ConversationHistoryProjector:
         available = int(self._budget.segment_input_tokens)
         selected: list[_ProjectedRow] = []
         snapshot: list[JsonObject] = (
-            [memory_summary_message(checkpoint.summary.text)]
+            [checkpoint_summary_message(checkpoint.summary.text)]
             if checkpoint is not None and checkpoint.summary is not None
             else []
         )
@@ -607,20 +605,20 @@ class ConversationHistoryProjector:
             else bounds.epoch_floor_sequence + 1
         )
         if selected[0].sequence != expected_start:
-            raise HistoryProjectionInvariantError(
+            raise ContextWindowInvariantError(
                 "Compaction prefix is not contiguous with its epoch checkpoint"
             )
-        return RetentionSegmentDraft.compaction(
+        return CompactionPlan.create(
             conversation_id=request.conversation_id,
             owner_user_id=request.owner_user_id,
             epoch_floor_sequence=bounds.epoch_floor_sequence,
             from_sequence=selected[0].sequence,
             through_sequence=selected[-1].sequence,
             anchor_turn_id=request.through_turn_id,
-            predecessor_segment_id=(
-                checkpoint.segment_id if checkpoint is not None else None
+            predecessor_compaction_id=(
+                checkpoint.compaction_id if checkpoint is not None else None
             ),
-            projection_version=HISTORY_PROJECTION_VERSION,
+            projection_version=CONTEXT_WINDOW_PROJECTION_VERSION,
             source_snapshot=tuple(snapshot),
             source_row_count=len(selected),
             source_token_count=snapshot_tokens,
@@ -628,8 +626,8 @@ class ConversationHistoryProjector:
         )
 
 
-class HistoryProjectionInvariantError(RuntimeError):
-    """@brief durable history 或 retention artifact 违反不变量 / Durable history or retention artifact violated an invariant."""
+class ContextWindowInvariantError(RuntimeError):
+    """@brief durable history 或 compaction artifact 违反不变量 / Durable history or compaction artifact violated an invariant."""
 
 
 def project_conversation_message(message: ConversationMessage) -> list[JsonObject]:
@@ -668,7 +666,7 @@ def project_conversation_message(message: ConversationMessage) -> list[JsonObjec
     ]
 
 
-def memory_summary_message(summary: str) -> JsonObject:
+def checkpoint_summary_message(summary: str) -> JsonObject:
     """@brief 把累计摘要包装成非指令 system memory / Wrap a cumulative summary as non-instruction system memory.
 
     @param summary 已完成累计摘要 / Completed cumulative summary.
@@ -696,22 +694,20 @@ def memory_summary_message(summary: str) -> JsonObject:
     }
 
 
-def _validate_checkpoint(segment: RetentionSegment, bounds: HistoryBounds) -> None:
+def _validate_checkpoint(segment: Compaction, bounds: ContextWindowBounds) -> None:
     """@brief 验证 checkpoint 属于当前 anchor epoch / Validate checkpoint ownership of the anchor epoch.
 
     @return None / None.
-    @raise HistoryProjectionInvariantError checkpoint 漂移 / Checkpoint drifted.
+    @raise ContextWindowInvariantError checkpoint 漂移 / Checkpoint drifted.
     """
 
     if (
-        segment.draft.kind is not RetentionKind.COMPACTION
-        or segment.status is not RetentionStatus.COMPLETED
+        segment.status is not CompactionStatus.COMPLETED
         or segment.draft.conversation_id != bounds.conversation_id
         or segment.draft.epoch_floor_sequence != bounds.epoch_floor_sequence
-        or segment.draft.through_sequence is None
         or segment.draft.through_sequence >= bounds.first_sequence
     ):
-        raise HistoryProjectionInvariantError(
+        raise ContextWindowInvariantError(
             "Retention checkpoint does not belong to the anchor Turn epoch"
         )
 
@@ -735,17 +731,17 @@ def _copy_json_object(value: Mapping[str, object]) -> JsonObject:
 
 
 __all__ = [
-    "ConversationHistoryProjector",
-    "HISTORY_PROJECTION_VERSION",
-    "HistoryBounds",
-    "HistoryCompactionPending",
-    "HistoryMessageTokenCounter",
-    "HistoryProjectionInvariantError",
-    "HistoryProjectionPersistence",
-    "HistoryProjectionRequest",
-    "HistoryProjectionResult",
-    "HistoryReady",
-    "HistoryTooLarge",
-    "memory_summary_message",
+    "ContextWindowProjector",
+    "CONTEXT_WINDOW_PROJECTION_VERSION",
+    "ContextWindowBounds",
+    "CompactionPending",
+    "ContextWindowTokenCounter",
+    "ContextWindowInvariantError",
+    "ContextWindowPersistence",
+    "ContextWindowRequest",
+    "ContextWindowResult",
+    "ContextWindowReady",
+    "ContextWindowTooLarge",
+    "checkpoint_summary_message",
     "project_conversation_message",
 ]

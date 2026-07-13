@@ -16,7 +16,12 @@ def test_system_prompt_defines_persona_and_runtime_contract() -> None:
     """@brief 验证 system prompt 身份与运行时契约 / Verify the system-prompt identity and runtime contract."""
 
     assert config.SYSTEM_PROMPT.startswith("# Runtime Contract\n\n## Persona\n")
-    assert "Asuhoshi Yume" in config.SYSTEM_PROMPT
+    persona, separator, identity_contract = config.SYSTEM_PROMPT.partition(
+        "\n## Identity and priority\n"
+    )
+    assert separator
+    assert persona.removeprefix("# Runtime Contract\n\n## Persona\n").strip()
+    assert identity_contract.strip()
     assert "# Runtime Contract\n" in config.SYSTEM_PROMPT
     assert config.SYSTEM_PROMPT.endswith("public repository when appropriate.\n")
     assert "@kleek_RoPL_bot" in config.SYSTEM_PROMPT

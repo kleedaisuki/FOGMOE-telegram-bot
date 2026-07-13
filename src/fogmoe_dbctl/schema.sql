@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0039_observability
--- Alembic head: 0039_observability
+-- Source migrations: 0001_initial through 0040_memory_context_boundaries
+-- Alembic head: 0040_memory_context_boundaries
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and user-plan backfill) and the
@@ -18,6 +18,8 @@ CREATE SCHEMA IF NOT EXISTS media;
 CREATE SCHEMA IF NOT EXISTS infra;
 CREATE SCHEMA IF NOT EXISTS admin;
 CREATE SCHEMA IF NOT EXISTS observability;
+CREATE SCHEMA IF NOT EXISTS context_window;
+CREATE SCHEMA IF NOT EXISTS memory;
 
 -- DB_MIGRATION_SCHEMA defaults to infra.  Its version value is data, so it is
 -- intentionally not recorded in this schema-only snapshot.
@@ -375,27 +377,24 @@ CREATE INDEX idx_outbound_messages_stream_head
   ON conversation.outbound_messages (delivery_stream_id, stream_sequence)
   WHERE status IN ('pending', 'processing', 'retry_wait');
 
-CREATE TABLE conversation.retention_segments (
-  segment_id UUID PRIMARY KEY,
-  kind TEXT NOT NULL CHECK (kind IN ('compaction', 'legacy_archive')),
+CREATE TABLE context_window.compactions (
+  compaction_id UUID PRIMARY KEY,
   conversation_id TEXT NOT NULL CHECK (
     char_length(conversation_id) BETWEEN 1 AND 512
   ),
   owner_user_id BIGINT NOT NULL CHECK (owner_user_id > 0),
-  epoch_floor_sequence BIGINT,
-  from_sequence BIGINT,
-  through_sequence BIGINT,
-  anchor_turn_id UUID
+  epoch_floor_sequence BIGINT NOT NULL,
+  from_sequence BIGINT NOT NULL,
+  through_sequence BIGINT NOT NULL,
+  anchor_turn_id UUID NOT NULL
     REFERENCES conversation.conversation_turns(turn_id) ON DELETE RESTRICT,
-  predecessor_segment_id UUID
-    REFERENCES conversation.retention_segments(segment_id) ON DELETE RESTRICT,
-  projection_version SMALLINT NOT NULL CHECK (projection_version >= 0),
+  predecessor_compaction_id UUID
+    REFERENCES context_window.compactions(compaction_id) ON DELETE RESTRICT,
+  projection_version SMALLINT NOT NULL CHECK (projection_version > 0),
   source_digest CHAR(64) NOT NULL CHECK (source_digest ~ '^[0-9a-f]{64}$'),
   source_snapshot JSON NOT NULL CHECK (json_typeof(source_snapshot) = 'array'),
-  source_row_count INTEGER NOT NULL CHECK (source_row_count >= 0),
+  source_row_count INTEGER NOT NULL CHECK (source_row_count > 0),
   source_token_count INTEGER NOT NULL CHECK (source_token_count >= 0),
-  legacy_record_id BIGINT UNIQUE,
-  legacy_summary_raw TEXT,
   status TEXT NOT NULL CHECK (
     status IN (
       'pending',
@@ -421,53 +420,33 @@ CREATE TABLE conversation.retention_segments (
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   completed_at TIMESTAMPTZ,
-  CONSTRAINT retention_segments_kind_shape_ck CHECK (
-    (
-      kind = 'compaction'
-      AND epoch_floor_sequence IS NOT NULL
-      AND epoch_floor_sequence >= 0
-      AND from_sequence IS NOT NULL
-      AND from_sequence > epoch_floor_sequence
-      AND through_sequence IS NOT NULL
-      AND through_sequence >= from_sequence
-      AND anchor_turn_id IS NOT NULL
-      AND projection_version > 0
-      AND source_row_count > 0
-      AND json_array_length(source_snapshot) > 0
-      AND legacy_record_id IS NULL
-      AND legacy_summary_raw IS NULL
-    ) OR (
-      kind = 'legacy_archive'
-      AND epoch_floor_sequence IS NULL
-      AND from_sequence IS NULL
-      AND through_sequence IS NULL
-      AND anchor_turn_id IS NULL
-      AND predecessor_segment_id IS NULL
-      AND projection_version = 0
-      AND source_row_count = json_array_length(source_snapshot)
-      AND legacy_record_id IS NOT NULL
-      AND status = 'completed'
-    )
+  CONSTRAINT compactions_source_ck CHECK (
+    json_array_length(source_snapshot) > 0
   ),
-  CONSTRAINT retention_segments_claimable_time_ck CHECK (
+  CONSTRAINT compactions_range_ck CHECK (
+    epoch_floor_sequence >= 0
+    AND from_sequence > epoch_floor_sequence
+    AND through_sequence >= from_sequence
+  ),
+  CONSTRAINT compactions_claimable_time_ck CHECK (
     (status IN ('pending', 'retry_wait')) = (next_attempt_at IS NOT NULL)
   ),
-  CONSTRAINT retention_segments_lease_ck CHECK (
+  CONSTRAINT compactions_lease_ck CHECK (
     (status = 'processing') = (
       claim_token IS NOT NULL AND lease_expires_at IS NOT NULL
     )
   ),
-  CONSTRAINT retention_segments_claim_pair_ck CHECK (
+  CONSTRAINT compactions_claim_pair_ck CHECK (
     (claim_token IS NULL) = (lease_expires_at IS NULL)
   ),
-  CONSTRAINT retention_segments_terminal_time_ck CHECK (
+  CONSTRAINT compactions_terminal_time_ck CHECK (
     (status IN ('completed', 'failed_final', 'cancelled')) =
     (completed_at IS NOT NULL)
   ),
-  CONSTRAINT retention_segments_completion_token_ck CHECK (
+  CONSTRAINT compactions_completion_token_ck CHECK (
     (status = 'completed') = (completion_token IS NOT NULL)
   ),
-  CONSTRAINT retention_segments_summary_shape_ck CHECK (
+  CONSTRAINT compactions_summary_shape_ck CHECK (
     (summary_text IS NULL AND summary_token_count IS NULL AND summary_route_key IS NULL)
     OR (
       summary_text IS NOT NULL
@@ -477,14 +456,14 @@ CREATE TABLE conversation.retention_segments (
       AND char_length(btrim(summary_route_key)) > 0
     )
   ),
-  CONSTRAINT retention_segments_compaction_summary_ck CHECK (
-    kind <> 'compaction' OR status <> 'completed' OR summary_text IS NOT NULL
+  CONSTRAINT compactions_completed_summary_ck CHECK (
+    status <> 'completed' OR summary_text IS NOT NULL
   ),
-  CONSTRAINT retention_segments_time_order_ck CHECK (
+  CONSTRAINT compactions_time_order_ck CHECK (
     updated_at >= created_at
     AND (completed_at IS NULL OR completed_at >= created_at)
   ),
-  CONSTRAINT retention_segments_range_uq UNIQUE (
+  CONSTRAINT compactions_range_uq UNIQUE (
     conversation_id,
     epoch_floor_sequence,
     through_sequence,
@@ -492,33 +471,24 @@ CREATE TABLE conversation.retention_segments (
   )
 );
 
-CREATE UNIQUE INDEX retention_segments_active_epoch_uq
-  ON conversation.retention_segments (conversation_id, epoch_floor_sequence)
-  WHERE kind = 'compaction'
-    AND status IN ('pending', 'processing', 'retry_wait');
+CREATE UNIQUE INDEX compactions_active_epoch_uq
+  ON context_window.compactions (conversation_id, epoch_floor_sequence)
+  WHERE status IN ('pending', 'processing', 'retry_wait');
 
-CREATE INDEX retention_segments_ready_idx
-  ON conversation.retention_segments (next_attempt_at, segment_id)
-  WHERE kind = 'compaction' AND status IN ('pending', 'retry_wait');
+CREATE INDEX compactions_ready_idx
+  ON context_window.compactions (next_attempt_at, compaction_id)
+  WHERE status IN ('pending', 'retry_wait');
 
-CREATE INDEX retention_segments_expired_lease_idx
-  ON conversation.retention_segments (lease_expires_at, segment_id)
+CREATE INDEX compactions_expired_lease_idx
+  ON context_window.compactions (lease_expires_at, compaction_id)
   WHERE status = 'processing';
 
-CREATE INDEX retention_segments_projection_idx
-  ON conversation.retention_segments (
+CREATE INDEX compactions_projection_idx
+  ON context_window.compactions (
     conversation_id,
     epoch_floor_sequence,
     through_sequence DESC,
     completed_at DESC
-  )
-  WHERE kind = 'compaction' AND status = 'completed';
-
-CREATE INDEX retention_segments_owner_completed_idx
-  ON conversation.retention_segments (
-    owner_user_id,
-    completed_at DESC,
-    segment_id DESC
   )
   WHERE status = 'completed';
 
@@ -536,6 +506,32 @@ CREATE TABLE identity.users (
   coins_paid INT NOT NULL DEFAULT 0,
   user_plan VARCHAR(10) NOT NULL DEFAULT 'free'
 );
+
+CREATE TABLE memory.records (
+  memory_id UUID PRIMARY KEY,
+  owner_user_id BIGINT NOT NULL
+    REFERENCES identity.users(id) ON DELETE CASCADE,
+  conversation_id TEXT NOT NULL CHECK (
+    char_length(conversation_id) BETWEEN 1 AND 512
+  ),
+  source_kind TEXT NOT NULL CHECK (
+    source_kind IN ('compaction_checkpoint', 'legacy_archive')
+  ),
+  source_id UUID NOT NULL UNIQUE,
+  source_digest CHAR(64) NOT NULL CHECK (
+    source_digest ~ '^[0-9a-f]{64}$'
+  ),
+  snapshot JSON NOT NULL CHECK (json_typeof(snapshot) = 'array'),
+  summary_text TEXT,
+  legacy_record_id BIGINT UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL,
+  CONSTRAINT memory_records_summary_ck CHECK (
+    summary_text IS NULL OR char_length(btrim(summary_text)) > 0
+  )
+);
+
+CREATE INDEX memory_records_owner_created_idx
+  ON memory.records (owner_user_id, created_at DESC, memory_id DESC);
 
 CREATE TABLE identity.operation_receipts (
   idempotency_key VARCHAR(200) PRIMARY KEY

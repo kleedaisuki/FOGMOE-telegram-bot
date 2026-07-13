@@ -1,4 +1,4 @@
-"""@brief Conversation retention 的真实 PostgreSQL 契约 / Real-PostgreSQL contracts for conversation retention."""
+"""@brief Context Window 与 Memory 的真实 PostgreSQL 契约 / Real-PostgreSQL contracts for Context Window and Memory."""
 
 from __future__ import annotations
 
@@ -11,22 +11,31 @@ from uuid import uuid4
 
 import pytest
 
+from fogmoe_bot.application.memory.queries import MemoryPageQuery
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     TurnId,
 )
-from fogmoe_bot.domain.conversation.retention import (
-    RetentionSegmentDraft,
-    RetentionSummary,
-    StaleRetentionClaimError,
-    TokenCount,
+from fogmoe_bot.domain.context_window.budget import TokenCount
+from fogmoe_bot.domain.context_window.compaction import (
+    CompactionPlan,
+    CompactionSummary,
+    StaleCompactionClaimError,
+    compaction_source_digest,
+)
+from fogmoe_bot.domain.memory.models import (
+    MemoryId,
+    MemoryProvenance,
+    MemoryRecord,
+    MemorySourceKind,
 )
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
-from fogmoe_bot.infrastructure.database.conversation_retention import (
-    PostgresConversationRetention,
+from fogmoe_bot.infrastructure.database.context_window import (
+    PostgresContextWindowStore,
 )
+from fogmoe_bot.infrastructure.database.memory import PostgresMemoryReader
 from fogmoe_dbctl.postgres import read_service, service_sqlalchemy_url
 
 
@@ -125,8 +134,7 @@ async def _insert_fixture(
 
 async def _insert_completed_legacy(
     *,
-    draft: RetentionSegmentDraft,
-    summary: RetentionSummary,
+    record: MemoryRecord,
 ) -> None:
     """@brief 插入一个已完成 legacy Segment 以验证 quota window / Insert a completed legacy segment to verify the quota window.
 
@@ -134,30 +142,22 @@ async def _insert_completed_legacy(
     """
 
     await db_connection.execute(
-        "INSERT INTO conversation.retention_segments ("
-        "segment_id, kind, conversation_id, owner_user_id, projection_version, "
-        "source_digest, source_snapshot, source_row_count, source_token_count, "
-        "legacy_record_id, status, completion_token, summary_text, "
-        "summary_token_count, summary_route_key, created_at, updated_at, completed_at"
+        "INSERT INTO memory.records ("
+        "memory_id, owner_user_id, conversation_id, source_kind, source_id, "
+        "source_digest, snapshot, summary_text, legacy_record_id, created_at"
         ") VALUES ("
-        "CAST(%s AS UUID), 'legacy_archive', %s, %s, 0, %s, CAST(%s AS JSONB), "
-        "%s, %s, %s, 'completed', CAST(%s AS UUID), %s, %s, %s, %s, %s, %s)",
+        "CAST(%s AS UUID), %s, %s, 'legacy_archive', CAST(%s AS UUID), %s, "
+        "CAST(%s AS JSON), %s, %s, %s)",
         (
-            str(draft.segment_id),
-            str(draft.conversation_id),
-            draft.owner_user_id,
-            draft.source_digest,
-            json.dumps(draft.source_snapshot, ensure_ascii=False),
-            draft.source_row_count,
-            int(draft.source_token_count),
-            draft.legacy_record_id,
-            str(draft.segment_id),
-            summary.text,
-            int(summary.token_count),
-            summary.route_key,
-            draft.created_at,
-            draft.created_at,
-            draft.created_at,
+            str(record.memory_id.value),
+            record.owner_user_id,
+            str(record.provenance.conversation_id),
+            str(record.memory_id.value),
+            record.provenance.source_digest,
+            json.dumps(record.snapshot, ensure_ascii=False),
+            record.summary,
+            record.memory_id.legacy_value,
+            record.created_at,
         ),
     )
 
@@ -170,7 +170,12 @@ async def _cleanup(user_id: int, conversation_id: ConversationId) -> None:
 
     async with db_connection.transaction() as connection:
         await db_connection.execute(
-            "DELETE FROM conversation.retention_segments WHERE owner_user_id = %s",
+            "DELETE FROM memory.records WHERE owner_user_id = %s",
+            (user_id,),
+            connection=connection,
+        )
+        await db_connection.execute(
+            "DELETE FROM context_window.compactions WHERE owner_user_id = %s",
             (user_id,),
             connection=connection,
         )
@@ -213,7 +218,8 @@ def test_real_postgres_enqueue_fencing_and_paid_quota(
         prior_turn_id = TurnId.new()
         anchor_turn_id = TurnId.new()
         now = datetime(2031, 1, 1, tzinfo=UTC)
-        repository = PostgresConversationRetention()
+        repository = PostgresContextWindowStore()
+        memory = PostgresMemoryReader()
         try:
             await _insert_fixture(
                 user_id=user_id,
@@ -231,14 +237,14 @@ def test_real_postgres_enqueue_fencing_and_paid_quota(
             assert (bounds.first_sequence, bounds.last_sequence) == (3, 3)
             assert bounds.epoch_floor_sequence == 0
 
-            draft = RetentionSegmentDraft.compaction(
+            draft = CompactionPlan.create(
                 conversation_id=conversation_id,
                 owner_user_id=user_id,
                 epoch_floor_sequence=0,
                 from_sequence=1,
                 through_sequence=2,
                 anchor_turn_id=anchor_turn_id,
-                predecessor_segment_id=None,
+                predecessor_compaction_id=None,
                 projection_version=1,
                 source_snapshot=(
                     {
@@ -261,7 +267,7 @@ def test_real_postgres_enqueue_fencing_and_paid_quota(
                 repository.enqueue_compaction(draft),
             )
             assert {first.inserted, second.inserted} == {False, True}
-            assert first.segment.segment_id == second.segment.segment_id
+            assert first.compaction.compaction_id == second.compaction.compaction_id
 
             claimed = await repository.claim_compactions(
                 now=now + timedelta(seconds=3),
@@ -285,69 +291,69 @@ def test_real_postgres_enqueue_fencing_and_paid_quota(
             )
             assert len(reclaimed) == 1
             assert reclaimed[0].claim_token != stale_claim.claim_token
-            with pytest.raises(StaleRetentionClaimError):
+            with pytest.raises(StaleCompactionClaimError):
                 await repository.complete_compaction(
                     stale_claim,
-                    summary=RetentionSummary("stale", TokenCount(1), "test:stale"),
+                    summary=CompactionSummary("stale", TokenCount(1), "test:stale"),
                     completed_at=now + timedelta(seconds=11),
                 )
 
             completed = await repository.complete_compaction(
                 reclaimed[0],
-                summary=RetentionSummary("cumulative", TokenCount(1), "test:model"),
+                summary=CompactionSummary("cumulative", TokenCount(1), "test:model"),
                 completed_at=now + timedelta(seconds=12),
             )
             assert completed.summary is not None
             assert completed.summary.text == "cumulative"
 
-            legacy = RetentionSegmentDraft.legacy_archive(
-                legacy_record_id=int(suffix[:10], 16) + 1,
-                conversation_id=conversation_id,
+            legacy_snapshot = ({"role": "user", "content": "newest"},)
+            legacy_memory_id = MemoryId(
+                uuid4(),
+                legacy_value=int(suffix[:10], 16) + 1,
+            )
+            legacy = MemoryRecord(
+                memory_id=legacy_memory_id,
                 owner_user_id=user_id,
-                source_snapshot=({"role": "user", "content": "newest"},),
-                source_token_count=TokenCount(1),
+                provenance=MemoryProvenance(
+                    conversation_id=conversation_id,
+                    source_kind=MemorySourceKind.LEGACY_ARCHIVE,
+                    source_id=legacy_memory_id.value,
+                    source_digest=compaction_source_digest(legacy_snapshot),
+                ),
+                snapshot=legacy_snapshot,
+                summary="newest",
                 created_at=now + timedelta(seconds=20),
             )
             await _insert_completed_legacy(
-                draft=legacy,
-                summary=RetentionSummary("newest", TokenCount(1), "test:legacy"),
+                record=legacy,
             )
-            visible = await repository.fetch_visible_segments(
-                user_id,
-                newest_first=True,
-                limit=10,
-                offset=0,
+            visible = await memory.read_page(
+                MemoryPageQuery(owner_user_id=user_id, limit=10)
             )
-            assert [segment.segment_id for segment in visible] == [legacy.segment_id]
-            assert await repository.count_visible_summaries(user_id) == 1
+            assert [record.memory_id.value for record in visible] == [
+                legacy.memory_id.value
+            ]
+            assert await memory.count_summaries(user_id) == 1
 
             await db_connection.execute(
                 "UPDATE identity.users SET permanent_records_limit = 0 WHERE id = %s",
                 (user_id,),
             )
             assert (
-                await repository.fetch_visible_segments(
-                    user_id,
-                    newest_first=True,
-                    limit=10,
-                    offset=0,
-                )
+                await memory.read_page(MemoryPageQuery(owner_user_id=user_id, limit=10))
                 == ()
             )
-            assert await repository.count_visible_summaries(user_id) == 0
+            assert await memory.count_summaries(user_id) == 0
             await db_connection.execute(
                 "UPDATE identity.users SET permanent_records_limit = 2 WHERE id = %s",
                 (user_id,),
             )
-            expanded = await repository.fetch_visible_segments(
-                user_id,
-                newest_first=True,
-                limit=10,
-                offset=0,
+            expanded = await memory.read_page(
+                MemoryPageQuery(owner_user_id=user_id, limit=10)
             )
-            assert [segment.segment_id for segment in expanded] == [
-                legacy.segment_id,
-                completed.segment_id,
+            assert [record.memory_id.value for record in expanded] == [
+                legacy.memory_id.value,
+                completed.compaction_id.value,
             ]
         finally:
             await _cleanup(user_id, conversation_id)

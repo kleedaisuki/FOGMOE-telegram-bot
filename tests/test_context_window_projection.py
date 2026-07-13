@@ -1,18 +1,18 @@
-"""@brief Token-aware history projection tests / Token-aware history-projection tests."""
+"""@brief Token-aware Context Window projection tests / Token-aware context-window projection tests."""
 
 import asyncio
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 
-from fogmoe_bot.application.conversation.history_projection import (
-    ConversationHistoryProjector,
-    HistoryBounds,
-    HistoryCompactionPending,
-    HistoryProjectionRequest,
-    HistoryReady,
-    memory_summary_message,
+from fogmoe_bot.application.context_window.projection import (
+    ContextWindowProjector,
+    ContextWindowBounds,
+    CompactionPending,
+    ContextWindowRequest,
+    ContextWindowReady,
+    checkpoint_summary_message,
 )
-from fogmoe_bot.application.conversation.history_cache import ConversationHistoryCache
+from fogmoe_bot.application.context_window.cache import ContextWindowCache
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -26,13 +26,12 @@ from fogmoe_bot.domain.conversation.message import (
     MessageDraft,
     MessageRole,
 )
-from fogmoe_bot.domain.conversation.retention import (
-    ContextTokenBudget,
-    RetentionEnqueueResult,
-    RetentionSegment,
-    RetentionSegmentDraft,
-    RetentionSummary,
-    TokenCount,
+from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
+from fogmoe_bot.domain.context_window.compaction import (
+    CompactionEnqueueResult,
+    Compaction,
+    CompactionPlan,
+    CompactionSummary,
 )
 
 
@@ -63,10 +62,10 @@ class _Persistence:
     def __init__(
         self,
         *,
-        bounds: HistoryBounds,
+        bounds: ContextWindowBounds,
         messages: tuple[ConversationMessage, ...],
-        checkpoint: RetentionSegment | None = None,
-        active: RetentionSegment | None = None,
+        checkpoint: Compaction | None = None,
+        active: Compaction | None = None,
     ) -> None:
         """@brief 保存固定 projection state / Store fixed projection state."""
 
@@ -74,7 +73,7 @@ class _Persistence:
         self.messages = messages
         self.checkpoint = checkpoint
         self.active = active
-        self.enqueued: list[RetentionSegmentDraft] = []
+        self.enqueued: list[CompactionPlan] = []
         self.pages: list[tuple[int, int, int]] = []
 
     async def history_bounds(
@@ -82,7 +81,7 @@ class _Persistence:
         conversation_id: ConversationId,
         *,
         through_turn_id: TurnId,
-    ) -> HistoryBounds | None:
+    ) -> ContextWindowBounds | None:
         """@brief 返回固定 anchor bounds / Return fixed anchor bounds."""
 
         assert conversation_id == self.bounds.conversation_id
@@ -95,7 +94,7 @@ class _Persistence:
         *,
         epoch_floor_sequence: int,
         before_sequence: int,
-    ) -> RetentionSegment | None:
+    ) -> Compaction | None:
         """@brief 返回固定 checkpoint / Return a fixed checkpoint."""
 
         del conversation_id, epoch_floor_sequence, before_sequence
@@ -106,7 +105,7 @@ class _Persistence:
         conversation_id: ConversationId,
         *,
         epoch_floor_sequence: int,
-    ) -> RetentionSegment | None:
+    ) -> Compaction | None:
         """@brief 返回固定在途 Segment / Return a fixed active segment."""
 
         del conversation_id, epoch_floor_sequence
@@ -132,14 +131,14 @@ class _Persistence:
 
     async def enqueue_compaction(
         self,
-        draft: RetentionSegmentDraft,
-    ) -> RetentionEnqueueResult:
+        draft: CompactionPlan,
+    ) -> CompactionEnqueueResult:
         """@brief 保存并返回 PENDING Segment / Store and return a pending segment."""
 
         self.enqueued.append(draft)
-        segment = RetentionSegment.pending(draft)
+        segment = Compaction.pending(draft)
         self.active = segment
-        return RetentionEnqueueResult(segment, True)
+        return CompactionEnqueueResult(segment, True)
 
 
 def _message(
@@ -169,10 +168,10 @@ def _message(
     )
 
 
-def _request(turn_id: TurnId) -> HistoryProjectionRequest:
+def _request(turn_id: TurnId) -> ContextWindowRequest:
     """@brief 构造 projection request / Build a projection request."""
 
-    return HistoryProjectionRequest(
+    return ContextWindowRequest(
         conversation_id=CONVERSATION,
         owner_user_id=7,
         through_turn_id=turn_id,
@@ -195,10 +194,10 @@ def test_more_than_128_tiny_rows_are_not_truncated() -> None:
             for index in range(1, 131)
         )
         persistence = _Persistence(
-            bounds=HistoryBounds(CONVERSATION, current_turn, 130, 130, 0),
+            bounds=ContextWindowBounds(CONVERSATION, current_turn, 130, 130, 0),
             messages=messages,
         )
-        projector = ConversationHistoryProjector(
+        projector = ContextWindowProjector(
             persistence=persistence,
             token_counter=_CharacterCounter(),
             budget=ContextTokenBudget(
@@ -212,7 +211,7 @@ def test_more_than_128_tiny_rows_are_not_truncated() -> None:
 
         result = await projector.project(_request(current_turn))
 
-        assert isinstance(result, HistoryReady)
+        assert isinstance(result, ContextWindowReady)
         assert len(result.messages) == 130
         assert len(persistence.pages) == 5
         assert persistence.enqueued == []
@@ -231,24 +230,24 @@ def test_history_cache_reuses_committed_prefix_and_reads_only_new_delta() -> Non
         first = _message(1, first_turn, "first")
         second = _message(2, second_turn, "second")
         persistence = _Persistence(
-            bounds=HistoryBounds(CONVERSATION, first_turn, 1, 1, 0),
+            bounds=ContextWindowBounds(CONVERSATION, first_turn, 1, 1, 0),
             messages=(first,),
         )
-        projector = ConversationHistoryProjector(
+        projector = ContextWindowProjector(
             persistence=persistence,
             token_counter=_CharacterCounter(),
-            cache=ConversationHistoryCache(capacity=2, ttl_seconds=60),
+            cache=ContextWindowCache(capacity=2, ttl_seconds=60),
         )
 
         first_result = await projector.project(_request(first_turn))
-        assert isinstance(first_result, HistoryReady)
+        assert isinstance(first_result, ContextWindowReady)
         assert persistence.pages == [(0, 1, 256)]
 
-        persistence.bounds = HistoryBounds(CONVERSATION, second_turn, 2, 2, 0)
+        persistence.bounds = ContextWindowBounds(CONVERSATION, second_turn, 2, 2, 0)
         persistence.messages = (first, second)
         second_result = await projector.project(_request(second_turn))
 
-        assert isinstance(second_result, HistoryReady)
+        assert isinstance(second_result, ContextWindowReady)
         assert second_result.messages == (
             {"role": "user", "content": "first"},
             {"role": "user", "content": "second"},
@@ -273,10 +272,10 @@ def test_two_large_rows_trigger_a_frozen_fenced_segment() -> None:
             _message(4, current_turn, "current"),
         )
         persistence = _Persistence(
-            bounds=HistoryBounds(CONVERSATION, current_turn, 4, 4, 0),
+            bounds=ContextWindowBounds(CONVERSATION, current_turn, 4, 4, 0),
             messages=messages,
         )
-        projector = ConversationHistoryProjector(
+        projector = ContextWindowProjector(
             persistence=persistence,
             token_counter=_CharacterCounter(),
             budget=ContextTokenBudget(
@@ -290,7 +289,7 @@ def test_two_large_rows_trigger_a_frozen_fenced_segment() -> None:
 
         result = await projector.project(_request(current_turn))
 
-        assert isinstance(result, HistoryCompactionPending)
+        assert isinstance(result, CompactionPending)
         assert len(persistence.enqueued) == 1
         draft = persistence.enqueued[0]
         assert (draft.from_sequence, draft.through_sequence) == (1, 1)
@@ -308,14 +307,14 @@ def test_completed_checkpoint_builds_summary_plus_recent_tail() -> None:
 
         current_turn = TurnId.new()
         old_anchor = TurnId.new()
-        draft = RetentionSegmentDraft.compaction(
+        draft = CompactionPlan.create(
             conversation_id=CONVERSATION,
             owner_user_id=7,
             epoch_floor_sequence=0,
             from_sequence=1,
             through_sequence=2,
             anchor_turn_id=old_anchor,
-            predecessor_segment_id=None,
+            predecessor_compaction_id=None,
             projection_version=1,
             source_snapshot=({"role": "user", "content": "old"},),
             source_row_count=2,
@@ -324,7 +323,7 @@ def test_completed_checkpoint_builds_summary_plus_recent_tail() -> None:
         )
         token = LeaseToken.new()
         checkpoint = (
-            RetentionSegment.pending(draft)
+            Compaction.pending(draft)
             .claim(
                 token=token,
                 claimed_at=NOW,
@@ -332,7 +331,7 @@ def test_completed_checkpoint_builds_summary_plus_recent_tail() -> None:
             )
             .complete(
                 token=token,
-                summary=RetentionSummary(
+                summary=CompactionSummary(
                     "remember old fact", TokenCount(3), "fake:model"
                 ),
                 completed_at=NOW + timedelta(seconds=1),
@@ -343,11 +342,11 @@ def test_completed_checkpoint_builds_summary_plus_recent_tail() -> None:
             _message(4, current_turn, "current"),
         )
         persistence = _Persistence(
-            bounds=HistoryBounds(CONVERSATION, current_turn, 4, 4, 0),
+            bounds=ContextWindowBounds(CONVERSATION, current_turn, 4, 4, 0),
             messages=messages,
             checkpoint=checkpoint,
         )
-        projector = ConversationHistoryProjector(
+        projector = ContextWindowProjector(
             persistence=persistence,
             token_counter=_CharacterCounter(),
             budget=ContextTokenBudget(
@@ -360,8 +359,8 @@ def test_completed_checkpoint_builds_summary_plus_recent_tail() -> None:
 
         result = await projector.project(_request(current_turn))
 
-        assert isinstance(result, HistoryReady)
-        assert result.memory_summary == "remember old fact"
+        assert isinstance(result, ContextWindowReady)
+        assert result.checkpoint_summary == "remember old fact"
         assert [message["content"] for message in result.messages] == [
             "recent",
             "current",
@@ -379,14 +378,14 @@ def test_next_compaction_snapshot_contains_the_prior_cumulative_memory() -> None
 
         current_turn = TurnId.new()
         old_anchor = TurnId.new()
-        checkpoint_draft = RetentionSegmentDraft.compaction(
+        checkpoint_draft = CompactionPlan.create(
             conversation_id=CONVERSATION,
             owner_user_id=7,
             epoch_floor_sequence=0,
             from_sequence=1,
             through_sequence=1,
             anchor_turn_id=old_anchor,
-            predecessor_segment_id=None,
+            predecessor_compaction_id=None,
             projection_version=1,
             source_snapshot=({"role": "user", "content": "old"},),
             source_row_count=1,
@@ -395,7 +394,7 @@ def test_next_compaction_snapshot_contains_the_prior_cumulative_memory() -> None
         )
         token = LeaseToken.new()
         checkpoint = (
-            RetentionSegment.pending(checkpoint_draft)
+            Compaction.pending(checkpoint_draft)
             .claim(
                 token=token,
                 claimed_at=NOW,
@@ -403,7 +402,7 @@ def test_next_compaction_snapshot_contains_the_prior_cumulative_memory() -> None
             )
             .complete(
                 token=token,
-                summary=RetentionSummary(
+                summary=CompactionSummary(
                     "remember old fact",
                     TokenCount(3),
                     "fake:model",
@@ -417,11 +416,11 @@ def test_next_compaction_snapshot_contains_the_prior_cumulative_memory() -> None
             _message(4, current_turn, "current"),
         )
         persistence = _Persistence(
-            bounds=HistoryBounds(CONVERSATION, current_turn, 4, 4, 0),
+            bounds=ContextWindowBounds(CONVERSATION, current_turn, 4, 4, 0),
             messages=messages,
             checkpoint=checkpoint,
         )
-        projector = ConversationHistoryProjector(
+        projector = ContextWindowProjector(
             persistence=persistence,
             token_counter=_CharacterCounter(),
             budget=ContextTokenBudget(
@@ -435,11 +434,13 @@ def test_next_compaction_snapshot_contains_the_prior_cumulative_memory() -> None
 
         result = await projector.project(_request(current_turn))
 
-        assert isinstance(result, HistoryReady)
+        assert isinstance(result, ContextWindowReady)
         assert len(persistence.enqueued) == 1
         draft = persistence.enqueued[0]
-        assert draft.predecessor_segment_id == checkpoint.segment_id
-        assert draft.source_snapshot[0] == memory_summary_message("remember old fact")
+        assert draft.predecessor_compaction_id == checkpoint.compaction_id
+        assert draft.source_snapshot[0] == checkpoint_summary_message(
+            "remember old fact"
+        )
         assert draft.source_snapshot[1:] == ({"role": "user", "content": "x" * 100},)
 
     asyncio.run(scenario())
@@ -455,13 +456,13 @@ def test_history_isolation_reads_only_the_anchor_turn_and_never_compacts() -> No
         prior_turn = TurnId.new()
         current = _message(2, current_turn, "translate me", excluded=True)
         persistence = _Persistence(
-            bounds=HistoryBounds(CONVERSATION, current_turn, 2, 2, 0),
+            bounds=ContextWindowBounds(CONVERSATION, current_turn, 2, 2, 0),
             messages=(
                 _message(1, prior_turn, "old" * 10_000),
                 current,
             ),
         )
-        projector = ConversationHistoryProjector(
+        projector = ContextWindowProjector(
             persistence=persistence,
             token_counter=_CharacterCounter(),
             budget=ContextTokenBudget(
@@ -471,7 +472,7 @@ def test_history_isolation_reads_only_the_anchor_turn_and_never_compacts() -> No
                 segment_input_tokens=TokenCount(50),
             ),
         )
-        request = HistoryProjectionRequest(
+        request = ContextWindowRequest(
             conversation_id=CONVERSATION,
             owner_user_id=7,
             through_turn_id=current_turn,
@@ -486,7 +487,7 @@ def test_history_isolation_reads_only_the_anchor_turn_and_never_compacts() -> No
 
         result = await projector.project(request)
 
-        assert isinstance(result, HistoryReady)
+        assert isinstance(result, ContextWindowReady)
         assert result.messages == ()
         assert result.anchor_messages == (current,)
         assert persistence.pages == [(1, 2, 256)]
@@ -508,10 +509,10 @@ def test_excluded_translation_payload_is_removed_before_token_budgeting() -> Non
             _message(2, current_turn, "current"),
         )
         persistence = _Persistence(
-            bounds=HistoryBounds(CONVERSATION, current_turn, 2, 2, 0),
+            bounds=ContextWindowBounds(CONVERSATION, current_turn, 2, 2, 0),
             messages=messages,
         )
-        projector = ConversationHistoryProjector(
+        projector = ContextWindowProjector(
             persistence=persistence,
             token_counter=_CharacterCounter(),
             budget=ContextTokenBudget(
@@ -524,7 +525,7 @@ def test_excluded_translation_payload_is_removed_before_token_budgeting() -> Non
 
         result = await projector.project(_request(current_turn))
 
-        assert isinstance(result, HistoryReady)
+        assert isinstance(result, ContextWindowReady)
         assert result.messages == ({"role": "user", "content": "current"},)
         assert persistence.enqueued == []
 

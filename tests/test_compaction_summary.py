@@ -8,7 +8,7 @@ import pytest
 
 from fogmoe_bot.application.assistant.completion import AssistantCompletion
 from fogmoe_bot.application.assistant.tools.catalog import ToolDefinition
-from fogmoe_bot.application.conversation.compaction_worker import (
+from fogmoe_bot.application.context_window.worker import (
     RetryableCompactionError,
 )
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
@@ -21,13 +21,12 @@ from fogmoe_bot.domain.conversation.identity import (
     LeaseToken,
     TurnId,
 )
-from fogmoe_bot.domain.conversation.retention import (
-    ContextTokenBudget,
-    RetentionSegment,
-    RetentionSegmentDraft,
-    TokenCount,
+from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
+from fogmoe_bot.domain.context_window.compaction import (
+    Compaction,
+    CompactionPlan,
 )
-from fogmoe_bot.infrastructure.assistant.compaction_summary import (
+from fogmoe_bot.infrastructure.context_window.summary import (
     ProviderCompactionSummaryGenerator,
 )
 
@@ -71,17 +70,17 @@ class _Completion:
         )
 
 
-def _claim() -> RetentionSegment:
+def _claim() -> Compaction:
     """@brief 构造带前序累计 memory 的 processing claim / Build a processing claim carrying prior cumulative memory."""
 
-    draft = RetentionSegmentDraft.compaction(
+    draft = CompactionPlan.create(
         conversation_id=ConversationId("assistant-user:7"),
         owner_user_id=7,
         epoch_floor_sequence=0,
         from_sequence=1,
         through_sequence=2,
         anchor_turn_id=TurnId.new(),
-        predecessor_segment_id=None,
+        predecessor_compaction_id=None,
         projection_version=1,
         source_snapshot=(
             {"role": "system", "content": "prior cumulative memory"},
@@ -91,7 +90,7 @@ def _claim() -> RetentionSegment:
         source_token_count=TokenCount(10),
         created_at=NOW,
     )
-    return RetentionSegment.pending(draft).claim(
+    return Compaction.pending(draft).claim(
         token=LeaseToken.new(),
         claimed_at=NOW + timedelta(seconds=1),
         lease_for=timedelta(seconds=30),

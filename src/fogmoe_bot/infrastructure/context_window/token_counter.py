@@ -1,4 +1,4 @@
-"""@brief 会话历史的保守 token 计数 adapter / Conservative token-counting adapter for conversation history."""
+"""@brief Context Window 的保守 token 计数 adapter / Conservative token-counting adapter for context windows."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 from fogmoe_bot.domain.context.token_estimator import estimate_message_tokens
 from fogmoe_bot.domain.conversation.payloads import JsonObject
-from fogmoe_bot.domain.conversation.retention import TokenCount
+from fogmoe_bot.domain.context_window.budget import TokenCount
 
 
 class ConservativeHistoryTokenCounter:

@@ -18,6 +18,8 @@ DEFAULT_CONFIG_DIR = PROJECT_ROOT / "var" / "psql"
 APPLICATION_SCHEMAS = (
     "identity",
     "conversation",
+    "context_window",
+    "memory",
     "assistant",
     "economy",
     "moderation",

@@ -1,4 +1,4 @@
-"""@brief Runtime-owned durable conversation compaction worker / Runtime-owned durable conversation-compaction worker."""
+"""@brief Runtime-owned durable Context Window compaction worker / Runtime-owned durable context-window compaction worker."""
 
 from __future__ import annotations
 
@@ -15,13 +15,12 @@ from typing import Protocol
 from fogmoe_bot.application.runtime import Jitter, SystemUtcClock, UtcClock
 from fogmoe_bot.domain.context.token_estimator import estimate_tokens
 from fogmoe_bot.domain.conversation.temporal import ensure_utc
-from fogmoe_bot.domain.conversation.retention import (
-    ContextTokenBudget,
-    RetentionSegment,
-    RetentionStatus,
-    RetentionSummary,
-    StaleRetentionClaimError,
-    TokenCount,
+from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
+from fogmoe_bot.domain.context_window.compaction import (
+    Compaction,
+    CompactionStatus,
+    CompactionSummary,
+    StaleCompactionClaimError,
 )
 
 
@@ -37,25 +36,25 @@ class CompactionPersistence(Protocol):
         now: datetime,
         limit: int,
         lease_for: timedelta,
-    ) -> Sequence[RetentionSegment]:
+    ) -> Sequence[Compaction]:
         """@brief 领取 ready compaction activities / Claim ready compaction activities."""
 
         ...
 
     async def complete_compaction(
         self,
-        claim: RetentionSegment,
+        claim: Compaction,
         *,
-        summary: RetentionSummary,
+        summary: CompactionSummary,
         completed_at: datetime,
-    ) -> RetentionSegment:
+    ) -> Compaction:
         """@brief 用 claim token 原子完成 Segment / Atomically complete a segment using its claim token."""
 
         ...
 
     async def retry_compaction(
         self,
-        claim: RetentionSegment,
+        claim: Compaction,
         *,
         failed_at: datetime,
         retry_at: datetime,
@@ -67,7 +66,7 @@ class CompactionPersistence(Protocol):
 
     async def fail_compaction(
         self,
-        claim: RetentionSegment,
+        claim: Compaction,
         *,
         failed_at: datetime,
         error: str,
@@ -85,7 +84,7 @@ class CompactionPersistence(Protocol):
 class CompactionSummaryGenerator(Protocol):
     """@brief 无工具、无数据库 mutation 的摘要端口 / Summary port without tools or database mutations."""
 
-    async def summarize(self, segment: RetentionSegment) -> RetentionSummary:
+    async def summarize(self, segment: Compaction) -> CompactionSummary:
         """@brief 为冻结 snapshot 生成累计摘要 / Generate a cumulative summary for a frozen snapshot.
 
         @param segment 当前 PROCESSING Segment / Current processing segment.
@@ -244,7 +243,7 @@ class DeterministicSummaryFallback:
 
         self._budget = budget or ContextTokenBudget()
 
-    def summarize(self, segment: RetentionSegment) -> RetentionSummary:
+    def summarize(self, segment: Compaction) -> CompactionSummary:
         """@brief 从冻结 JSON 生成确定性有界文本 / Generate deterministic bounded text from frozen JSON.
 
         @param segment PROCESSING Segment / Processing segment.
@@ -252,7 +251,7 @@ class DeterministicSummaryFallback:
         @raise CompactionSourceError Segment 非 processing 或 snapshot 为空 / Segment is not processing or has an empty snapshot.
         """
 
-        if segment.status is not RetentionStatus.PROCESSING:
+        if segment.status is not CompactionStatus.PROCESSING:
             raise CompactionSourceError("Fallback requires a processing segment")
         if not segment.draft.source_snapshot:
             raise CompactionSourceError("Fallback source snapshot is empty")
@@ -269,10 +268,10 @@ class DeterministicSummaryFallback:
         limit = int(self._budget.summary_output_tokens)
         text = _trim_text_to_tokens(prefix + body, limit)
         count = TokenCount(estimate_tokens(text, guard_ratio=1.0))
-        return RetentionSummary(text, count, "deterministic.extractive:v1")
+        return CompactionSummary(text, count, "deterministic.extractive:v1")
 
 
-class ConversationCompactionWorker:
+class CompactionWorker:
     """@brief 固定 consumer 数的 durable compaction work loop / Durable compaction work loop with a fixed consumer count."""
 
     def __init__(
@@ -375,17 +374,17 @@ class ConversationCompactionWorker:
             except Exception:
                 logger.exception(
                     "Conversation-compaction claim could not be finalized: segment=%s",
-                    claim.segment_id,
+                    claim.compaction_id,
                 )
 
-    async def process_claim(self, claim: RetentionSegment) -> None:
+    async def process_claim(self, claim: Compaction) -> None:
         """@brief 在 DB transaction 外执行并 fenced 终结一个 claim / Execute outside a DB transaction and finalize one claim with fencing.
 
         @param claim PROCESSING Segment / Processing segment.
         @return None / None.
         """
 
-        if claim.status is not RetentionStatus.PROCESSING or claim.claim_token is None:
+        if claim.status is not CompactionStatus.PROCESSING or claim.claim_token is None:
             raise ValueError("Compaction worker requires a processing claim")
         try:
             async with asyncio.timeout(self._attempt_timeout.total_seconds()):
@@ -407,15 +406,15 @@ class ConversationCompactionWorker:
                     summary=summary,
                     completed_at=self._clock.now(),
                 )
-            except StaleRetentionClaimError:
+            except StaleCompactionClaimError:
                 logger.info(
                     "Discarded stale conversation-compaction completion: segment=%s",
-                    claim.segment_id,
+                    claim.compaction_id,
                 )
 
     async def _finalize_failure_if_current(
         self,
-        claim: RetentionSegment,
+        claim: Compaction,
         error: Exception,
     ) -> None:
         """@brief 仅当前 fencing owner 可提交失败决定 / Finalize a failure only while still the fencing owner.
@@ -429,15 +428,15 @@ class ConversationCompactionWorker:
 
         try:
             await self._handle_failure(claim, error)
-        except StaleRetentionClaimError:
+        except StaleCompactionClaimError:
             logger.info(
                 "Discarded stale conversation-compaction failure: segment=%s",
-                claim.segment_id,
+                claim.compaction_id,
             )
 
     async def _handle_failure(
         self,
-        claim: RetentionSegment,
+        claim: Compaction,
         error: Exception,
     ) -> None:
         """@brief 应用 retry/fallback/final policy / Apply retry, fallback, or final policy.
@@ -515,7 +514,7 @@ __all__ = [
     "CompactionPersistence",
     "CompactionSourceError",
     "CompactionSummaryGenerator",
-    "ConversationCompactionWorker",
+    "CompactionWorker",
     "DeterministicSummaryFallback",
     "FailCompactionFinal",
     "FullJitterCompactionRetryPolicy",
