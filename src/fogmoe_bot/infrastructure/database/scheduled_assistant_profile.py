@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from fogmoe_bot.application.assistant.inference_command import DurableAssistantUser
+from fogmoe_bot.application.assistant.inference_command import (
+    DurableAssistantUser,
+    DurableUserProfile,
+)
 from fogmoe_bot.application.conversation.assistant_ingress import (
-    normalize_assistant_impression,
     normalize_assistant_personal_info,
 )
 from fogmoe_bot.infrastructure.database import connection as db_connection
@@ -12,10 +14,19 @@ from fogmoe_bot.infrastructure.database.repositories import (
     conversation_repository,
     user_repository,
 )
+from fogmoe_bot.infrastructure.database.user_profile.store import PostgresUserProfileStore
 
 
 class PostgresScheduledAssistantProfileReader:
     """@brief 在一个只读快照中装配定时回合用户上下文 / Assemble scheduled-turn user context in one read snapshot."""
+
+    def __init__(self, profiles: PostgresUserProfileStore | None = None) -> None:
+        """@brief 注入 User Profile reader / Inject a User Profile reader.
+
+        @param profiles PostgreSQL Profile store / PostgreSQL Profile store.
+        """
+
+        self._profiles = profiles or PostgresUserProfileStore()
 
     async def read(self, user_id: int) -> DurableAssistantUser | None:
         """@brief 读取并规范化用户快照 / Read and normalize a user snapshot.
@@ -31,9 +42,8 @@ class PostgresScheduledAssistantProfileReader:
             )
             if account is None:
                 return None
-            impression = await user_repository.fetch_impression(
-                user_id,
-                connection=connection,
+            profile = await self._profiles.read_profile_in_transaction(
+                user_id, connection=connection
             )
             diary_exists = await conversation_repository.user_diary_exists(
                 user_id,
@@ -50,7 +60,11 @@ class PostgresScheduledAssistantProfileReader:
             coins=account.total_coins,
             plan=account.user_plan,
             permission=account.permission,
-            impression=normalize_assistant_impression(impression),
+            profile=(
+                DurableUserProfile.from_snapshot(profile)
+                if profile is not None
+                else None
+            ),
             personal_info=normalize_assistant_personal_info(account.info),
             diary_exists=diary_exists,
         )

@@ -75,20 +75,20 @@ def test_runtime_derives_stable_receipt_identity_and_classifies_mutation() -> No
             step=2,
             ordinal=1,
             provider_call_id="provider-random-a",
-            tool_name="update_impression",
-            raw_arguments={"impression": "curious"},
+            tool_name="kindness_gift",
+            raw_arguments={"amount": 3},
         )
         second = await runtime.execute(
             context=context,
             step=2,
             ordinal=1,
             provider_call_id="provider-random-b",
-            tool_name="update_impression",
-            raw_arguments={"impression": "curious"},
+            tool_name="kindness_gift",
+            raw_arguments={"amount": 3},
         )
 
         assert first.invocation_id == second.invocation_id == "step:2:call:1"
-        assert first.effect_kind == "account.update_impression"
+        assert first.effect_kind == "account.kindness_gift"
         assert persistence.requests[0].mutating is True
         assert (
             persistence.requests[0].request_hash == persistence.requests[1].request_hash

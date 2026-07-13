@@ -20,6 +20,7 @@ APPLICATION_SCHEMAS = (
     "conversation",
     "context_window",
     "retrieval",
+    "user_profile",
     "assistant",
     "economy",
     "moderation",

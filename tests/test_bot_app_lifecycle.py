@@ -63,6 +63,7 @@ def test_composition_has_one_listener_and_complete_phased_runtime() -> None:
         "assistant-inference",
         "conversation-compaction",
         "episodic-retrieval",
+        "user-profile-dreaming",
         "rps",
         "crypto-prediction",
         "games",

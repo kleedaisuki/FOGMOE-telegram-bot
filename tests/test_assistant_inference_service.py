@@ -50,9 +50,7 @@ def _service(*, order, profiles, runner, text_only_patterns=()):
 def _context(messages, *, text_fallback_messages=None):
     return ContextState(
         scope=ConversationScope(user_id=123),
-        user_state=UserState(
-            coins=10, plan="free", permission=0, impression="Not recorded"
-        ),
+        user_state=UserState(coins=10, plan="free", permission=0, profile=None),
         messages=messages,
         tool_context={
             "user_id": 123,

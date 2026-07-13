@@ -413,7 +413,7 @@ def test_request_contains_strict_adapter_metadata_and_normalized_user_content() 
             coins=9,
             plan="paid",
             permission=1,
-            impression="kind",
+            profile=None,
             personal_info="CS student",
             diary_exists=True,
         ),
@@ -453,7 +453,7 @@ def test_request_contains_strict_adapter_metadata_and_normalized_user_content() 
         "coins": 9,
         "plan": "paid",
         "permission": 1,
-        "impression": "kind",
+        "profile": None,
         "personal_info": "CS student",
         "diary_exists": True,
     }

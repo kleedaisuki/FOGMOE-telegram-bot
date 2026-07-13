@@ -2,6 +2,8 @@
 
 from typing import Iterable
 
+from fogmoe_bot.domain.user_profile.models import UserProfileSnapshot
+
 
 def xml_escape(value: object | None) -> str:
     if value is None:
@@ -53,7 +55,7 @@ def format_user_state_prompt(
     user_coins: int,
     user_plan: str,
     user_permission: int,
-    impression: str,
+    profile: UserProfileSnapshot | None,
     personal_info: str = "",
     diary_exists: bool = False,
 ) -> str:
@@ -75,10 +77,19 @@ def format_user_state_prompt(
         f'{key}="{xml_escape(value)}"' for key, value in attrs if value
     )
     lines = [f"<user_state {attr_text} />"]
-    if impression or personal_info:
-        lines.append("<user_profile>")
-        if impression:
-            lines.append(f"  <impression>{xml_escape(impression)}</impression>")
+    if profile is not None or personal_info:
+        revision_attr = f' revision="{profile.revision}"' if profile is not None else ""
+        lines.append(f'<user_profile trust="untrusted_derived_data"{revision_attr}>')
+        if profile is not None:
+            for claim in profile.document.claims:
+                lines.append(
+                    "  <claim "
+                    f'key="{xml_escape(claim.key)}" '
+                    f'kind="{claim.kind.value}" '
+                    f'confidence="{claim.confidence.value}" '
+                    f'observed_at="{claim.observed_at.isoformat()}">'
+                    f"{xml_escape(claim.statement)}</claim>"
+                )
         if personal_info:
             lines.append(
                 f"  <personal_info>{xml_escape(personal_info)}</personal_info>"

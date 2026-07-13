@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -14,7 +15,6 @@ from fogmoe_bot.application.conversation.assistant_ingress import (
     AssistantTurnRequest,
     AssistantUserNotRegistered,
     assistant_pool_contribution,
-    normalize_assistant_impression,
     normalize_assistant_personal_info,
 )
 from fogmoe_bot.application.conversation.workflow import (
@@ -25,6 +25,7 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnSource,
 )
 from fogmoe_bot.domain.temporal import ensure_utc
+from fogmoe_bot.domain.user_profile.models import UserProfileSnapshot
 from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
 from fogmoe_bot.domain.economy import (
     AssistantBillingReservation,
@@ -43,6 +44,21 @@ from fogmoe_bot.infrastructure.database.repositories import (
 from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
     PostgresTurnRepository,
 )
+from fogmoe_bot.infrastructure.database.user_profile.store import PostgresUserProfileStore
+
+
+class TransactionalProfileReader(Protocol):
+    """@brief acceptance adapter 所需的同事务 Profile 读取 / Transaction-bound Profile read required by the acceptance adapter."""
+
+    async def read_profile_in_transaction(
+        self,
+        user_id: int,
+        *,
+        connection: AsyncConnection,
+    ) -> UserProfileSnapshot | None:
+        """@brief 读取一个 committed Profile revision / Read one committed Profile revision."""
+
+        ...
 
 
 class PostgresAssistantTurnAcceptanceUoW:
@@ -52,11 +68,13 @@ class PostgresAssistantTurnAcceptanceUoW:
         self,
         workflow_repository: PostgresTurnRepository | None = None,
         billing: AssistantBillingTransactions | None = None,
+        profiles: TransactionalProfileReader | None = None,
     ) -> None:
         """@brief 注入 connection-bound workflow 与计费原语 / Inject connection-bound workflow and billing primitives.
 
         @param workflow_repository Conversation workflow adapter / Conversation workflow adapter.
         @param billing reserve/settle/release 计费原语 / Reserve/settle/release billing primitive.
+        @param profiles acceptance transaction 内的 Profile reader / Profile reader inside the acceptance transaction.
         """
 
         self._workflow_repository = (
@@ -67,6 +85,8 @@ class PostgresAssistantTurnAcceptanceUoW:
         """@brief 同事务 acceptance primitive / Same-transaction acceptance primitive."""
         self._billing = billing or PostgresAssistantBilling()
         """@brief 同事务计费预留原语 / Same-transaction billing-reservation primitive."""
+        self._profiles = profiles or PostgresUserProfileStore()
+        """@brief acceptance-pinned Profile reader / acceptance-pinned Profile reader."""
 
     async def accept(
         self,
@@ -141,11 +161,9 @@ class PostgresAssistantTurnAcceptanceUoW:
                 coins=new_free + new_paid,
                 plan=_resolve_plan(request.user_id, new_paid),
                 permission=account.permission,
-                impression=normalize_assistant_impression(
-                    await user_repository.fetch_impression(
-                        request.user_id,
-                        connection=connection,
-                    )
+                profile=await self._profiles.read_profile_in_transaction(
+                    request.user_id,
+                    connection=connection,
                 ),
                 personal_info=normalize_assistant_personal_info(account.info),
                 diary_exists=await conversation_repository.user_diary_exists(

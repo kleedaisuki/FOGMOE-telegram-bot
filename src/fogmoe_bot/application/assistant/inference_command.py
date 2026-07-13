@@ -8,6 +8,7 @@ provider, Telegram SDK, or persistence implementation.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal, Self, cast
 from uuid import UUID
 
@@ -18,9 +19,14 @@ from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     TurnId,
 )
+from fogmoe_bot.domain.user_profile.models import (
+    ProfileClaimKind,
+    ProfileConfidence,
+    UserProfileSnapshot,
+)
 
 
-ASSISTANT_INFERENCE_SCHEMA_VERSION: Literal[1] = 1
+ASSISTANT_INFERENCE_SCHEMA_VERSION: Literal[2] = 2
 """@brief Durable inference request schema 版本 / Durable inference-request schema version."""
 
 type AssistantTaskKind = Literal["assistant", "translation"]
@@ -34,6 +40,57 @@ class _StrictFrozenModel(BaseModel):
     """@brief 禁止隐式强制转换与未知字段 / Forbid implicit coercion and unknown fields."""
 
 
+class DurableProfileClaim(_StrictFrozenModel):
+    """@brief acceptance 时冻结的一条 Profile claim / One Profile claim frozen at acceptance."""
+
+    key: str = Field(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_.-]{0,79}$")
+    kind: ProfileClaimKind
+    statement: str = Field(min_length=1, max_length=500)
+    confidence: ProfileConfidence
+    evidence_event_ids: tuple[int, ...] = Field(min_length=1, max_length=16)
+    observed_at: datetime
+
+
+class DurableUserProfile(_StrictFrozenModel):
+    """@brief 一个 Turn 冻结的版本化 User Profile / Versioned User Profile frozen for one Turn."""
+
+    revision: int = Field(ge=1)
+    observed_through_event_id: int = Field(ge=1)
+    prompt_version: int = Field(ge=1)
+    route_key: str = Field(min_length=1, max_length=300)
+    created_at: datetime
+    updated_at: datetime
+    claims: tuple[DurableProfileClaim, ...] = Field(max_length=64)
+
+    @classmethod
+    def from_snapshot(cls, snapshot: UserProfileSnapshot) -> DurableUserProfile:
+        """@brief 从领域 snapshot 构造 durable DTO / Build a durable DTO from a domain snapshot.
+
+        @param snapshot committed Profile snapshot / Committed Profile snapshot.
+        @return durable Profile / Durable Profile.
+        """
+
+        return cls(
+            revision=snapshot.revision,
+            observed_through_event_id=snapshot.observed_through_event_id,
+            prompt_version=snapshot.prompt_version,
+            route_key=snapshot.route_key,
+            created_at=snapshot.created_at,
+            updated_at=snapshot.updated_at,
+            claims=tuple(
+                DurableProfileClaim(
+                    key=claim.key,
+                    kind=claim.kind,
+                    statement=claim.statement,
+                    confidence=claim.confidence,
+                    evidence_event_ids=claim.evidence_event_ids,
+                    observed_at=claim.observed_at,
+                )
+                for claim in snapshot.document.claims
+            ),
+        )
+
+
 class DurableAssistantUser(_StrictFrozenModel):
     """@brief acceptance 时冻结的用户上下文 / User context frozen at acceptance time.
 
@@ -43,7 +100,7 @@ class DurableAssistantUser(_StrictFrozenModel):
     @param coins acceptance 时的硬币余额 / Coin balance at acceptance.
     @param plan 订阅计划 / Subscription plan.
     @param permission 权限等级 / Permission level.
-    @param impression 助手长期印象 / Assistant long-term impression.
+    @param profile acceptance 时冻结的 User Profile / User Profile frozen at acceptance.
     @param personal_info 用户个人信息 / User personal information.
     @param diary_exists 是否已有日记 / Whether a diary exists.
     """
@@ -54,7 +111,7 @@ class DurableAssistantUser(_StrictFrozenModel):
     coins: int = Field(ge=0)
     plan: str = Field(min_length=1, max_length=32)
     permission: int
-    impression: str = Field(max_length=500)
+    profile: DurableUserProfile | None = None
     personal_info: str = Field(default="", max_length=500)
     diary_exists: bool = False
 
@@ -107,7 +164,7 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
     @param disable_web_page_preview 是否禁用链接预览 / Whether link previews are disabled.
     """
 
-    schema_version: Literal[1] = ASSISTANT_INFERENCE_SCHEMA_VERSION
+    schema_version: Literal[2] = ASSISTANT_INFERENCE_SCHEMA_VERSION
     task_kind: AssistantTaskKind = "assistant"
     translation_input: str | None = Field(default=None, min_length=1, max_length=3000)
     conversation_id: str = Field(min_length=1, max_length=512)
@@ -213,4 +270,6 @@ __all__ = [
     "DurableAssistantInferenceCommand",
     "DurableAssistantScope",
     "DurableAssistantUser",
+    "DurableProfileClaim",
+    "DurableUserProfile",
 ]

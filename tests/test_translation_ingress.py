@@ -179,7 +179,7 @@ def test_valid_translation_uses_shared_acceptance_and_marks_history_isolation() 
                 coins=7,
                 plan="free",
                 permission=0,
-                impression="Not recorded",
+                profile=None,
                 personal_info="",
                 diary_exists=False,
             ),

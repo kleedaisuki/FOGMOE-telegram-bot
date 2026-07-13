@@ -1,4 +1,4 @@
-"""Assistant kindness/impression atomic mutations / Assistant 善意赠币与印象原子 mutation."""
+"""@brief Assistant 善意赠币原子 mutation / Assistant kindness-gift atomic mutation."""
 
 import random
 from datetime import UTC, datetime, timedelta
@@ -66,31 +66,4 @@ async def execute_kindness_gift(
         "amount": amount,
         "recipient_coins_before": account.total_coins,
         "recipient_coins_after": account.total_coins + amount,
-    }
-
-
-async def execute_impression_update(
-    request: ToolEffectRequest,
-    *,
-    connection: AsyncConnection,
-) -> JsonValue:
-    """在 receipt transaction 中原子更新用户 impression。"""
-
-    text = str(request.arguments["impression"]).strip()
-    account = await user_repository.fetch_user_account(
-        request.context.user_id,
-        connection=connection,
-        for_update=True,
-    )
-    if account is None:
-        return {"error": "User not found"}
-    await user_repository.upsert_impression(
-        request.context.user_id,
-        text,
-        connection=connection,
-    )
-    return {
-        "status": "updated",
-        "user_id": request.context.user_id,
-        "impression": text,
     }

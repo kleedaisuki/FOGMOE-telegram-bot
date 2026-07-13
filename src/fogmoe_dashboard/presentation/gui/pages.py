@@ -99,6 +99,7 @@ _RELIABILITY_METRICS = (
     "fogmoe.llm.outcomes",
     "fogmoe.tool.outcomes",
     "fogmoe.dependency.outcomes",
+    "fogmoe.user_profile.outcomes",
     "fogmoe.pipeline.lease.recoveries",
     "fogmoe.telemetry.accepted",
     "fogmoe.telemetry.dropped",

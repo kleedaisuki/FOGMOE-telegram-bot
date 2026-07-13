@@ -140,7 +140,10 @@ def test_dashboard_queries_every_signal_family_through_read_only_pool() -> None:
             assert overview.spans >= 1
             assert overview.error_spans >= 1
             assert overview.input_tokens >= 120
-            assert len(overview.pipeline) == 4
+            assert len(overview.pipeline) == 5
+            assert any(
+                stage.stage == "user_profile.dreaming" for stage in overview.pipeline
+            )
             health = await dashboard.health_series(window, buckets=60)
             assert any(point.span_rate_per_second > 0 for point in health)
             assert any(point.span_error_rate > 0 for point in health)

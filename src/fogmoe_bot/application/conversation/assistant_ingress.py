@@ -14,7 +14,9 @@ from fogmoe_bot.application.assistant.inference_command import (
     DurableAssistantInferenceCommand,
     DurableAssistantScope,
     DurableAssistantUser,
+    DurableUserProfile,
 )
+from fogmoe_bot.domain.user_profile.models import UserProfileSnapshot
 from fogmoe_bot.application.conversation.workflow import AcceptConversationTurn
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCapability,
@@ -55,7 +57,7 @@ class AssistantAccountContext:
     @param coins 扣费后总余额 / Total balance after charging.
     @param plan 用户计划 / User plan.
     @param permission 权限等级 / Permission level.
-    @param impression 规范化印象 / Normalized impression.
+    @param profile 当前 committed User Profile / Current committed User Profile.
     @param personal_info 规范化个人信息 / Normalized personal information.
     @param diary_exists 是否存在日记 / Whether a diary exists.
     """
@@ -63,7 +65,7 @@ class AssistantAccountContext:
     coins: int
     plan: str
     permission: int
-    impression: str
+    profile: UserProfileSnapshot | None
     personal_info: str
     diary_exists: bool
 
@@ -202,7 +204,11 @@ class AssistantTurnRequest:
                 coins=account.coins,
                 plan=account.plan,
                 permission=account.permission,
-                impression=account.impression,
+                profile=(
+                    DurableUserProfile.from_snapshot(account.profile)
+                    if account.profile is not None
+                    else None
+                ),
                 personal_info=account.personal_info,
                 diary_exists=account.diary_exists,
             ),
@@ -427,19 +433,6 @@ def assistant_pool_contribution(coin_cost: int) -> Decimal:
     )
 
 
-def normalize_assistant_impression(value: str | None) -> str:
-    """@brief 规范化 durable 用户印象 / Normalize a durable user impression.
-
-    @param value 原始印象 / Raw impression.
-    @return 单行、最多 500 字符的印象 / Single-line impression up to 500 characters.
-    """
-
-    impression = (value or "").strip().replace("\r", " ").replace("\n", " ")
-    if not impression:
-        return "Not recorded"
-    return impression if len(impression) <= 500 else impression[:497] + "..."
-
-
 def normalize_assistant_personal_info(value: str | None) -> str:
     """@brief 规范化 durable 个人信息 / Normalize durable personal information.
 
@@ -495,6 +488,5 @@ __all__ = [
     "AssistantUserNotRegistered",
     "assistant_pool_contribution",
     "assistant_text_cost",
-    "normalize_assistant_impression",
     "normalize_assistant_personal_info",
 ]

@@ -2,7 +2,6 @@ from datetime import datetime, timezone, timedelta
 
 from fogmoe_bot.application.conversation.assistant_ingress import (
     normalize_assistant_personal_info as normalize_personal_info,
-    normalize_assistant_impression as normalize_user_impression,
 )
 from fogmoe_bot.domain.context import (
     ChatMessageContext,
@@ -17,6 +16,40 @@ from fogmoe_bot.domain.context import (
     render_scheduled_task,
     render_user_state,
 )
+from fogmoe_bot.domain.user_profile.models import (
+    ProfileClaim,
+    ProfileClaimKind,
+    ProfileConfidence,
+    ProfileDocument,
+    UserProfileSnapshot,
+)
+
+
+def _profile() -> UserProfileSnapshot:
+    """@brief 构造 acceptance-pinned Profile / Build an acceptance-pinned Profile."""
+
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    return UserProfileSnapshot(
+        user_id=42,
+        revision=3,
+        document=ProfileDocument(
+            (
+                ProfileClaim(
+                    key="interest.cs",
+                    kind=ProfileClaimKind.PREFERENCE,
+                    statement="喜欢计算机科学",
+                    confidence=ProfileConfidence.EXPLICIT,
+                    evidence_event_ids=(7,),
+                    observed_at=now,
+                ),
+            )
+        ),
+        observed_through_event_id=7,
+        created_at=now,
+        updated_at=now,
+        route_key="test:model",
+        prompt_version=1,
+    )
 
 
 def test_context_tools_render_chat_message_metadata_and_escape_content():
@@ -75,7 +108,7 @@ def test_context_tools_render_user_state_and_tool_context():
             coins=7,
             plan="paid",
             permission=2,
-            impression="likes CS",
+            profile=_profile(),
             personal_info="Klee",
             diary_exists=True,
         )
@@ -114,7 +147,7 @@ def test_context_state_builds_model_messages_with_runtime_replacements():
         coins=7,
         plan="paid",
         permission=2,
-        impression="likes CS",
+        profile=_profile(),
     )
     context_state = build_context_state(
         system_prompt="base system policy",
@@ -138,7 +171,10 @@ def test_context_state_builds_model_messages_with_runtime_replacements():
             "content": "base system policy\n\n"
             '<user_state coins="7" user_plan="paid" permission="2" '
             'permission_label="Premium" diary_exists="false" />\n'
-            "<user_profile>\n  <impression>likes CS</impression>\n</user_profile>",
+            '<user_profile trust="untrusted_derived_data" revision="3">\n'
+            '  <claim key="interest.cs" kind="preference" confidence="explicit" '
+            'observed_at="2026-07-06T00:00:00+00:00">喜欢计算机科学</claim>\n'
+            "</user_profile>",
         },
         {"role": "user", "content": "older"},
         runtime_message,
@@ -168,9 +204,4 @@ def test_context_tools_ignore_empty_runtime_replacement():
 
 
 def test_user_state_normalizers_keep_prompt_inputs_bounded():
-    long_impression = "a\n" + ("b" * 600)
-    assert normalize_user_impression(None) == "Not recorded"
-    assert "\n" not in normalize_user_impression(long_impression)
-    assert len(normalize_user_impression(long_impression)) == 500
-
     assert normalize_personal_info("x" * 600) == "x" * 500

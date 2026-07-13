@@ -9,11 +9,12 @@ from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.llm.litellm_models import normalize_provider
 
 
-_TASKS = frozenset({"chat", "summary", "translate"})
+_TASKS = frozenset({"chat", "summary", "translate", "dreaming"})
 """@brief 支持的推理任务 / Supported inference tasks."""
 
 _TASK_PROVIDER_CONFIG_PREFIXES = {
     "summary": "AI_SUMMARY",
+    "dreaming": "AI_DREAMING",
     "translate": "AI_TRANSLATE",
 }
 """@brief 子任务 provider 配置前缀 / Provider-setting prefixes for subtasks."""
@@ -96,13 +97,16 @@ def get_provider_order_for_task(task: str) -> list[str]:
     if task_name not in _TASKS:
         raise RuntimeError(f"Unsupported AI task: {task}")
     prefix = _TASK_PROVIDER_CONFIG_PREFIXES[task_name]
-    return _dedupe(
+    order = _dedupe(
         (
             getattr(config, f"{prefix}_PROVIDER", None),
             getattr(config, f"{prefix}_FALLBACK_PROVIDER", None),
         ),
         casefold=True,
     )
+    if task_name == "dreaming" and not order:
+        return get_provider_order_for_task("summary")
+    return order
 
 
 def provider_model_for_task(provider: str, task: str) -> str | None:
@@ -117,7 +121,11 @@ def provider_model_for_task(provider: str, task: str) -> str | None:
     pattern = _PROVIDER_MODEL_CONFIG_PATTERNS.get(provider_name)
     if pattern is None:
         return None
-    return getattr(config, pattern.format(task=task.strip().upper()), None)
+    task_name = task.strip().upper()
+    configured = getattr(config, pattern.format(task=task_name), None)
+    if configured is None and task_name == "DREAMING":
+        return getattr(config, pattern.format(task="SUMMARY"), None)
+    return configured
 
 
 def provider_fallback_model_for_task(provider: str, task: str) -> str | None:

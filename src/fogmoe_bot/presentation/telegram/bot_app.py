@@ -452,6 +452,11 @@ def _compose_services(
             shutdown_phase=20,
         ),
         ServiceBinding(
+            "user-profile-dreaming",
+            assistant.dreaming,
+            shutdown_phase=20,
+        ),
+        ServiceBinding(
             "rps",
             _required_capability(application, RPS_SERVICE_DATA_KEY, RpsService),
             shutdown_phase=20,

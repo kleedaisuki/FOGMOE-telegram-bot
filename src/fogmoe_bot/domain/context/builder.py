@@ -42,7 +42,7 @@ def render_user_state(user_state: UserState) -> str:
         user_coins=user_state.coins,
         user_plan=user_state.plan,
         user_permission=user_state.permission,
-        impression=user_state.impression,
+        profile=user_state.profile,
         personal_info=user_state.personal_info,
         diary_exists=user_state.diary_exists,
     )

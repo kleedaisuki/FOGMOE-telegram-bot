@@ -53,6 +53,11 @@ from fogmoe_bot.domain.conversation.identity import DeliveryStreamId
 from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
 from fogmoe_bot.domain.context_window.budget import TokenCount
+from fogmoe_bot.domain.user_profile.models import (
+    ProfileClaim,
+    ProfileDocument,
+    UserProfileSnapshot,
+)
 
 from .agent_loop import AgentResponse
 from .errors import (
@@ -308,7 +313,7 @@ class DurableAssistantInferenceAdapter:
             coins=command.user.coins,
             plan=command.user.plan,
             permission=command.user.permission,
-            impression=command.user.impression,
+            profile=_profile_from_command(command),
             personal_info=command.user.personal_info,
             diary_exists=command.user.diary_exists,
         )
@@ -652,6 +657,42 @@ def _last_assistant_texts(messages: Sequence[Mapping[str, object]]) -> list[str]
         if isinstance(content, str) and content.strip():
             return [content.strip()]
     return []
+
+
+def _profile_from_command(
+    command: DurableAssistantInferenceCommand,
+) -> UserProfileSnapshot | None:
+    """@brief 从 acceptance-pinned DTO 重建不可变 Profile / Rebuild an immutable Profile from the acceptance-pinned DTO.
+
+    @param command 已校验 durable command / Validated durable command.
+    @return pinned Profile 或 None / Pinned Profile or None.
+    """
+
+    profile = command.user.profile
+    if profile is None:
+        return None
+    return UserProfileSnapshot(
+        user_id=command.user.user_id,
+        revision=profile.revision,
+        document=ProfileDocument(
+            tuple(
+                ProfileClaim(
+                    key=claim.key,
+                    kind=claim.kind,
+                    statement=claim.statement,
+                    confidence=claim.confidence,
+                    evidence_event_ids=claim.evidence_event_ids,
+                    observed_at=claim.observed_at,
+                )
+                for claim in profile.claims
+            )
+        ),
+        observed_through_event_id=profile.observed_through_event_id,
+        created_at=profile.created_at,
+        updated_at=profile.updated_at,
+        route_key=profile.route_key,
+        prompt_version=profile.prompt_version,
+    )
 
 
 def _history_ends_with_text(

@@ -36,6 +36,13 @@ from fogmoe_bot.domain.conversation.message import (
 from fogmoe_bot.domain.conversation.workflow_results import TurnAcceptanceResult
 from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
 from fogmoe_bot.domain.economy import AssistantBillingReservation
+from fogmoe_bot.domain.user_profile.models import (
+    ProfileClaim,
+    ProfileClaimKind,
+    ProfileConfidence,
+    ProfileDocument,
+    UserProfileSnapshot,
+)
 from fogmoe_bot.infrastructure.database import assistant_turn_acceptance
 from fogmoe_bot.infrastructure.database.assistant_turn_acceptance import (
     PostgresAssistantTurnAcceptanceUoW,
@@ -222,6 +229,53 @@ class RecordingBilling:
         raise AssertionError("acceptance attempted to release billing")
 
 
+class FrozenProfileReader:
+    """@brief 记录 acceptance transaction 内唯一 Profile 读取 / Record the sole Profile read inside acceptance."""
+
+    def __init__(self, snapshot: UserProfileSnapshot | None) -> None:
+        """@brief 保存返回快照 / Store the returned snapshot."""
+
+        self.snapshot = snapshot
+        self.calls: list[tuple[int, object]] = []
+
+    async def read_profile_in_transaction(
+        self,
+        user_id: int,
+        *,
+        connection: object,
+    ) -> UserProfileSnapshot | None:
+        """@brief 返回同一 committed snapshot / Return the same committed snapshot."""
+
+        self.calls.append((user_id, connection))
+        return self.snapshot
+
+
+def _profile_snapshot() -> UserProfileSnapshot:
+    """@brief 构造 acceptance 可冻结的 Profile / Build a Profile pinnable at acceptance."""
+
+    return UserProfileSnapshot(
+        user_id=42,
+        revision=3,
+        document=ProfileDocument(
+            (
+                ProfileClaim(
+                    key="drink.preference",
+                    kind=ProfileClaimKind.PREFERENCE,
+                    statement="偏好茶",
+                    confidence=ProfileConfidence.EXPLICIT,
+                    evidence_event_ids=(7,),
+                    observed_at=NOW,
+                ),
+            )
+        ),
+        observed_through_event_id=7,
+        created_at=NOW,
+        updated_at=NOW,
+        route_key="test:profile-model",
+        prompt_version=1,
+    )
+
+
 def _request(*, update_id: int = 100, cost: int = 4) -> AssistantTurnRequest:
     """@brief 构造预检 Assistant 请求 / Build a preflighted Assistant request.
 
@@ -283,6 +337,7 @@ def test_success_locks_rows_and_commits_charge_pool_and_acceptance_on_one_connec
         account_reads: list[tuple[int, object, bool]] = []
         balance_writes: list[tuple[int, int, int, str, object]] = []
         billing = RecordingBilling()
+        profiles = FrozenProfileReader(_profile_snapshot())
 
         async def fake_fetch_one(
             sql: str,
@@ -307,12 +362,6 @@ def test_success_locks_rows_and_commits_charge_pool_and_acceptance_on_one_connec
 
             account_reads.append((user_id, connection, for_update))
             return _account()
-
-        async def fake_impression(user_id: int, *, connection: object) -> str:
-            """@brief 返回印象 / Return an impression."""
-
-            del user_id, connection
-            return "kind"
 
         async def fake_diary(user_id: int, *, connection: object) -> bool:
             """@brief 返回日记存在 / Return diary existence."""
@@ -348,11 +397,6 @@ def test_success_locks_rows_and_commits_charge_pool_and_acceptance_on_one_connec
             fake_account,
         )
         monkeypatch.setattr(
-            assistant_turn_acceptance.user_repository,
-            "fetch_impression",
-            fake_impression,
-        )
-        monkeypatch.setattr(
             assistant_turn_acceptance.conversation_repository,
             "user_diary_exists",
             fake_diary,
@@ -365,6 +409,7 @@ def test_success_locks_rows_and_commits_charge_pool_and_acceptance_on_one_connec
         result = await PostgresAssistantTurnAcceptanceUoW(  # type: ignore[arg-type]
             workflow,
             billing=billing,  # type: ignore[arg-type]
+            profiles=profiles,  # type: ignore[arg-type]
         ).accept(_request(), accepted_at=NOW)
 
         assert isinstance(result, AssistantTurnAccepted)
@@ -395,10 +440,28 @@ def test_success_locks_rows_and_commits_charge_pool_and_acceptance_on_one_connec
             "coins": 3,
             "plan": "paid",
             "permission": 1,
-            "impression": "kind",
+            "profile": {
+                "revision": 3,
+                "observed_through_event_id": 7,
+                "prompt_version": 1,
+                "route_key": "test:profile-model",
+                "created_at": "2030-01-01T00:00:00Z",
+                "updated_at": "2030-01-01T00:00:00Z",
+                "claims": [
+                    {
+                        "key": "drink.preference",
+                        "kind": "preference",
+                        "statement": "偏好茶",
+                        "confidence": "explicit",
+                        "evidence_event_ids": [7],
+                        "observed_at": "2030-01-01T00:00:00Z",
+                    }
+                ],
+            },
             "personal_info": "CS student",
             "diary_exists": True,
         }
+        assert profiles.calls == [(42, transaction.connection)]
         assert transaction.exit_exception is None
 
     asyncio.run(scenario())
@@ -439,12 +502,6 @@ def test_zero_cost_translation_accepts_without_balance_or_pool_write(
             assert for_update is True
             return _account()
 
-        async def fake_impression(user_id: int, *, connection: object) -> str:
-            """@brief 返回印象 / Return an impression."""
-
-            del user_id, connection
-            return "kind"
-
         async def fake_diary(user_id: int, *, connection: object) -> bool:
             """@brief 返回无日记 / Return no diary."""
 
@@ -471,11 +528,6 @@ def test_zero_cost_translation_accepts_without_balance_or_pool_write(
             assistant_turn_acceptance.user_repository,
             "fetch_user_account",
             fake_account,
-        )
-        monkeypatch.setattr(
-            assistant_turn_acceptance.user_repository,
-            "fetch_impression",
-            fake_impression,
         )
         monkeypatch.setattr(
             assistant_turn_acceptance.conversation_repository,
@@ -696,12 +748,6 @@ def test_concurrent_requests_for_one_account_cannot_overspend(monkeypatch: Any) 
             nonlocal balance
             balance = free
 
-        async def fake_impression(*args: object, **kwargs: object) -> str:
-            """@brief 返回空印象 / Return an empty impression."""
-
-            del args, kwargs
-            return ""
-
         async def fake_diary(*args: object, **kwargs: object) -> bool:
             """@brief 返回无日记 / Return no diary."""
 
@@ -727,11 +773,6 @@ def test_concurrent_requests_for_one_account_cannot_overspend(monkeypatch: Any) 
             assistant_turn_acceptance.user_repository,
             "set_coin_balances_and_plan",
             fake_balances,
-        )
-        monkeypatch.setattr(
-            assistant_turn_acceptance.user_repository,
-            "fetch_impression",
-            fake_impression,
         )
         monkeypatch.setattr(
             assistant_turn_acceptance.conversation_repository,
@@ -792,12 +833,6 @@ def test_workflow_failure_rolls_back_before_balance_or_pool_write(
             del args, kwargs
             return _account()
 
-        async def fake_impression(*args: object, **kwargs: object) -> str:
-            """@brief 返回印象 / Return impression."""
-
-            del args, kwargs
-            return ""
-
         async def fake_diary(*args: object, **kwargs: object) -> bool:
             """@brief 返回无日记 / Return no diary."""
 
@@ -824,11 +859,6 @@ def test_workflow_failure_rolls_back_before_balance_or_pool_write(
             assistant_turn_acceptance.user_repository,
             "fetch_user_account",
             fake_account,
-        )
-        monkeypatch.setattr(
-            assistant_turn_acceptance.user_repository,
-            "fetch_impression",
-            fake_impression,
         )
         monkeypatch.setattr(
             assistant_turn_acceptance.conversation_repository,
@@ -889,12 +919,6 @@ def test_partial_acceptance_receipt_is_invariant_conflict_and_rolls_back(
             del args, kwargs
             return _account()
 
-        async def fake_impression(*args: object, **kwargs: object) -> str:
-            """@brief 返回空印象 / Return an empty impression."""
-
-            del args, kwargs
-            return ""
-
         async def fake_diary(*args: object, **kwargs: object) -> bool:
             """@brief 返回无日记 / Return no diary."""
 
@@ -921,11 +945,6 @@ def test_partial_acceptance_receipt_is_invariant_conflict_and_rolls_back(
             assistant_turn_acceptance.user_repository,
             "fetch_user_account",
             fake_account,
-        )
-        monkeypatch.setattr(
-            assistant_turn_acceptance.user_repository,
-            "fetch_impression",
-            fake_impression,
         )
         monkeypatch.setattr(
             assistant_turn_acceptance.conversation_repository,

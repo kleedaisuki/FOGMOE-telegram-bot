@@ -108,7 +108,7 @@ def _profile() -> DurableAssistantUser:
         coins=19,
         plan="paid",
         permission=1,
-        impression="curious",
+        profile=None,
         personal_info="",
         diary_exists=True,
     )

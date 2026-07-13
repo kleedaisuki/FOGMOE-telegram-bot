@@ -1,4 +1,4 @@
-"""@brief Retrieval、Context Window 与未来 Memory 边界测试 / Retrieval, context-window, and future-memory boundary tests."""
+"""@brief Retrieval、Context Window 与 User Profile 边界测试 / Retrieval, context-window, and User Profile boundary tests."""
 
 from __future__ import annotations
 
@@ -50,6 +50,8 @@ def test_conversation_domain_does_not_depend_on_derived_state() -> None:
         "fogmoe_bot.application.context_window",
         "fogmoe_bot.domain.retrieval",
         "fogmoe_bot.application.retrieval",
+        "fogmoe_bot.domain.user_profile",
+        "fogmoe_bot.application.user_profile",
     )
     violations = [
         (path, target)
@@ -89,13 +91,35 @@ def test_retrieval_domain_is_provider_and_product_independent() -> None:
     assert violations == []
 
 
+def test_user_profile_domain_is_conversation_provider_and_storage_independent() -> None:
+    """@brief User Profile 领域不依赖来源、模型或存储 / User Profile domain is independent of source, model, and storage."""
+
+    forbidden = (
+        "fogmoe_bot.domain.conversation",
+        "fogmoe_bot.domain.context_window",
+        "fogmoe_bot.domain.retrieval",
+        "fogmoe_bot.application",
+        "fogmoe_bot.infrastructure",
+    )
+    violations = [
+        (path, target)
+        for path in _python_files(SRC_ROOT / "domain" / "user_profile")
+        for target in _imports(path)
+        if target.startswith(forbidden)
+    ]
+    assert violations == []
+    for layer in ("domain", "application", "infrastructure"):
+        package = SRC_ROOT / layer / "user_profile" / "__init__.py"
+        assert "from ." not in package.read_text(encoding="utf-8")
+
+
 def test_context_window_persistence_does_not_write_memory_records() -> None:
     """@brief Context Window checkpoint 不能形成 Memory record / Context-window checkpoints cannot form memory records.
 
     @return None / None.
-    @note Compaction summary 只替换过长 Context State；User Profile 使用独立的未来机制。/
+    @note Compaction summary 只替换过长 Context State；User Profile 使用独立 Dreaming。/
         A compaction summary only replaces oversized context state; a user profile uses an
-        independent future mechanism.
+        independent Dreaming mechanism.
     """
 
     context_window_store = (
@@ -103,6 +127,20 @@ def test_context_window_persistence_does_not_write_memory_records() -> None:
     ).read_text(encoding="utf-8")
     assert "memory.records" not in context_window_store
     assert "_project_completed_compaction" not in context_window_store
+
+
+def test_profile_is_frozen_at_acceptance_and_not_reloaded_during_inference() -> None:
+    """@brief Profile 只在 acceptance 读取并随 durable command 固定 / Profile is read only at acceptance and pinned in the durable command."""
+
+    acceptance = (
+        SRC_ROOT / "infrastructure" / "database" / "assistant_turn_acceptance.py"
+    ).read_text(encoding="utf-8")
+    inference = (
+        SRC_ROOT / "application" / "assistant" / "durable_inference.py"
+    ).read_text(encoding="utf-8")
+    assert "read_profile_in_transaction" in acceptance
+    assert "read_profile" not in inference
+    assert "PostgresUserProfileStore" not in inference
 
 
 def test_removed_retention_paths_have_no_compatibility_facades() -> None:
@@ -171,3 +209,9 @@ def test_database_snapshot_expresses_retrieval_and_context_ownership() -> None:
     assert "DROP SCHEMA memory" in cleanup_migration
     assert "DROP COLUMN permanent_records_limit" in cleanup_migration
     assert "embedding vector(1024)" in snapshot
+    assert "CREATE TABLE user_profile.evidence_events" in snapshot
+    assert "CREATE TABLE user_profile.profile_revisions" in snapshot
+    assert "CREATE TABLE user_profile.dreams" in snapshot
+    assert "CREATE TABLE user_profile.dream_sources" in snapshot
+    assert "evidence_events(event_id) ON DELETE CASCADE" in snapshot
+    assert "CREATE TABLE assistant.ai_user_affection" not in snapshot

@@ -20,7 +20,7 @@ from .retrieval import recall_conversation_history
 from .outbound import finalize_downstream_effect
 from .parsing import optional_text, required_connection, required_text
 from .schedule import execute_schedule
-from .social import execute_impression_update, execute_kindness_gift
+from .social import execute_kindness_gift
 
 
 class AssistantToolOperationDispatcher:
@@ -93,11 +93,6 @@ class AssistantToolOperationDispatcher:
                 return await execute_schedule(request, connection=connection)
             case "kindness_gift":
                 return await execute_kindness_gift(
-                    request,
-                    connection=required_connection(connection),
-                )
-            case "update_impression":
-                return await execute_impression_update(
                     request,
                     connection=required_connection(connection),
                 )

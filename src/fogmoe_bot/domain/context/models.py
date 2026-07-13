@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from fogmoe_bot.domain.user_profile.models import UserProfileSnapshot
+
 
 @dataclass(frozen=True, slots=True)
 class UserState:
@@ -11,7 +13,7 @@ class UserState:
     @param coins 用户当前硬币数 / Current user coin balance.
     @param plan 用户订阅计划 / User subscription plan.
     @param permission 用户权限等级 / User permission level.
-    @param impression 助手对用户的长期印象 / Assistant long-term impression of the user.
+    @param profile acceptance 时冻结的 User Profile / User Profile frozen at acceptance.
     @param personal_info 用户自定义个人信息 / User-defined personal information.
     @param diary_exists 是否存在用户日记 / Whether user diary exists.
     """
@@ -19,7 +21,7 @@ class UserState:
     coins: int
     plan: str
     permission: int
-    impression: str
+    profile: UserProfileSnapshot | None = None
     personal_info: str = ""
     diary_exists: bool = False
 

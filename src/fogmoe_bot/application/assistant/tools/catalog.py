@@ -152,14 +152,6 @@ class KindnessGiftArgs(ToolArguments):
     amount: int | None = Field(default=None, ge=1, le=10, description="Coins to gift")
 
 
-class UpdateImpressionArgs(ToolArguments):
-    """@brief 更新印象参数 / Update-impression arguments."""
-
-    impression: str = Field(
-        min_length=1, max_length=500, description="Complete impression"
-    )
-
-
 class RecallConversationHistoryArgs(ToolArguments):
     """@brief 召回历史对话证据参数 / Recall-conversation-history arguments."""
 
@@ -628,12 +620,6 @@ DEFAULT_TOOL_CATALOG = ToolCatalog(
             mutation_classifier=_always("account.kindness_gift"),
         ),
         define_tool(
-            name="update_impression",
-            description="Update the permanent impression of the current user",
-            arguments_model=UpdateImpressionArgs,
-            mutation_classifier=_always("account.update_impression"),
-        ),
-        define_tool(
             name="recall_conversation_history",
             description=(
                 "Semantically retrieve relevant evidence from the authenticated user's "
@@ -687,7 +673,6 @@ __all__ = [
     "ToolValidationIssue",
     "ToolValidationResult",
     "UnknownTool",
-    "UpdateImpressionArgs",
     "UserDiaryArgs",
     "ValidatedToolInvocation",
     "define_tool",

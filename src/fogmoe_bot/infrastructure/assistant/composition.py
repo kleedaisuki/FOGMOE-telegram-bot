@@ -18,6 +18,7 @@ from fogmoe_bot.application.retrieval import (
     RetrievalWorker,
     SemanticRecall,
 )
+from fogmoe_bot.application.user_profile.worker import DreamingWorker
 from fogmoe_bot.application.context_window.worker import (
     CompactionWorker,
 )
@@ -43,6 +44,10 @@ from fogmoe_bot.infrastructure.database.retrieval import (
     PostgresEpisodicSource,
     PostgresRetrievalStore,
 )
+from fogmoe_bot.infrastructure.database.user_profile.source import (
+    PostgresProfileEvidenceSource,
+)
+from fogmoe_bot.infrastructure.database.user_profile.store import PostgresUserProfileStore
 from fogmoe_bot.infrastructure.database.group_message_projection import (
     PostgresGroupMessageProjection,
 )
@@ -58,6 +63,7 @@ from fogmoe_bot.infrastructure.context_window.token_counter import (
 from fogmoe_bot.infrastructure.media.file_artifact_store import FileArtifactStore
 from fogmoe_bot.infrastructure.media.file_rate_limiter import FileSlidingWindowLimiter
 from fogmoe_bot.infrastructure.retrieval import OpenAICompatibleEmbeddings
+from fogmoe_bot.infrastructure.user_profile.dreaming_model import ProviderDreamingModel
 
 from fogmoe_bot.infrastructure.context_window.summary import (
     ProviderCompactionSummaryGenerator,
@@ -77,6 +83,7 @@ class DurableAssistantComposition:
     @param inference durable inference adapter / Durable inference adapter.
     @param compaction durable conversation compaction worker / Durable conversation-compaction worker.
     @param retrieval durable episodic-retrieval worker / Durable episodic-retrieval worker.
+    @param dreaming durable User Profile consolidation worker / Durable User Profile consolidation worker.
     @param embedding_client 共享 embedding HTTP client 与生命周期 / Shared embedding HTTP client and lifecycle.
     @param artifacts outbox delivery 共享 artifact store / Artifact store shared with outbox delivery.
     @param blocking_bulkheads 由顶层运行时关停的阻塞 SDK 隔舱 /
@@ -86,6 +93,7 @@ class DurableAssistantComposition:
     inference: DurableAssistantInferenceAdapter
     compaction: CompactionWorker
     retrieval: RetrievalWorker
+    dreaming: DreamingWorker
     embedding_client: OpenAICompatibleEmbeddings
     artifacts: FileArtifactStore
     blocking_bulkheads: tuple[AsyncBlockingBulkhead, ...]
@@ -259,6 +267,29 @@ def build_durable_assistant(
         attempt_timeout=timedelta(seconds=config.COMPACTION_ATTEMPT_TIMEOUT_SECONDS),
         lease_for=timedelta(seconds=config.COMPACTION_LEASE_SECONDS),
     )
+    profile_store = PostgresUserProfileStore()
+    dreaming = DreamingWorker(
+        source=PostgresProfileEvidenceSource(),
+        store=profile_store,
+        model=ProviderDreamingModel(
+            completion=completion,
+            service_order=configured_service_order("dreaming"),
+            profiles=build_provider_profiles("dreaming"),
+            request_timeout_seconds=config.DREAMING_PROVIDER_TIMEOUT_SECONDS,
+            telemetry=telemetry,
+        ),
+        telemetry=telemetry,
+        worker_count=config.DREAMING_WORKER_COUNT,
+        batch_size=config.DREAMING_BATCH_SIZE,
+        source_batch_size=config.DREAMING_SOURCE_BATCH_SIZE,
+        max_events_per_dream=config.DREAMING_MAX_EVENTS_PER_JOB,
+        max_evidence_chars=config.DREAMING_MAX_EVIDENCE_CHARS,
+        poll_interval=config.DREAMING_POLL_INTERVAL,
+        refresh_after=timedelta(seconds=config.DREAMING_REFRESH_SECONDS),
+        attempt_timeout=timedelta(seconds=config.DREAMING_ATTEMPT_TIMEOUT_SECONDS),
+        lease_for=timedelta(seconds=config.DREAMING_LEASE_SECONDS),
+        max_attempts=config.DREAMING_MAX_ATTEMPTS,
+    )
     return DurableAssistantComposition(
         inference=DurableAssistantInferenceAdapter(
             history=history,
@@ -270,6 +301,7 @@ def build_durable_assistant(
         ),
         compaction=compaction,
         retrieval=retrieval,
+        dreaming=dreaming,
         embedding_client=embedding_client,
         artifacts=artifacts,
         blocking_bulkheads=(

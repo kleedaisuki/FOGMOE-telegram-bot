@@ -40,10 +40,11 @@ Turn 内的日志可使用 `turn_id`、`update_id`、`activity_id` 或 `outbound
 - `fogmoe.llm.outcomes`
 - `fogmoe.tool.outcomes`
 - `fogmoe.retrieval.outcomes`
+- `fogmoe.user_profile.outcomes`
 - `fogmoe.dependency.outcomes`
 
 `fogmoe.pipeline.lease.recoveries` 使用 `pipeline.stage` 区分 inbox、inference、outbox 与
-retrieval。
+retrieval 与 `user_profile.dreaming`。
 runtime sampler 每 15 秒补充 mailbox、telemetry queue、exporter、RSS、累计 CPU、FD、
 event-loop lag 与系统一分钟负载。Telemetry buffer 还按 `log`、`span`、`metric` 三类
 分别暴露累计 accepted/dropped；因此可以区分“业务流量很高”与“日志或 Trace 被队列丢弃”。
@@ -80,7 +81,9 @@ Dashboard 的 Retrieval 页面将这些时间窗信号与 `retrieval.passage_vec
 
 Dashboard 使用独立只读连接。Metrics 页面按完整 attributes 分组，因而能分别显示例如
 `outcome=success` 与 `outcome=failure`，不会把它们错误合并。日志表显示 Event、Trace 和
-Turn。
+Turn。Overview 的 durable pipeline 同时呈现 Dreaming job 的 pending、processing、retry、
+failed-final、最老 ready 时间与过期 lease；Operations/AI/Metrics 页面分别展示 evidence
+projection、Dreaming/model latency、provider usage 与 outcome。
 
 生产部署应采用分层保留：错误/慢 Trace 保留较久；普通 Trace 与 INFO 日志按容量采样；
 metrics 先高精度保留再降采样。保留期限、采样率与 SLO 阈值属于部署配置，而非业务代码。

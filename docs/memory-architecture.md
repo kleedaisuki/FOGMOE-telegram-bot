@@ -9,25 +9,27 @@
 共享数据来源，但不共享变化原因与业务不变量。继续扩展统一 `RetentionSegment` 会让
 上下文窗口策略、永久记忆产品语义和历史迁移形状互相渗透。
 
-本决策采用三个已实现边界与一个保留扩展边界：
+本决策采用四个已实现边界：
 
 1. `conversation` 是不可变事实日志，拥有 Turn、Message、Reset 和 durable workflow。
 2. `context_window` 是推理资源管理，拥有 token budget、history projection、checkpoint、
    compaction lifecycle、lease/fencing 和 provider-neutral summary。
 3. `retrieval` 是独立底层能力，拥有 embedding space、passage、异步向量形成、检索与
    provenance；当前 Consumer 是 Conversation episodic history。
-4. User Profile 是保留的逻辑扩展边界，未来拥有 profile scope、provenance、修正、
-   遗忘和用户可见策略；当前没有 `memory` package 或 schema。Profile 更新由独立机制
-   负责，不由 compaction 触发。
+4. `user_profile` 是长期语义状态，拥有 evidence log、版本化 Profile、Dreaming queue、
+   provenance、lease/fencing 与修正扩展位。Profile 更新由独立后台机制负责，不由
+   compaction 触发。
 
 ## 2. 依赖方向
 
 ```text
 domain.context_window ----> domain.conversation (identity/message/payload only)
 domain.retrieval ---------> domain.temporal only
+domain.user_profile ------> domain.temporal only
 
 application.context_window -> domain.context_window + domain.conversation
 application.retrieval ------> domain.retrieval
+application.user_profile ---> domain.user_profile + narrow runtime/telemetry ports
 application.assistant -----> application ports + domain DTO
 
 infrastructure ------------> application ports + domain models
@@ -36,7 +38,7 @@ presentation --------------> application use cases
 
 禁止：
 
-- `conversation` domain 导入 `context_window`、`retrieval` 或未来 `memory`；
+- `conversation` domain 导入 `context_window`、`retrieval` 或 `user_profile`；
 - `retrieval` domain 导入 Conversation、Context Window、provider SDK 或数据库；
 - Assistant retrieval tool 暴露 provider/database aggregate；
 - context-window checkpoint 充当可修改的用户事实；
@@ -86,17 +88,39 @@ query instruction 与 passage format version；不同空间的向量不可比较
 再执行 exact cosine ordering。当前单用户语料很小，精确检索具有完整 recall，不创建
 HNSW/IVFFlat；只有评测与规模证明必要时才改变物理策略。
 
-### 3.4 Memory / User Profile 扩展位
+### 3.4 User Profile 与 Dreaming
 
 回答“系统跨会话对用户持有什么当前认识，以及为什么可以相信、修正或删除它”。目标
-模型是有 provenance 的 User Profile，而不是 compaction summary 集合。Profile 的更新
-需要独立的形成、冲突处理、supersession 和用户纠正机制；本决策只保留扩展边界，不预先
-规定其触发频率、提取模型或内部 schema。
+模型是有 provenance 的当前 User Profile，而不是 compaction summary 集合。
 
-当前不实现 User Profile 更新机制，也不保留用 compaction summary 伪装的 Memory record。
-旧 `memory.records` 在验证每条 archive 都已有 Conversation 来源后删除；历史读取由
-Conversation episodic retrieval 取代。未来 Profile 形成独立 ADR、schema 与 worker，
-不得复用 compaction lifecycle 或 passage-vector state machine。
+Dreaming 是 Runtime 所有的后台 consolidation workflow：唯一 coordinator 从已完成私聊
+Assistant Turn 幂等投影 immutable evidence，并为到期且存在新证据的用户形成精确 source
+set；固定数量 model consumers 每次只领取一个 job，在数据库事务外调用专用模型，返回严格 JSON patch，再通过
+revision compare-and-swap（CAS）与 fencing token 提交。模型只允许 UPSERT/DELETE 有稳定键的
+fact、preference、goal 与 interaction-style claim；每个操作必须引用当前批次 event ID。
+
+```text
+Conversation completed Turn
+        | idempotent projection
+        v
+evidence_events -> frozen Dream job -> MODEL(Profile_i + Events + Metadata)
+                                      -> validated patch + reducer
+                                      -> Profile_(i+1)
+```
+
+一个 Dream job 同时受事件数和送模字符预算约束。原始用户/Assistant 文本完整保存在 evidence
+log；Assistant 回应只是解释上下文，不是用户事实证据，送模时可有界截断。Profile revisions
+append-only，`profiles.current_revision` 只指向当前版本。`dream_sources` 是 job 的组成部分，
+随 job 或 evidence 生命周期级联清理，不拥有第二份独立消费状态。
+
+Profile 的读取边界是 Turn acceptance。acceptance 在同一短事务中读取一个 committed Profile
+snapshot，序列化进 schema-versioned durable inference command。推理首次执行、provider fallback、
+retry 与 crash recovery 都只消费该冻结快照，禁止在对话中途重新读取 Profile。后台 Dreaming
+即使此时提交新 revision，也只影响之后接受的 Turn。
+
+Profile 当前预留用户纠正、删除和敏感信息策略的扩展位，但不让模型写入 secrets、credentials、
+财务余额、权限、医疗诊断、protected/sensitive traits 或面向 Assistant 的命令。所有 Profile
+内容在 Context 中标记为 `untrusted_derived_data`。
 
 三个状态不得互相替代：
 
@@ -117,7 +141,10 @@ User Profile       = 由独立机制维护的当前用户认识
 5. 删除旧 Memory Python packages 与两个 permanent-record Assistant tools；
 6. 从已完成的私聊 Assistant Turn 自愈 backfill passages 与 1024 维向量；
 7. `0042` 删除无产品语义的用户 Memory quota、商店 SKU 与空 `memory` schema；
-8. User Profile 通过后续独立决策演进，不复用 retrieval 或 compaction lifecycle。
+8. `0043` 建立独立 `user_profile` schema、Dreaming queue 与 append-only revisions，并删除
+   旧的 `assistant.ai_user_affection`/impression 路径；
+9. acceptance command schema 升级为 v2，直接冻结 Profile snapshot；不保留旧 inference
+   command 的运行时兼容分支。
 
 数据迁移允许一次性 backfill，不维持应用层双写。跨上下文派生使用同事务 intent/outbox
 和幂等 consumer，避免把两个 aggregate 包装成伪原子大对象。
@@ -132,7 +159,7 @@ Assistant 只暴露 `recall_conversation_history` 自然语言工具；旧摘要
 删除。返回值保留 source Turn、事件时间、excerpt 与 cosine distance。检索内容始终视为
 不可信历史数据，不获得 system/instruction 权限。
 
-Retrieval evidence 与未来 User Profile content 永远视为不可信数据。形成和读取必须保留 provenance、scope isolation、
+Retrieval evidence 与 User Profile content 永远视为不可信数据。形成和读取必须保留 provenance、scope isolation、
 删除/隔离状态，并在注入模型时使用数据边界，防止持久化 prompt injection。
 
 ## 6. 验收标准
@@ -141,7 +168,11 @@ Retrieval evidence 与未来 User Profile content 永远视为不可信数据。
 - `domain.retrieval` 不依赖产品来源或 infrastructure；
 - context-window persistence 不读取或写入 `memory.records`；
 - compaction 完成只改变 checkpoint 状态，不形成 Memory/User Profile；
-- User Profile 保留独立扩展边界，且不依赖 compaction lifecycle；
+- User Profile 由独立 evidence/revision/Dreaming lifecycle 维护，且不依赖 compaction；
+- 每个 Dream source set 精确、输入有界，模型调用发生在事务外；
+- Dream completion 使用 lease、fencing 与 Profile revision CAS 拒绝迟到结果；
+- acceptance 恰好读取一次 committed Profile 并冻结进 durable command；推理不重新读取；
+- Profile claim 必须具有当前 evidence provenance，并作为不可信派生数据注入 Context；
 - `memory.records` 与旧 Memory Python facade 不存在；
 - `memory` schema、旧用户 quota 与商店 SKU 不存在；
 - Assistant retrieval operation 只依赖 typed recall port；
@@ -161,6 +192,10 @@ Retrieval evidence 与未来 User Profile content 永远视为不可信数据。
 - [MemGPT](https://arxiv.org/abs/2310.08560)：上下文窗口和外部长期存储是不同 memory tier。
 - [LongMemEval, ICLR 2025](https://openreview.net/forum?id=pZiyCaVuti)：长期记忆需要信息
   提取、多 session 推理、时间推理、更新与拒答，不能以累计摘要代替完整产品语义。
+- [Generative Agents, UIST 2023](https://dl.acm.org/doi/10.1145/3586183.3606763)：将观察
+  与周期性 reflection/consolidation 分离，为后台 Dreaming 提供了可比较的研究范式。
+- [Mem0, 2025](https://arxiv.org/abs/2504.19413)：显式提取、更新与删除长期状态，相比
+  无界历史或统一摘要更适合低延迟生产系统；其评测结论仍需以本系统数据复验。
 - [Qwen3-Embedding-8B model card](https://huggingface.co/Qwen/Qwen3-Embedding-8B)：
   query instruction、MRL 与 32--4096 可变输出维度。
 - [pgvector](https://github.com/pgvector/pgvector)：exact search、cosine operator、过滤与
@@ -171,3 +206,5 @@ Retrieval evidence 与未来 User Profile content 永远视为不可信数据。
   thread-scoped short-term state 与 namespaced long-term store 分离。
 - [OWASP Agent Memory Guard](https://owasp.org/www-project-agent-memory-guard/)：
   持久记忆是跨 session poisoning 攻击面。
+- [PostgreSQL `SKIP LOCKED`](https://www.postgresql.org/docs/current/sql-select.html)：
+  queue-like 多消费者可跳过已锁行，但必须与 durable status、lease 和 fencing 一起使用。

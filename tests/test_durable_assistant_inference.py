@@ -60,7 +60,7 @@ def _request(turn_id: TurnId, **overrides: object) -> JsonObject:
     """
 
     request: JsonObject = {
-        "schema_version": 1,
+        "schema_version": 2,
         "conversation_id": "assistant-user:7",
         "turn_id": str(turn_id),
         "delivery_stream_id": "telegram:bot:1:chat:-100:thread:9",
@@ -74,7 +74,7 @@ def _request(turn_id: TurnId, **overrides: object) -> JsonObject:
             "coins": 91,
             "plan": "free",
             "permission": 0,
-            "impression": "curious",
+            "profile": None,
             "personal_info": "",
             "diary_exists": False,
         },

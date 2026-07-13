@@ -617,9 +617,26 @@ SELECT * FROM (
            WHERE status = 'processing' AND lease_expires_at <= CURRENT_TIMESTAMP
          ) AS expired_lease_count
   FROM retrieval.passage_vectors
+  UNION ALL
+  SELECT 'user_profile.dreaming' AS stage,
+         count(*) FILTER (WHERE status = 'pending') AS pending_count,
+         count(*) FILTER (WHERE status = 'processing') AS processing_count,
+         count(*) FILTER (WHERE status = 'retry_wait') AS retry_count,
+         count(*) FILTER (WHERE status = 'failed_final') AS failed_final_count,
+         min(next_attempt_at) FILTER (WHERE status IN ('pending','retry_wait'))
+           AS oldest_ready_at,
+         count(*) FILTER (
+           WHERE status = 'processing' AND lease_expires_at <= CURRENT_TIMESTAMP
+         ) AS expired_lease_count
+  FROM user_profile.dreams
 ) AS pipeline
 ORDER BY CASE stage
-  WHEN 'inbox' THEN 1 WHEN 'inference' THEN 2 WHEN 'outbox' THEN 3 ELSE 4 END
+  WHEN 'inbox' THEN 1
+  WHEN 'inference' THEN 2
+  WHEN 'outbox' THEN 3
+  WHEN 'retrieval.embedding' THEN 4
+  WHEN 'user_profile.dreaming' THEN 5
+  ELSE 6 END
 """
 """@brief Durable pipeline 健康 SQL / Durable-pipeline health SQL."""
 
