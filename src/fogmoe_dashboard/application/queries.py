@@ -18,6 +18,7 @@ from fogmoe_dashboard.domain.models import (
     Overview,
     PipelineStage,
     ResourceInstance,
+    RetrievalSnapshot,
     SpanStats,
     TimeWindow,
     TraceDetail,
@@ -37,6 +38,7 @@ class DashboardView(StrEnum):
     TRACE = "trace"
     METRICS = "metrics"
     AI = "ai"
+    RETRIEVAL = "retrieval"
     LATENCY = "latency"
     RESOURCES = "resources"
 
@@ -122,6 +124,13 @@ class GenAiQuery:
 
 
 @dataclass(frozen=True, slots=True)
+class RetrievalQuery:
+    """@brief Retrieval 性能组合查询 / Combined Retrieval-performance query."""
+
+    window: TimeWindow
+
+
+@dataclass(frozen=True, slots=True)
 class LatencyQuery:
     """@brief Turn 延迟组合快照查询 / Combined Turn-latency snapshot query."""
 
@@ -148,6 +157,7 @@ DashboardQuery: TypeAlias = (
     | TraceQuery
     | MetricsQuery
     | GenAiQuery
+    | RetrievalQuery
     | LatencyQuery
     | ResourcesQuery
 )
@@ -164,6 +174,7 @@ DashboardResult: TypeAlias = (
     | TraceDetail
     | tuple[MetricStats, ...]
     | tuple[GenAiStats, ...]
+    | RetrievalSnapshot
     | LatencySnapshot
     | tuple[ResourceInstance, ...]
 )
@@ -216,6 +227,8 @@ async def execute_query(
             return await dashboard.metrics(window, name=name, limit=limit)
         case GenAiQuery(window=window, limit=limit):
             return await dashboard.gen_ai(window, limit=limit)
+        case RetrievalQuery(window=window):
+            return await dashboard.retrieval(window)
         case LatencyQuery(window=window, slow_turn_limit=limit):
             summary, slow_turns = await asyncio.gather(
                 dashboard.latency(window),
@@ -254,6 +267,8 @@ def query_view(query: DashboardQuery) -> DashboardView:
             return DashboardView.METRICS
         case GenAiQuery():
             return DashboardView.AI
+        case RetrievalQuery():
+            return DashboardView.RETRIEVAL
         case LatencyQuery():
             return DashboardView.LATENCY
         case ResourcesQuery():
@@ -275,6 +290,7 @@ __all__ = [
     "OverviewQuery",
     "PipelineQuery",
     "ResourcesQuery",
+    "RetrievalQuery",
     "SpansQuery",
     "TraceQuery",
     "TracesQuery",

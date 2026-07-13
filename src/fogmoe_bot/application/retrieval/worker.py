@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 import random
+import time
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 
@@ -22,6 +23,7 @@ from fogmoe_bot.application.retrieval.ports import (
 from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
 from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
+from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
 from fogmoe_bot.domain.retrieval import EmbeddingSpace, EmbeddingVector
 
 
@@ -138,21 +140,62 @@ class RetrievalWorker:
         """
 
         now = self._clock.now()
+        started_ns = time.perf_counter_ns()
         sources = await self._source.read_unprojected(
             format_version=self._renderer.format_version,
             limit=self._batch_size,
         )
-        for source in sources:
-            await self._store.project_turn(
-                source,
-                self._renderer.render(source),
-                space=self._space,
-                projected_at=now,
-            )
+        discovery_seconds = (time.perf_counter_ns() - started_ns) / 1_000_000_000
+        if not sources:
+            return False
+        self._telemetry.gauge(
+            MetricName.RETRIEVAL_SOURCE_DISCOVERY_DURATION,
+            discovery_seconds,
+            unit="s",
+        )
+        try:
+            with self._telemetry.span(
+                "retrieval.projection.batch",
+                kind=SpanKind.CONSUMER,
+                attributes={
+                    "retrieval.space.id": self._space.space_id,
+                    "retrieval.batch.limit": self._batch_size,
+                },
+            ) as span:
+                passage_count = 0
+                for source in sources:
+                    passages = self._renderer.render(source)
+                    passage_count += len(passages)
+                    await self._store.project_turn(
+                        source,
+                        passages,
+                        space=self._space,
+                        projected_at=now,
+                    )
+                    self._telemetry.counter(
+                        MetricName.RETRIEVAL_OUTCOMES,
+                        attributes={
+                            "operation": "projection",
+                            "outcome": Outcome.SUCCESS,
+                        },
+                    )
+                span.set_attribute("retrieval.source.count", len(sources))
+                span.set_attribute("retrieval.passage.count", passage_count)
+        except Exception:
             self._telemetry.counter(
                 MetricName.RETRIEVAL_OUTCOMES,
-                attributes={"operation": "projection", "outcome": Outcome.SUCCESS},
+                attributes={
+                    "operation": "projection",
+                    "outcome": Outcome.FAILURE,
+                },
             )
+            raise
+        self._telemetry.gauge(
+            MetricName.RETRIEVAL_BATCH_SIZE,
+            float(len(sources)),
+            unit="{source}",
+            attributes={"stage": "projection"},
+        )
         return bool(sources)
 
     async def _run_vector_consumer(self, stop_event: asyncio.Event) -> None:
@@ -174,15 +217,29 @@ class RetrievalWorker:
         """
 
         now = self._clock.now()
+        started_ns = time.perf_counter_ns()
         claims = await self._store.claim_vectors(
             space=self._space,
             now=now,
             limit=self._batch_size,
             lease_for=self._lease_for,
         )
-        if claims:
-            await self._embed_claims(claims)
-        return bool(claims)
+        claim_seconds = (time.perf_counter_ns() - started_ns) / 1_000_000_000
+        if not claims:
+            return False
+        self._telemetry.gauge(
+            MetricName.RETRIEVAL_VECTOR_CLAIM_DURATION,
+            claim_seconds,
+            unit="s",
+        )
+        await self._embed_claims(claims)
+        self._telemetry.gauge(
+            MetricName.RETRIEVAL_BATCH_SIZE,
+            float(len(claims)),
+            unit="{passage}",
+            attributes={"stage": "embedding"},
+        )
+        return True
 
     async def _embed_claims(self, claims: Sequence[PassageVectorClaim]) -> None:
         """@brief 单次 Provider batch 后逐条 fenced 完成 / Complete claims individually after one provider batch.
@@ -191,23 +248,35 @@ class RetrievalWorker:
         @return None / None.
         """
 
-        try:
-            vectors = tuple(
-                await self._embeddings.embed_documents(
-                    tuple(claim.passage.text for claim in claims),
-                    space=self._space,
+        with self._telemetry.span(
+            "retrieval.embedding.batch",
+            kind=SpanKind.INTERNAL,
+            attributes={
+                "retrieval.space.id": self._space.space_id,
+                "retrieval.batch.size": len(claims),
+                "retrieval.embedding.model": self._space.model,
+                "retrieval.embedding.dimensions": self._space.dimensions,
+            },
+        ) as span:
+            try:
+                vectors = tuple(
+                    await self._embeddings.embed_documents(
+                        tuple(claim.passage.text for claim in claims),
+                        space=self._space,
+                    )
                 )
-            )
-            if len(vectors) != len(claims):
-                raise EmbeddingContractError(
-                    "Embedding provider returned a different batch length"
-                )
-            for claim, vector in zip(claims, vectors, strict=True):
-                await self._complete_claim(claim, vector)
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            await self._handle_batch_failure(claims, error)
+                if len(vectors) != len(claims):
+                    raise EmbeddingContractError(
+                        "Embedding provider returned a different batch length"
+                    )
+                for claim, vector in zip(claims, vectors, strict=True):
+                    await self._complete_claim(claim, vector)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                span.set_status(SpanStatus.ERROR, str(error))
+                span.set_attribute("error.type", type(error).__name__)
+                await self._handle_batch_failure(claims, error)
 
     async def _complete_claim(
         self,

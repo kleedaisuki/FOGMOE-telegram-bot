@@ -24,6 +24,7 @@ from fogmoe_dashboard.application.queries import (
     OverviewQuery,
     PipelineQuery,
     ResourcesQuery,
+    RetrievalQuery,
     SpansQuery,
     TraceQuery,
     TracesQuery,
@@ -89,6 +90,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     ai = subparsers.add_parser("ai", help="GenAI calls, latency, errors, and tokens.")
     _add_limit(ai, 50)
+
+    subparsers.add_parser(
+        "retrieval",
+        help="Retrieval latency, embedding queues, outcomes, and saturation.",
+    )
 
     latency = subparsers.add_parser(
         "latency", help="Turn stage latency and slow Turns."
@@ -196,6 +202,8 @@ def _query(
             return MetricsQuery(window, name=args.name, limit=args.limit)
         case "ai":
             return GenAiQuery(window, limit=args.limit)
+        case "retrieval":
+            return RetrievalQuery(window)
         case "latency":
             return LatencyQuery(window, slow_turn_limit=args.limit)
         case "resources":

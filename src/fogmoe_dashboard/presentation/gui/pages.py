@@ -32,6 +32,7 @@ from fogmoe_dashboard.application.queries import (
     MetricsQuery,
     OverviewQuery,
     ResourcesQuery,
+    RetrievalQuery,
     SpansQuery,
     TraceQuery,
     TracesQuery,
@@ -46,6 +47,8 @@ from fogmoe_dashboard.domain.models import (
     Overview,
     PipelineStage,
     ResourceInstance,
+    RetrievalQueueStats,
+    RetrievalSnapshot,
     SlowTurn,
     SpanStats,
     TimeWindow,
@@ -563,6 +566,107 @@ class ReliabilityPage(QueryPage):
         )
 
 
+class RetrievalPage(QueryPage):
+    """@brief Retrieval RED、队列与指标工作区 / Retrieval RED, queue, and metrics workspace."""
+
+    def __init__(self) -> None:
+        """@brief 组装 Retrieval 性能与饱和度视图 / Compose Retrieval performance and saturation views."""
+
+        super().__init__()
+        self._cards = {
+            "ready": KpiCard("等待/重试"),
+            "failed": KpiCard("最终失败"),
+            "expired": KpiCard("过期 leases"),
+            "p95": KpiCard("最慢 operation p95"),
+        }
+        card_grid = QGridLayout()
+        card_grid.setContentsMargins(0, 0, 0, 0)
+        for index, card in enumerate(self._cards.values()):
+            card_grid.addWidget(card, 0, index)
+        self._chart = SpanLatencyChart()
+        self._operation_model = ObjectTableModel[SpanStats](
+            (
+                TableColumn("Operation", lambda row: row.name, stretch=True),
+                TableColumn("Calls", lambda row: row.calls, integer, _RIGHT),
+                TableColumn("错误", lambda row: row.errors, integer, _RIGHT),
+                TableColumn("错误率", lambda row: row.error_rate, percent, _RIGHT),
+                TableColumn("p50", lambda row: row.p50_ms, milliseconds, _RIGHT),
+                TableColumn("p95", lambda row: row.p95_ms, milliseconds, _RIGHT),
+                TableColumn("p99", lambda row: row.p99_ms, milliseconds, _RIGHT),
+                TableColumn("Max", lambda row: row.maximum_ms, milliseconds, _RIGHT),
+            )
+        )
+        self._queue_model = ObjectTableModel[RetrievalQueueStats](
+            (
+                TableColumn("Space", lambda row: row.space_id, stretch=True),
+                TableColumn("Model", lambda row: row.model, stretch=True),
+                TableColumn("Dims", lambda row: row.dimensions, integer, _RIGHT),
+                TableColumn("等待", lambda row: row.pending, integer, _RIGHT),
+                TableColumn("处理中", lambda row: row.processing, integer, _RIGHT),
+                TableColumn("重试", lambda row: row.retrying, integer, _RIGHT),
+                TableColumn("完成", lambda row: row.completed, integer, _RIGHT),
+                TableColumn("失败", lambda row: row.failed_final, integer, _RIGHT),
+                TableColumn(
+                    "过期 lease", lambda row: row.expired_leases, integer, _RIGHT
+                ),
+                TableColumn(
+                    "最老积压秒",
+                    lambda row: row.oldest_ready_age_seconds,
+                    alignment=_RIGHT,
+                ),
+            )
+        )
+        self._metric_model = ObjectTableModel[MetricStats](
+            (
+                TableColumn("Metric", lambda row: row.name, stretch=True),
+                TableColumn("Attributes", lambda row: row.attributes, stretch=True),
+                TableColumn("Points", lambda row: row.points, integer, _RIGHT),
+                TableColumn("Latest", lambda row: row.latest, alignment=_RIGHT),
+                TableColumn("Average", lambda row: row.average, alignment=_RIGHT),
+                TableColumn("Max", lambda row: row.maximum, alignment=_RIGHT),
+                TableColumn("Total", lambda row: row.total, alignment=_RIGHT),
+            )
+        )
+        tabs = QTabWidget()
+        tabs.addTab(table_view(self._operation_model), "Operations")
+        tabs.addTab(table_view(self._queue_model), "Embedding queues")
+        tabs.addTab(table_view(self._metric_model), "Metrics")
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            page_header(
+                "Retrieval",
+                "关联 Projection、Embedding、Search 与 Recall 延迟，并检查向量任务积压。",
+            )
+        )
+        layout.addLayout(card_grid)
+        layout.addWidget(self._chart, stretch=1)
+        layout.addWidget(tabs, stretch=1)
+
+    def queries(self, window: TimeWindow) -> tuple[DashboardQuery, ...]:
+        """@brief 请求 Retrieval 组合快照 / Request a Retrieval snapshot."""
+
+        return (RetrievalQuery(window),)
+
+    def accept(self, query: DashboardQuery, value: DashboardResult) -> None:
+        """@brief 更新 Retrieval 所有区域 / Update every Retrieval region."""
+
+        if not isinstance(query, RetrievalQuery) or not isinstance(
+            value, RetrievalSnapshot
+        ):
+            return
+        self._operation_model.replace(value.operations)
+        self._queue_model.replace(value.queues)
+        self._metric_model.replace(value.metrics)
+        self._chart.plot_spans(value.operations)
+        slowest_p95 = max((row.p95_ms for row in value.operations), default=None)
+        self._cards["ready"].set_value(f"{value.ready:,}", alert=value.ready > 0)
+        self._cards["failed"].set_value(f"{value.failed:,}", alert=value.failed > 0)
+        self._cards["expired"].set_value(
+            f"{value.expired_leases:,}", alert=value.expired_leases > 0
+        )
+        self._cards["p95"].set_value(milliseconds(slowest_p95))
+
+
 class AiTurnsPage(QueryPage):
     """@brief GenAI 使用与 Turn latency 联合页面 / Combined GenAI-usage and Turn-latency page."""
 
@@ -720,5 +824,6 @@ __all__ = [
     "OperationsPage",
     "OverviewPage",
     "ResourcesPage",
+    "RetrievalPage",
     "TracesPage",
 ]

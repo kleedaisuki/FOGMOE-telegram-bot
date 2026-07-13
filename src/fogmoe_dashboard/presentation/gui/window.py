@@ -33,6 +33,7 @@ from fogmoe_dashboard.presentation.gui.pages import (
     OverviewPage,
     ReliabilityPage,
     ResourcesPage,
+    RetrievalPage,
     TracesPage,
 )
 from fogmoe_dashboard.presentation.gui.worker import (
@@ -88,6 +89,7 @@ class DashboardWindow(QMainWindow):
             ("Traces", TracesPage()),
             ("Metrics", MetricsPage()),
             ("可靠性", ReliabilityPage()),
+            ("Retrieval", RetrievalPage()),
             ("AI 与 Turn", AiTurnsPage()),
             ("Resources", ResourcesPage()),
         )

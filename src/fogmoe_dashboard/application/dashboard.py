@@ -15,6 +15,7 @@ from fogmoe_dashboard.domain.models import (
     Overview,
     PipelineStage,
     ResourceInstance,
+    RetrievalSnapshot,
     SlowTurn,
     SpanStats,
     TimeWindow,
@@ -118,6 +119,11 @@ class DashboardRepository(Protocol):
         limit: int,
     ) -> Sequence[GenAiStats]:
         """@brief 查询 GenAI 使用统计 / Query GenAI usage statistics."""
+
+        ...
+
+    async def retrieval(self, window: TimeWindow) -> RetrievalSnapshot:
+        """@brief 查询 Retrieval 性能与队列健康 / Query Retrieval performance and queue health."""
 
         ...
 
@@ -300,6 +306,15 @@ class Dashboard:
         """@brief 返回 provider/model 使用统计 / Return provider/model usage statistics."""
 
         return tuple(await self._repository.gen_ai(window, limit=_limit(limit)))
+
+    async def retrieval(self, window: TimeWindow) -> RetrievalSnapshot:
+        """@brief 返回 Retrieval 性能与队列健康 / Return Retrieval performance and queue health.
+
+        @param window 分析窗口 / Analytics window.
+        @return Retrieval 组合快照 / Retrieval snapshot.
+        """
+
+        return await self._repository.retrieval(window)
 
     async def latency(
         self,

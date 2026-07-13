@@ -7,6 +7,8 @@ from collections.abc import Mapping
 
 from aiohttp import web
 
+from fogmoe_bot.application.observability.telemetry import Telemetry, TelemetryBuffer
+from fogmoe_bot.domain.observability.signals import SpanSignal
 from fogmoe_bot.domain.retrieval import EmbeddingSpace
 from fogmoe_bot.infrastructure.retrieval import OpenAICompatibleEmbeddings
 
@@ -54,10 +56,12 @@ def test_adapter_formats_qwen_query_and_restores_provider_index_order() -> None:
         sockets = getattr(site._server, "sockets", None)
         assert sockets
         port = sockets[0].getsockname()[1]
+        telemetry_buffer = TelemetryBuffer(16)
         client = OpenAICompatibleEmbeddings(
             api_key="test-key",
             api_base=f"http://127.0.0.1:{port}/v1",
             timeout_seconds=2.0,
+            telemetry=Telemetry(telemetry_buffer),
         )
         try:
             documents = await client.embed_documents(("alpha", "beta"), space=_space())
@@ -79,5 +83,16 @@ def test_adapter_formats_qwen_query_and_restores_provider_index_order() -> None:
             "Query: tea preference"
         ]
         assert requests[1]["input_type"] == "search_query"
+        spans = tuple(
+            signal
+            for signal in telemetry_buffer.drain(16)
+            if isinstance(signal, SpanSignal)
+        )
+        assert [span.name for span in spans] == [
+            "retrieval.embedding.request",
+            "retrieval.embedding.request",
+        ]
+        assert spans[0].attributes["retrieval.batch.size"] == 2
+        assert spans[0].attributes["http.response.status_code"] == 200
 
     asyncio.run(scenario())

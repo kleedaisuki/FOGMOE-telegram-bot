@@ -11,14 +11,21 @@ from PyQt6.QtCore import QEventLoop, QTimer, Qt
 from PyQt6.QtWidgets import QApplication
 
 from fogmoe_dashboard.application.dashboard import Dashboard
-from fogmoe_dashboard.application.queries import HealthSeriesQuery, OverviewQuery
+from fogmoe_dashboard.application.queries import (
+    HealthSeriesQuery,
+    OverviewQuery,
+    RetrievalQuery,
+)
 from fogmoe_dashboard.domain.models import (
     HealthPoint,
     Overview,
     PipelineStage,
+    RetrievalQueueStats,
+    RetrievalSnapshot,
+    SpanStats,
     TimeWindow,
 )
-from fogmoe_dashboard.presentation.gui.pages import OverviewPage
+from fogmoe_dashboard.presentation.gui.pages import OverviewPage, RetrievalPage
 from fogmoe_dashboard.presentation.gui.table import ObjectTableModel, TableColumn
 from fogmoe_dashboard.presentation.gui.window import DashboardWindow
 from fogmoe_dashboard.presentation.gui.worker import (
@@ -115,6 +122,44 @@ def test_overview_page_renders_kpis_and_time_series_without_display() -> None:
     page.close()
 
 
+def test_retrieval_page_renders_latency_and_queue_saturation() -> None:
+    """@brief Retrieval 页面呈现 RED 与实时积压 / Retrieval page renders RED and live saturation."""
+
+    _application()
+    window = TimeWindow.last(timedelta(hours=1))
+    page = RetrievalPage()
+    snapshot = RetrievalSnapshot(
+        operations=(
+            SpanStats("retrieval.search", "client", 8, 0.2, 1, 2, 6, 9, 3, 12),
+        ),
+        queues=(
+            RetrievalQueueStats(
+                "conversation.qwen.v1",
+                "qwen/qwen3-embedding-8b",
+                1024,
+                2,
+                1,
+                3,
+                100,
+                1,
+                window.start,
+                42.0,
+                1,
+            ),
+        ),
+        metrics=(),
+    )
+
+    page.accept(RetrievalQuery(window), snapshot)
+
+    assert page._cards["ready"].text == "5"
+    assert page._cards["failed"].text == "1"
+    assert page._cards["expired"].text == "1"
+    assert page._operation_model.rowCount() == 1
+    assert page._queue_model.rowCount() == 1
+    page.close()
+
+
 def test_main_window_executes_queries_in_worker_and_closes_cleanly() -> None:
     """@brief 主窗口跨线程取得结果且有序关闭 pool / Main window obtains cross-thread results and closes the pool orderly."""
 
@@ -127,7 +172,7 @@ def test_main_window_executes_queries_in_worker_and_closes_cleanly() -> None:
     window.show()
     _drain_events(250)
 
-    assert len(window.pages) == 8
+    assert len(window.pages) == 9
     overview = window.pages[0][1]
     assert isinstance(overview, OverviewPage)
     assert overview._cards["spans"].text == "10"

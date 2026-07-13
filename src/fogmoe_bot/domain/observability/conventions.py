@@ -35,6 +35,9 @@ class MetricName(StrEnum):
     LLM_OUTCOMES = "fogmoe.llm.outcomes"
     TOOL_OUTCOMES = "fogmoe.tool.outcomes"
     RETRIEVAL_OUTCOMES = "fogmoe.retrieval.outcomes"
+    RETRIEVAL_BATCH_SIZE = "fogmoe.retrieval.batch.size"
+    RETRIEVAL_SOURCE_DISCOVERY_DURATION = "fogmoe.retrieval.source.discovery.duration"
+    RETRIEVAL_VECTOR_CLAIM_DURATION = "fogmoe.retrieval.vector.claim.duration"
     DEPENDENCY_OUTCOMES = "fogmoe.dependency.outcomes"
     LEASE_RECOVERIES = "fogmoe.pipeline.lease.recoveries"
 

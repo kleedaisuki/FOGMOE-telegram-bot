@@ -15,7 +15,7 @@ fogmoe-dashboard-gui --window 6h
 fogmoe-dashboard-gui --window 24h --auto-refresh 10
 ~~~
 
-它包含七个面向排障问题组织的工作区：
+它包含九个面向排障问题组织的工作区：
 
 | 工作区 | 交互与可视化 |
 |---|---|
@@ -25,6 +25,7 @@ fogmoe-dashboard-gui --window 24h --auto-refresh 10
 | Traces | error-only 筛选、master-detail、waterfall、关联日志与 attributes |
 | Metrics | 精确 metric 筛选、latest/average/min–max 范围图、Counter rate |
 | 可靠性与依赖 | inbox/inference/outbox/LLM/tool/dependency outcome、lease recovery 与遥测健康 |
+| Retrieval | Projection/Embedding/Search/Recall 的 p50/p95/p99、批次指标与 Embedding Space 实时积压 |
 | AI 与 Turn | provider/model token 与 p95、Turn 分阶段延迟及 slow Turns |
 | Resources | service/version/environment/instance 生命周期 |
 
@@ -86,7 +87,7 @@ fogmoe-dashboard \
 | 视图 | 问题 |
 |---|---|
 | overview | 系统请求量、错误率、p50/p95/p99、token 和 pipeline 是否健康？ |
-| pipeline | inbox、inference、outbox 的积压、重试、最终失败、过期 lease 是多少？ |
+| pipeline | inbox、inference、outbox、retrieval embedding 的积压、重试、最终失败、过期 lease 是多少？ |
 | spans | 哪个操作最慢、调用最多或错误最多？ |
 | errors | 最近的错误 span 和 error log 按时间合并后是什么？ |
 | logs | 某严重度或 logger 的结构日志是什么？ |
@@ -94,6 +95,7 @@ fogmoe-dashboard \
 | trace | 一条 trace 的父子 waterfall 与关联日志是什么？ |
 | metrics | Gauge/Counter 在窗口内的最新值、范围和平均值是什么？ |
 | ai | 各 provider/model 的调用、错误、token 与延迟如何？ |
+| retrieval | Projection、Embedding、Search、Recall 哪段最慢，向量队列是否积压？ |
 | latency | Turn 端到端、推理、投递延迟及最慢 Turn 如何？ |
 | resources | 哪些服务实例在何时启动、停止，当前是否存活？ |
 | watch | overview 的实时刷新结果如何？ |
@@ -103,6 +105,7 @@ fogmoe-dashboard --window 1h spans --name chat
 fogmoe-dashboard --window 24h logs --severity error --limit 200
 fogmoe-dashboard --window 6h traces --errors-only
 fogmoe-dashboard --window 7d ai
+fogmoe-dashboard --window 24h retrieval
 fogmoe-dashboard --window 24h latency --limit 50
 ~~~
 
@@ -129,10 +132,12 @@ async def inspect() -> None:
         overview = await dashboard.overview(window)
         slow_operations = await dashboard.spans(window, limit=20)
         failures = await dashboard.errors(window, limit=100)
+        retrieval = await dashboard.retrieval(window)
 
     print(overview.span_error_rate)
     print(slow_operations[0] if slow_operations else "no spans")
     print(len(failures))
+    print(retrieval.queues)
 ~~~
 
 也可显式使用 URL：
@@ -147,7 +152,7 @@ dashboard = DashboardClient.from_database_url(
 
 公开方法均返回 fogmoe_dashboard.domain.models 中的 frozen、slotted dataclass，
 包括 Overview、SpanStats、ErrorEvent、TraceDetail、MetricStats、GenAiStats、
-TurnLatencyStats、HealthPoint 与 ResourceInstance。
+TurnLatencyStats、RetrievalSnapshot、RetrievalQueueStats、HealthPoint 与 ResourceInstance。
 
 ## 设计依据
 

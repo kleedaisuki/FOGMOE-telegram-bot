@@ -39,9 +39,11 @@ Turn 内的日志可使用 `turn_id`、`update_id`、`activity_id` 或 `outbound
 - `fogmoe.outbox.outcomes`
 - `fogmoe.llm.outcomes`
 - `fogmoe.tool.outcomes`
+- `fogmoe.retrieval.outcomes`
 - `fogmoe.dependency.outcomes`
 
-`fogmoe.pipeline.lease.recoveries` 使用 `pipeline.stage` 区分 inbox、inference 与 outbox。
+`fogmoe.pipeline.lease.recoveries` 使用 `pipeline.stage` 区分 inbox、inference、outbox 与
+retrieval。
 runtime sampler 每 15 秒补充 mailbox、telemetry queue、exporter、RSS、累计 CPU、FD、
 event-loop lag 与系统一分钟负载。Telemetry buffer 还按 `log`、`span`、`metric` 三类
 分别暴露累计 accepted/dropped；因此可以区分“业务流量很高”与“日志或 Trace 被队列丢弃”。
@@ -54,6 +56,25 @@ LLM、Agent tool、外部读取、图像生成与语音生成均产生 client sp
 
 Dashboard 的总览和健康趋势排除数据库 client span，避免频繁轮询把用户体验延迟淹没；
 Operations 页面仍保留这些 span 以供数据库排障。
+
+## Retrieval 性能契约
+
+Retrieval 使用封闭的低基数 operation 名称形成完整耗时链：
+
+- `retrieval.projection.batch`：非空 Conversation Source 批次形成 Passage；
+- `retrieval.embedding.batch`：durable claim 到 fenced completion 的批次处理；
+- `retrieval.embedding.request`：OpenAI-compatible Provider HTTP 请求；
+- `retrieval.recall`：Assistant 语义召回端到端；
+- `retrieval.query.embedding`：Query embedding；
+- `retrieval.search`：租户过滤后的 pgvector exact search。
+
+空 polling 不产生 span 或 metric point，避免闲置实例污染吞吐与延迟分位数。非空工作额外
+记录 `fogmoe.retrieval.batch.size`、`fogmoe.retrieval.source.discovery.duration` 和
+`fogmoe.retrieval.vector.claim.duration`；duration 单位遵循 OpenTelemetry 约定使用秒。
+Dashboard 的 Retrieval 页面将这些时间窗信号与 `retrieval.passage_vectors` 的实时状态
+组合，呈现每个 Embedding Space 的 pending、processing、retry、completed、failed、最老
+积压年龄与过期 lease。查询使用稳定 operation/metric 精确集合，使分区索引可用于时间窗
+聚合，禁止用前缀模糊扫描扩大监控成本。
 
 ## Dashboard 与数据保留
 

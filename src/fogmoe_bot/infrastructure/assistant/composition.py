@@ -114,6 +114,7 @@ def build_durable_assistant(
         api_key=_retrieval_api_key(),
         api_base=config.RETRIEVAL_EMBEDDING_API_BASE,
         timeout_seconds=config.RETRIEVAL_EMBEDDING_TIMEOUT_SECONDS,
+        telemetry=telemetry,
         proxy_url=config.NETWORK_PROXY_URL,
     )
     recall = SemanticRecall(
@@ -121,6 +122,7 @@ def build_durable_assistant(
         store=retrieval_store,
         space=embedding_space,
         corpus_id=EPISODIC_CORPUS_ID,
+        telemetry=telemetry,
     )
     retrieval = RetrievalWorker(
         source=PostgresEpisodicSource(),

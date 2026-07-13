@@ -43,6 +43,7 @@ def test_dashboard_queries_every_signal_family_through_read_only_pool() -> None:
 
         now = datetime.now(UTC)
         trace = TraceContext.new_root()
+        retrieval_trace = trace.child()
         resource = Resource(
             resource_id=uuid4(),
             service_name="fogmoe-dashboard-test",
@@ -82,6 +83,19 @@ def test_dashboard_queries_every_signal_family_through_read_only_pool() -> None:
                     status_message="provider failed",
                     attributes=attributes,
                 ),
+                SpanSignal(
+                    started_at=now + timedelta(milliseconds=1),
+                    ended_at=now + timedelta(milliseconds=9),
+                    duration_ns=8_000_000,
+                    trace_id=retrieval_trace.trace_id,
+                    span_id=retrieval_trace.span_id,
+                    parent_span_id=trace.span_id,
+                    name="retrieval.search",
+                    kind=SpanKind.CLIENT,
+                    status=SpanStatus.OK,
+                    status_message=None,
+                    attributes=freeze_attributes({"retrieval.candidate.count": 3}),
+                ),
                 LogSignal(
                     occurred_at=now,
                     observed_at=now,
@@ -106,6 +120,15 @@ def test_dashboard_queries_every_signal_family_through_read_only_pool() -> None:
                     trace_id=trace.trace_id,
                     attributes=freeze_attributes(),
                 ),
+                MetricSignal(
+                    observed_at=now,
+                    name="fogmoe.retrieval.batch.size",
+                    kind=MetricKind.GAUGE,
+                    value=4,
+                    unit="{passage}",
+                    trace_id=retrieval_trace.trace_id,
+                    attributes=freeze_attributes({"stage": "embedding"}),
+                ),
             )
         )
 
@@ -117,7 +140,7 @@ def test_dashboard_queries_every_signal_family_through_read_only_pool() -> None:
             assert overview.spans >= 1
             assert overview.error_spans >= 1
             assert overview.input_tokens >= 120
-            assert len(overview.pipeline) == 3
+            assert len(overview.pipeline) == 4
             health = await dashboard.health_series(window, buckets=60)
             assert any(point.span_rate_per_second > 0 for point in health)
             assert any(point.span_error_rate > 0 for point in health)
@@ -133,7 +156,10 @@ def test_dashboard_queries_every_signal_family_through_read_only_pool() -> None:
             trace_id = str(trace.trace_id)
             assert any(item.trace_id == trace_id for item in summaries)
             detail = await dashboard.trace(trace_id)
-            assert [item.name for item in detail.spans] == ["chat"]
+            assert [item.name for item in detail.spans] == [
+                "chat",
+                "retrieval.search",
+            ]
             assert [item.event_name for item in detail.logs] == ["test.failed"]
             assert any(
                 item.name == "fogmoe.dashboard.test"
@@ -142,6 +168,14 @@ def test_dashboard_queries_every_signal_family_through_read_only_pool() -> None:
             assert any(
                 item.provider == "test-provider" and item.input_tokens >= 120
                 for item in await dashboard.gen_ai(window)
+            )
+            retrieval = await dashboard.retrieval(window)
+            assert any(
+                item.name == "retrieval.search" and item.p95_ms >= 8
+                for item in retrieval.operations
+            )
+            assert any(
+                item.name == "fogmoe.retrieval.batch.size" for item in retrieval.metrics
             )
             assert any(
                 item.resource_id == resource.resource_id

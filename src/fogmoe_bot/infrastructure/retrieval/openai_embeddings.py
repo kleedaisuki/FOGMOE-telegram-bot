@@ -12,10 +12,12 @@ from typing import cast
 import aiohttp
 from aiohttp_socks import ProxyConnector
 
+from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.application.retrieval import (
     EmbeddingContractError,
     RetryableEmbeddingError,
 )
+from fogmoe_bot.domain.observability.signals import SpanKind
 from fogmoe_bot.domain.retrieval import EmbeddingSpace, EmbeddingVector
 
 
@@ -35,6 +37,7 @@ class OpenAICompatibleEmbeddings:
         api_key: str,
         api_base: str,
         timeout_seconds: float,
+        telemetry: Telemetry,
         proxy_url: str | None = None,
     ) -> None:
         """@brief 保存连接配置但不执行 I/O / Store connection configuration without I/O.
@@ -42,6 +45,7 @@ class OpenAICompatibleEmbeddings:
         @param api_key Bearer token / Bearer token.
         @param api_base OpenAI-compatible API root / OpenAI-compatible API root.
         @param timeout_seconds 总请求超时 / Total request timeout.
+        @param telemetry 进程 typed telemetry / Process typed telemetry.
         @param proxy_url 可选 HTTP/SOCKS proxy / Optional HTTP/SOCKS proxy.
         @raise ValueError 配置非法 / Invalid configuration.
         """
@@ -59,6 +63,7 @@ class OpenAICompatibleEmbeddings:
         self._endpoint = f"{base}/embeddings"
         self._timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         self._proxy_url = proxy or None
+        self._telemetry = telemetry
         self._session: aiohttp.ClientSession | None = None
         self._session_lock = asyncio.Lock()
 
@@ -147,27 +152,39 @@ class OpenAICompatibleEmbeddings:
             "encoding_format": "float",
             "input_type": input_type,
         }
-        try:
-            async with session.post(
-                self._endpoint,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-                proxy=_http_proxy(self._proxy_url),
-            ) as response:
-                raw = await _read_bounded(response)
-                if response.status != 200:
-                    self._raise_http_error(response, raw)
-                decoded = _decode_json(raw)
-        except asyncio.CancelledError:
-            raise
-        except (aiohttp.ClientError, TimeoutError) as error:
-            raise RetryableEmbeddingError(
-                f"Embedding transport failed: {type(error).__name__}"
-            ) from error
-        vectors = _parse_vectors(decoded, expected_count=len(texts), space=space)
+        with self._telemetry.span(
+            "retrieval.embedding.request",
+            kind=SpanKind.CLIENT,
+            attributes={
+                "retrieval.embedding.model": space.model,
+                "retrieval.embedding.dimensions": space.dimensions,
+                "retrieval.embedding.input_type": input_type,
+                "retrieval.batch.size": len(texts),
+            },
+        ) as span:
+            try:
+                async with session.post(
+                    self._endpoint,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    proxy=_http_proxy(self._proxy_url),
+                ) as response:
+                    raw = await _read_bounded(response)
+                    span.set_attribute("http.response.status_code", response.status)
+                    span.set_attribute("http.response.body.size", len(raw))
+                    if response.status != 200:
+                        self._raise_http_error(response, raw)
+                    decoded = _decode_json(raw)
+            except asyncio.CancelledError:
+                raise
+            except (aiohttp.ClientError, TimeoutError) as error:
+                raise RetryableEmbeddingError(
+                    f"Embedding transport failed: {type(error).__name__}"
+                ) from error
+            vectors = _parse_vectors(decoded, expected_count=len(texts), space=space)
         logger.info(
             "Embedding request completed model=%s dimensions=%s batch_size=%s",
             space.model,

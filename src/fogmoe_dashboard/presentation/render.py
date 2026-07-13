@@ -15,7 +15,12 @@ from rich.table import Table
 from rich.text import Text
 
 from fogmoe_dashboard.application.queries import DashboardView
-from fogmoe_dashboard.domain.models import LatencySnapshot, Overview, TraceDetail
+from fogmoe_dashboard.domain.models import (
+    LatencySnapshot,
+    Overview,
+    RetrievalSnapshot,
+    TraceDetail,
+)
 
 
 _COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -117,6 +122,18 @@ _COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         ("started_at", "Started"),
         ("stopped_at", "Stopped"),
     ),
+    "retrieval_queue": (
+        ("space_id", "Space"),
+        ("model", "Model"),
+        ("dimensions", "Dims"),
+        ("pending", "Pending"),
+        ("processing", "Processing"),
+        ("retrying", "Retry"),
+        ("completed", "Completed"),
+        ("failed_final", "Failed"),
+        ("expired_leases", "Expired leases"),
+        ("oldest_ready_age_seconds", "Oldest age s"),
+    ),
 }
 """@brief 低噪声终端列定义 / Low-noise terminal column definitions."""
 
@@ -161,6 +178,14 @@ def render(view: DashboardView, value: object) -> RenderableType:
         return Group(
             _table("latency", value.summary, title="Turn latency"),
             _table("slow_turns", value.slow_turns, title="Slow Turns"),
+        )
+    if view is DashboardView.RETRIEVAL:
+        if not isinstance(value, RetrievalSnapshot):
+            raise TypeError("retrieval renderer requires RetrievalSnapshot")
+        return Group(
+            _table("spans", value.operations, title="Retrieval operations"),
+            _table("retrieval_queue", value.queues, title="Embedding queues"),
+            _table("metrics", value.metrics, title="Retrieval metrics"),
         )
     return _table(view.value, value, title=view.value.replace("_", " ").title())
 

@@ -150,6 +150,68 @@ class SpanStats:
 
 
 @dataclass(frozen=True, slots=True)
+class RetrievalQueueStats:
+    """@brief 一个 Embedding Space 的实时队列健康 / Live queue health for one embedding space.
+
+    @param space_id Embedding Space identity / Embedding-space identity.
+    @param model Provider model identity / Provider-model identity.
+    @param dimensions 向量维度 / Vector dimensions.
+    @param pending 待处理任务 / Pending jobs.
+    @param processing 已领取任务 / Processing jobs.
+    @param retrying 等待重试任务 / Retry-wait jobs.
+    @param completed 已完成向量 / Completed vectors.
+    @param failed_final 最终失败任务 / Finally failed jobs.
+    @param oldest_ready_at 最早就绪时间 / Oldest ready timestamp.
+    @param oldest_ready_age_seconds 最老积压秒数 / Oldest backlog age in seconds.
+    @param expired_leases 已过期租约 / Expired leases.
+    """
+
+    space_id: str
+    model: str
+    dimensions: int
+    pending: int
+    processing: int
+    retrying: int
+    completed: int
+    failed_final: int
+    oldest_ready_at: datetime | None
+    oldest_ready_age_seconds: float | None
+    expired_leases: int
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalSnapshot:
+    """@brief Retrieval 性能与饱和度组合快照 / Combined Retrieval performance and saturation snapshot.
+
+    @param operations 时间窗内 RED 操作统计 / Operation RED statistics in the window.
+    @param queues 当前 Embedding Space 队列 / Current embedding-space queues.
+    @param metrics Retrieval 指标摘要 / Retrieval metric summaries.
+    """
+
+    operations: tuple[SpanStats, ...]
+    queues: tuple[RetrievalQueueStats, ...]
+    metrics: tuple[MetricStats, ...]
+
+    @property
+    def ready(self) -> int:
+        """@brief 返回所有空间待处理与重试总数 / Return total pending and retry-wait jobs."""
+
+        return sum(queue.pending + queue.retrying for queue in self.queues)
+
+    @property
+    def failed(self) -> int:
+        """@brief 返回最终失败总数 / Return total finally failed jobs."""
+
+        return sum(queue.failed_final for queue in self.queues)
+
+    @property
+    def expired_leases(self) -> int:
+        """@brief 返回过期租约总数 / Return total expired leases."""
+
+        return sum(queue.expired_leases for queue in self.queues)
+
+
+@dataclass(frozen=True, slots=True)
 class ErrorEvent:
     """@brief 跨 span 与 log 的统一错误事件 / Unified error event across spans and logs."""
 
@@ -354,6 +416,8 @@ __all__ = [
     "Overview",
     "PipelineStage",
     "ResourceInstance",
+    "RetrievalQueueStats",
+    "RetrievalSnapshot",
     "SlowTurn",
     "SpanStats",
     "TimeWindow",

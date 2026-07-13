@@ -20,6 +20,8 @@ from fogmoe_dashboard.domain.models import (
     Overview,
     PipelineStage,
     ResourceInstance,
+    RetrievalQueueStats,
+    RetrievalSnapshot,
     SlowTurn,
     SpanStats,
     TimeWindow,
@@ -280,23 +282,7 @@ class PostgresDashboardRepository:
         """@brief 查询 metric 窗口统计 / Query metric window statistics."""
 
         rows = await self._fetch(_METRICS_SQL, window.start, window.end, name, limit)
-        return tuple(
-            MetricStats(
-                name=str(row["metric_name"]),
-                kind=str(row["metric_kind"]),
-                unit=str(row["unit"]),
-                attributes=freeze_json_object(row["attributes"]),
-                points=int(row["points"]),
-                latest_at=_datetime(row["latest_at"]),
-                latest=float(row["latest"]),
-                minimum=float(row["minimum"]),
-                maximum=float(row["maximum"]),
-                average=float(row["average"]),
-                total=_optional_float(row["total"]),
-                rate_per_second=_optional_float(row["rate_per_second"]),
-            )
-            for row in rows
-        )
+        return tuple(_metric_stats(row) for row in rows)
 
     async def gen_ai(
         self,
@@ -319,6 +305,63 @@ class PostgresDashboardRepository:
                 p95_ms=float(row["p95_ms"]),
             )
             for row in rows
+        )
+
+    async def retrieval(self, window: TimeWindow) -> RetrievalSnapshot:
+        """@brief 查询 Retrieval RED、队列与指标 / Query Retrieval RED, queues, and metrics."""
+
+        pool = await self._get_pool()
+        async with pool.acquire() as connection:
+            operation_rows = await connection.fetch(
+                _RETRIEVAL_OPERATIONS_SQL,
+                window.start,
+                window.end,
+            )
+            queue_rows = await connection.fetch(_RETRIEVAL_QUEUE_SQL)
+            metric_rows = await connection.fetch(
+                _RETRIEVAL_METRICS_SQL,
+                window.start,
+                window.end,
+            )
+        return RetrievalSnapshot(
+            operations=tuple(
+                SpanStats(
+                    name=str(row["span_name"]),
+                    kind=str(row["span_kind"]),
+                    calls=int(row["calls"]),
+                    rate_per_second=float(row["rate_per_second"]),
+                    errors=int(row["errors"]),
+                    p50_ms=float(row["p50_ms"]),
+                    p95_ms=float(row["p95_ms"]),
+                    p99_ms=float(row["p99_ms"]),
+                    average_ms=float(row["average_ms"]),
+                    maximum_ms=float(row["maximum_ms"]),
+                )
+                for row in operation_rows
+            ),
+            queues=tuple(
+                RetrievalQueueStats(
+                    space_id=str(row["space_id"]),
+                    model=str(row["model"]),
+                    dimensions=int(row["dimensions"]),
+                    pending=int(row["pending_count"]),
+                    processing=int(row["processing_count"]),
+                    retrying=int(row["retry_count"]),
+                    completed=int(row["completed_count"]),
+                    failed_final=int(row["failed_final_count"]),
+                    oldest_ready_at=(
+                        _datetime(row["oldest_ready_at"])
+                        if row["oldest_ready_at"] is not None
+                        else None
+                    ),
+                    oldest_ready_age_seconds=_optional_float(
+                        row["oldest_ready_age_seconds"]
+                    ),
+                    expired_leases=int(row["expired_lease_count"]),
+                )
+                for row in queue_rows
+            ),
+            metrics=tuple(_metric_stats(row) for row in metric_rows),
         )
 
     async def latency(self, window: TimeWindow) -> Sequence[TurnLatencyStats]:
@@ -468,6 +511,29 @@ def _pipeline_stage(row: Mapping[str, Any]) -> PipelineStage:
     )
 
 
+def _metric_stats(row: Mapping[str, Any]) -> MetricStats:
+    """@brief 映射 metric 聚合行 / Map a metric-aggregate row.
+
+    @param row PostgreSQL 聚合结果 / PostgreSQL aggregate row.
+    @return 强类型 metric 摘要 / Strongly typed metric summary.
+    """
+
+    return MetricStats(
+        name=str(row["metric_name"]),
+        kind=str(row["metric_kind"]),
+        unit=str(row["unit"]),
+        attributes=freeze_json_object(row["attributes"]),
+        points=int(row["points"]),
+        latest_at=_datetime(row["latest_at"]),
+        latest=float(row["latest"]),
+        minimum=float(row["minimum"]),
+        maximum=float(row["maximum"]),
+        average=float(row["average"]),
+        total=_optional_float(row["total"]),
+        rate_per_second=_optional_float(row["rate_per_second"]),
+    )
+
+
 def _datetime(value: object) -> datetime:
     """@brief 校验 UTC datetime / Validate a UTC datetime."""
 
@@ -535,10 +601,25 @@ FROM span_rollup CROSS JOIN log_rollup
 """@brief RED 总览聚合 SQL / RED overview aggregation SQL."""
 
 _PIPELINE_SQL = """
-SELECT stage, pending_count, processing_count, retry_count,
-       failed_final_count, oldest_ready_at, expired_lease_count
-FROM observability.pipeline_health
-ORDER BY CASE stage WHEN 'inbox' THEN 1 WHEN 'inference' THEN 2 ELSE 3 END
+SELECT * FROM (
+  SELECT stage, pending_count, processing_count, retry_count,
+         failed_final_count, oldest_ready_at, expired_lease_count
+  FROM observability.pipeline_health
+  UNION ALL
+  SELECT 'retrieval.embedding' AS stage,
+         count(*) FILTER (WHERE status = 'pending') AS pending_count,
+         count(*) FILTER (WHERE status = 'processing') AS processing_count,
+         count(*) FILTER (WHERE status = 'retry_wait') AS retry_count,
+         count(*) FILTER (WHERE status = 'failed_final') AS failed_final_count,
+         min(next_attempt_at) FILTER (WHERE status IN ('pending','retry_wait'))
+           AS oldest_ready_at,
+         count(*) FILTER (
+           WHERE status = 'processing' AND lease_expires_at <= CURRENT_TIMESTAMP
+         ) AS expired_lease_count
+  FROM retrieval.passage_vectors
+) AS pipeline
+ORDER BY CASE stage
+  WHEN 'inbox' THEN 1 WHEN 'inference' THEN 2 WHEN 'outbox' THEN 3 ELSE 4 END
 """
 """@brief Durable pipeline 健康 SQL / Durable-pipeline health SQL."""
 
@@ -608,6 +689,59 @@ ORDER BY p95_ms DESC, calls DESC
 LIMIT $4
 """
 """@brief Span RED 分组 SQL / Span RED grouping SQL."""
+
+_RETRIEVAL_OPERATIONS_SQL = """
+SELECT span_name, span_kind, count(*) AS calls,
+       count(*) / greatest(
+         EXTRACT(EPOCH FROM ($2::TIMESTAMPTZ - $1::TIMESTAMPTZ)), 0.001
+       ) AS rate_per_second,
+       count(*) FILTER (WHERE status_code = 'error') AS errors,
+       percentile_cont(0.50) WITHIN GROUP (ORDER BY duration_ns / 1e6) AS p50_ms,
+       percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ns / 1e6) AS p95_ms,
+       percentile_cont(0.99) WITHIN GROUP (ORDER BY duration_ns / 1e6) AS p99_ms,
+       avg(duration_ns / 1e6) AS average_ms,
+       max(duration_ns / 1e6) AS maximum_ms
+FROM observability.spans
+WHERE started_at >= $1 AND started_at < $2
+  AND span_name IN (
+    'retrieval.projection.batch',
+    'retrieval.embedding.batch',
+    'retrieval.embedding.request',
+    'retrieval.recall',
+    'retrieval.query.embedding',
+    'retrieval.search'
+  )
+GROUP BY span_name, span_kind
+ORDER BY p95_ms DESC, calls DESC
+"""
+"""@brief Retrieval operation RED 聚合 / Retrieval-operation RED aggregation."""
+
+_RETRIEVAL_QUEUE_SQL = """
+SELECT space.space_id, space.model, space.dimensions,
+       count(vector.passage_id) FILTER (WHERE vector.status = 'pending') AS pending_count,
+       count(vector.passage_id) FILTER (WHERE vector.status = 'processing') AS processing_count,
+       count(vector.passage_id) FILTER (WHERE vector.status = 'retry_wait') AS retry_count,
+       count(vector.passage_id) FILTER (WHERE vector.status = 'completed') AS completed_count,
+       count(vector.passage_id) FILTER (WHERE vector.status = 'failed_final')
+         AS failed_final_count,
+       min(vector.next_attempt_at) FILTER (
+         WHERE vector.status IN ('pending','retry_wait')
+       ) AS oldest_ready_at,
+       EXTRACT(EPOCH FROM (
+         CURRENT_TIMESTAMP - min(vector.next_attempt_at) FILTER (
+           WHERE vector.status IN ('pending','retry_wait')
+         )
+       )) AS oldest_ready_age_seconds,
+       count(vector.passage_id) FILTER (
+         WHERE vector.status = 'processing'
+           AND vector.lease_expires_at <= CURRENT_TIMESTAMP
+       ) AS expired_lease_count
+FROM retrieval.embedding_spaces AS space
+LEFT JOIN retrieval.passage_vectors AS vector USING (space_id)
+GROUP BY space.space_id, space.model, space.dimensions
+ORDER BY space.space_id
+"""
+"""@brief Retrieval 当前队列健康 / Current Retrieval queue health."""
 
 _ERRORS_SQL = """
 SELECT occurred_at, source, name, message, trace_id, turn_id
@@ -704,6 +838,30 @@ ORDER BY metric_name, attributes
 LIMIT $4
 """
 """@brief Metric 窗口统计 SQL / Metric-window statistics SQL."""
+
+_RETRIEVAL_METRICS_SQL = """
+SELECT metric_name, metric_kind, unit, attributes, count(*) AS points,
+       max(observed_at) AS latest_at,
+       (array_agg(value ORDER BY observed_at DESC))[1] AS latest,
+       min(value) AS minimum, max(value) AS maximum, avg(value) AS average,
+       CASE WHEN metric_kind = 'counter' THEN sum(value) END AS total,
+       CASE WHEN metric_kind = 'counter'
+         THEN sum(value) / greatest(
+           EXTRACT(EPOCH FROM ($2::TIMESTAMPTZ - $1::TIMESTAMPTZ)), 0.001
+         )
+       END AS rate_per_second
+FROM observability.metric_points
+WHERE observed_at >= $1 AND observed_at < $2
+  AND metric_name IN (
+    'fogmoe.retrieval.outcomes',
+    'fogmoe.retrieval.batch.size',
+    'fogmoe.retrieval.source.discovery.duration',
+    'fogmoe.retrieval.vector.claim.duration'
+  )
+GROUP BY metric_name, metric_kind, unit, attributes
+ORDER BY metric_name, attributes
+"""
+"""@brief Retrieval metric 窗口统计 / Retrieval metric-window statistics."""
 
 _GEN_AI_SQL = """
 SELECT coalesce(attributes ->> 'gen_ai.provider.name', 'unknown') AS provider,

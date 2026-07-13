@@ -13,11 +13,19 @@ from rich.console import Console
 from fogmoe_dashboard.application.dashboard import Dashboard
 from fogmoe_dashboard.application.queries import (
     DashboardView,
+    RetrievalQuery,
     SpansQuery,
     execute_query,
 )
 from fogmoe_dashboard.config import service_database_url
-from fogmoe_dashboard.domain.models import Overview, PipelineStage, TimeWindow
+from fogmoe_dashboard.domain.models import (
+    Overview,
+    PipelineStage,
+    RetrievalQueueStats,
+    RetrievalSnapshot,
+    SpanStats,
+    TimeWindow,
+)
 from fogmoe_dashboard.presentation.cli import build_parser
 from fogmoe_dashboard.presentation.duration import parse_duration
 from fogmoe_dashboard.presentation.render import print_json, render, to_jsonable
@@ -48,6 +56,12 @@ class FakeRepository:
 
         self.calls.append(("health_series", (window, buckets)))
         return ()
+
+    async def retrieval(self, window: TimeWindow) -> RetrievalSnapshot:
+        """@brief 返回固定 Retrieval 快照 / Return a fixed Retrieval snapshot."""
+
+        self.calls.append(("retrieval", window))
+        return _retrieval()
 
     async def spans(self, window, *, name, limit):
         """@brief 记录 span 查询 / Record a span query."""
@@ -163,6 +177,9 @@ def test_closed_query_language_reuses_application_semantics() -> None:
 
         assert result == ()
         assert repository.calls[-1][1][1:] == ("chat", 12)
+        retrieval = await execute_query(dashboard, RetrievalQuery(window))
+        assert isinstance(retrieval, RetrievalSnapshot)
+        assert retrieval.ready == 3
 
     import asyncio
 
@@ -222,6 +239,7 @@ def test_dashboard_cli_registers_all_builtin_views_and_parses_duration() -> None
         "trace",
         "metrics",
         "ai",
+        "retrieval",
         "latency",
         "resources",
         "watch",
@@ -256,6 +274,13 @@ def test_overview_renders_rich_table_and_stable_json() -> None:
     assert payload["data"]["spans"] == 10
     assert to_jsonable(value.window)["start"].endswith("+00:00")
 
+    retrieval_console = Console(record=True, width=160, color_system=None)
+    retrieval_console.print(render(DashboardView.RETRIEVAL, _retrieval()))
+    retrieval_text = retrieval_console.export_text()
+    assert "Retrieval operations" in retrieval_text
+    assert "Embedding queues" in retrieval_text
+    assert "retrieval.recall" in retrieval_text
+
 
 def _overview(window: TimeWindow) -> Overview:
     """@brief 创建固定总览 fixture / Create a fixed overview fixture."""
@@ -279,4 +304,30 @@ def _overview(window: TimeWindow) -> Overview:
             PipelineStage("inference", 0, 1, 0, 0, None, 0),
             PipelineStage("outbox", 2, 0, 0, 0, None, 0),
         ),
+    )
+
+
+def _retrieval() -> RetrievalSnapshot:
+    """@brief 创建固定 Retrieval 快照 / Create a fixed Retrieval snapshot."""
+
+    return RetrievalSnapshot(
+        operations=(
+            SpanStats("retrieval.recall", "internal", 4, 0.1, 0, 4, 8, 12, 6, 14),
+        ),
+        queues=(
+            RetrievalQueueStats(
+                "conversation.qwen.v1",
+                "qwen/qwen3-embedding-8b",
+                1024,
+                2,
+                1,
+                1,
+                100,
+                0,
+                None,
+                12.0,
+                0,
+            ),
+        ),
+        metrics=(),
     )

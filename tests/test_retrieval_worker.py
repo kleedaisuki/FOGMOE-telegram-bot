@@ -15,6 +15,7 @@ from fogmoe_bot.application.retrieval import (
 )
 from fogmoe_bot.application.runtime import UtcClock
 from fogmoe_bot.application.observability.telemetry import Telemetry, TelemetryBuffer
+from fogmoe_bot.domain.observability.signals import MetricSignal, SpanSignal
 from fogmoe_bot.domain.retrieval import (
     EmbeddingSpace,
     EmbeddingVector,
@@ -226,7 +227,7 @@ class _Embeddings:
 
 def _worker(
     *, fail: bool, stop_event: asyncio.Event
-) -> tuple[RetrievalWorker, _Store, _Source]:
+) -> tuple[RetrievalWorker, _Store, _Source, TelemetryBuffer]:
     """@brief 构造固定 worker 场景 / Build a fixed worker scenario."""
 
     turn = EpisodicTurn(
@@ -245,20 +246,21 @@ def _worker(
     )
     store = _Store(stop_event)
     source = _Source(turn)
+    telemetry_buffer = TelemetryBuffer(64)
     worker = RetrievalWorker(
         source=source,
         store=store,
         embeddings=_Embeddings(fail=fail),
         space=space,
         renderer=EpisodicPassageRenderer(),
-        telemetry=Telemetry(TelemetryBuffer(32)),
+        telemetry=Telemetry(telemetry_buffer),
         worker_count=4,
         batch_size=4,
         poll_interval=0.01,
         lease_for=timedelta(seconds=30),
         clock=_Clock(),
     )
-    return worker, store, source
+    return worker, store, source, telemetry_buffer
 
 
 def test_worker_projects_embeds_and_drains_structurally() -> None:
@@ -268,12 +270,26 @@ def test_worker_projects_embeds_and_drains_structurally() -> None:
         """@brief 执行成功场景 / Execute the success scenario."""
 
         stop_event = asyncio.Event()
-        worker, store, source = _worker(fail=False, stop_event=stop_event)
+        worker, store, source, telemetry_buffer = _worker(
+            fail=False, stop_event=stop_event
+        )
         await worker.run(stop_event)
         assert store.completed == EmbeddingVector((1.0, 0.0))
         assert store.retried_at is None
         assert source.reader_tasks
         assert set(source.reader_tasks) == {"retrieval-projection"}
+        signals = telemetry_buffer.drain(64)
+        assert [
+            signal.name for signal in signals if isinstance(signal, SpanSignal)
+        ] == ["retrieval.projection.batch", "retrieval.embedding.batch"]
+        assert {
+            signal.name for signal in signals if isinstance(signal, MetricSignal)
+        } >= {
+            "fogmoe.retrieval.outcomes",
+            "fogmoe.retrieval.batch.size",
+            "fogmoe.retrieval.source.discovery.duration",
+            "fogmoe.retrieval.vector.claim.duration",
+        }
 
     asyncio.run(scenario())
 
@@ -285,7 +301,7 @@ def test_worker_honors_provider_retry_after() -> None:
         """@brief 执行 retry 场景 / Execute the retry scenario."""
 
         stop_event = asyncio.Event()
-        worker, store, source = _worker(fail=True, stop_event=stop_event)
+        worker, store, source, _ = _worker(fail=True, stop_event=stop_event)
         await worker.run(stop_event)
         assert store.completed is None
         assert store.retried_at == NOW + timedelta(seconds=7)
