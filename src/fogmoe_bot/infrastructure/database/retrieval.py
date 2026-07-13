@@ -185,36 +185,12 @@ class PostgresRetrievalStore:
         _validate_projection(turn, canonical, space)
         source_digest = _projection_digest(canonical)
         async with db_connection.transaction() as connection:
-            existing = await db_connection.fetch_one(
-                "SELECT owner_user_id, source_digest FROM retrieval.source_projections "
-                "WHERE corpus_id = %s AND source_kind = %s "
-                "AND source_id = CAST(%s AS UUID) AND format_version = %s FOR UPDATE",
-                (
-                    EPISODIC_CORPUS_ID,
-                    CONVERSATION_TURN_SOURCE_KIND,
-                    str(turn.turn_id),
-                    space.passage_format_version,
-                ),
-                connection=connection,
-            )
-            if existing is not None:
-                if tuple(existing) != (turn.owner_user_id, source_digest):
-                    raise RuntimeError(
-                        f"Episodic projection drifted for turn {turn.turn_id}"
-                    )
-                return
-            for passage in canonical:
-                await self._insert_passage(
-                    passage,
-                    space=space,
-                    created_at=timestamp,
-                    connection=connection,
-                )
             await db_connection.execute(
                 "INSERT INTO retrieval.source_projections "
                 "(corpus_id, owner_user_id, source_kind, source_id, format_version, "
                 "source_digest, projected_at) VALUES (%s, %s, %s, CAST(%s AS UUID), "
-                "%s, %s, %s)",
+                "%s, %s, %s) ON CONFLICT "
+                "(corpus_id, source_kind, source_id, format_version) DO NOTHING",
                 (
                     EPISODIC_CORPUS_ID,
                     turn.owner_user_id,
@@ -226,6 +202,32 @@ class PostgresRetrievalStore:
                 ),
                 connection=connection,
             )
+            existing = await db_connection.fetch_one(
+                "SELECT owner_user_id, source_digest FROM retrieval.source_projections "
+                "WHERE corpus_id = %s AND source_kind = %s "
+                "AND source_id = CAST(%s AS UUID) AND format_version = %s",
+                (
+                    EPISODIC_CORPUS_ID,
+                    CONVERSATION_TURN_SOURCE_KIND,
+                    str(turn.turn_id),
+                    space.passage_format_version,
+                ),
+                connection=connection,
+            )
+            if existing is None or tuple(existing) != (
+                turn.owner_user_id,
+                source_digest,
+            ):
+                raise RuntimeError(
+                    f"Episodic projection drifted for turn {turn.turn_id}"
+                )
+            for passage in canonical:
+                await self._insert_passage(
+                    passage,
+                    space=space,
+                    created_at=timestamp,
+                    connection=connection,
+                )
 
     async def _insert_passage(
         self,

@@ -215,13 +215,18 @@ def test_real_pgvector_projection_fencing_and_tenant_filtered_exact_search(
                 if episode.owner_user_id in {owner_a, owner_b}
             )
             assert {str(episode.turn_id) for episode in selected} == {turn_a, turn_b}
-            for episode in selected:
-                await store.project_turn(
-                    episode,
-                    renderer.render(episode),
-                    space=space,
-                    projected_at=now + timedelta(seconds=2),
+            await asyncio.gather(
+                *(
+                    store.project_turn(
+                        episode,
+                        renderer.render(episode),
+                        space=space,
+                        projected_at=now + timedelta(seconds=2),
+                    )
+                    for episode in selected
+                    for _ in range(4)
                 )
+            )
             claims = await store.claim_vectors(
                 space=space,
                 now=now + timedelta(seconds=3),

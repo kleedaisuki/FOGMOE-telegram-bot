@@ -44,6 +44,7 @@ class _Source:
 
         self._turn = turn
         self._returned = False
+        self.reader_tasks: list[str] = []
 
     async def read_unprojected(
         self,
@@ -55,6 +56,8 @@ class _Source:
 
         assert format_version == 1
         assert limit == 4
+        task = asyncio.current_task()
+        self.reader_tasks.append(task.get_name() if task is not None else "")
         if self._returned:
             return ()
         self._returned = True
@@ -221,7 +224,9 @@ class _Embeddings:
         raise AssertionError((text, space))
 
 
-def _worker(*, fail: bool, stop_event: asyncio.Event) -> tuple[RetrievalWorker, _Store]:
+def _worker(
+    *, fail: bool, stop_event: asyncio.Event
+) -> tuple[RetrievalWorker, _Store, _Source]:
     """@brief 构造固定 worker 场景 / Build a fixed worker scenario."""
 
     turn = EpisodicTurn(
@@ -239,20 +244,21 @@ def _worker(*, fail: bool, stop_event: asyncio.Event) -> tuple[RetrievalWorker, 
         1,
     )
     store = _Store(stop_event)
+    source = _Source(turn)
     worker = RetrievalWorker(
-        source=_Source(turn),
+        source=source,
         store=store,
         embeddings=_Embeddings(fail=fail),
         space=space,
         renderer=EpisodicPassageRenderer(),
         telemetry=Telemetry(TelemetryBuffer(32)),
-        worker_count=1,
+        worker_count=4,
         batch_size=4,
         poll_interval=0.01,
         lease_for=timedelta(seconds=30),
         clock=_Clock(),
     )
-    return worker, store
+    return worker, store, source
 
 
 def test_worker_projects_embeds_and_drains_structurally() -> None:
@@ -262,10 +268,12 @@ def test_worker_projects_embeds_and_drains_structurally() -> None:
         """@brief 执行成功场景 / Execute the success scenario."""
 
         stop_event = asyncio.Event()
-        worker, store = _worker(fail=False, stop_event=stop_event)
+        worker, store, source = _worker(fail=False, stop_event=stop_event)
         await worker.run(stop_event)
         assert store.completed == EmbeddingVector((1.0, 0.0))
         assert store.retried_at is None
+        assert source.reader_tasks
+        assert set(source.reader_tasks) == {"retrieval-projection"}
 
     asyncio.run(scenario())
 
@@ -277,9 +285,10 @@ def test_worker_honors_provider_retry_after() -> None:
         """@brief 执行 retry 场景 / Execute the retry scenario."""
 
         stop_event = asyncio.Event()
-        worker, store = _worker(fail=True, stop_event=stop_event)
+        worker, store, source = _worker(fail=True, stop_event=stop_event)
         await worker.run(stop_event)
         assert store.completed is None
         assert store.retried_at == NOW + timedelta(seconds=7)
+        assert set(source.reader_tasks) == {"retrieval-projection"}
 
     asyncio.run(scenario())

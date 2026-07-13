@@ -109,28 +109,32 @@ class RetrievalWorker:
                 attributes={"pipeline.stage": "retrieval"},
             )
         async with asyncio.TaskGroup() as task_group:
+            task_group.create_task(
+                self._run_projector(stop_event),
+                name="retrieval-projection",
+            )
             for ordinal in range(self._worker_count):
                 task_group.create_task(
-                    self._run_consumer(stop_event),
+                    self._run_vector_consumer(stop_event),
                     name=f"retrieval-vector:{ordinal}",
                 )
 
-    async def _run_consumer(self, stop_event: asyncio.Event) -> None:
-        """@brief 运行单个固定 consumer / Run one fixed consumer.
+    async def _run_projector(self, stop_event: asyncio.Event) -> None:
+        """@brief 运行唯一 source projection producer / Run the sole source-projection producer.
 
         @param stop_event 停止信号 / Stop signal.
         @return None / None.
         """
 
         while not stop_event.is_set():
-            did_work = await self._run_cycle()
+            did_work = await self._project_sources()
             if not did_work:
                 await _wait_or_stop(stop_event, self._poll_interval)
 
-    async def _run_cycle(self) -> bool:
-        """@brief 投影新 Turn 并处理一个 vector batch / Project new turns and process one vector batch.
+    async def _project_sources(self) -> bool:
+        """@brief 投影一个来源批次 / Project one source batch.
 
-        @return 本轮是否发现工作 / Whether this cycle found work.
+        @return 本轮是否发现来源 / Whether this cycle found sources.
         """
 
         now = self._clock.now()
@@ -149,6 +153,27 @@ class RetrievalWorker:
                 MetricName.RETRIEVAL_OUTCOMES,
                 attributes={"operation": "projection", "outcome": Outcome.SUCCESS},
             )
+        return bool(sources)
+
+    async def _run_vector_consumer(self, stop_event: asyncio.Event) -> None:
+        """@brief 运行一个只领取 vector intent 的 consumer / Run one consumer owning vector intents only.
+
+        @param stop_event 停止信号 / Stop signal.
+        @return None / None.
+        """
+
+        while not stop_event.is_set():
+            did_work = await self._process_vector_batch()
+            if not did_work:
+                await _wait_or_stop(stop_event, self._poll_interval)
+
+    async def _process_vector_batch(self) -> bool:
+        """@brief 领取并处理一个 vector batch / Claim and process one vector batch.
+
+        @return 是否领取到任务 / Whether any vector intents were claimed.
+        """
+
+        now = self._clock.now()
         claims = await self._store.claim_vectors(
             space=self._space,
             now=now,
@@ -157,7 +182,7 @@ class RetrievalWorker:
         )
         if claims:
             await self._embed_claims(claims)
-        return bool(sources or claims)
+        return bool(claims)
 
     async def _embed_claims(self, claims: Sequence[PassageVectorClaim]) -> None:
         """@brief 单次 Provider batch 后逐条 fenced 完成 / Complete claims individually after one provider batch.
