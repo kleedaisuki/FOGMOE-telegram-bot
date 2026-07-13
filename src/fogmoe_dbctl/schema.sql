@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0040_memory_context_boundaries
--- Alembic head: 0040_memory_context_boundaries
+-- Source migrations: 0001_initial through 0042_remove_legacy_memory
+-- Alembic head: 0042_remove_legacy_memory
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and user-plan backfill) and the
@@ -19,7 +19,9 @@ CREATE SCHEMA IF NOT EXISTS infra;
 CREATE SCHEMA IF NOT EXISTS admin;
 CREATE SCHEMA IF NOT EXISTS observability;
 CREATE SCHEMA IF NOT EXISTS context_window;
-CREATE SCHEMA IF NOT EXISTS memory;
+CREATE SCHEMA IF NOT EXISTS retrieval;
+
+CREATE EXTENSION IF NOT EXISTS vector;
 
 -- DB_MIGRATION_SCHEMA defaults to infra.  Its version value is data, so it is
 -- intentionally not recorded in this schema-only snapshot.
@@ -501,37 +503,120 @@ CREATE TABLE identity.users (
   coins INT NOT NULL DEFAULT 0,
   permission INT DEFAULT 0,
   info VARCHAR(500) DEFAULT NULL,
-  permanent_records_limit INT NOT NULL DEFAULT 100,
   recharge_blocked_until TIMESTAMP NULL,
   coins_paid INT NOT NULL DEFAULT 0,
   user_plan VARCHAR(10) NOT NULL DEFAULT 'free'
 );
 
-CREATE TABLE memory.records (
-  memory_id UUID PRIMARY KEY,
+CREATE TABLE retrieval.embedding_spaces (
+  space_id VARCHAR(100) PRIMARY KEY CHECK (
+    space_id ~ '^[a-z][a-z0-9_.-]{0,99}$'
+  ),
+  model VARCHAR(255) NOT NULL CHECK (char_length(btrim(model)) > 0),
+  dimensions INTEGER NOT NULL CHECK (dimensions = 1024),
+  distance_metric TEXT NOT NULL CHECK (distance_metric = 'cosine'),
+  query_instruction VARCHAR(2000) NOT NULL CHECK (
+    char_length(btrim(query_instruction)) > 0
+  ),
+  passage_format_version INTEGER NOT NULL CHECK (passage_format_version > 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE retrieval.source_projections (
+  corpus_id VARCHAR(100) NOT NULL CHECK (
+    corpus_id ~ '^[a-z][a-z0-9_.-]{0,99}$'
+  ),
   owner_user_id BIGINT NOT NULL
     REFERENCES identity.users(id) ON DELETE CASCADE,
-  conversation_id TEXT NOT NULL CHECK (
-    char_length(conversation_id) BETWEEN 1 AND 512
+  source_kind VARCHAR(100) NOT NULL CHECK (
+    source_kind ~ '^[a-z][a-z0-9_.-]{0,99}$'
   ),
-  source_kind TEXT NOT NULL CHECK (
-    source_kind IN ('compaction_checkpoint', 'legacy_archive')
-  ),
-  source_id UUID NOT NULL UNIQUE,
+  source_id UUID NOT NULL,
+  format_version INTEGER NOT NULL CHECK (format_version > 0),
   source_digest CHAR(64) NOT NULL CHECK (
     source_digest ~ '^[0-9a-f]{64}$'
   ),
-  snapshot JSON NOT NULL CHECK (json_typeof(snapshot) = 'array'),
-  summary_text TEXT,
-  legacy_record_id BIGINT UNIQUE,
+  projected_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (corpus_id, source_kind, source_id, format_version)
+);
+
+CREATE INDEX retrieval_source_projections_owner_idx
+  ON retrieval.source_projections (owner_user_id, projected_at DESC);
+
+CREATE TABLE retrieval.passages (
+  passage_id UUID PRIMARY KEY,
+  corpus_id VARCHAR(100) NOT NULL CHECK (
+    corpus_id ~ '^[a-z][a-z0-9_.-]{0,99}$'
+  ),
+  owner_user_id BIGINT NOT NULL
+    REFERENCES identity.users(id) ON DELETE CASCADE,
+  source_kind VARCHAR(100) NOT NULL CHECK (
+    source_kind ~ '^[a-z][a-z0-9_.-]{0,99}$'
+  ),
+  source_id UUID NOT NULL,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  format_version INTEGER NOT NULL CHECK (format_version > 0),
+  content_text TEXT NOT NULL CHECK (
+    char_length(btrim(content_text)) BETWEEN 1 AND 20000
+  ),
+  content_digest CHAR(64) NOT NULL CHECK (
+    content_digest ~ '^[0-9a-f]{64}$'
+  ),
+  occurred_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL,
-  CONSTRAINT memory_records_summary_ck CHECK (
-    summary_text IS NULL OR char_length(btrim(summary_text)) > 0
+  UNIQUE (corpus_id, source_kind, source_id, format_version, ordinal)
+);
+
+CREATE INDEX retrieval_passages_owner_corpus_time_idx
+  ON retrieval.passages (
+    owner_user_id,
+    corpus_id,
+    format_version,
+    occurred_at DESC,
+    passage_id
+  );
+
+CREATE TABLE retrieval.passage_vectors (
+  passage_id UUID NOT NULL
+    REFERENCES retrieval.passages(passage_id) ON DELETE CASCADE,
+  space_id VARCHAR(100) NOT NULL
+    REFERENCES retrieval.embedding_spaces(space_id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (
+    status IN ('pending','retry_wait','processing','completed','failed_final')
+  ),
+  version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  next_attempt_at TIMESTAMPTZ,
+  claim_token UUID,
+  lease_expires_at TIMESTAMPTZ,
+  embedding vector(1024),
+  last_error VARCHAR(1000),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  completed_at TIMESTAMPTZ,
+  PRIMARY KEY (passage_id, space_id),
+  CONSTRAINT retrieval_passage_vectors_ready_ck CHECK (
+    (status IN ('pending','retry_wait')) = (next_attempt_at IS NOT NULL)
+  ),
+  CONSTRAINT retrieval_passage_vectors_lease_ck CHECK (
+    (status = 'processing') = (
+      claim_token IS NOT NULL AND lease_expires_at IS NOT NULL
+    )
+  ),
+  CONSTRAINT retrieval_passage_vectors_result_ck CHECK (
+    (status = 'completed') = (
+      embedding IS NOT NULL AND completed_at IS NOT NULL
+    )
   )
 );
 
-CREATE INDEX memory_records_owner_created_idx
-  ON memory.records (owner_user_id, created_at DESC, memory_id DESC);
+CREATE INDEX retrieval_passage_vectors_ready_idx
+  ON retrieval.passage_vectors (space_id, next_attempt_at, passage_id)
+  WHERE status IN ('pending','retry_wait');
+
+CREATE INDEX retrieval_passage_vectors_expired_lease_idx
+  ON retrieval.passage_vectors (space_id, lease_expires_at, passage_id)
+  WHERE status = 'processing';
 
 CREATE TABLE identity.operation_receipts (
   idempotency_key VARCHAR(200) PRIMARY KEY

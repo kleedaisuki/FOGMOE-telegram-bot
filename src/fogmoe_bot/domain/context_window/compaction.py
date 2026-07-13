@@ -20,7 +20,7 @@ from fogmoe_bot.domain.conversation.identity import (
     LeaseToken,
     TurnId,
 )
-from fogmoe_bot.domain.conversation.temporal import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.context_window.budget import TokenCount
 
 
@@ -136,7 +136,7 @@ class CompactionPlan:
 
     @param compaction_id 稳定 Compaction ID / Stable compaction ID.
     @param conversation_id 所属长期会话 / Owning long-lived conversation.
-    @param owner_user_id 下游记忆投影所有者 / Owner of the downstream memory projection.
+    @param owner_user_id Context State 所有者 / Owner of the Context State.
     @param epoch_floor_sequence 当前 reset epoch 下界 / Current reset-epoch floor.
     @param from_sequence 本次 delta 首序号 / First sequence in this delta.
     @param through_sequence 本次 delta 末序号 / Last sequence in this delta.

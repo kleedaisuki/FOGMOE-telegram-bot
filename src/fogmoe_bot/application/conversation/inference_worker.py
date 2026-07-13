@@ -27,7 +27,7 @@ from fogmoe_bot.domain.conversation.identity import (
     DeliveryStreamId,
     OutboundMessageId,
 )
-from fogmoe_bot.domain.conversation.temporal import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.inference import InferenceActivityClaim
 from fogmoe_bot.domain.conversation.message import (
     MessageDraft,

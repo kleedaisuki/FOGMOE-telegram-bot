@@ -10,7 +10,7 @@ from fogmoe_bot.domain.conversation.identity import (
     LeaseToken,
     UpdateId,
 )
-from fogmoe_bot.domain.conversation.temporal import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.inbox import (
     InboundClaim,
     InboundStatus,

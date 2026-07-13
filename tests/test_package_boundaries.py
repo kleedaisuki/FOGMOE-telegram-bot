@@ -25,12 +25,12 @@ def test_context_and_conversation_have_distinct_domain_ownership():
 
     assert (context_root / "formatting.py").is_file()
     assert (context_root / "token_estimator.py").is_file()
+    assert (SRC_ROOT / "domain" / "temporal.py").is_file()
     assert (conversation_root / "__init__.py").is_file()
     assert not (conversation_root / "models.py").exists()
     for feature in (
         "payloads.py",
         "identity.py",
-        "temporal.py",
         "turn.py",
         "inbox.py",
         "inference.py",
@@ -765,7 +765,7 @@ def test_assistant_tool_operations_have_explicit_feature_ownership() -> None:
         "dispatcher.py",
         "external.py",
         "group.py",
-        "memory.py",
+        "retrieval.py",
         "outbound.py",
         "parsing.py",
         "schedule.py",

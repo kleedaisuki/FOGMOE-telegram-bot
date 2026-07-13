@@ -23,7 +23,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from fogmoe_bot.application.runtime import Jitter, SystemUtcClock, UtcClock
-from fogmoe_bot.domain.conversation.temporal import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.outbox import (
     OutboundClaim,
     OutboundMessage,

@@ -16,7 +16,7 @@ from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     TurnId,
 )
-from fogmoe_bot.domain.conversation.temporal import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.message import (
     ConversationMessage,
     MessageRole,
@@ -77,7 +77,7 @@ class ContextWindowRequest:
     """@brief 一次 durable inference 的历史投影请求 / History-projection request for one durable inference.
 
     @param conversation_id 长期会话 ID / Long-lived conversation identifier.
-    @param owner_user_id 永久记忆所有者 / Permanent-memory owner.
+    @param owner_user_id Context State 所有者 / Context-State owner.
     @param through_turn_id 截止 Turn / Cutoff Turn.
     @param base_messages 不含历史的 system/user-state 消息 / System and user-state messages excluding history.
     @param reserved_tokens 输出与 tool schema 预留 / Output and tool-schema reserve.
@@ -527,7 +527,7 @@ class ContextWindowProjector:
         checkpoint_summary: str | None,
         history: Sequence[JsonObject],
     ) -> TokenCount:
-        """@brief 估算 base、memory、raw 与 reserve / Estimate base, memory, raw history, and reserves.
+        """@brief 估算 base、checkpoint、raw 与 reserve / Estimate base, checkpoint, raw history, and reserves.
 
         @return 完整预算 token 数 / Complete budget token count.
         """
@@ -667,11 +667,13 @@ def project_conversation_message(message: ConversationMessage) -> list[JsonObjec
 
 
 def checkpoint_summary_message(summary: str) -> JsonObject:
-    """@brief 把累计摘要包装成非指令 system memory / Wrap a cumulative summary as non-instruction system memory.
+    """@brief 把 checkpoint 摘要包装成非指令 system data / Wrap a checkpoint summary as non-instruction system data.
 
     @param summary 已完成累计摘要 / Completed cumulative summary.
     @return provider-neutral system message / Provider-neutral system message.
     @raise ValueError 摘要为空 / Raised for blank summary.
+    @note ``conversation_memory`` 是 projection v1 的 wire label，不代表 Memory bounded context /
+        ``conversation_memory`` is a projection-v1 wire label, not a Memory bounded context.
     """
 
     normalized = summary.strip()

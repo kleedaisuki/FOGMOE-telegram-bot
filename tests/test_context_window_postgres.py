@@ -1,4 +1,4 @@
-"""@brief Context Window 与 Memory 的真实 PostgreSQL 契约 / Real-PostgreSQL contracts for Context Window and Memory."""
+"""@brief Context Window 的真实 PostgreSQL 契约 / Real-PostgreSQL contracts for Context Window."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from uuid import uuid4
 
 import pytest
 
-from fogmoe_bot.application.memory.queries import MemoryPageQuery
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     TurnId,
@@ -21,13 +20,6 @@ from fogmoe_bot.domain.context_window.compaction import (
     CompactionPlan,
     CompactionSummary,
     StaleCompactionClaimError,
-    compaction_source_digest,
-)
-from fogmoe_bot.domain.memory.models import (
-    MemoryId,
-    MemoryProvenance,
-    MemoryRecord,
-    MemorySourceKind,
 )
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.database import connection as db_connection
@@ -35,7 +27,6 @@ from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.context_window import (
     PostgresContextWindowStore,
 )
-from fogmoe_bot.infrastructure.database.memory import PostgresMemoryReader
 from fogmoe_dbctl.postgres import read_service, service_sqlalchemy_url
 
 
@@ -77,8 +68,8 @@ async def _insert_fixture(
     async with db_connection.transaction() as connection:
         await db_connection.execute(
             "INSERT INTO identity.users "
-            "(id, tg_uid, provider, name, permanent_records_limit) "
-            "VALUES (%s, %s, 'telegram', %s, 1)",
+            "(id, tg_uid, provider, name) "
+            "VALUES (%s, %s, 'telegram', %s)",
             (user_id, user_id, f"retention_{source_suffix}"),
             connection=connection,
         )
@@ -132,36 +123,6 @@ async def _insert_fixture(
             )
 
 
-async def _insert_completed_legacy(
-    *,
-    record: MemoryRecord,
-) -> None:
-    """@brief 插入一个已完成 legacy Segment 以验证 quota window / Insert a completed legacy segment to verify the quota window.
-
-    @return None / None.
-    """
-
-    await db_connection.execute(
-        "INSERT INTO memory.records ("
-        "memory_id, owner_user_id, conversation_id, source_kind, source_id, "
-        "source_digest, snapshot, summary_text, legacy_record_id, created_at"
-        ") VALUES ("
-        "CAST(%s AS UUID), %s, %s, 'legacy_archive', CAST(%s AS UUID), %s, "
-        "CAST(%s AS JSON), %s, %s, %s)",
-        (
-            str(record.memory_id.value),
-            record.owner_user_id,
-            str(record.provenance.conversation_id),
-            str(record.memory_id.value),
-            record.provenance.source_digest,
-            json.dumps(record.snapshot, ensure_ascii=False),
-            record.summary,
-            record.memory_id.legacy_value,
-            record.created_at,
-        ),
-    )
-
-
 async def _cleanup(user_id: int, conversation_id: ConversationId) -> None:
     """@brief 按外键顺序删除 retention fixture / Delete the retention fixture in foreign-key order.
 
@@ -169,11 +130,6 @@ async def _cleanup(user_id: int, conversation_id: ConversationId) -> None:
     """
 
     async with db_connection.transaction() as connection:
-        await db_connection.execute(
-            "DELETE FROM memory.records WHERE owner_user_id = %s",
-            (user_id,),
-            connection=connection,
-        )
         await db_connection.execute(
             "DELETE FROM context_window.compactions WHERE owner_user_id = %s",
             (user_id,),
@@ -196,10 +152,10 @@ async def _cleanup(user_id: int, conversation_id: ConversationId) -> None:
         )
 
 
-def test_real_postgres_enqueue_fencing_and_paid_quota(
+def test_real_postgres_enqueue_and_fencing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """@brief 并发 enqueue 只建一段，旧 lease 被 fencing，付费 limit 控制可见记录 / Concurrent enqueue creates one segment, stale leases are fenced, and the paid limit controls visibility.
+    """@brief Compaction completion 只改变 checkpoint 且旧 lease 被 fencing / Completion changes only the checkpoint and fences stale leases.
 
     @param monkeypatch 临时绑定隔离 DSN / Temporarily bind the isolated DSN.
     """
@@ -219,7 +175,6 @@ def test_real_postgres_enqueue_fencing_and_paid_quota(
         anchor_turn_id = TurnId.new()
         now = datetime(2031, 1, 1, tzinfo=UTC)
         repository = PostgresContextWindowStore()
-        memory = PostgresMemoryReader()
         try:
             await _insert_fixture(
                 user_id=user_id,
@@ -305,56 +260,6 @@ def test_real_postgres_enqueue_fencing_and_paid_quota(
             )
             assert completed.summary is not None
             assert completed.summary.text == "cumulative"
-
-            legacy_snapshot = ({"role": "user", "content": "newest"},)
-            legacy_memory_id = MemoryId(
-                uuid4(),
-                legacy_value=int(suffix[:10], 16) + 1,
-            )
-            legacy = MemoryRecord(
-                memory_id=legacy_memory_id,
-                owner_user_id=user_id,
-                provenance=MemoryProvenance(
-                    conversation_id=conversation_id,
-                    source_kind=MemorySourceKind.LEGACY_ARCHIVE,
-                    source_id=legacy_memory_id.value,
-                    source_digest=compaction_source_digest(legacy_snapshot),
-                ),
-                snapshot=legacy_snapshot,
-                summary="newest",
-                created_at=now + timedelta(seconds=20),
-            )
-            await _insert_completed_legacy(
-                record=legacy,
-            )
-            visible = await memory.read_page(
-                MemoryPageQuery(owner_user_id=user_id, limit=10)
-            )
-            assert [record.memory_id.value for record in visible] == [
-                legacy.memory_id.value
-            ]
-            assert await memory.count_summaries(user_id) == 1
-
-            await db_connection.execute(
-                "UPDATE identity.users SET permanent_records_limit = 0 WHERE id = %s",
-                (user_id,),
-            )
-            assert (
-                await memory.read_page(MemoryPageQuery(owner_user_id=user_id, limit=10))
-                == ()
-            )
-            assert await memory.count_summaries(user_id) == 0
-            await db_connection.execute(
-                "UPDATE identity.users SET permanent_records_limit = 2 WHERE id = %s",
-                (user_id,),
-            )
-            expanded = await memory.read_page(
-                MemoryPageQuery(owner_user_id=user_id, limit=10)
-            )
-            assert [record.memory_id.value for record in expanded] == [
-                legacy.memory_id.value,
-                completed.compaction_id.value,
-            ]
         finally:
             await _cleanup(user_id, conversation_id)
             await db.dispose_current_engine()

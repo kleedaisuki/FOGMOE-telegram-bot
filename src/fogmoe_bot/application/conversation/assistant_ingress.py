@@ -29,7 +29,7 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnSource,
     UpdateId,
 )
-from fogmoe_bot.domain.conversation.temporal import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
 from fogmoe_bot.domain.conversation.workflow_results import TurnAcceptanceResult
 from fogmoe_bot.domain.observability.trace import TraceContext

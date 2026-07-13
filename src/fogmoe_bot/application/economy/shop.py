@@ -29,7 +29,6 @@ class PoolFundingCommand:
 class ShopItem(StrEnum):
     """@brief 商店可购买项目 / Purchasable shop item."""
 
-    MEMORY_LIMIT = "memory_limit"
     PERMISSION_1 = "permission_1"
     PERMISSION_2 = "permission_2"
     PERMISSION_3 = "permission_3"
@@ -64,7 +63,6 @@ class ShopPurchaseResult:
     @param reward 抽奖奖励 / Lottery reward.
     @param bonus 保底奖励 / Pity bonus.
     @param permission 新权限级别 / New permission level.
-    @param memory_limit 新永久记忆上限 / New permanent-memory limit.
     """
 
     code: EconomyCode
@@ -72,7 +70,6 @@ class ShopPurchaseResult:
     reward: int = 0
     bonus: int = 0
     permission: int = 0
-    memory_limit: int = 0
 
 
 class ShopOperations(Protocol):

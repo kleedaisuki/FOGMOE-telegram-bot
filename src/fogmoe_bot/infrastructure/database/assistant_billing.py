@@ -10,7 +10,7 @@ from typing import Protocol, cast
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.domain.conversation.identity import TurnId
-from fogmoe_bot.domain.conversation.temporal import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
 from fogmoe_bot.domain.economy import (
     AssistantBillingReservation,

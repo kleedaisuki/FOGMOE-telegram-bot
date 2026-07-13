@@ -12,7 +12,7 @@ from fogmoe_bot.domain.conversation.identity import (
     InferenceActivityId,
     TurnId,
 )
-from fogmoe_bot.domain.conversation.temporal import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.turn import (
     POST_ACCEPTANCE_TURN_STATES,
     ConversationTurn,

@@ -36,9 +36,6 @@ from fogmoe_bot.infrastructure.database.assistant_tool_effects import (
     PostgresAssistantToolStore,
     ToolTransactionMode,
 )
-from fogmoe_bot.infrastructure.database.memory import (
-    PostgresMemoryReader,
-)
 from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
     PostgresOutboxRepository,
 )
@@ -112,7 +109,7 @@ def test_checkpoint_receipt_replay_conflict_and_kill_window(
             generated_media=external,
             stickers=external,
             outbox=PostgresOutboxRepository(),
-            memory=PostgresMemoryReader(),
+            recall=external,
             groups=PostgresGroupMessageProjection(),
         )
         context = ToolExecutionContext(
@@ -361,7 +358,7 @@ def test_diary_schedule_and_kindness_share_atomic_receipt_transactions(
             generated_media=external,
             stickers=external,
             outbox=PostgresOutboxRepository(),
-            memory=PostgresMemoryReader(),
+            recall=external,
             groups=PostgresGroupMessageProjection(),
         )
         context = ToolExecutionContext(

@@ -38,9 +38,6 @@ from fogmoe_bot.infrastructure.database.assistant_tool_effects import (
 from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
     StandaloneOutboxWriter,
 )
-from fogmoe_bot.infrastructure.database.memory import (
-    PostgresMemoryReader,
-)
 from fogmoe_bot.infrastructure.database.group_message_projection import (
     PostgresGroupMessageProjection,
 )
@@ -304,7 +301,7 @@ def test_receipt_replay_queues_exactly_one_standalone_sticker_outbox(
             generated_media=adapters,
             stickers=adapters,
             outbox=cast(StandaloneOutboxWriter, workflow),
-            memory=PostgresMemoryReader(),
+            recall=adapters,
             groups=PostgresGroupMessageProjection(),
         )
         turn_id = TurnId.new()
@@ -385,7 +382,7 @@ def test_generated_media_runs_outside_transaction_then_finalizes_once(
             generated_media=generated,
             stickers=unused,
             outbox=cast(StandaloneOutboxWriter, outbox),
-            memory=PostgresMemoryReader(),
+            recall=unused,
             groups=PostgresGroupMessageProjection(),
         )
         turn_id = TurnId.new()

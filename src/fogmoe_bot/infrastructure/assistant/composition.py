@@ -12,7 +12,12 @@ from fogmoe_bot.application.assistant.durable_inference import (
 from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
 from fogmoe_bot.application.assistant.tool_runtime import AgentRuntime
 from fogmoe_bot.application.assistant.tools.catalog import DEFAULT_TOOL_CATALOG
-from fogmoe_bot.application.memory.queries import MemoryReader
+from fogmoe_bot.application.retrieval import (
+    EPISODIC_CORPUS_ID,
+    EpisodicPassageRenderer,
+    RetrievalWorker,
+    SemanticRecall,
+)
 from fogmoe_bot.application.context_window.worker import (
     CompactionWorker,
 )
@@ -23,6 +28,7 @@ from fogmoe_bot.application.context_window.cache import ContextWindowCache
 from fogmoe_bot.application.conversation.inference_worker import InferenceRuntimeLimits
 from fogmoe_bot.domain.assistant.routing.circuit import ProviderCircuit
 from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
+from fogmoe_bot.domain.retrieval import EmbeddingSpace
 from fogmoe_bot.infrastructure import config
 from fogmoe_bot.infrastructure.blocking import (
     AsyncBlockingBulkhead,
@@ -33,7 +39,10 @@ from fogmoe_bot.infrastructure.database.assistant_tool_effects import (
 from fogmoe_bot.infrastructure.database.context_window import (
     PostgresContextWindowStore,
 )
-from fogmoe_bot.infrastructure.database.memory import PostgresMemoryReader
+from fogmoe_bot.infrastructure.database.retrieval import (
+    PostgresEpisodicSource,
+    PostgresRetrievalStore,
+)
 from fogmoe_bot.infrastructure.database.group_message_projection import (
     PostgresGroupMessageProjection,
 )
@@ -48,6 +57,7 @@ from fogmoe_bot.infrastructure.context_window.token_counter import (
 )
 from fogmoe_bot.infrastructure.media.file_artifact_store import FileArtifactStore
 from fogmoe_bot.infrastructure.media.file_rate_limiter import FileSlidingWindowLimiter
+from fogmoe_bot.infrastructure.retrieval import OpenAICompatibleEmbeddings
 
 from fogmoe_bot.infrastructure.context_window.summary import (
     ProviderCompactionSummaryGenerator,
@@ -66,6 +76,8 @@ class DurableAssistantComposition:
 
     @param inference durable inference adapter / Durable inference adapter.
     @param compaction durable conversation compaction worker / Durable conversation-compaction worker.
+    @param retrieval durable episodic-retrieval worker / Durable episodic-retrieval worker.
+    @param embedding_client 共享 embedding HTTP client 与生命周期 / Shared embedding HTTP client and lifecycle.
     @param artifacts outbox delivery 共享 artifact store / Artifact store shared with outbox delivery.
     @param blocking_bulkheads 由顶层运行时关停的阻塞 SDK 隔舱 /
         Blocking SDK bulkheads closed by the top-level runtime.
@@ -73,6 +85,8 @@ class DurableAssistantComposition:
 
     inference: DurableAssistantInferenceAdapter
     compaction: CompactionWorker
+    retrieval: RetrievalWorker
+    embedding_client: OpenAICompatibleEmbeddings
     artifacts: FileArtifactStore
     blocking_bulkheads: tuple[AsyncBlockingBulkhead, ...]
 
@@ -82,7 +96,6 @@ def build_durable_assistant(
     system_prompt: str,
     runtime_limits: InferenceRuntimeLimits,
     context_window: PostgresContextWindowStore | None = None,
-    memory: MemoryReader | None = None,
     telemetry: Telemetry,
 ) -> DurableAssistantComposition:
     """@brief 组合 async Agent、receipts、adapters 与 durable inference / Compose the async Agent, receipts, adapters, and durable inference.
@@ -90,13 +103,37 @@ def build_durable_assistant(
     @param system_prompt system prompt / System prompt.
     @param runtime_limits inference worker budgets / Inference-worker budgets.
     @param context_window 可替换 Context Window store / Replaceable context-window store.
-    @param memory 可替换长期记忆 reader / Replaceable long-term-memory reader.
     @param telemetry 进程 typed telemetry / Process typed telemetry.
     @return inference 与 artifact store / Inference and artifact store.
     """
 
     context_window_store = context_window or PostgresContextWindowStore()
-    memory_reader = memory or PostgresMemoryReader()
+    retrieval_store = PostgresRetrievalStore()
+    embedding_space = _retrieval_space()
+    embedding_client = OpenAICompatibleEmbeddings(
+        api_key=_retrieval_api_key(),
+        api_base=config.RETRIEVAL_EMBEDDING_API_BASE,
+        timeout_seconds=config.RETRIEVAL_EMBEDDING_TIMEOUT_SECONDS,
+        proxy_url=config.NETWORK_PROXY_URL,
+    )
+    recall = SemanticRecall(
+        embeddings=embedding_client,
+        store=retrieval_store,
+        space=embedding_space,
+        corpus_id=EPISODIC_CORPUS_ID,
+    )
+    retrieval = RetrievalWorker(
+        source=PostgresEpisodicSource(),
+        store=retrieval_store,
+        embeddings=embedding_client,
+        space=embedding_space,
+        renderer=EpisodicPassageRenderer(),
+        telemetry=telemetry,
+        worker_count=config.RETRIEVAL_WORKER_COUNT,
+        batch_size=config.RETRIEVAL_BATCH_SIZE,
+        poll_interval=config.RETRIEVAL_POLL_INTERVAL,
+        lease_for=timedelta(seconds=config.RETRIEVAL_LEASE_SECONDS),
+    )
     budget = _context_window_budget()
     history = ContextWindowProjector(
         persistence=context_window_store,
@@ -170,7 +207,7 @@ def build_durable_assistant(
             bulkhead=sticker_bulkhead,
         ),
         outbox=PostgresOutboxRepository(),
-        memory=memory_reader,
+        recall=recall,
         groups=PostgresGroupMessageProjection(),
     )
     store = PostgresAssistantToolStore(operations=operations)
@@ -230,6 +267,8 @@ def build_durable_assistant(
             translation_inference=translation_service,
         ),
         compaction=compaction,
+        retrieval=retrieval,
+        embedding_client=embedding_client,
         artifacts=artifacts,
         blocking_bulkheads=(
             external_bulkhead,
@@ -252,6 +291,36 @@ def _context_window_budget() -> ContextTokenBudget:
         hard_tokens=TokenCount(config.CHAT_TOKEN_LIMIT),
         summary_output_tokens=TokenCount(2_500),
         segment_input_tokens=TokenCount(min(64_000, warning)),
+    )
+
+
+def _retrieval_api_key() -> str:
+    """@brief 解析独立 embedding 凭据并允许显式复用 OpenRouter key / Resolve embedding credentials with explicit OpenRouter fallback.
+
+    @return 非空 API key / Non-empty API key.
+    @raise RuntimeError 未配置凭据 / Missing credentials.
+    """
+
+    key = config.RETRIEVAL_EMBEDDING_API_KEY or config.OPENROUTER_API_KEY
+    if not key:
+        raise RuntimeError(
+            "RETRIEVAL_EMBEDDING_API_KEY or OPENROUTER_API_KEY is required"
+        )
+    return key
+
+
+def _retrieval_space() -> EmbeddingSpace:
+    """@brief 从显式配置构造活跃 embedding space / Build the active embedding space from explicit configuration.
+
+    @return 已验证空间 / Validated space.
+    """
+
+    return EmbeddingSpace(
+        space_id=config.RETRIEVAL_EMBEDDING_SPACE_ID,
+        model=config.RETRIEVAL_EMBEDDING_MODEL,
+        dimensions=config.RETRIEVAL_EMBEDDING_DIMENSIONS,
+        query_instruction=config.RETRIEVAL_QUERY_INSTRUCTION,
+        passage_format_version=1,
     )
 
 

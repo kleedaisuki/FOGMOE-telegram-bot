@@ -19,7 +19,7 @@ APPLICATION_SCHEMAS = (
     "identity",
     "conversation",
     "context_window",
-    "memory",
+    "retrieval",
     "assistant",
     "economy",
     "moderation",

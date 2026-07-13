@@ -21,7 +21,7 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnId,
     TurnSource,
 )
-from fogmoe_bot.domain.conversation.temporal import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.turn import ConversationTurn
 from fogmoe_bot.domain.conversation.inference import InferenceActivityDraft
 from fogmoe_bot.domain.conversation.message import (

@@ -10,7 +10,7 @@ from types import MappingProxyType
 from typing import Self
 
 from .identity import ConversationId, TurnId, TurnSource
-from .temporal import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 
 
 class TurnState(StrEnum):

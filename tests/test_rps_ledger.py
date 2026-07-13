@@ -60,7 +60,6 @@ def _account(user_id: int, coins: int) -> UserAccount:
         permission=0,
         coins=coins,
         coins_paid=0,
-        permanent_records_limit=100,
         info="",
     )
 

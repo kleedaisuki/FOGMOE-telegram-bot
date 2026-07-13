@@ -34,6 +34,7 @@ class MetricName(StrEnum):
     OUTBOX_OUTCOMES = "fogmoe.outbox.outcomes"
     LLM_OUTCOMES = "fogmoe.llm.outcomes"
     TOOL_OUTCOMES = "fogmoe.tool.outcomes"
+    RETRIEVAL_OUTCOMES = "fogmoe.retrieval.outcomes"
     DEPENDENCY_OUTCOMES = "fogmoe.dependency.outcomes"
     LEASE_RECOVERIES = "fogmoe.pipeline.lease.recoveries"
 

@@ -278,7 +278,7 @@ source .venv/bin/activate
 - `src/fogmoe_bot/application/runtime/`：有界 keyed mailbox 与统一后台服务生命周期
 - `src/fogmoe_bot/application/conversation/`：durable inbox、Turn、inference activity 与 outbox 工作流
 - `src/fogmoe_bot/domain/context_window/`、`application/context_window/`：token budget、history projection、checkpoint 与 durable compaction
-- `src/fogmoe_bot/domain/memory/`、`application/memory/`：跨会话 memory identity、provenance、query DTO 与窄端口
+- `src/fogmoe_bot/domain/retrieval/`、`application/retrieval/`：embedding space、episodic passage、durable vector workflow 与 typed semantic recall
 - `src/fogmoe_bot/domain/observability/`：W3C trace identity 与不可变 typed signals
 - `src/fogmoe_bot/application/observability/`：有界 buffer、span scope、export/runtime metrics 生命周期
 - `src/fogmoe_bot/infrastructure/observability/`：结构日志、脱敏、独立 PostgreSQL batch sink 与进程装配

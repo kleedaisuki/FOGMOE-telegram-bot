@@ -441,7 +441,6 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.delete_message()
         return
     item = {
-        "shop_buy_memory_limit": ShopItem.MEMORY_LIMIT,
         "shop_upgrade_1": ShopItem.PERMISSION_1,
         "shop_upgrade_2": ShopItem.PERMISSION_2,
         "shop_upgrade_3": ShopItem.PERMISSION_3,
@@ -527,11 +526,6 @@ def _shop_home_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("购买权限", callback_data="shop_buy_permission")],
-            [
-                InlineKeyboardButton(
-                    "购买记忆上限 +1 - 100金币", callback_data="shop_buy_memory_limit"
-                )
-            ],
             [InlineKeyboardButton("购买彩票", callback_data="shop_buy_lottery")],
             [InlineKeyboardButton("关闭商店", callback_data="shop_close")],
         ]
@@ -554,8 +548,6 @@ def _render_purchase(item: ShopItem, result: ShopPurchaseResult) -> str:
         return "您已经拥有该权限或更高权限。"
     if result.code is EconomyCode.PERMISSION_PREREQUISITE:
         return "您需要先购买前一级权限。"
-    if item is ShopItem.MEMORY_LIMIT:
-        return f"购买成功！永久记忆上限已提升至 {result.memory_limit} 条。"
     if item in {ShopItem.PERMISSION_1, ShopItem.PERMISSION_2, ShopItem.PERMISSION_3}:
         return f"购买成功！您的权限已升级到{result.permission}级。"
     bonus = (

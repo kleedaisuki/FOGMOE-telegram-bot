@@ -8,7 +8,7 @@ from decimal import Decimal
 from enum import StrEnum
 
 from fogmoe_bot.domain.conversation.identity import TurnId
-from fogmoe_bot.domain.conversation.temporal import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 
 
 class AssistantBillingStatus(StrEnum):

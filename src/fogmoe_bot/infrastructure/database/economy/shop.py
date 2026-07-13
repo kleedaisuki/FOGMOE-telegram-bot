@@ -80,8 +80,8 @@ class PostgresShopOperations(ShopOperations):
 
         async with db_connection.transaction() as connection:
             row = await db_connection.fetch_one(
-                "SELECT id, coins, coins_paid, user_plan, permission, "
-                "permanent_records_limit FROM identity.users "
+                "SELECT id, coins, coins_paid, user_plan, permission "
+                "FROM identity.users "
                 "WHERE id = %s FOR UPDATE",
                 (command.user_id,),
                 connection=connection,
@@ -98,7 +98,6 @@ class PostgresShopOperations(ShopOperations):
                 cast(str, row[3]),
             )
             permission = cast(int, row[4])
-            memory_limit = cast(int, row[5])
             price = _shop_price(command.item)
             rejection = _purchase_prerequisite(command.item, permission)
             if rejection is not None:
@@ -106,7 +105,6 @@ class PostgresShopOperations(ShopOperations):
                     rejection,
                     available=account.total,
                     permission=permission,
-                    memory_limit=memory_limit,
                 )
             else:
                 charged = account.spend(price)
@@ -115,7 +113,6 @@ class PostgresShopOperations(ShopOperations):
                         EconomyCode.INSUFFICIENT_COINS,
                         available=account.total,
                         permission=permission,
-                        memory_limit=memory_limit,
                     )
                 else:
                     reward = command.drawn_reward
@@ -126,10 +123,9 @@ class PostgresShopOperations(ShopOperations):
                             bonus = 10 if command.item is ShopItem.SCRATCH else 2
                             await _reset_pity(command, connection)
                     permission = _new_permission(command.item, permission)
-                    memory_limit += int(command.item is ShopItem.MEMORY_LIMIT)
                     await db_connection.execute(
                         "UPDATE identity.users SET coins = %s, coins_paid = %s, "
-                        "user_plan = %s, permission = %s, permanent_records_limit = %s "
+                        "user_plan = %s, permission = %s "
                         "WHERE id = %s",
                         (
                             charged.free + reward + bonus,
@@ -140,7 +136,6 @@ class PostgresShopOperations(ShopOperations):
                                 self._admin_user_id,
                             ),
                             permission,
-                            memory_limit,
                             command.user_id,
                         ),
                         connection=connection,
@@ -151,7 +146,6 @@ class PostgresShopOperations(ShopOperations):
                         reward=reward,
                         bonus=bonus,
                         permission=permission,
-                        memory_limit=memory_limit,
                     )
             await _save_result(
                 command.idempotency_key,
@@ -171,7 +165,6 @@ def _shop_price(item: ShopItem) -> int:
     """
 
     return {
-        ShopItem.MEMORY_LIMIT: 100,
         ShopItem.PERMISSION_1: 50,
         ShopItem.PERMISSION_2: 100,
         ShopItem.PERMISSION_3: 10_000,
@@ -283,7 +276,6 @@ def _purchase_mapping(result: ShopPurchaseResult) -> dict[str, object]:
         "reward": result.reward,
         "bonus": result.bonus,
         "permission": result.permission,
-        "memory_limit": result.memory_limit,
     }
 
 
@@ -300,5 +292,4 @@ def _purchase_from_mapping(value: Mapping[str, Any]) -> ShopPurchaseResult:
         reward=int(value.get("reward", 0)),
         bonus=int(value.get("bonus", 0)),
         permission=int(value.get("permission", 0)),
-        memory_limit=int(value.get("memory_limit", 0)),
     )

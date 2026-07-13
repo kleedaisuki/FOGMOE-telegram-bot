@@ -7,7 +7,7 @@ from typing import Self
 
 from .identity import ConversationId, LeaseToken, UpdateId
 from .payloads import JsonObject
-from .temporal import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.observability.trace import TraceContext
 
 

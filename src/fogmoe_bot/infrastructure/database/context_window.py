@@ -20,7 +20,7 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnId,
     UpdateId,
 )
-from fogmoe_bot.domain.conversation.temporal import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.message import (
     ConversationMessage,
     MessageDraft,
@@ -434,7 +434,6 @@ class PostgresContextWindowStore:
                     raise StaleCompactionClaimError(
                         f"Stale compaction completion for {claim.compaction_id}"
                     )
-                await _project_completed_compaction(current, connection=connection)
                 return current
             if (
                 current.status is not CompactionStatus.PROCESSING
@@ -467,9 +466,7 @@ class PostgresContextWindowStore:
                 raise StaleCompactionClaimError(
                     f"Stale compaction completion for {claim.compaction_id}"
                 )
-            completed = _map_compaction(row)
-            await _project_completed_compaction(completed, connection=connection)
-            return completed
+            return _map_compaction(row)
 
     async def retry_compaction(
         self,
@@ -612,72 +609,6 @@ def _map_compaction(row: object) -> Compaction:
         updated_at=_datetime(values[25]),
         completed_at=_optional_datetime(values[26]),
     )
-
-
-async def _project_completed_compaction(
-    compaction: Compaction,
-    *,
-    connection: AsyncConnection,
-) -> None:
-    """@brief 同事务投影不可变长期记忆记录 / Transactionally project an immutable long-term-memory record.
-
-    @param compaction 已完成 compaction / Completed compaction.
-    @param connection 调用方事务连接 / Caller-owned transaction connection.
-    @return None / None.
-    @raise RuntimeError 同 identity 的 memory projection 发生漂移 / The memory projection for the identity drifted.
-    @note 这是同部署单元内的同步领域事件投影；memory domain 不依赖 compaction aggregate。/
-        This is a synchronous domain-event projection inside one deployment unit; the
-        memory domain does not depend on the compaction aggregate.
-    """
-
-    if (
-        compaction.status is not CompactionStatus.COMPLETED
-        or compaction.summary is None
-        or compaction.completed_at is None
-    ):
-        raise ValueError("Memory projection requires a completed compaction")
-    draft = compaction.draft
-    inserted = await db_connection.fetch_one(
-        "INSERT INTO memory.records ("
-        "memory_id, owner_user_id, conversation_id, source_kind, source_id, "
-        "source_digest, snapshot, summary_text, legacy_record_id, created_at"
-        ") VALUES (CAST(%s AS UUID), %s, %s, 'compaction_checkpoint', "
-        "CAST(%s AS UUID), %s, CAST(%s AS JSON), %s, NULL, %s) "
-        "ON CONFLICT (memory_id) DO NOTHING RETURNING memory_id",
-        (
-            str(compaction.compaction_id),
-            draft.owner_user_id,
-            str(draft.conversation_id),
-            str(compaction.compaction_id),
-            draft.source_digest,
-            _encode_snapshot(draft.source_snapshot),
-            compaction.summary.text,
-            compaction.completed_at,
-        ),
-        connection=connection,
-    )
-    if inserted is not None:
-        return
-    existing = await db_connection.fetch_one(
-        "SELECT owner_user_id, conversation_id, source_kind, source_id, "
-        "source_digest, summary_text, created_at FROM memory.records "
-        "WHERE memory_id = CAST(%s AS UUID)",
-        (str(compaction.compaction_id),),
-        connection=connection,
-    )
-    expected = (
-        draft.owner_user_id,
-        str(draft.conversation_id),
-        "compaction_checkpoint",
-        compaction.compaction_id.value,
-        draft.source_digest,
-        compaction.summary.text,
-        compaction.completed_at,
-    )
-    if existing is None or tuple(existing) != expected:
-        raise RuntimeError(
-            f"Memory projection drifted for compaction {compaction.compaction_id}"
-        )
 
 
 def _map_message(row: object) -> ConversationMessage:

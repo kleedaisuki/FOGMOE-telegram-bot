@@ -260,7 +260,6 @@ def _account(*, free: int = 2, paid: int = 5) -> UserAccount:
         permission=1,
         coins=free,
         coins_paid=paid,
-        permanent_records_limit=100,
         info="CS student",
         name="Klee",
         user_plan="paid",

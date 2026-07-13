@@ -1,4 +1,4 @@
-"""会话工作流时间不变量 / Conversation workflow temporal invariants."""
+"""@brief 跨领域 UTC 时间不变量 / Cross-domain UTC temporal invariants."""
 
 from datetime import datetime, timezone
 
@@ -12,5 +12,5 @@ def ensure_utc(value: datetime) -> datetime:
     """
 
     if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("Conversation workflow timestamps must be timezone-aware")
+        raise ValueError("Domain timestamps must be timezone-aware")
     return value.astimezone(timezone.utc)

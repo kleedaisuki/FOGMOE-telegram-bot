@@ -16,7 +16,6 @@ class UserAccount:
     @param permission 用户权限等级 / User permission level.
     @param coins 免费硬币余额 / Free coin balance.
     @param coins_paid 付费硬币余额 / Paid coin balance.
-    @param permanent_records_limit 永久记忆上限 / Permanent memory record limit.
     @param info 用户个人信息 / User personal information.
     @param name 用户名 / User name.
     @param user_plan 用户套餐 / User plan.
@@ -28,7 +27,6 @@ class UserAccount:
     permission: int
     coins: int
     coins_paid: int
-    permanent_records_limit: int | None
     info: str
     name: str = ""
     user_plan: str = "free"
@@ -58,11 +56,10 @@ def _coerce_user_account(row: Sequence[object] | None) -> UserAccount | None:
         permission=int(str(row[1] or 0)),
         coins=int(str(row[2] or 0)),
         coins_paid=int(str(row[3] or 0)),
-        permanent_records_limit=None if row[4] is None else int(str(row[4])),
-        info="" if row[5] is None else str(row[5]),
-        name="" if row[6] is None else str(row[6]),
-        user_plan=str(row[7] or "free"),
-        recharge_blocked_until=cast(datetime | None, row[8]),
+        info="" if row[4] is None else str(row[4]),
+        name="" if row[5] is None else str(row[5]),
+        user_plan=str(row[6] or "free"),
+        recharge_blocked_until=cast(datetime | None, row[7]),
     )
 
 
@@ -83,7 +80,7 @@ async def fetch_user_account(
 
     lock_clause = " FOR UPDATE" if for_update else ""
     row = await db_connection.fetch_one(
-        "SELECT id, permission, coins, coins_paid, permanent_records_limit, info, "
+        "SELECT id, permission, coins, coins_paid, info, "
         "name, user_plan, recharge_blocked_until "
         f"FROM users WHERE id = %s{lock_clause}",
         (user_id,),

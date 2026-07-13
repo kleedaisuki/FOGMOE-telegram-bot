@@ -13,7 +13,7 @@ from .identity import (
     normalize_idempotency_key,
 )
 from .payloads import JsonObject
-from .temporal import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 
 
 class MessageRole(StrEnum):

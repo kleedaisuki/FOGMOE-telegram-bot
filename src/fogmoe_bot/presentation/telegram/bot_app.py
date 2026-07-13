@@ -447,6 +447,11 @@ def _compose_services(
             shutdown_phase=20,
         ),
         ServiceBinding(
+            "episodic-retrieval",
+            assistant.retrieval,
+            shutdown_phase=20,
+        ),
+        ServiceBinding(
             "rps",
             _required_capability(application, RPS_SERVICE_DATA_KEY, RpsService),
             shutdown_phase=20,
@@ -487,6 +492,11 @@ def _compose_services(
         ServiceBinding(
             "assistant-blocking-calls",
             blocking,
+            shutdown_phase=25,
+        ),
+        ServiceBinding(
+            "embedding-http-client",
+            assistant.embedding_client,
             shutdown_phase=25,
         ),
         ServiceBinding("outbox", outbox, shutdown_phase=30),

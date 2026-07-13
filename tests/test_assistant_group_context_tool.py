@@ -19,9 +19,6 @@ from fogmoe_bot.domain.conversation.identity import (
 from fogmoe_bot.infrastructure.assistant.tool_operations.dispatcher import (
     AssistantToolOperationDispatcher,
 )
-from fogmoe_bot.infrastructure.database.memory import (
-    PostgresMemoryReader,
-)
 from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
     PostgresOutboxRepository,
 )
@@ -114,7 +111,7 @@ def test_group_context_tool_reads_only_the_canonical_projection() -> None:
             generated_media=unused,
             stickers=unused,
             outbox=PostgresOutboxRepository(),
-            memory=PostgresMemoryReader(),
+            recall=unused,
             groups=groups,
         )
         result = await operations.execute(_request(is_group=True), connection=None)
