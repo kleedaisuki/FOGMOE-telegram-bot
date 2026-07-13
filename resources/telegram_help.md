@@ -12,10 +12,14 @@
 /spam - 垃圾消息管制
 /keyword - 设置关键词自动回复
 /chart - 代币图表功能
+/resetgroup - 清空当前群聊的共享记忆（仅群管理员）
 
 ***聊天相关：***
 /setmyinfo - 设置个性化提示词
-/clear - 清除个人记忆
+/clear - 清空上下文并开始新对话
+/resetmem - 清空个人记忆
+/resetprofile - 清除 User Profile
+/regen - 手动请求更新 User Profile
 
 ***数据相关：***
 /me - 获取个人信息

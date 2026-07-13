@@ -25,6 +25,11 @@ def test_system_prompt_defines_persona_and_runtime_contract() -> None:
     assert "# Runtime Contract\n" in config.SYSTEM_PROMPT
     assert config.SYSTEM_PROMPT.endswith("public repository when appropriate.\n")
     assert "@kleek_RoPL_bot" in config.SYSTEM_PROMPT
+    assert "## Memory and User Profile\n" in config.SYSTEM_PROMPT
+    assert "current explicit statement overrides" in config.SYSTEM_PROMPT
+    assert "empty retrieval result does not prove" in config.SYSTEM_PROMPT
+    assert "Call `search_memory`" in config.SYSTEM_PROMPT
+    assert "Never attempt to cross personal or group boundaries" in config.SYSTEM_PROMPT
 
 
 def test_system_prompt_requires_the_typed_sticker_tool() -> None:

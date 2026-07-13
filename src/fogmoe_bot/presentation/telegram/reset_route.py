@@ -27,7 +27,9 @@ from .delivery import delivery_stream_for_chat
 
 
 _RESET_CONFIRMATION_TEXT = (
-    "雾萌娘已进行记忆清除处理。\nThe current conversation history has been cleared."
+    "当前对话上下文已清空，下一条消息将开始新对话；个人/群聊记忆与 User Profile "
+    "不受影响。\nThe current context has been cleared; your next message starts a new "
+    "conversation. Memory and User Profile are unchanged."
 )
 """@brief reset 成功确认文本 / Successful-reset confirmation text."""
 

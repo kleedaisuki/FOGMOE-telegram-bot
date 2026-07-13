@@ -192,7 +192,10 @@ def test_real_pgvector_projection_fencing_and_privacy_scoped_exact_search(
         activity_b = str(uuid4())
         activity_group_a = str(uuid4())
         activity_group_b = str(uuid4())
-        now = datetime(2033, 1, 1, tzinfo=UTC)
+        # 共享开发库可能已有超过一批的真实 Turn；刻意使用早期时间，让 fixture 稳定落在
+        # 第一页而不依赖库龄。/ A shared development database may contain more than one
+        # source batch; an early timestamp keeps this fixture on the first page.
+        now = datetime(2000, 1, 1, tzinfo=UTC)
         format_version = int(suffix[:7], 16) + 2
         space = EmbeddingSpace(
             space_id=f"test.{suffix[:16]}",

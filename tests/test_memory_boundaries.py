@@ -243,3 +243,38 @@ def test_database_snapshot_expresses_retrieval_and_context_ownership() -> None:
     assert "CREATE TABLE user_profile.dream_sources" in snapshot
     assert "evidence_events(event_id) ON DELETE CASCADE" in snapshot
     assert "CREATE TABLE assistant.ai_user_affection" not in snapshot
+
+
+def test_forgetting_is_enforced_at_discovery_and_projection_commit() -> None:
+    """@brief 遗忘同时约束来源发现与最终投影提交 / Forgetting constrains both source discovery and final projection commit.
+
+    @return None / None.
+    @note 边界比较使用 Turn acceptance time；重置前开始但稍后完成的 Turn 仍属于旧状态。/
+        The boundary uses Turn acceptance time, so a Turn started before reset but completed
+        later still belongs to the forgotten state.
+    """
+
+    retrieval = (
+        SRC_ROOT / "infrastructure" / "database" / "retrieval.py"
+    ).read_text(encoding="utf-8")
+    profile_source = (
+        SRC_ROOT
+        / "infrastructure"
+        / "database"
+        / "user_profile"
+        / "source.py"
+    ).read_text(encoding="utf-8")
+    profile_store = (
+        SRC_ROOT
+        / "infrastructure"
+        / "database"
+        / "user_profile"
+        / "store.py"
+    ).read_text(encoding="utf-8")
+
+    assert "retrieval.scope_forgetting_boundaries" in retrieval
+    assert "turn.created_at <= boundary.forgotten_through" in retrieval
+    assert "await lock_retrieval_scope(connection, turn.scope)" in retrieval
+    assert "turn.created_at <= profile.forgotten_through" in profile_source
+    assert "await lock_user_profile(connection, evidence.owner_user_id)" in profile_store
+    assert "await lock_user_profile(connection, claim.owner_user_id)" in profile_store

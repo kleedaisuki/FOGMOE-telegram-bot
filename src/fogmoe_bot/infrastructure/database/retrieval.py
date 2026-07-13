@@ -28,6 +28,7 @@ from fogmoe_bot.domain.retrieval import (
     RetrievalScopeKind,
 )
 from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database.retrieval_scope import lock_retrieval_scope
 
 
 _PASSAGE_COLUMNS = (
@@ -64,13 +65,26 @@ class PostgresEpisodicSource:
             "CASE WHEN COALESCE(activity.request #>> '{scope,is_group}', 'false') = 'true' "
             "THEN CAST(activity.request #>> '{scope,group_id}' AS BIGINT) "
             "ELSE CAST(activity.request #>> '{user,user_id}' AS BIGINT) END AS scope_id, "
+            "turn.created_at AS occurred_at, "
             "activity.completed_at "
             "FROM conversation.inference_activities AS activity "
+            "JOIN conversation.conversation_turns AS turn ON turn.turn_id = activity.turn_id "
             "WHERE activity.status = 'completed' "
             "AND COALESCE(activity.request ->> 'task_kind', 'assistant') = 'assistant' "
             "AND activity.request #>> '{user,user_id}' ~ '^[1-9][0-9]*$' "
             "AND (COALESCE(activity.request #>> '{scope,is_group}', 'false') = 'false' "
             "OR activity.request #>> '{scope,group_id}' ~ '^-?[1-9][0-9]*$') "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM retrieval.scope_forgetting_boundaries AS boundary "
+            "WHERE boundary.scope_kind = CASE WHEN COALESCE("
+            "activity.request #>> '{scope,is_group}', 'false') = 'true' "
+            "THEN 'group' ELSE 'personal' END "
+            "AND boundary.scope_id = CASE WHEN COALESCE("
+            "activity.request #>> '{scope,is_group}', 'false') = 'true' "
+            "THEN CAST(activity.request #>> '{scope,group_id}' AS BIGINT) "
+            "ELSE CAST(activity.request #>> '{user,user_id}' AS BIGINT) END "
+            "AND turn.created_at <= boundary.forgotten_through"
+            ") "
             "AND EXISTS (SELECT 1 FROM conversation.conversation_messages AS source_message "
             "WHERE source_message.turn_id = activity.turn_id "
             "AND source_message.role = 'user' "
@@ -88,7 +102,7 @@ class PostgresEpisodicSource:
             ") ORDER BY activity.completed_at, activity.turn_id LIMIT %s"
             ") SELECT candidate.turn_id, candidate.scope_kind, candidate.scope_id, "
             "user_messages.content_text, assistant_messages.content_text, "
-            "candidate.completed_at "
+            "candidate.occurred_at "
             "FROM candidates AS candidate "
             "CROSS JOIN LATERAL ("
             "SELECT string_agg(message.content ->> 'text', E'\\n' ORDER BY message.sequence) "
@@ -192,6 +206,20 @@ class PostgresRetrievalStore:
         _validate_projection(turn, canonical, space)
         source_digest = _projection_digest(canonical)
         async with db_connection.transaction() as connection:
+            await lock_retrieval_scope(connection, turn.scope)
+            boundary = await db_connection.fetch_one(
+                "SELECT forgotten_through "
+                "FROM retrieval.scope_forgetting_boundaries "
+                "WHERE scope_kind = %s AND scope_id = %s",
+                (turn.scope.kind, turn.scope.scope_id),
+                connection=connection,
+            )
+            if boundary is not None:
+                forgotten_through = boundary[0]
+                if not isinstance(forgotten_through, datetime):
+                    raise TypeError("Retrieval forgetting boundary must be a datetime")
+                if turn.occurred_at <= ensure_utc(forgotten_through):
+                    return
             await db_connection.execute(
                 "INSERT INTO retrieval.source_projections "
                 "(corpus_id, scope_kind, scope_id, personal_user_id, source_kind, "

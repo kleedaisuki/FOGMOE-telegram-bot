@@ -40,6 +40,7 @@ from .mapping import (
     _uuid,
     _values,
 )
+from .locking import lock_user_profile
 
 
 class PostgresUserProfileStore:
@@ -117,6 +118,19 @@ class PostgresUserProfileStore:
         metadata = _metadata_json(evidence.metadata)
         digest = _evidence_digest(evidence)
         async with db_connection.transaction() as connection:
+            await lock_user_profile(connection, evidence.owner_user_id)
+            boundary = await db_connection.fetch_one(
+                "SELECT forgotten_through FROM user_profile.profiles "
+                "WHERE user_id = %s",
+                (evidence.owner_user_id,),
+                connection=connection,
+            )
+            if boundary is not None and boundary[0] is not None:
+                forgotten_through = boundary[0]
+                if not isinstance(forgotten_through, datetime):
+                    raise TypeError("Profile forgetting boundary must be a datetime")
+                if evidence.occurred_at <= ensure_utc(forgotten_through):
+                    return
             await db_connection.execute(
                 "INSERT INTO user_profile.evidence_events "
                 "(source_turn_id, owner_user_id, user_text, assistant_text, occurred_at, "
@@ -156,7 +170,8 @@ class PostgresUserProfileStore:
             await db_connection.execute(
                 "INSERT INTO user_profile.profiles "
                 "(user_id, current_revision, observed_through_event_id, next_eligible_at, "
-                "created_at, updated_at) VALUES (%s, NULL, 0, %s, %s, %s) "
+                "forgotten_through, created_at, updated_at) "
+                "VALUES (%s, NULL, 0, %s, NULL, %s, %s) "
                 "ON CONFLICT (user_id) DO UPDATE SET next_eligible_at = "
                 "LEAST(COALESCE(user_profile.profiles.next_eligible_at, EXCLUDED.next_eligible_at), "
                 "EXCLUDED.next_eligible_at) WHERE user_profile.profiles.current_revision IS NULL",
@@ -426,6 +441,7 @@ class PostgresUserProfileStore:
             raise ValueError("Profile refresh_after must be positive")
         patch_json = _patch_json(result)
         async with db_connection.transaction() as connection:
+            await lock_user_profile(connection, claim.owner_user_id)
             await self._lock_claim(claim, connection=connection)
             profile_row = await db_connection.fetch_one(
                 "SELECT COALESCE(current_revision, 0), observed_through_event_id, created_at "

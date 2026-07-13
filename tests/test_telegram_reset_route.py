@@ -128,6 +128,8 @@ def test_operation_persists_reset_and_confirmation_without_direct_delivery() -> 
         )
         assert first.confirmation.payload["chat_id"] == 42
         assert first.confirmation.payload["reply_to_message_id"] == 7
-        assert "history has been cleared" in str(first.confirmation.payload["text"])
+        text = str(first.confirmation.payload["text"])
+        assert "context has been cleared" in text
+        assert "Memory and User Profile are unchanged" in text
 
     asyncio.run(scenario())

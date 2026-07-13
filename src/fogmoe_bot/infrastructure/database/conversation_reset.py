@@ -24,6 +24,9 @@ from fogmoe_bot.domain.conversation.errors import (
     IdempotencyConflictError,
 )
 from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database.command_source import (
+    validate_telegram_command_source,
+)
 from fogmoe_bot.infrastructure.database.assistant_billing import (
     AssistantBillingTransactions,
     PostgresAssistantBilling,
@@ -64,7 +67,12 @@ class PostgresConversationResetUoW:
         """
 
         async with db_connection.transaction() as connection:
-            await self._validate_telegram_source(command, connection=connection)
+            await validate_telegram_command_source(
+                command.source,
+                command.conversation_id,
+                operation="Conversation reset",
+                connection=connection,
+            )
             await db_connection.fetch_one(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                 (str(command.conversation_id),),
@@ -272,38 +280,6 @@ class PostgresConversationResetUoW:
                 connection,
                 turn_id=turn_id,
                 released_at=transition_at,
-            )
-
-    @staticmethod
-    async def _validate_telegram_source(
-        command: ResetConversation,
-        *,
-        connection: AsyncConnection,
-    ) -> None:
-        """@brief 锁定并验证可选 Telegram inbox 来源 / Lock and validate an optional Telegram inbox source.
-
-        @param command reset 命令 / Reset command.
-        @param connection 当前事务 / Current transaction.
-        @return None / None.
-        @raise IdempotencyConflictError Telegram 来源不存在或会话漂移 / Telegram source is absent or changes conversation.
-        """
-
-        update_id = command.source.update_id
-        if update_id is None:
-            return
-        row = await db_connection.fetch_one(
-            "SELECT conversation_id FROM conversation.inbound_updates "
-            "WHERE update_id = %s FOR UPDATE",
-            (int(update_id),),
-            connection=connection,
-        )
-        if row is None:
-            raise IdempotencyConflictError(
-                f"Reset source Update {int(update_id)} does not exist"
-            )
-        if str(row[0]) != str(command.conversation_id):
-            raise IdempotencyConflictError(
-                f"Reset source Update {int(update_id)} changed conversation identity"
             )
 
     @staticmethod

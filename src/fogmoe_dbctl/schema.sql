@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0043_user_profile_dreaming
--- Alembic head: 0044_retrieval_privacy_scopes
+-- Source migrations: 0001_initial through 0045_memory_management_commands
+-- Alembic head: 0045_memory_management_commands
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and user-plan backfill) and the
@@ -123,6 +123,19 @@ CREATE INDEX idx_inbound_updates_expired_lease
 
 CREATE INDEX idx_inbound_updates_conversation
   ON conversation.inbound_updates (conversation_id, received_at, update_id);
+
+CREATE TABLE conversation.command_authorization_decisions (
+  source_update_id BIGINT NOT NULL
+    REFERENCES conversation.inbound_updates(update_id) ON DELETE CASCADE,
+  capability VARCHAR(100) NOT NULL CHECK (
+    capability ~ '^[a-z][a-z0-9_.-]{0,99}$'
+  ),
+  resource_id BIGINT NOT NULL CHECK (resource_id <> 0),
+  actor_user_id BIGINT NOT NULL CHECK (actor_user_id > 0),
+  allowed BOOLEAN NOT NULL,
+  observed_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (source_update_id, capability)
+);
 
 CREATE INDEX idx_inbound_updates_stream_head
   ON conversation.inbound_updates (conversation_id, update_id)
@@ -636,6 +649,24 @@ CREATE INDEX retrieval_passage_vectors_expired_lease_idx
   ON retrieval.passage_vectors (space_id, lease_expires_at, passage_id)
   WHERE status = 'processing';
 
+CREATE TABLE retrieval.scope_forgetting_boundaries (
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('personal','group')),
+  scope_id BIGINT NOT NULL,
+  personal_user_id BIGINT NULL
+    REFERENCES identity.users(id) ON DELETE CASCADE,
+  forgotten_through TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CONSTRAINT retrieval_scope_forgetting_boundaries_scope_ck CHECK (
+    (scope_kind = 'personal' AND scope_id > 0 AND personal_user_id = scope_id)
+    OR (scope_kind = 'group' AND scope_id <> 0 AND personal_user_id IS NULL)
+  ),
+  CONSTRAINT retrieval_scope_forgetting_boundaries_time_ck CHECK (
+    updated_at >= created_at AND forgotten_through <= updated_at
+  ),
+  PRIMARY KEY (scope_kind, scope_id)
+);
+
 CREATE TABLE user_profile.evidence_events (
   event_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   source_turn_id UUID NOT NULL UNIQUE
@@ -667,6 +698,7 @@ CREATE TABLE user_profile.profiles (
     observed_through_event_id >= 0
   ),
   next_eligible_at TIMESTAMPTZ,
+  forgotten_through TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   CONSTRAINT user_profiles_revision_ck CHECK (

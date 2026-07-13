@@ -68,6 +68,7 @@ from fogmoe_bot.application.runtime import (
 )
 from fogmoe_bot.application.scheduling.dispatcher import ScheduleDispatcher
 from fogmoe_bot.application.scheduling.prompt_turn import PromptTurnHandler
+from fogmoe_bot.application.telegram import DurableGroupAdministratorAuthorization
 from fogmoe_bot.application.scheduling.runtime import SchedulingWorkLoop
 from fogmoe_bot.application.observability.runtime_metrics import RuntimeMetricsService
 from fogmoe_bot.infrastructure import config
@@ -92,6 +93,12 @@ from fogmoe_bot.infrastructure.database.assistant_turn_acceptance import (
 from fogmoe_bot.infrastructure.database.conversation_reset import (
     PostgresConversationResetUoW,
 )
+from fogmoe_bot.infrastructure.database.memory_management import (
+    PostgresMemoryForgetUoW,
+)
+from fogmoe_bot.infrastructure.database.telegram_authorization import (
+    PostgresGroupAdministratorDecisionStore,
+)
 from fogmoe_bot.infrastructure.database.conversation_workflow.inbox import (
     PostgresInboxRepository,
 )
@@ -110,10 +117,16 @@ from fogmoe_bot.infrastructure.database.repositories.schedule_repository import 
 from fogmoe_bot.infrastructure.database.scheduled_assistant_profile import (
     PostgresScheduledAssistantProfileReader,
 )
+from fogmoe_bot.infrastructure.database.user_profile.management import (
+    PostgresUserProfileManagementUoW,
+)
 from fogmoe_bot.infrastructure.observability.logging import current_log_file_path
 from fogmoe_bot.infrastructure.observability.composition import ObservabilityAssembly
 from fogmoe_bot.infrastructure.telegram.monitor_notification import (
     TelegramMonitorNotificationSink,
+)
+from fogmoe_bot.infrastructure.telegram.group_authorization import (
+    TelegramGroupAdministratorSource,
 )
 from fogmoe_bot.infrastructure.telegram.outbox_delivery import (
     TelegramOutboxDeliveryAdapter,
@@ -135,6 +148,7 @@ from .handler_catalog import (
     TelegramApplication,
     install_error_policy,
 )
+from .memory_handlers import MemoryManagementTelegramCommandHandler
 from .handler_composition import (
     HANDLER_BLOCKING_BULKHEADS_DATA_KEY,
     assemble_handler_capabilities,
@@ -294,6 +308,17 @@ def _compose_ingress(
             StaticTelegramCommandHandler(
                 outbound=primitives.outbound,
                 help_text=config.HELP_TEXT,
+            ),
+            MemoryManagementTelegramCommandHandler(
+                memories=PostgresMemoryForgetUoW(primitives.outbox_repository),
+                profiles=PostgresUserProfileManagementUoW(
+                    primitives.outbox_repository
+                ),
+                group_authorization=DurableGroupAdministratorAuthorization(
+                    source=TelegramGroupAdministratorSource(application.bot),
+                    store=PostgresGroupAdministratorDecisionStore(),
+                ),
+                outbound=primitives.outbound,
             ),
             EconomyBasicTelegramCommandHandler(
                 economy=_required_capability(
