@@ -72,6 +72,9 @@ def test_system_prompt_defines_persona_and_runtime_contract() -> None:
     assert "Preserve speaker attribution" in resources.system_prompt
     assert "Private User Profile" in resources.system_prompt
     assert "Use `fetch_group_context`" in resources.system_prompt
+    assert 'parse_mode="Markdown"' in resources.system_prompt
+    assert "not CommonMark" in resources.system_prompt
+    assert "Formatting entities must never nest" in resources.system_prompt
 
 
 def test_system_prompt_requires_the_typed_sticker_tool() -> None:

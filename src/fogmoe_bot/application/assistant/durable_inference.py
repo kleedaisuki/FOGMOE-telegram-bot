@@ -495,6 +495,7 @@ class DurableAssistantInferenceAdapter:
             outbound_payload: JsonObject = {
                 "chat_id": cast(JsonValue, command.chat_id),
                 "text": text,
+                "parse_mode": "Markdown",
                 "disable_notification": command.disable_notification,
                 "protect_content": command.protect_content,
                 "disable_web_page_preview": command.disable_web_page_preview,

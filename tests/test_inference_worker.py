@@ -2,10 +2,12 @@
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import logging
 
 import pytest
 from observability_testkit import make_telemetry
 
+import fogmoe_bot.application.conversation.inference_worker as inference_worker_module
 from fogmoe_bot.application.conversation.inference_worker import (
     FullJitterInferenceRetryPolicy,
     InferenceErrorCategory,
@@ -35,6 +37,7 @@ from fogmoe_bot.domain.conversation.outbox import (
     SEND_TELEGRAM_MESSAGE,
     OutboundDraft,
 )
+from fogmoe_bot.domain.conversation.errors import StaleClaimError
 
 
 NOW = datetime(2026, 7, 11, 10, tzinfo=timezone.utc)
@@ -298,6 +301,68 @@ def test_durable_dependency_wait_does_not_exhaust_provider_attempt_budget() -> N
         assert len(repository.retried) == 1
         assert repository.failed == []
         assert repository.retried[0][2] > NOW + timedelta(seconds=7)
+
+    asyncio.run(scenario())
+
+
+def test_superseded_claim_is_an_informational_fencing_outcome(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief reset 使 claim 失效时不把正常 fencing 记录为错误 / A reset-superseded claim is not logged as an error.
+
+    @param caplog pytest 日志捕获器 / pytest log capture fixture.
+    @param monkeypatch pytest 属性替换器 / pytest attribute patcher.
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 模拟外部推理期间发生的会话 reset / Simulate a conversation reset during external inference.
+
+        @return None / None.
+        """
+
+        repository = _Repository()
+
+        async def stale_completion(
+            claim: InferenceActivityClaim,
+            *,
+            assistant_message: MessageDraft,
+            outbounds: tuple[OutboundDraft, ...],
+            completed_at: datetime,
+        ) -> object:
+            """@brief 模拟 reset 失效的 completion claim / Simulate a reset-invalidated completion claim.
+
+            @param claim 已被 fencing 的 claim / Claim invalidated by fencing.
+            @param assistant_message 待提交的助手消息 / Assistant message pending commit.
+            @param outbounds 待提交的出站效果 / Outbound effects pending commit.
+            @param completed_at 推理完成时间 / Inference completion time.
+            @return 永不返回 / Never returns.
+            """
+
+            del claim, assistant_message, outbounds, completed_at
+            raise StaleClaimError("claim cancelled by conversation reset")
+
+        monkeypatch.setattr(repository, "complete_inference_activity", stale_completion)
+        worker = _worker(repository, _Inference(_result()))
+        queue: asyncio.Queue[inference_worker_module._WorkItem] = asyncio.Queue()
+        capacity: asyncio.Queue[None] = asyncio.Queue()
+        claim = _claim()
+        await queue.put(inference_worker_module._ClaimWork(claim))
+        await queue.put(inference_worker_module._StopConsumer())
+
+        with caplog.at_level(logging.INFO, logger=inference_worker_module.__name__):
+            await worker._consume(queue, capacity)
+
+        assert capacity.qsize() == 1
+        records = [
+            record
+            for record in caplog.records
+            if "superseded before finalization" in record.getMessage()
+        ]
+        assert len(records) == 1
+        assert records[0].levelno == logging.INFO
+        assert getattr(records[0], "event_name", None) == "inference.claim.superseded"
 
     asyncio.run(scenario())
 

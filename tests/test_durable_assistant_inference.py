@@ -331,6 +331,7 @@ def test_adapter_reads_cutoff_history_and_returns_ordered_durable_outbox_intents
         assert result.outbounds[0].payload == {
             "chat_id": -100,
             "text": "progress",
+            "parse_mode": "Markdown",
             "disable_notification": False,
             "protect_content": False,
             "disable_web_page_preview": True,
@@ -340,6 +341,7 @@ def test_adapter_reads_cutoff_history_and_returns_ordered_durable_outbox_intents
         assert result.outbounds[1].payload == {
             "chat_id": -100,
             "text": "final answer",
+            "parse_mode": "Markdown",
             "disable_notification": False,
             "protect_content": False,
             "disable_web_page_preview": True,
@@ -427,6 +429,7 @@ def test_translation_uses_dedicated_prompt_without_tools_and_marks_output_exclud
         assert result.assistant_content["task_kind"] == "translation"
         assert result.assistant_content["exclude_from_assistant"] is True
         assert result.outbounds[0].payload["text"] == "Hello, meow!"
+        assert result.outbounds[0].payload["parse_mode"] == "Markdown"
 
     asyncio.run(scenario())
 

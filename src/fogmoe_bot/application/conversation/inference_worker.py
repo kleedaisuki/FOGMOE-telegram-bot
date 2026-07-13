@@ -37,6 +37,7 @@ from fogmoe_bot.domain.conversation.outbox import (
     OutboundDraft,
     OutboundKind,
 )
+from fogmoe_bot.domain.conversation.errors import StaleClaimError
 from fogmoe_bot.domain.conversation.workflow_results import InferenceCompletionResult
 from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.domain.observability.conventions import EventName, MetricName, Outcome
@@ -740,6 +741,16 @@ class InferenceWorker:
                     return
                 try:
                     await self.process_claim(work.claim)
+                except StaleClaimError:
+                    logger.info(
+                        "Inference claim was superseded before finalization: "
+                        "activity_id=%s",
+                        work.claim.activity.activity_id,
+                        extra={
+                            "event_name": "inference.claim.superseded",
+                            "telemetry_attributes": {"pipeline.stage": "inference"},
+                        },
+                    )
                 except Exception:
                     logger.exception(
                         "Inference claim could not be finalized: activity_id=%s",
