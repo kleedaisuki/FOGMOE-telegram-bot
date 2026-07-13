@@ -64,8 +64,9 @@ plotly.js；在桌面 Qt 内通常还要引入 Qt WebEngine/Chromium。当前数
 ## 连接与安全边界
 
 Dashboard 只从根目录 `config.json` 的 `database.endpoint` 与 `database.reporting` 读取连接身份，
-并从 `observability.dashboard` 读取查询资源边界。默认配置路径为当前仓库的 `./config.json`；
-从其他工作目录启动时，显式传入 `--config /绝对或相对路径/config.json`。
+并从 `observability.dashboard` 读取查询资源边界。默认配置路径始终是源码/部署根目录的
+`config.json`，因此可从任意工作目录启动；多实例部署或脱离源码树安装时，显式传入
+`--config /绝对或相对路径/config.json`。
 
 它由自己的 `fogmoe_dashboard.config` 解释这些字段并构造只读连接，不依赖 bot 或
 `fogmoe-dbctl` 的配置服务。三者共享的是面向操作者的 `config.json`，而不是跨包的全局配置

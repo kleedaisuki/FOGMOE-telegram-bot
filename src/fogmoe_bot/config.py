@@ -989,10 +989,19 @@ def reveal_secret(value: SecretStr | None) -> str | None:
 def default_config_path() -> Path:
     """@brief 返回默认根配置路径 / Return the default root configuration path.
 
-    @return 当前工作目录中的 config.json / ``config.json`` in the current working directory.
+    @return 项目根目录中的 config.json / ``config.json`` in the project root.
+
+    @note 控制台入口可从任意工作目录启动；不能让调用者当前目录（current
+        working directory）改变默认的部署配置。通过 ``config.py`` 在 src-layout
+        中的位置定位项目根目录。已安装到不含源码树的环境时，调用方应通过
+        ``--config`` 显式提供路径。/
+        Console entry points may start from any directory, so the caller's current
+        working directory must not change the default deployment configuration. The
+        project root is located from ``config.py`` in the src-layout. In an installed
+        environment without the source tree, callers should pass ``--config``.
     """
 
-    return Path.cwd() / "config.json"
+    return Path(__file__).resolve().parents[2] / "config.json"
 
 
 def read_bot_settings(path: Path | None = None) -> BotSettings:

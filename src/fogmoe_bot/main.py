@@ -36,7 +36,7 @@ def _parse_arguments() -> argparse.Namespace:
         "--config",
         type=Path,
         default=default_config_path(),
-        help="root JSONC configuration file (default: ./config.json)",
+        help="root JSONC configuration file (default: project-root/config.json)",
     )
     return parser.parse_args()
 
