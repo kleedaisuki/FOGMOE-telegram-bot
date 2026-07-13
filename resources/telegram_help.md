@@ -1,11 +1,11 @@
-***指令列表：***
+*指令列表：*
 /start - 开始使用
 /help - 查看帮助文档
 /ref - 查看邀请信息或绑定邀请人
 /tl - 中英互译功能
 /music - 搜索音乐
 
-***群组相关：***
+*群组相关：*
 /fogmoebot - 在群组中连接
 /report - 举报垃圾消息给群管理
 /verify - 管理新成员验证
@@ -14,14 +14,14 @@
 /chart - 代币图表功能
 /resetgroup - 清空当前群聊的共享记忆（仅群管理员）
 
-***聊天相关：***
+*聊天相关：*
 /setmyinfo - 设置个性化提示词
 /clear - 清空上下文并开始新对话
 /resetmem - 清空个人记忆
 /resetprofile - 清除 User Profile
 /regen - 手动请求更新 User Profile
 
-***数据相关：***
+*数据相关：*
 /me - 获取个人信息
 /lottery - 每天一次免费获取金币
 /checkin - 每日签到
@@ -34,7 +34,7 @@
 /recharge - 发起人工充值申请
 /webpassword - 设置Web登录密码
 
-***娱乐相关：***
+*娱乐相关：*
 /omikuji - 抽取御神签预测运势
 /rps\_game - 猜拳游戏
 /gamble - 发起赌博游戏

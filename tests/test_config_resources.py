@@ -12,6 +12,17 @@ def test_text_resources_are_loaded_verbatim() -> None:
     ).read_text(encoding="utf-8")
 
 
+def test_help_text_uses_telegram_legacy_markdown_delimiters() -> None:
+    """@brief 验证帮助文本使用 Telegram 旧版 Markdown 标记 / Verify help text uses Telegram legacy Markdown delimiters."""
+
+    assert "***" not in config.HELP_TEXT
+    assert "*指令列表：*" in config.HELP_TEXT
+    assert "*群组相关：*" in config.HELP_TEXT
+    assert "*聊天相关：*" in config.HELP_TEXT
+    assert "*数据相关：*" in config.HELP_TEXT
+    assert "*娱乐相关：*" in config.HELP_TEXT
+
+
 def test_system_prompt_defines_persona_and_runtime_contract() -> None:
     """@brief 验证 system prompt 身份与运行时契约 / Verify the system-prompt identity and runtime contract."""
 
