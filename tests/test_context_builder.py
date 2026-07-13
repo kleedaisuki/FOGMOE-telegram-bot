@@ -115,6 +115,9 @@ def test_context_tools_render_user_state_and_tool_context():
             profile=_profile(),
             personal_info="Klee",
             diary_exists=True,
+            user_id=42,
+            username="klee",
+            display_name="Klee",
         )
     )
 
@@ -122,6 +125,10 @@ def test_context_tools_render_user_state_and_tool_context():
         ConversationScope(user_id=42, is_group=True, group_id=-100, message_id=12),
     )
 
+    assert (
+        '<user_identity trust="trusted_platform_metadata" display_name="Klee" '
+        'username="klee" user_id="42" />'
+    ) in user_state_prompt
     assert '<user_state coins="7" user_plan="paid" permission="2"' in user_state_prompt
     assert 'permission_label="Premium"' in user_state_prompt
     assert 'diary_exists="true"' in user_state_prompt
@@ -152,6 +159,9 @@ def test_context_state_builds_model_messages_with_runtime_replacements():
         coins=7,
         plan="paid",
         permission=2,
+        user_id=42,
+        username="klee",
+        display_name="Klee",
     )
     context_state = build_context_state(
         context_id=UUID("00000000-0000-4000-8000-000000000042"),
@@ -176,6 +186,8 @@ def test_context_state_builds_model_messages_with_runtime_replacements():
             "content": "base system policy\n\n"
             '<conversation_scope kind="group" shared="true" group_id="-100" '
             'thread_id="0" current_user_id="42" />\n\n'
+            '<user_identity trust="trusted_platform_metadata" display_name="Klee" '
+            'username="klee" user_id="42" />\n'
             '<user_state coins="7" user_plan="paid" permission="2" '
             'permission_label="Premium" diary_exists="false" />',
         },

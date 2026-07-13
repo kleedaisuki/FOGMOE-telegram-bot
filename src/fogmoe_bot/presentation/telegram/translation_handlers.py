@@ -70,6 +70,7 @@ class TranslationTelegramCommandHandler:
             conversation_id=update.conversation_id,
             received_at=update.received_at,
             chat_id=command.chat_id,
+            chat_type=command.chat_type,
             message_id=command.message_id,
             message_thread_id=command.message_thread_id,
             delivery_stream_id=delivery_stream_for_chat(

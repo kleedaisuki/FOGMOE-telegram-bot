@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -107,9 +108,10 @@ def _target(update_id: int = 9) -> TranslationReplyTarget:
 
     return TranslationReplyTarget(
         update_id=UpdateId(update_id),
-        conversation_id=ConversationId("assistant-user:42"),
+        conversation_id=ConversationId("assistant-group:-100:thread:8"),
         received_at=NOW,
         chat_id=-100,
+        chat_type="supergroup",
         message_id=77,
         message_thread_id=8,
         delivery_stream_id=DeliveryStreamId("telegram:primary:chat:-100:thread:8"),
@@ -190,6 +192,52 @@ def test_valid_translation_uses_shared_acceptance_and_marks_history_isolation() 
         assert outbound.commands == []
 
     asyncio.run(scenario())
+
+
+def test_translation_identity_supports_private_and_group_topic_addresses() -> None:
+    """@brief 翻译请求按私聊用户或群组 Topic 验证地址 / Translation requests validate private-user or group-topic addresses."""
+
+    group = _request("hello")
+    assert group.target.conversation_id == ConversationId(
+        "assistant-group:-100:thread:8"
+    )
+    private_target = replace(
+        _target(),
+        conversation_id=ConversationId("assistant-user:42"),
+        chat_id=42,
+        chat_type="private",
+        message_thread_id=None,
+        delivery_stream_id=DeliveryStreamId("telegram:primary:chat:42:thread:0"),
+    )
+    private = TranslationTurnRequest(
+        target=private_target,
+        user_id=42,
+        username="klee",
+        display_name="Klee",
+        is_group=False,
+        text="hello",
+    )
+
+    assert private.to_assistant_request().conversation_id == ConversationId(
+        "assistant-user:42"
+    )
+
+
+def test_translation_identity_rejects_mismatched_group_conversation() -> None:
+    """@brief 群组翻译不能伪装为发送者私聊会话 / A group translation cannot masquerade as the sender's private conversation."""
+
+    with pytest.raises(ValueError, match="address"):
+        TranslationTurnRequest(
+            target=replace(
+                _target(),
+                conversation_id=ConversationId("assistant-user:42"),
+            ),
+            user_id=42,
+            username="klee",
+            display_name="Klee",
+            is_group=True,
+            text="hello",
+        )
 
 
 def test_too_long_translation_never_reaches_acceptance_and_feedback_is_stable() -> None:

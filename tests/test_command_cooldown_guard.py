@@ -24,6 +24,9 @@ from fogmoe_bot.domain.conversation.identity import (
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
+)
 from fogmoe_bot.presentation.telegram.command_cooldown_guard import (
     MalformedTelegramCommandUpdate,
     TelegramCommandCooldownGuard,
@@ -126,7 +129,12 @@ def _inbound(
     payload_id = update_id if payload_update_id is None else payload_update_id
     return InboundUpdate.pending(
         update_id=UpdateId(update_id),
-        conversation_id=ConversationId("assistant-user:42"),
+        conversation_id=TelegramConversationAddress(
+            chat_type="supergroup",
+            chat_id=-100,
+            user_id=42,
+            message_thread_id=9,
+        ).conversation_id,
         payload=_payload(payload_id, token=token),
         received_at=NOW + timedelta(seconds=update_id),
     )
@@ -169,7 +177,12 @@ def test_parses_owned_command_and_ignores_plain_slash_text() -> None:
 
     plain = InboundUpdate.pending(
         update_id=UpdateId(2),
-        conversation_id=ConversationId("assistant-user:42"),
+        conversation_id=TelegramConversationAddress(
+            chat_type="supergroup",
+            chat_id=-100,
+            user_id=42,
+            message_thread_id=9,
+        ).conversation_id,
         payload=_payload(2, command_entity=False),
         received_at=NOW,
     )
@@ -236,8 +249,52 @@ def test_unowned_commands_do_not_consume_cooldown(token: str) -> None:
     assert isinstance(asyncio.run(guard.evaluate(_inbound(31, token=token))), Allow)
 
 
-def test_command_identity_mismatch_is_permanent_ingress_error() -> None:
-    """@brief payload/durable identity 不一致不会进入 handler / A payload/durable identity mismatch never reaches a handler."""
+def test_command_payload_identity_mismatch_is_permanent_ingress_error() -> None:
+    """@brief payload/durable Update identity 不一致不会进入 handler / A payload/durable Update identity mismatch never reaches a handler."""
 
     with pytest.raises(MalformedTelegramCommandUpdate, match="does not match"):
         parse_telegram_command(_inbound(40, payload_update_id=41))
+
+
+def test_command_address_identity_supports_private_group_and_topic() -> None:
+    """@brief 命令地址以私聊用户或群组 Topic 验证 / Commands validate private-user or group-topic identities."""
+
+    cases = (
+        ("private", 42, None, "assistant-user:42"),
+        ("group", -100, None, "assistant-group:-100:thread:0"),
+        ("supergroup", -100, 9, "assistant-group:-100:thread:9"),
+    )
+    for chat_type, chat_id, thread_id, expected in cases:
+        payload = _payload(
+            50,
+            chat_id=chat_id,
+            thread_id=thread_id,
+        )
+        message = payload["message"]
+        assert isinstance(message, dict)
+        chat = message["chat"]
+        assert isinstance(chat, dict)
+        chat["type"] = chat_type
+        inbound = InboundUpdate.pending(
+            update_id=UpdateId(50),
+            conversation_id=ConversationId(expected),
+            payload=payload,
+            received_at=NOW,
+        )
+        parsed = parse_telegram_command(inbound)
+        assert parsed is not None
+        assert parsed.conversation_id == ConversationId(expected)
+
+
+def test_command_address_identity_mismatch_is_permanent_ingress_error() -> None:
+    """@brief 命令 payload 与 durable 会话不一致会被隔离 / A command payload and durable conversation mismatch is quarantined."""
+
+    malformed = InboundUpdate.pending(
+        update_id=UpdateId(51),
+        conversation_id=ConversationId("assistant-user:42"),
+        payload=_payload(51),
+        received_at=NOW,
+    )
+
+    with pytest.raises(MalformedTelegramCommandUpdate, match="address"):
+        parse_telegram_command(malformed)

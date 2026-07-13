@@ -12,10 +12,12 @@ from fogmoe_bot.application.conversation.translation_ingress import (
 )
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
-    ConversationId,
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
+)
 from fogmoe_bot.presentation.telegram.command_cooldown_guard import (
     parse_telegram_command,
 )
@@ -102,7 +104,12 @@ def _inbound(
         message["reply_to_message"] = {"message_id": 70, "text": reply_text}
     return InboundUpdate.pending(
         update_id=UpdateId(9),
-        conversation_id=ConversationId("assistant-user:42"),
+        conversation_id=TelegramConversationAddress(
+            chat_type="supergroup",
+            chat_id=-100,
+            user_id=42,
+            message_thread_id=8,
+        ).conversation_id,
         payload={"update_id": 9, "message": message},
         received_at=NOW,
     )

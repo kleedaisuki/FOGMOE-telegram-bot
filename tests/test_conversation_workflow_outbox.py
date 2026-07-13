@@ -99,11 +99,14 @@ def test_claim_outbound_uses_skip_locked_fencing_and_delivery_stream_head(
     assert int(claims[0].message.stream_sequence) == 7
     assert claims[0].lease_expires_at == NOW + timedelta(seconds=30)
     sql, params, used_connection = calls[0]
+    assert "delivery plan cancelled after permanent sibling failure" in sql
+    assert "turn.state = 'failed_final'" in sql
+    assert "turn.state = 'waiting_delivery'" in sql
     assert "FOR UPDATE OF candidate SKIP LOCKED" in sql
     assert "earlier.delivery_stream_id = candidate.delivery_stream_id" in sql
     assert "earlier.stream_sequence < candidate.stream_sequence" in sql
     assert used_connection is connection
-    assert UUID(str(params[2])) == claims[0].token.value
+    assert UUID(str(params[3])) == claims[0].token.value
 
 
 def test_claim_standalone_outbound_does_not_load_or_transition_a_turn(
@@ -637,6 +640,105 @@ def test_delivered_effect_keeps_turn_waiting_until_delivery_plan_is_empty(
             external_message_id="42",
         )
     )
+
+
+def test_permanent_delivery_failure_cancels_unclaimed_sibling_effects(
+    monkeypatch: Any,
+) -> None:
+    """@brief 永久失败会取消同一 Turn 尚未领取的 effect / A permanent failure cancels unclaimed sibling effects in the same Turn."""
+
+    connection = object()
+    repository = PostgresOutboxRepository()
+    statements: list[tuple[str, tuple[object, ...]]] = []
+    captured: dict[str, object] = {}
+
+    async def fake_execute(
+        sql: str,
+        params: tuple[object, ...],
+        *,
+        connection: object,
+    ) -> int:
+        """@brief 记录 fenced 失败与 sibling 取消 SQL / Record fenced failure and sibling-cancellation SQL.
+
+        @param sql 执行的 SQL / Executed SQL.
+        @param params SQL 参数 / SQL parameters.
+        @param connection 当前连接 / Current connection.
+        @return 受影响行数 / Affected-row count.
+        """
+
+        assert connection is not None
+        statements.append((sql, params))
+        return 1
+
+    async def fake_load_turn(
+        turn_id: TurnId,
+        *,
+        connection: object,
+    ) -> object:
+        """@brief 返回等待投递的 Turn / Return a Turn waiting for delivery.
+
+        @param turn_id Turn ID / Turn identifier.
+        @param connection 当前连接 / Current connection.
+        @return 等待投递 Turn / Waiting-delivery Turn.
+        """
+
+        del turn_id
+        assert connection is not None
+        return turn_uow._map_turn(
+            _turn_row(
+                state="waiting_delivery",
+                version=4,
+                inference_attempts=1,
+                delivery_attempts=1,
+            )
+        )
+
+    async def fake_persist(
+        turn: object,
+        *,
+        expected_version: int,
+        connection: object,
+    ) -> None:
+        """@brief 记录失败终态 Turn / Record the terminal failed Turn.
+
+        @param turn 终态 Turn / Terminal Turn.
+        @param expected_version 乐观锁版本 / Optimistic-lock version.
+        @param connection 当前连接 / Current connection.
+        @return None / None.
+        """
+
+        captured["turn"] = turn
+        captured["version"] = expected_version
+        assert connection is not None
+
+    monkeypatch.setattr(
+        db_connection,
+        "transaction",
+        lambda: _TransactionContext(connection),
+    )
+    monkeypatch.setattr(db_connection, "execute", fake_execute)
+    monkeypatch.setattr(outbox_repository, "_load_turn_for_mutation", fake_load_turn)
+    monkeypatch.setattr(outbox_repository, "_persist_turn", fake_persist)
+    claim = OutboundClaim(
+        message=outbox_repository._map_outbound(_outbound_row()),
+        token=LeaseToken.new(),
+        lease_expires_at=NOW + timedelta(seconds=30),
+    )
+
+    asyncio.run(
+        repository.fail_outbound(
+            claim,
+            failed_at=NOW + timedelta(seconds=1),
+            error="permanent Telegram error",
+        )
+    )
+
+    assert len(statements) == 2
+    assert "status = 'failed_final'" in statements[0][0]
+    assert "status = 'cancelled'" in statements[1][0]
+    assert "message_id <> CAST(%s AS UUID)" in statements[1][0]
+    assert getattr(captured["turn"], "state").value == "failed_final"
+    assert captured["version"] == 4
 
 
 def test_delivered_standalone_outbound_never_transitions_a_turn(

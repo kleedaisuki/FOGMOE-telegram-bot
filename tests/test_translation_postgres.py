@@ -91,6 +91,7 @@ def test_translation_charge_turn_and_activity_replay_atomically(
             conversation_id=conversation_id,
             received_at=now,
             chat_id=user_id,
+            chat_type="private",
             message_id=77,
             message_thread_id=None,
             delivery_stream_id=DeliveryStreamId(

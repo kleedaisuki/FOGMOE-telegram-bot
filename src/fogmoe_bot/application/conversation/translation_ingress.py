@@ -20,6 +20,10 @@ from fogmoe_bot.application.conversation.assistant_ingress import (
     AssistantTurnRequest,
     AssistantUserNotRegistered,
 )
+from fogmoe_bot.application.conversation.telegram_identity import (
+    GROUP_CHAT_TYPES,
+    TelegramConversationAddress,
+)
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCapability,
     StandaloneOutboundCommand,
@@ -39,6 +43,9 @@ from fogmoe_bot.domain.observability.trace import TraceContext
 TRANSLATION_TEXT_LIMIT = 3000
 """@brief 翻译输入字符上限 / Translation-input character limit."""
 
+TRANSLATION_CHAT_TYPES = frozenset({"private", *GROUP_CHAT_TYPES})
+"""@brief `/tl` 支持的 Telegram chat 类型 / Telegram chat types supported by `/tl`."""
+
 
 @dataclass(frozen=True, slots=True)
 class TranslationReplyTarget:
@@ -48,6 +55,7 @@ class TranslationReplyTarget:
     @param conversation_id 长期会话 identity / Long-lived conversation identity.
     @param received_at Listener 接收时间 / Listener receipt time.
     @param chat_id Telegram chat ID / Telegram chat identifier.
+    @param chat_type Telegram chat 类型 / Telegram chat type.
     @param message_id `/tl` 消息 ID / `/tl` message identifier.
     @param message_thread_id 可选 topic ID / Optional topic identifier.
     @param delivery_stream_id 有序投递流 / Ordered delivery stream.
@@ -61,6 +69,7 @@ class TranslationReplyTarget:
     message_thread_id: int | None
     delivery_stream_id: DeliveryStreamId
     trace_context: TraceContext = field(default_factory=TraceContext.new_root)
+    chat_type: str = "private"
 
     def __post_init__(self) -> None:
         """@brief 校验外部身份并规范时间 / Validate external identities and normalize time.
@@ -70,6 +79,11 @@ class TranslationReplyTarget:
 
         if isinstance(self.chat_id, bool) or self.chat_id == 0:
             raise ValueError("Translation chat_id cannot be zero")
+        if not isinstance(self.chat_type, str):
+            raise TypeError("Translation chat_type must be a string")
+        chat_type = self.chat_type.strip().casefold()
+        if chat_type not in TRANSLATION_CHAT_TYPES:
+            raise ValueError(f"Unsupported translation chat_type: {chat_type}")
         if isinstance(self.message_id, bool) or self.message_id <= 0:
             raise ValueError("Translation message_id must be positive")
         if self.message_thread_id is not None and (
@@ -77,6 +91,7 @@ class TranslationReplyTarget:
         ):
             raise ValueError("Translation message_thread_id must be positive")
         object.__setattr__(self, "received_at", ensure_utc(self.received_at))
+        object.__setattr__(self, "chat_type", chat_type)
         if not isinstance(self.trace_context, TraceContext):
             raise TypeError("Translation target requires a TraceContext")
 
@@ -108,11 +123,20 @@ class TranslationTurnRequest:
 
         if isinstance(self.user_id, bool) or self.user_id <= 0:
             raise ValueError("Translation user_id must be positive")
-        if self.target.conversation_id != ConversationId(
-            f"assistant-user:{self.user_id}"
-        ):
+        if not isinstance(self.is_group, bool):
+            raise TypeError("Translation is_group must be a Boolean")
+        expected_is_group = self.target.chat_type in GROUP_CHAT_TYPES
+        if self.is_group != expected_is_group:
+            raise ValueError("Translation is_group must match target chat_type")
+        expected_conversation = TelegramConversationAddress(
+            chat_type=self.target.chat_type,
+            chat_id=self.target.chat_id,
+            user_id=self.user_id,
+            message_thread_id=self.target.message_thread_id,
+        ).conversation_id
+        if self.target.conversation_id != expected_conversation:
             raise ValueError(
-                "Translation sender must own the durable conversation identity"
+                "Translation address must match the durable conversation identity"
             )
         display_name = self.display_name.strip()
         if not display_name:

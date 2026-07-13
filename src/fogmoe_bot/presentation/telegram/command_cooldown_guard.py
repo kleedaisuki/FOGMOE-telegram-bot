@@ -26,6 +26,10 @@ from fogmoe_bot.domain.conversation.identity import ConversationId
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
 
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
+)
+
 from .delivery import delivery_stream_for_chat
 
 
@@ -72,6 +76,23 @@ class ParsedTelegramCommand:
     display_name: str = ""
     chat_type: str = "private"
     reply_text: str | None = None
+
+    @property
+    def conversation_id(self) -> ConversationId:
+        """@brief 由命令 envelope 推导规范会话身份 / Derive the canonical conversation identity from the command envelope.
+
+        @return 私聊用户或群组 Topic 的规范 Conversation ID / Canonical private-user or group-topic Conversation ID.
+        @note 不能仅由 ``user_id`` 推导：群聊中的所有成员必须落在同一个
+            ``group_id + topic`` 会话。/ This cannot be derived from ``user_id`` alone:
+            all group members must resolve to the same ``group_id + topic`` conversation.
+        """
+
+        return TelegramConversationAddress(
+            chat_type=self.chat_type,
+            chat_id=self.chat_id,
+            user_id=self.user_id,
+            message_thread_id=self.message_thread_id,
+        ).conversation_id
 
 
 class TelegramCommandCooldownGuard:
@@ -132,11 +153,6 @@ class TelegramCommandCooldownGuard:
             return Allow()
         if parsed.target is not None and parsed.target.casefold() != self._bot_username:
             return Allow()
-        expected_conversation = ConversationId(f"assistant-user:{parsed.user_id}")
-        if update.conversation_id != expected_conversation:
-            raise MalformedTelegramCommandUpdate(
-                "Command sender does not match the durable conversation identity"
-            )
         if self._gate.try_acquire(
             (parsed.user_id, parsed.command),
             int(update.update_id),
@@ -229,7 +245,7 @@ def parse_telegram_command(update: InboundUpdate) -> ParsedTelegramCommand | Non
     message_id = _positive_int(message, "message_id")
     thread_id = _optional_positive_int(message, "message_thread_id")
     argument_text = text[length:].strip()
-    return ParsedTelegramCommand(
+    parsed = ParsedTelegramCommand(
         command=matched.group(1).casefold(),
         target=matched.group(2),
         user_id=user_id,
@@ -243,6 +259,9 @@ def parse_telegram_command(update: InboundUpdate) -> ParsedTelegramCommand | Non
         chat_type=chat_type,
         reply_text=_reply_text(message),
     )
+    if update.conversation_id != parsed.conversation_id:
+        raise _malformed("command address does not match durable conversation identity")
+    return parsed
 
 
 def _message(payload: JsonObject) -> JsonObject | None:

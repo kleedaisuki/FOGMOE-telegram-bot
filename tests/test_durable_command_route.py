@@ -15,10 +15,12 @@ from fogmoe_bot.domain.conversation.payloads import (
     JsonValue,
 )
 from fogmoe_bot.domain.conversation.identity import (
-    ConversationId,
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
+)
 from fogmoe_bot.presentation.telegram.basic_handlers import (
     StaticTelegramCommandHandler,
 )
@@ -119,7 +121,12 @@ def _inbound(update_id: int, token: str) -> InboundUpdate:
     }
     return InboundUpdate.pending(
         update_id=UpdateId(update_id),
-        conversation_id=ConversationId("assistant-user:42"),
+        conversation_id=TelegramConversationAddress(
+            chat_type="supergroup",
+            chat_id=-100,
+            user_id=42,
+            message_thread_id=7,
+        ).conversation_id,
         payload={"update_id": update_id, "message": message},
         received_at=NOW,
     )
@@ -138,7 +145,7 @@ def test_route_owns_targeted_command_and_executes_one_handler() -> None:
     assert route.matches(update)
     operation = asyncio.run(route.operation(update))
     assert operation.key.aggregate_type == "conversation"
-    assert operation.key.identity == ("assistant-user:42",)
+    assert operation.key.identity == ("assistant-group:-100:thread:7",)
     asyncio.run(operation.call())
 
     assert len(handler.calls) == 1

@@ -357,11 +357,26 @@ class PostgresOutboxRepository:
         token = LeaseToken.new()
         async with db_connection.transaction() as connection:
             rows = await db_connection.fetch_all(
-                "WITH candidates AS ("
+                "WITH abandoned AS ("
+                "UPDATE conversation.outbound_messages AS outbound "
+                "SET status = 'cancelled', version = outbound.version + 1, "
+                "next_attempt_at = NULL, updated_at = %s, claim_token = NULL, "
+                "lease_expires_at = NULL, "
+                "last_error = 'delivery plan cancelled after permanent sibling failure' "
+                "FROM conversation.conversation_turns AS turn "
+                "WHERE outbound.turn_id = turn.turn_id "
+                "AND turn.state = 'failed_final' "
+                "AND outbound.status IN ('pending', 'retry_wait')"
+                "), candidates AS ("
                 "SELECT candidate.message_id, candidate.status AS previous_status "
                 "FROM conversation.outbound_messages AS candidate "
                 "WHERE candidate.status IN ('pending', 'retry_wait') "
                 "AND candidate.next_attempt_at <= %s "
+                "AND (candidate.turn_id IS NULL OR EXISTS ("
+                "SELECT 1 FROM conversation.conversation_turns AS turn "
+                "WHERE turn.turn_id = candidate.turn_id "
+                "AND turn.state = 'waiting_delivery'"
+                ")) "
                 "AND NOT EXISTS ("
                 "SELECT 1 FROM conversation.outbound_messages AS earlier "
                 "WHERE earlier.delivery_stream_id = candidate.delivery_stream_id "
@@ -384,7 +399,14 @@ class PostgresOutboxRepository:
                 "outbound.attempt_count, outbound.next_attempt_at, outbound.created_at, "
                 "outbound.updated_at, outbound.delivered_at, outbound.external_message_id, "
                 "outbound.last_error, outbound.traceparent, candidates.previous_status",
-                (timestamp, limit, str(token), lease_expires_at, timestamp),
+                (
+                    timestamp,
+                    timestamp,
+                    limit,
+                    str(token),
+                    lease_expires_at,
+                    timestamp,
+                ),
                 connection=connection,
             )
             claims: list[OutboundClaim] = []
@@ -568,6 +590,11 @@ class PostgresOutboxRepository:
                 error=normalized_error,
                 connection=connection,
             )
+            await self._cancel_unclaimed_delivery_plan(
+                claim,
+                occurred_at=failure_time,
+                connection=connection,
+            )
 
     async def _complete_delivery_turn_if_settled(
         self,
@@ -605,6 +632,8 @@ class PostgresOutboxRepository:
             turn_id,
             connection=connection,
         )
+        if turn.state is TurnState.FAILED_FINAL:
+            return None
         if turn.state is not TurnState.WAITING_DELIVERY:
             raise ConcurrentTurnUpdateError(
                 f"Outbound {claim.message.message_id} requires a waiting_delivery turn, "
@@ -642,6 +671,8 @@ class PostgresOutboxRepository:
         if turn_id is None:
             return None
         turn = await _load_turn_for_mutation(turn_id, connection=connection)
+        if turn.state is TurnState.FAILED_FINAL:
+            return None
         if turn.state is not TurnState.WAITING_DELIVERY:
             raise ConcurrentTurnUpdateError(
                 f"Outbound {claim.message.message_id} requires a waiting_delivery turn, "
@@ -658,6 +689,44 @@ class PostgresOutboxRepository:
             connection=connection,
         )
         return updated
+
+    async def _cancel_unclaimed_delivery_plan(
+        self,
+        claim: OutboundClaim,
+        *,
+        occurred_at: datetime,
+        connection: AsyncConnection,
+    ) -> None:
+        """@brief 取消同一失败投递计划中尚未领取的 effect / Cancel unclaimed effects in the same failed delivery plan.
+
+        @param claim 已最终失败的 effect 领取凭证 / Claim for the effect that failed permanently.
+        @param occurred_at 取消时刻 / Cancellation time.
+        @param connection 当前短事务连接 / Current short-transaction connection.
+        @return None / None.
+        @note ``processing`` effect 保留给其持有者终结；其成功确认不会再推进已失败的
+            Turn。/ ``processing`` effects remain for their holder to finalize; a successful
+            acknowledgement will no longer advance the already failed Turn.
+        """
+
+        turn_id = claim.message.turn_id
+        if turn_id is None:
+            return
+        await db_connection.execute(
+            "UPDATE conversation.outbound_messages "
+            "SET status = 'cancelled', version = version + 1, "
+            "next_attempt_at = NULL, updated_at = %s, claim_token = NULL, "
+            "lease_expires_at = NULL, "
+            "last_error = 'delivery plan cancelled after permanent sibling failure' "
+            "WHERE turn_id = CAST(%s AS UUID) "
+            "AND message_id <> CAST(%s AS UUID) "
+            "AND status IN ('pending', 'retry_wait')",
+            (
+                occurred_at,
+                str(turn_id),
+                str(claim.message.message_id),
+            ),
+            connection=connection,
+        )
 
     async def recover_expired_outbound_leases(self, *, now: datetime) -> int:
         """@brief 回收崩溃 worker 遗留的 outbox 租约 / Recover outbox leases stranded by crashed workers.

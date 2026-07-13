@@ -46,6 +46,9 @@ def render_user_state(user_state: UserState) -> str:
         profile=user_state.profile,
         personal_info=user_state.personal_info,
         diary_exists=user_state.diary_exists,
+        user_id=user_state.user_id,
+        username=user_state.username,
+        display_name=user_state.display_name,
     )
 
 

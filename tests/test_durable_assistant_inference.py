@@ -307,6 +307,13 @@ def test_adapter_reads_cutoff_history_and_returns_ordered_durable_outbox_intents
         assert history.calls[0].through_turn_id == turn_id
         assert history.calls[0].include_history is True
         assert inference.context is not None
+        system_message = inference.context.messages[0]
+        assert system_message["role"] == "system"
+        assert isinstance(system_message["content"], str)
+        assert (
+            '<user_identity trust="trusted_platform_metadata" display_name="Klee" '
+            'username="klee" user_id="7" />'
+        ) in system_message["content"]
         assert inference.context.messages[1:3] == [
             {"role": "assistant", "content": "previous"},
             {"role": "user", "content": "hello"},

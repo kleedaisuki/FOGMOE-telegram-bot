@@ -17,6 +17,9 @@ class UserState:
     @param profile acceptance 时冻结的 User Profile / User Profile frozen at acceptance.
     @param personal_info 用户自定义个人信息 / User-defined personal information.
     @param diary_exists 是否存在用户日记 / Whether user diary exists.
+    @param user_id Telegram 用户 ID / Telegram user identifier visible to the model.
+    @param username Telegram username / Telegram username visible to the model.
+    @param display_name Telegram 显示名 / Telegram display name visible to the model.
     """
 
     coins: int
@@ -25,6 +28,9 @@ class UserState:
     profile: UserProfileSnapshot | None = None
     personal_info: str = ""
     diary_exists: bool = False
+    user_id: int | None = None
+    username: str | None = None
+    display_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)

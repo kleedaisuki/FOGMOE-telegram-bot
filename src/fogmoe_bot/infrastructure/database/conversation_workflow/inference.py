@@ -570,7 +570,7 @@ class PostgresInferenceRepository:
                 "activity.request, activity.status, activity.version, "
                 "activity.attempt_count, activity.next_attempt_at, activity.created_at, "
                 "activity.updated_at, activity.completed_at, activity.completion_token, "
-                "activity.last_error",
+                "activity.last_error, activity.traceparent",
                 (timestamp, retry_time, timestamp, recovery_error),
                 connection=connection,
             )

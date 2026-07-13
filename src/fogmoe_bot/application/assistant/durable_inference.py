@@ -317,6 +317,9 @@ class DurableAssistantInferenceAdapter:
             profile=_profile_from_command(command),
             personal_info=command.user.personal_info,
             diary_exists=command.user.diary_exists,
+            user_id=command.user.user_id,
+            username=command.user.username,
+            display_name=command.user.display_name,
         )
         if command.task_kind == "translation":
             translation_input = command.translation_input

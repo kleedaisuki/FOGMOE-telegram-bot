@@ -99,6 +99,110 @@ def test_inference_claim_preserves_conversation_causality_across_workers(
     asyncio.run(scenario())
 
 
+def test_expired_inference_recovery_returns_a_complete_activity_projection(
+    monkeypatch: Any,
+) -> None:
+    """@brief 过期推理租约恢复返回含 traceparent 的完整活动行 / Expired inference recovery returns a complete activity row including traceparent."""
+
+    connection = object()
+    repository = PostgresInferenceRepository()
+    activity = _activity()
+    captured: dict[str, object] = {}
+
+    async def fake_fetch_all(
+        sql: str,
+        params: tuple[object, ...],
+        *,
+        connection: object,
+    ) -> list[tuple[object, ...]]:
+        """@brief 返回恢复后的 14 列 activity 行 / Return the recovered 14-column activity row.
+
+        @param sql 执行的 SQL / Executed SQL.
+        @param params SQL 参数 / SQL parameters.
+        @param connection 当前连接 / Current connection.
+        @return 已恢复活动行 / Recovered activity row.
+        """
+
+        captured["sql"] = sql
+        assert connection is not None
+        retry_at = params[1]
+        assert isinstance(retry_at, type(NOW))
+        return [
+            (
+                activity.activity_id.value,
+                activity.turn_id.value,
+                str(activity.conversation_id),
+                activity.draft.request,
+                "retry",
+                2,
+                activity.attempt_count,
+                retry_at,
+                activity.draft.created_at,
+                retry_at,
+                None,
+                None,
+                "inference worker lease expired before finalization",
+                activity.draft.trace_context.to_traceparent(),
+            )
+        ]
+
+    async def fake_load_turn(
+        turn_id: TurnId,
+        *,
+        connection: object,
+    ) -> object:
+        """@brief 返回等待推理的 Turn / Return a Turn waiting for inference.
+
+        @param turn_id Turn ID / Turn identifier.
+        @param connection 当前连接 / Current connection.
+        @return 等待推理 Turn / Waiting-inference Turn.
+        """
+
+        assert turn_id == activity.turn_id
+        assert connection is not None
+        return turn_uow._map_turn(
+            _turn_row(
+                state="waiting_inference",
+                version=3,
+                inference_attempts=1,
+            )
+        )
+
+    async def fake_persist(
+        turn: object,
+        *,
+        expected_version: int,
+        connection: object,
+    ) -> None:
+        """@brief 记录恢复后的 Turn / Record the recovered Turn.
+
+        @param turn 已恢复 Turn / Recovered Turn.
+        @param expected_version 乐观锁版本 / Optimistic-lock version.
+        @param connection 当前连接 / Current connection.
+        @return None / None.
+        """
+
+        captured["turn"] = turn
+        captured["version"] = expected_version
+        assert connection is not None
+
+    monkeypatch.setattr(
+        db_connection,
+        "transaction",
+        lambda: _TransactionContext(connection),
+    )
+    monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(inference_repository, "_load_turn_for_mutation", fake_load_turn)
+    monkeypatch.setattr(inference_repository, "_persist_turn", fake_persist)
+
+    recovered = asyncio.run(repository.recover_expired_inference_leases(now=NOW))
+
+    assert recovered == 1
+    assert "activity.last_error, activity.traceparent" in str(captured["sql"])
+    assert getattr(captured["turn"], "state").value == "inference_retry_wait"
+    assert captured["version"] == 3
+
+
 def test_inference_uow_failure_exits_the_single_transaction_for_rollback(
     monkeypatch: Any,
 ) -> None:

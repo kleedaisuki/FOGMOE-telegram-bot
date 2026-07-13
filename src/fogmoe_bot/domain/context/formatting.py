@@ -61,7 +61,24 @@ def format_user_state_prompt(
     profile: UserProfileSnapshot | None,
     personal_info: str = "",
     diary_exists: bool = False,
+    user_id: int | None = None,
+    username: str | None = None,
+    display_name: str = "",
 ) -> str:
+    """@brief 格式化模型可见的用户状态 / Format model-visible user state.
+
+    @param user_coins 用户硬币余额 / User coin balance.
+    @param user_plan 用户订阅计划 / User subscription plan.
+    @param user_permission 用户权限等级 / User permission level.
+    @param profile 冻结的用户画像 / Frozen user profile.
+    @param personal_info 用户自定义个人信息 / User-provided personal information.
+    @param diary_exists 是否存在用户日记 / Whether the user diary exists.
+    @param user_id Telegram 用户 ID / Telegram user identifier.
+    @param username Telegram username / Telegram username.
+    @param display_name Telegram 显示名 / Telegram display name.
+    @return 用户身份与状态提示词 / User identity and state prompt.
+    """
+
     permission_labels = {
         0: "Normal",
         1: "Advanced",
@@ -69,6 +86,11 @@ def format_user_state_prompt(
         3: "Ultimate",
     }
     permission_label = permission_labels.get(user_permission, "Unknown")
+    identity_attrs = [
+        ("display_name", display_name),
+        ("username", username),
+        ("user_id", str(user_id) if user_id is not None else None),
+    ]
     attrs = [
         ("coins", str(user_coins)),
         ("user_plan", user_plan),
@@ -79,7 +101,16 @@ def format_user_state_prompt(
     attr_text = " ".join(
         f'{key}="{xml_escape(value)}"' for key, value in attrs if value
     )
-    lines = [f"<user_state {attr_text} />"]
+    identity_attr_text = " ".join(
+        f'{key}="{xml_escape(value)}"' for key, value in identity_attrs if value
+    )
+    lines = []
+    if identity_attr_text:
+        lines.append(
+            '<user_identity trust="trusted_platform_metadata" '
+            f"{identity_attr_text} />"
+        )
+    lines.append(f"<user_state {attr_text} />")
     if profile is not None or personal_info:
         revision_attr = f' revision="{profile.revision}"' if profile is not None else ""
         lines.append(f'<user_profile trust="untrusted_derived_data"{revision_attr}>')

@@ -19,8 +19,11 @@ from fogmoe_bot.application.user_profile import (
     RequestUserProfileRegeneration,
     UserProfileManagementResult,
 )
-from fogmoe_bot.domain.conversation.identity import ConversationId, UpdateId
+from fogmoe_bot.domain.conversation.identity import UpdateId
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
+)
 from fogmoe_bot.presentation.telegram.command_cooldown_guard import (
     parse_telegram_command,
 )
@@ -180,7 +183,12 @@ def _inbound(
     token = text.split(maxsplit=1)[0]
     return InboundUpdate.pending(
         update_id=UpdateId(99),
-        conversation_id=ConversationId("assistant-user:42"),
+        conversation_id=TelegramConversationAddress(
+            chat_type=chat_type,
+            chat_id=chat_id,
+            user_id=42,
+            message_thread_id=None,
+        ).conversation_id,
         payload={
             "update_id": 99,
             "message": {
