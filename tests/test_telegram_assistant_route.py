@@ -260,6 +260,8 @@ def _inbound(payload: JsonObject) -> InboundUpdate:
 def _route(
     acceptance: RecordingAcceptance | None = None,
     feedback: RecordingFeedback | None = None,
+    *,
+    bot_username: str = "FogMoeBot",
 ) -> tuple[TelegramAssistantPrimaryRoute, RecordingAcceptance, RecordingFeedback]:
     """@brief 构造 route 与记录端口 / Build a route and recording ports.
 
@@ -277,7 +279,7 @@ def _route(
         TelegramAssistantPrimaryRoute(
             coordinator=coordinator,
             bot_user_id=999,
-            bot_username="FogMoeBot",
+            bot_username=bot_username,
         ),
         acceptance_port,
         feedback_port,
@@ -404,6 +406,24 @@ def test_group_trigger_preserves_mentions_keywords_and_reply_to_bot() -> None:
     assert not route.matches(quiet)
     assert route.matches(mentioned)
     assert route.matches(replied_photo)
+
+
+def test_group_trigger_matches_the_current_bot_username() -> None:
+    """@brief 群聊提及必须匹配运行时 Bot 用户名 / Group mentions must match the runtime Bot username.
+
+    @return None / None.
+    """
+
+    route, _acceptance, _feedback = _route(bot_username="kleek_RoPL_bot")
+    current_mention = _inbound(
+        _message_payload(
+            chat_type="supergroup",
+            chat_id=-1001,
+            text="@KLEEK_ropl_BOT 在吗",
+        )
+    )
+
+    assert route.matches(current_mention)
 
 
 def test_request_contains_strict_adapter_metadata_and_normalized_user_content() -> None:

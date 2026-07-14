@@ -175,7 +175,7 @@ class ParsedTelegramAssistantMessage:
         folded = text.casefold()
         return (
             "/fogmoebot" in text
-            or "@FogMoeBot" in text
+            or f"@{bot_username.removeprefix('@').casefold()}" in folded
             or "雾萌" in text
             or "fog moe" in folded
             or "萌娘" in text
