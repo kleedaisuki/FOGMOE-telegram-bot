@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 
 from fogmoe_bot.application.economy.common import EconomyCode
@@ -15,24 +15,40 @@ from fogmoe_bot.application.economy.rewards import (
     RewardOperations,
     calculate_checkin_reward,
 )
+from fogmoe_bot.domain.banking.ledger import LedgerAccount, LedgerReason
+from fogmoe_bot.domain.banking.money import (
+    SystemAccountKind,
+    TokenAmount,
+    TokenBucket,
+)
 from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database.banking import post_bank_transfer
 
-from .common import _credit_free, _load_result, _lock_account, _save_result
+from .common import (
+    _load_result,
+    _lock_operation_key,
+    _registered_user_exists,
+    _save_result,
+)
 
 
 class PostgresRewardOperations(RewardOperations):
-    """@brief 以账户锁串行化签到与抽奖奖励 / Serialize check-in and lottery rewards with account locks."""
+    """@brief 以领域状态与银行账本串行化签到和抽奖 / Serialize check-in and lottery through domain state and the bank ledger."""
 
     async def check_in(self, command: CheckInCommand) -> CheckInResult:
-        """@brief 以账户行串行化签到与奖励 / Serialize check-in and reward on the account row.
+        """@brief 以签到状态和账本原子串行化签到奖励 / Serialize a check-in reward through check-in state and the ledger.
 
         @param command 签到命令 / Check-in command.
         @return 签到结果 / Check-in result.
         """
 
         async with db_connection.transaction() as connection:
-            account = await _lock_account(command.user_id, connection)
-            if account is None:
+            await _lock_operation_key(command.idempotency_key, connection)
+            await _lock_operation_key(
+                f"checkin:{command.user_id}:{command.day.isoformat()}",
+                connection,
+            )
+            if not await _registered_user_exists(command.user_id, connection):
                 return CheckInResult(EconomyCode.NOT_REGISTERED)
             replay = await _load_result(command.idempotency_key, connection)
             if replay is not None:
@@ -77,7 +93,18 @@ class PostgresRewardOperations(RewardOperations):
                 (command.user_id, command.day, consecutive),
                 connection=connection,
             )
-            await _credit_free(command.user_id, reward, connection)
+            await post_bank_transfer(
+                namespace="economy-checkin-reward",
+                source_idempotency_key=command.idempotency_key,
+                reason=LedgerReason.BANK_ISSUANCE,
+                source=LedgerAccount.system(SystemAccountKind.ISSUANCE),
+                destination=LedgerAccount.user(command.user_id, TokenBucket.FREE),
+                amount=TokenAmount(reward),
+                created_at=datetime.combine(command.day, time.min, tzinfo=UTC),
+                actor_id=command.user_id,
+                connection=connection,
+                metadata={"grant_kind": "checkin", "consecutive_days": consecutive},
+            )
             result = CheckInResult(
                 EconomyCode.SUCCESS,
                 consecutive_days=consecutive,
@@ -93,7 +120,7 @@ class PostgresRewardOperations(RewardOperations):
             return result
 
     async def claim_lottery(self, command: LotteryCommand) -> LotteryResult:
-        """@brief 以账户行串行化抽奖与奖励 / Serialize a lottery claim and reward on the account row.
+        """@brief 以抽奖状态和账本原子串行化领取 / Serialize a lottery claim through lottery state and the ledger.
 
         @param command 抽奖命令 / Lottery command.
         @return 稳定、可回放结果 / Stable replayable result.
@@ -101,7 +128,9 @@ class PostgresRewardOperations(RewardOperations):
 
         operation_kind = "lottery_claim"
         async with db_connection.transaction() as connection:
-            if await _lock_account(command.user_id, connection) is None:
+            await _lock_operation_key(command.idempotency_key, connection)
+            await _lock_operation_key(f"lottery:{command.user_id}", connection)
+            if not await _registered_user_exists(command.user_id, connection):
                 return LotteryResult(EconomyCode.NOT_REGISTERED)
             replay = await _load_result(
                 command.idempotency_key,
@@ -135,7 +164,18 @@ class PostgresRewardOperations(RewardOperations):
                     next_eligible_at=next_eligible,
                 )
             else:
-                await _credit_free(command.user_id, command.prize, connection)
+                await post_bank_transfer(
+                    namespace="economy-lottery-reward",
+                    source_idempotency_key=command.idempotency_key,
+                    reason=LedgerReason.BANK_ISSUANCE,
+                    source=LedgerAccount.system(SystemAccountKind.ISSUANCE),
+                    destination=LedgerAccount.user(command.user_id, TokenBucket.FREE),
+                    amount=TokenAmount(command.prize),
+                    created_at=claimed_at,
+                    actor_id=command.user_id,
+                    connection=connection,
+                    metadata={"grant_kind": "daily_lottery"},
+                )
                 await db_connection.execute(
                     "INSERT INTO economy.user_lottery (user_id, last_lottery_date) "
                     "VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET "

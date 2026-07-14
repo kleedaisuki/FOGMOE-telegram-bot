@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal, ROUND_DOWN
 from enum import StrEnum
 from typing import Protocol
 
@@ -43,18 +42,12 @@ ASSISTANT_TEXT_LIMIT = 4096
 ASSISTANT_MEDIA_LIMIT_BYTES = 8 * 1024 * 1024
 """@brief Assistant 单媒体下载上限 / Per-media Assistant download limit."""
 
-_POOL_RATE = Decimal("0.2")
-"""@brief 对话费用进入质押池的比例 / Share of conversation charges added to the staking pool."""
-
-_POOL_QUANT = Decimal("0.01")
-"""@brief 质押池金额精度 / Staking-pool amount precision."""
-
 
 @dataclass(frozen=True, slots=True)
 class AssistantAccountContext:
-    """@brief 扣费后用于 durable inference 的账户上下文 / Post-charge account context for durable inference.
+    """@brief 不含货币余额的 durable inference 用户上下文 / Non-monetary user context for durable inference.
 
-    @param coins 扣费后总余额 / Total balance after charging.
+    @param coins durable inference schema 的只读展示字段；直接入口固定为零且绝不触发扣费 / Read-only display field in the durable inference schema; direct ingress fixes it at zero and never charges.
     @param plan 用户计划 / User plan.
     @param permission 权限等级 / Permission level.
     @param profile 当前 committed User Profile / Current committed User Profile.
@@ -75,8 +68,8 @@ class AssistantAccountContext:
         @return None / None.
         """
 
-        if isinstance(self.coins, bool) or self.coins < 0:
-            raise ValueError("Assistant account coins cannot be negative")
+        if isinstance(self.coins, bool) or self.coins != 0:
+            raise ValueError("Assistant account coins are retired and must be zero")
         if not self.plan.strip():
             raise ValueError("Assistant account plan cannot be blank")
         if isinstance(self.permission, bool) or not isinstance(self.permission, int):
@@ -101,7 +94,6 @@ class AssistantTurnRequest:
     @param message_thread_id 可选话题 ID / Optional topic ID.
     @param delivery_stream_id 有序投递流 / Ordered delivery stream.
     @param user_content 规范化用户消息 / Normalized user message.
-    @param coin_cost 本回合费用 / Charge for this turn.
     @param task_kind 推理任务种类 / Inference task kind.
     @param translation_input 翻译活动的隔离输入 / Isolated translation input.
     """
@@ -118,13 +110,12 @@ class AssistantTurnRequest:
     message_thread_id: int | None
     delivery_stream_id: DeliveryStreamId
     user_content: JsonObject
-    coin_cost: int
     trace_context: TraceContext = field(default_factory=TraceContext.new_root)
     task_kind: AssistantTaskKind = "assistant"
     translation_input: str | None = None
 
     def __post_init__(self) -> None:
-        """@brief 校验请求身份、费用与 JSON / Validate request identity, charge, and JSON.
+        """@brief 校验请求身份与 JSON / Validate request identity and JSON.
 
         @return None / None.
         """
@@ -143,8 +134,6 @@ class AssistantTurnRequest:
             raise ValueError("Assistant display name cannot be blank")
         if self.username is not None and not self.username.strip():
             raise ValueError("Assistant username cannot be blank when present")
-        if isinstance(self.coin_cost, bool) or not 0 <= self.coin_cost <= 5:
-            raise ValueError("Assistant coin cost must be between zero and five")
         text = self.user_content.get("text")
         if not isinstance(text, str) or not text:
             raise ValueError("Assistant user content requires non-empty text")
@@ -178,9 +167,9 @@ class AssistantTurnRequest:
         *,
         accepted_at: datetime,
     ) -> AcceptConversationTurn:
-        """@brief 以扣费后账户快照构造严格 v1 Conversation acceptance / Build a strict-v1 Conversation acceptance from the post-charge account snapshot.
+        """@brief 以冻结的无计费用户上下文构造严格 v1 Conversation acceptance / Build a strict-v1 Conversation acceptance from a frozen no-charge user context.
 
-        @param account 扣费后上下文 / Post-charge account context.
+        @param account acceptance 时冻结的用户上下文 / User context frozen at acceptance.
         @param accepted_at 应用接受时间 / Application acceptance time.
         @return 可交给 ConversationWorkflow.prepare 的命令 / Command for ConversationWorkflow.prepare.
         @raise ValueError 群聊上下文携带私人状态 / A group context carries private state.
@@ -272,35 +261,12 @@ class AssistantUserNotRegistered:
     """@brief 用户尚未注册，未产生任何写入 / User is not registered and no writes were made."""
 
 
-@dataclass(frozen=True, slots=True)
-class AssistantInsufficientCoins:
-    """@brief 余额不足，未创建 Turn / Insufficient balance; no Turn was created.
-
-    @param available 当前可用余额 / Available balance.
-    @param required 本回合费用 / Required charge.
-    """
-
-    available: int
-    required: int
-
-    def __post_init__(self) -> None:
-        """@brief 校验余额拒绝 / Validate the balance rejection.
-
-        @return None / None.
-        """
-
-        if self.available < 0 or self.required <= self.available:
-            raise ValueError("Insufficient-coins result requires available < required")
-
-
-type AssistantTurnAcceptanceResult = (
-    AssistantTurnAccepted | AssistantUserNotRegistered | AssistantInsufficientCoins
-)
-"""@brief 扣费与 acceptance 的穷尽结果 / Exhaustive charge-and-accept result."""
+type AssistantTurnAcceptanceResult = AssistantTurnAccepted | AssistantUserNotRegistered
+"""@brief 无计费 Assistant acceptance 的穷尽结果 / Exhaustive no-charge Assistant-acceptance result."""
 
 
 class AssistantTurnAcceptanceUoW(Protocol):
-    """@brief 账户、奖池与 Conversation acceptance 的原子 UoW / Atomic account, pool, and Conversation-acceptance unit of work."""
+    """@brief 无货币副作用的 Conversation acceptance 原子 UoW / Monetary-side-effect-free Conversation-acceptance atomic UoW."""
 
     async def accept(
         self,
@@ -308,13 +274,13 @@ class AssistantTurnAcceptanceUoW(Protocol):
         *,
         accepted_at: datetime,
     ) -> AssistantTurnAcceptanceResult:
-        """@brief 在单个短事务内扣费并接受回合 / Charge and accept in one short transaction.
+        """@brief 在单个短事务内接受无计费回合 / Accept a no-charge turn in one short transaction.
 
         @param request 已预检请求 / Preflighted request.
         @param accepted_at 接受时间 / Acceptance time.
         @return 接受或业务拒绝 / Acceptance or business rejection.
-        @note 实现必须先锁 durable Update 与账户，且任何拒绝/异常都不得留下 Turn。/
-            Implementations must lock the durable Update and account first; rejection or failure must not leave a Turn.
+        @note 实现必须先锁 durable Update 与用户身份，且任何拒绝/异常都不得留下 Turn。/
+            Implementations must lock the durable Update and user identity first; rejection or failure must not leave a Turn.
         """
 
         ...
@@ -326,7 +292,6 @@ class AssistantFeedbackReason(StrEnum):
     TEXT_TOO_LONG = "text_too_long"
     MEDIA_TOO_LARGE = "media_too_large"
     USER_NOT_REGISTERED = "user_not_registered"
-    INSUFFICIENT_COINS = "insufficient_coins"
 
 
 class AssistantIngressCoordinator:
@@ -341,7 +306,7 @@ class AssistantIngressCoordinator:
     ) -> None:
         """@brief 注入 UoW、反馈能力与时钟 / Inject the UoW, feedback capability, and clock.
 
-        @param acceptance 原子扣费与回合 acceptance / Atomic charge-and-turn acceptance.
+        @param acceptance 无计费回合 acceptance / No-charge turn acceptance.
         @param feedback standalone outbox 能力 / Standalone-outbox capability.
         @param clock UTC 时钟 / UTC clock.
         """
@@ -367,8 +332,6 @@ class AssistantIngressCoordinator:
         )
         if isinstance(result, AssistantUserNotRegistered):
             await self.reject(request, AssistantFeedbackReason.USER_NOT_REGISTERED)
-        elif isinstance(result, AssistantInsufficientCoins):
-            await self.reject(request, AssistantFeedbackReason.INSUFFICIENT_COINS)
         return result
 
     async def reject(
@@ -383,7 +346,7 @@ class AssistantIngressCoordinator:
         @return None / None.
         """
 
-        text = _feedback_text(reason, required=request.coin_cost)
+        text = _feedback_text(reason)
         payload: JsonObject = {
             "chat_id": request.chat_id,
             "text": text,
@@ -404,47 +367,6 @@ class AssistantIngressCoordinator:
         )
 
 
-def assistant_text_cost(text: str) -> int:
-    """@brief 按旧产品边界计算文本费用 / Calculate text cost using legacy product boundaries.
-
-    @param text 非空消息文本 / Non-empty message text.
-    @return 1 至 5 枚硬币 / Between one and five coins.
-    @raises ValueError 文本为空或超过上限 / Text is empty or exceeds the limit.
-    """
-
-    if not text:
-        raise ValueError("Assistant text cannot be empty")
-    length = len(text)
-    if length > ASSISTANT_TEXT_LIMIT:
-        raise ValueError(
-            f"Assistant text cannot exceed {ASSISTANT_TEXT_LIMIT} characters"
-        )
-    if length > 2000:
-        return 5
-    if length > 1000:
-        return 4
-    if length > 500:
-        return 3
-    if length > 100:
-        return 2
-    return 1
-
-
-def assistant_pool_contribution(coin_cost: int) -> Decimal:
-    """@brief 计算对话费用进入质押池的金额 / Calculate the staking-pool contribution from a conversation charge.
-
-    @param coin_cost 正整数费用 / Positive integer charge.
-    @return 向下取整到分的 20% / Twenty percent rounded down to cents.
-    """
-
-    if isinstance(coin_cost, bool) or coin_cost <= 0:
-        raise ValueError("Assistant coin cost must be positive")
-    return (Decimal(coin_cost) * _POOL_RATE).quantize(
-        _POOL_QUANT,
-        rounding=ROUND_DOWN,
-    )
-
-
 def normalize_assistant_personal_info(value: str | None) -> str:
     """@brief 规范化 durable 个人信息 / Normalize durable personal information.
 
@@ -455,11 +377,10 @@ def normalize_assistant_personal_info(value: str | None) -> str:
     return (value or "").strip()[:500]
 
 
-def _feedback_text(reason: AssistantFeedbackReason, *, required: int) -> str:
+def _feedback_text(reason: AssistantFeedbackReason) -> str:
     """@brief 渲染兼容旧产品的拒绝文本 / Render product-compatible rejection text.
 
     @param reason 拒绝原因 / Rejection reason.
-    @param required 本回合费用 / Required charge.
     @return 双语拒绝文本 / Bilingual rejection text.
     """
 
@@ -478,11 +399,7 @@ def _feedback_text(reason: AssistantFeedbackReason, *, required: int) -> str:
             "请先使用 /me 命令注册个人信息后再聊天。\n"
             "Please register first using the /me command before chatting."
         )
-    return (
-        f"您的硬币不足，无法与雾萌娘连接，需要{required}个硬币。试试通过 /lottery 抽奖吧！\n"
-        f"You don't have enough coins (need {required}), I don't want to talk to you. "
-        "Try using /lottery to get some coins!"
-    )
+    raise ValueError(f"Unsupported Assistant feedback reason: {reason}")
 
 
 __all__ = [
@@ -492,13 +409,10 @@ __all__ = [
     "AssistantAccountContext",
     "AssistantFeedbackReason",
     "AssistantIngressCoordinator",
-    "AssistantInsufficientCoins",
     "AssistantTurnAcceptanceResult",
     "AssistantTurnAcceptanceUoW",
     "AssistantTurnAccepted",
     "AssistantTurnRequest",
     "AssistantUserNotRegistered",
-    "assistant_pool_contribution",
-    "assistant_text_cost",
     "normalize_assistant_personal_info",
 ]

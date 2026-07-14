@@ -17,11 +17,10 @@ from fogmoe_bot.domain.media.music import (
 
 @dataclass(frozen=True)
 class Profile:
-    """测试媒体准入快照 / Test media-admission snapshot."""
+    """@brief 测试媒体准入快照 / Test media-admission snapshot."""
 
     registered: bool = True
     permission: int = 2
-    coins: int = 100
 
 
 class Accounts:

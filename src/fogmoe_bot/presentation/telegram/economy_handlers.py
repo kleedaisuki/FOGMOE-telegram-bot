@@ -17,10 +17,6 @@ from fogmoe_bot.application.economy.service import (
     ECONOMY_SERVICE_DATA_KEY,
     EconomyService,
 )
-from fogmoe_bot.application.economy.shop import (
-    ShopItem,
-    ShopPurchaseResult,
-)
 
 from .runtime_settings import telegram_runtime_settings
 
@@ -357,107 +353,6 @@ async def webpassword_command(
     await message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
-async def shop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """@brief 渲染商店主菜单 / Render the shop home menu.
-
-    @param update Telegram Update / Telegram Update.
-    @param context PTB callback context / PTB callback context.
-    @return None / None.
-    """
-
-    del context
-    if update.effective_message is not None:
-        await update.effective_message.reply_text(
-            "欢迎来到商城，请选择购买项目：",
-            reply_markup=_shop_home_keyboard(),
-        )
-
-
-async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """@brief 解析 ``shop_`` callback 并渲染原子购买结果 / Parse a ``shop_`` callback and render an atomic purchase.
-
-    @param update Telegram Update / Telegram Update.
-    @param context PTB callback context / PTB callback context.
-    @return None / None.
-    """
-
-    query = update.callback_query
-    if query is None or not isinstance(query.data, str):
-        return
-    if query.data == "shop_buy_permission":
-        await query.edit_message_text(
-            "请选择购买的项目：",
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "升级权限等级到1级 - 50金币", callback_data="shop_upgrade_1"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "升级权限等级到2级 - 100金币",
-                            callback_data="shop_upgrade_2",
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "升级权限等级到3级 - 10000金币",
-                            callback_data="shop_upgrade_3",
-                        )
-                    ],
-                    [InlineKeyboardButton("返回", callback_data="shop_home")],
-                ]
-            ),
-        )
-        return
-    if query.data == "shop_buy_lottery":
-        await query.edit_message_text(
-            "请选择购彩项目：",
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "购买刮刮乐 - 10金币", callback_data="shop_scratch"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "购买欢乐彩 - 1金币", callback_data="shop_huanle"
-                        )
-                    ],
-                    [InlineKeyboardButton("返回", callback_data="shop_home")],
-                ]
-            ),
-        )
-        return
-    if query.data == "shop_home":
-        await query.edit_message_text(
-            "欢迎来到商城，请选择购买项目：",
-            reply_markup=_shop_home_keyboard(),
-        )
-        return
-    if query.data == "shop_close":
-        await query.delete_message()
-        return
-    item = {
-        "shop_upgrade_1": ShopItem.PERMISSION_1,
-        "shop_upgrade_2": ShopItem.PERMISSION_2,
-        "shop_upgrade_3": ShopItem.PERMISSION_3,
-        "shop_scratch": ShopItem.SCRATCH,
-        "shop_huanle": ShopItem.HUANLE,
-    }.get(query.data)
-    if item is None:
-        return
-    result = await _service(context).purchase(
-        query.from_user.id,
-        item,
-        day=date.today(),
-        idempotency_key=f"telegram:shop:{update.update_id}:{query.from_user.id}:{item.value}",
-    )
-    await query.answer(_render_purchase(item, result), show_alert=True)
-
-
 def _service(context: ContextTypes.DEFAULT_TYPE) -> EconomyService:
     """@brief 获取已装配 economy service / Resolve the assembled economy service.
 
@@ -517,54 +412,11 @@ def _render_referral_result(
     return f"邀请绑定成功！您获得了 *{total}* 金币！"
 
 
-def _shop_home_keyboard() -> InlineKeyboardMarkup:
-    """@brief 构造商店主菜单 / Build the shop home keyboard.
-
-    @return Telegram inline keyboard / Telegram inline keyboard.
-    """
-
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("购买权限", callback_data="shop_buy_permission")],
-            [InlineKeyboardButton("购买彩票", callback_data="shop_buy_lottery")],
-            [InlineKeyboardButton("关闭商店", callback_data="shop_close")],
-        ]
-    )
-
-
-def _render_purchase(item: ShopItem, result: ShopPurchaseResult) -> str:
-    """@brief 渲染购买结果 / Render a purchase result.
-
-    @param item 商品 / Item.
-    @param result 购买结果 / Purchase result.
-    @return callback alert 文本 / Callback alert text.
-    """
-
-    if result.code is EconomyCode.NOT_REGISTERED:
-        return "请先使用 /me 命令获取个人信息。"
-    if result.code is EconomyCode.INSUFFICIENT_COINS:
-        return f"硬币不足，您当前只有 {result.available} 个硬币。"
-    if result.code is EconomyCode.ALREADY_OWNED:
-        return "您已经拥有该权限或更高权限。"
-    if result.code is EconomyCode.PERMISSION_PREREQUISITE:
-        return "您需要先购买前一级权限。"
-    if item in {ShopItem.PERMISSION_1, ShopItem.PERMISSION_2, ShopItem.PERMISSION_3}:
-        return f"购买成功！您的权限已升级到{result.permission}级。"
-    bonus = (
-        f"\n\n由于连续未中奖，系统赠送您 {result.bonus} 个金币作为安慰！"
-        if result.bonus
-        else ""
-    )
-    return f"恭喜！您获得了 {result.reward} 个金币。{bonus}"
-
-
 __all__ = [
     "ECONOMY_SERVICE_DATA_KEY",
     "checkin_command",
     "ref_callback",
     "ref_command",
-    "shop_callback",
-    "shop_command",
     "start_command",
     "task_callback",
     "task_command",

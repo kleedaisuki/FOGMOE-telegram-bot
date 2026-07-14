@@ -1,40 +1,8 @@
-"""@brief 经济领域模型 / Economy domain models."""
+"""@brief 经济领域模型包 / Economy domain-model package.
 
-from .assistant_billing import (
-    AssistantBillingReservation,
-    AssistantBillingStateError,
-    AssistantBillingStatus,
-)
+@note Assistant 金币预留已随 0058 退役；新的权益与支付模型归属 ``billing`` 与
+    ``banking`` 领域。/ Assistant token reservations were retired in 0058; current
+    entitlement and payment models belong to the ``billing`` and ``banking`` domains.
+"""
 
-from .staking import (
-    MAX_DAILY_RATE,
-    MIN_DAILY_RATE,
-    REWARD_INTERVAL_DAYS,
-    WITHDRAW_FEE_RATE,
-    AccountBalance,
-    StakeAction,
-    StakeDecision,
-    StakePosition,
-    calculate_daily_reward_rate,
-    calculate_payable_intervals,
-    calculate_reward_for_intervals,
-    calculate_reward_window,
-)
-
-__all__ = [
-    "AssistantBillingReservation",
-    "AssistantBillingStateError",
-    "AssistantBillingStatus",
-    "MAX_DAILY_RATE",
-    "MIN_DAILY_RATE",
-    "REWARD_INTERVAL_DAYS",
-    "WITHDRAW_FEE_RATE",
-    "AccountBalance",
-    "StakeAction",
-    "StakeDecision",
-    "StakePosition",
-    "calculate_daily_reward_rate",
-    "calculate_payable_intervals",
-    "calculate_reward_for_intervals",
-    "calculate_reward_window",
-]
+__all__: list[str] = []

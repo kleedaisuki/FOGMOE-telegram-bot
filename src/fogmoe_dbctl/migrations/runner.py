@@ -267,5 +267,12 @@ def run_migration_sql(revision_file: str | Path, direction: str) -> None:
     if not section:
         return
 
+    # Migration SQL is authored as PostgreSQL driver SQL, not a SQLAlchemy
+    # ``text()`` template.  In particular, durable account keys legitimately
+    # contain fragments such as ``'user:42:free'`` and ``'system:staking_pool'``;
+    # ``op.execute(str)`` routes them through SQLAlchemy's named-bind parser and
+    # mistakes ``:free`` / ``:staking_pool`` for missing parameters.  Executing
+    # at the driver boundary preserves every quoted literal exactly as authored.
+    connection = op.get_bind()
     for statement in _split_sql_statements(section):
-        op.execute(statement)
+        connection.exec_driver_sql(statement)

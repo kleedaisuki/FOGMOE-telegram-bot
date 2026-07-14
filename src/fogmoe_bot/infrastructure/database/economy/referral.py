@@ -1,7 +1,7 @@
 """@brief PostgreSQL 推荐关系适配器 / PostgreSQL referral adapter."""
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import cast
 
 from fogmoe_bot.application.economy.common import EconomyCode
@@ -12,22 +12,35 @@ from fogmoe_bot.application.economy.referral import (
     ReferralResult,
     ReferralSummary,
 )
+from fogmoe_bot.domain.banking.ledger import LedgerAccount, LedgerReason
+from fogmoe_bot.domain.banking.money import (
+    SystemAccountKind,
+    TokenAmount,
+    TokenBucket,
+)
 from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database.banking import post_bank_transfer
 
-from .common import _credit_free, _load_result, _save_result
+from .common import _load_result, _lock_operation_key, _save_result
 
 
 class PostgresReferralOperations(ReferralOperations):
-    """@brief 按稳定用户锁序绑定和读取推荐关系 / Bind and read referrals with stable user lock order."""
+    """@brief 以唯一关系和银行账本绑定推荐 / Bind referrals through the unique relationship and bank ledger."""
 
     async def bind_referral(self, command: ReferralCommand) -> ReferralResult:
-        """@brief 以用户 ID 升序锁定双方并绑定推荐 / Lock both users by ascending ID and bind a referral.
+        """@brief 以唯一邀请关系原子绑定并发奖 / Atomically bind a referral through its unique invitation relationship.
 
         @param command 推荐命令 / Referral command.
         @return 绑定结果 / Binding result.
+        @note 不在银行 posting 前锁 ``identity.users``。邀请主键是竞争仲裁点，成功插入
+            的事务才可发奖；这维持账本账户优先的全局锁序。/
+            This method never locks ``identity.users`` before a bank posting.  The invitation
+            primary key arbitrates races and only the transaction that inserts it can award
+            tokens, preserving the global bank-account-first lock order.
         """
 
         async with db_connection.transaction() as connection:
+            await _lock_operation_key(command.idempotency_key, connection)
             referrer = await db_connection.fetch_one(
                 "SELECT name FROM identity.users WHERE id = %s",
                 (command.referrer_id,),
@@ -45,12 +58,6 @@ class PostgresReferralOperations(ReferralOperations):
                 ),
                 connection=connection,
             )
-            await db_connection.fetch_all(
-                "SELECT id FROM identity.users WHERE id IN (%s, %s) "
-                "ORDER BY id FOR UPDATE",
-                (command.invited_user_id, command.referrer_id),
-                connection=connection,
-            )
             replay = await _load_result(command.idempotency_key, connection)
             if replay is not None:
                 return ReferralResult(
@@ -58,33 +65,57 @@ class PostgresReferralOperations(ReferralOperations):
                     new_user=bool(replay.get("new_user", False)),
                     referrer_name=str(replay.get("referrer_name", "")) or None,
                 )
-            existing = await db_connection.fetch_one(
-                "SELECT referrer_id FROM economy.user_invitations "
-                "WHERE invited_user_id = %s",
-                (command.invited_user_id,),
+            inserted_invitation = await db_connection.fetch_one(
+                "INSERT INTO economy.user_invitations "
+                "(invited_user_id, referrer_id, invitation_time, reward_claimed) "
+                "VALUES (%s, %s, CURRENT_TIMESTAMP, TRUE) "
+                "ON CONFLICT (invited_user_id) DO NOTHING "
+                "RETURNING referrer_id",
+                (command.invited_user_id, command.referrer_id),
                 connection=connection,
             )
-            if existing is not None:
+            if inserted_invitation is None:
                 result = ReferralResult(
                     EconomyCode.ALREADY_BOUND,
                     referrer_name=cast(str, referrer[0]),
                 )
             else:
-                await db_connection.execute(
-                    "INSERT INTO economy.user_invitations "
-                    "(invited_user_id, referrer_id, invitation_time, reward_claimed) "
-                    "VALUES (%s, %s, CURRENT_TIMESTAMP, TRUE)",
-                    (command.invited_user_id, command.referrer_id),
-                    connection=connection,
-                )
                 invited_reward = command.invitation_reward + (
                     command.new_user_bonus if created == 1 else 0
                 )
-                await _credit_free(command.invited_user_id, invited_reward, connection)
-                await _credit_free(
-                    command.referrer_id,
-                    command.invitation_reward,
-                    connection,
+                awarded_at = datetime.now(UTC)
+                await post_bank_transfer(
+                    namespace="economy-referral-invited",
+                    source_idempotency_key=command.idempotency_key,
+                    reason=LedgerReason.BANK_ISSUANCE,
+                    source=LedgerAccount.system(SystemAccountKind.ISSUANCE),
+                    destination=LedgerAccount.user(
+                        command.invited_user_id,
+                        TokenBucket.FREE,
+                    ),
+                    amount=TokenAmount(invited_reward),
+                    created_at=awarded_at,
+                    actor_id=command.invited_user_id,
+                    connection=connection,
+                    metadata={
+                        "grant_kind": "referral_invited",
+                        "new_user": created == 1,
+                    },
+                )
+                await post_bank_transfer(
+                    namespace="economy-referral-referrer",
+                    source_idempotency_key=command.idempotency_key,
+                    reason=LedgerReason.BANK_ISSUANCE,
+                    source=LedgerAccount.system(SystemAccountKind.ISSUANCE),
+                    destination=LedgerAccount.user(
+                        command.referrer_id,
+                        TokenBucket.FREE,
+                    ),
+                    amount=TokenAmount(command.invitation_reward),
+                    created_at=awarded_at,
+                    actor_id=command.invited_user_id,
+                    connection=connection,
+                    metadata={"grant_kind": "referral_referrer"},
                 )
                 result = ReferralResult(
                     EconomyCode.SUCCESS,

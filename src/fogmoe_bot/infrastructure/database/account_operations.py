@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 import json
 from typing import Any, cast
+from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -17,11 +19,22 @@ from fogmoe_bot.application.accounts.operations import (
     PersonalInfoResult,
     RegisterAccount,
 )
+from fogmoe_bot.domain.banking.ledger import (
+    LedgerAccount,
+    LedgerEntry,
+    LedgerReason,
+)
+from fogmoe_bot.domain.banking.money import SystemAccountKind, TokenAmount, TokenBucket
 from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database.banking import (
+    append_bank_entry,
+    ensure_bank_user_wallets,
+    load_bank_overview,
+)
 
 
 class PostgresAccountOperations(AccountOperations):
-    """@brief 以账户行锁和 identity receipt 执行账户命令 / Execute account commands with account-row locks and identity receipts."""
+    """@brief 以身份回执与银行账本执行账户命令 / Execute account commands with identity receipts and the bank ledger."""
 
     async def register(
         self,
@@ -35,23 +48,22 @@ class PostgresAccountOperations(AccountOperations):
 
         operation_kind = "register_account"
         async with db_connection.transaction() as connection:
-            await db_connection.execute(
+            inserted = await db_connection.execute(
                 "INSERT INTO identity.users "
-                "(id, tg_uid, provider, name, coins, user_plan) "
-                "VALUES (%s, %s, 'telegram', %s, %s, %s) "
+                "(id, tg_uid, provider, name, coins, coins_paid, user_plan) "
+                "VALUES (%s, %s, 'telegram', %s, 0, 0, %s) "
                 "ON CONFLICT DO NOTHING",
                 (
                     command.user_id,
                     command.user_id,
                     command.username,
-                    command.initial_coins,
                     "admin" if command.user_id == command.admin_user_id else "free",
                 ),
                 connection=connection,
             )
-            row = await _lock_profile(command.user_id, connection)
+            row = await _read_profile(command.user_id, connection)
             if row is None:
-                raise RuntimeError("Inserted account disappeared before row lock")
+                raise RuntimeError("Inserted account disappeared before profile read")
             replay = await _load_receipt(
                 command.idempotency_key,
                 operation_kind,
@@ -65,21 +77,42 @@ class PostgresAccountOperations(AccountOperations):
                     replayed=True,
                 )
 
-            paid_coins = cast(int, row[3])
-            plan = _plan(command.user_id, paid_coins, command.admin_user_id)
+            await ensure_bank_user_wallets(command.user_id, connection)
+            if inserted == 1 and command.initial_coins > 0:
+                await append_bank_entry(
+                    LedgerEntry.transfer(
+                        entry_id=uuid4(),
+                        idempotency_key=command.idempotency_key,
+                        reason=LedgerReason.BANK_ISSUANCE,
+                        source=LedgerAccount.system(SystemAccountKind.ISSUANCE),
+                        destination=LedgerAccount.user(
+                            command.user_id, TokenBucket.FREE
+                        ),
+                        amount=TokenAmount(command.initial_coins),
+                        created_at=datetime.now(UTC),
+                        metadata={"purpose": "new_account_bonus"},
+                    ),
+                    connection,
+                )
+            plan = _plan(
+                command.user_id,
+                cast(str, row[2]),
+                command.admin_user_id,
+            )
             await db_connection.execute(
                 "UPDATE identity.users SET tg_uid = %s, provider = 'telegram', "
                 "name = %s, user_plan = %s WHERE id = %s",
                 (command.user_id, command.username, plan, command.user_id),
                 connection=connection,
             )
+            overview = await load_bank_overview(command.user_id, connection)
             profile = AccountProfile(
                 user_id=command.user_id,
                 username=command.username,
                 permission=cast(int, row[1]),
                 plan=plan,
-                free_coins=cast(int, row[2]),
-                paid_coins=paid_coins,
+                free_coins=overview.free.value,
+                paid_coins=overview.paid.value,
             )
             await _save_receipt(
                 command.idempotency_key,
@@ -154,20 +187,25 @@ class PostgresAccountOperations(AccountOperations):
             return result
 
 
-async def _lock_profile(
+async def _read_profile(
     user_id: int,
     connection: AsyncConnection,
 ) -> tuple[object, ...] | None:
-    """@brief 锁定并读取账户展示字段 / Lock and read account display fields.
+    """@brief 读取账户展示字段，不抢占银行投影的用户锁 / Read account-display fields without preempting the bank projection's user lock.
 
     @param user_id 用户 ID / User ID.
     @param connection 当前事务 / Current transaction.
     @return raw row 或 None / Raw row or None.
+    @note 账户注册的货币变更只发生在 ``bank.ledger_postings``；这里不使用
+        ``FOR UPDATE``，因此不会和账本投影触发器构成 identity→bank 的反向锁序。/
+        Monetary registration changes occur only in ``bank.ledger_postings``.  This reader uses
+        no ``FOR UPDATE``, so it cannot form an identity-to-bank inverse lock order with the
+        ledger projection trigger.
     """
 
     row = await db_connection.fetch_one(
-        "SELECT id, permission, coins, coins_paid, user_plan, name "
-        "FROM identity.users WHERE id = %s FOR UPDATE",
+        "SELECT id, permission, user_plan, name "
+        "FROM identity.users WHERE id = %s",
         (user_id,),
         connection=connection,
     )
@@ -237,18 +275,18 @@ async def _save_receipt(
     )
 
 
-def _plan(user_id: int, paid_coins: int, admin_user_id: int) -> str:
+def _plan(user_id: int, current_plan: str, admin_user_id: int) -> str:
     """@brief 解析账户 plan / Resolve an account plan.
 
     @param user_id 用户 ID / User ID.
-    @param paid_coins 付费余额 / Paid balance.
+    @param current_plan 当前已结算套餐 / Current settled plan.
     @param admin_user_id 管理员 ID / Administrator ID.
     @return admin/paid/free / admin/paid/free.
     """
 
     if user_id == admin_user_id:
         return "admin"
-    return "paid" if paid_coins > 0 else "free"
+    return current_plan
 
 
 def _profile_mapping(profile: AccountProfile) -> dict[str, object]:

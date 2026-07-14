@@ -35,6 +35,11 @@ _APPLICATION_SCHEMAS = (
     "media",
     "admin",
     "observability",
+    "bank",
+    "billing",
+    "town",
+    "chance",
+    "personal_rpg",
 )
 """@brief 迁移拥有且应用需要访问的 schema / Schemas owned by migrations and used by the application."""
 

@@ -160,7 +160,6 @@ def _guard(
         ),
         outbound=outbound,
         bot_username="FogMoeBot",
-        commands={"help", "clear", "fogmoebot"},
     )
 
 
@@ -232,13 +231,17 @@ def test_old_admission_replays_after_a_newer_admission() -> None:
 
 
 @pytest.mark.parametrize(
-    "token",
-    ["/unknown", "/help@AnotherBot"],
+    ("token", "expected"),
+    (("/unknown", Reject), ("/help@AnotherBot", Allow)),
 )
-def test_unowned_commands_do_not_consume_cooldown(token: str) -> None:
-    """@brief 未知或发给其他 Bot 的命令直接放行 / Unknown commands or commands for another Bot pass through.
+def test_unknown_commands_are_cooled_but_other_bot_commands_are_not(
+    token: str,
+    expected: type[Allow] | type[Reject],
+) -> None:
+    """@brief 未知命令也限流，其他 Bot 的命令仍直接放行 / Unknown commands are cooled while commands for another Bot pass through.
 
     @param token command token / Command token.
+    @param expected 期望 guard 结果类型 / Expected guard-result type.
     """
 
     clock = ManualMonotonic()
@@ -246,7 +249,7 @@ def test_unowned_commands_do_not_consume_cooldown(token: str) -> None:
     guard = _guard(clock, outbound)
 
     assert isinstance(asyncio.run(guard.evaluate(_inbound(30, token=token))), Allow)
-    assert isinstance(asyncio.run(guard.evaluate(_inbound(31, token=token))), Allow)
+    assert isinstance(asyncio.run(guard.evaluate(_inbound(31, token=token))), expected)
 
 
 def test_command_payload_identity_mismatch_is_permanent_ingress_error() -> None:

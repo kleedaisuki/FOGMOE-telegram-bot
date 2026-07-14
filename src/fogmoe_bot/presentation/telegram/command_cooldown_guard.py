@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
 from dataclasses import dataclass
 import re
 
@@ -104,31 +103,27 @@ class TelegramCommandCooldownGuard:
         gate: ReplayAwareCooldownGate[tuple[int, str]],
         outbound: StandaloneOutboundCapability,
         bot_username: str,
-        commands: Collection[str],
     ) -> None:
-        """@brief 注入 P1 gate、durable outbox 与命令所有权 / Inject the P1 gate, durable outbox, and command ownership.
+        """@brief 注入 P1 gate、durable outbox 与 Bot 身份 / Inject the P1 gate, durable outbox, and Bot identity.
 
         @param gate 重放感知冷却门 / Replay-aware cooldown gate.
         @param outbound 通用 standalone outbox 能力 / Generic standalone-outbox capability.
         @param bot_username 当前 Bot username / Current Bot username.
-        @param commands 当前进程拥有的命令名 / Command names owned by this process.
-        @raise ValueError username 或 command catalog 非法 / Invalid username or command catalog.
+        @raise ValueError username 非法时抛出 / Raised for an invalid username.
+        @note 冷却覆盖所有发给当前 Bot 的合法 command token；未知命令也会产生 durable
+            帮助回复，不能成为绕过限流的入口。/ Cooldown covers every valid command token
+            addressed to this Bot. Unknown commands also emit a durable help reply and cannot
+            become a rate-limit bypass.
         """
 
         username = bot_username.removeprefix("@").strip().casefold()
         if not username:
             raise ValueError("bot_username cannot be blank")
-        normalized_commands = frozenset(
-            command.strip().casefold() for command in commands
-        )
-        if not normalized_commands or "" in normalized_commands:
-            raise ValueError("commands must contain at least one non-blank command")
         self._gate = gate
         """@brief runtime-owned P1 冷却门 / Runtime-owned P1 cooldown gate."""
         self._outbound = outbound
         """@brief durable standalone outbox 能力 / Durable standalone-outbox capability."""
         self._bot_username = username
-        self._commands = normalized_commands
 
     @property
     def name(self) -> str:
@@ -143,13 +138,13 @@ class TelegramCommandCooldownGuard:
         """@brief 对一个 durable Update 稳定决定命令冷却 / Stably decide command cooldown for one durable Update.
 
         @param update 已持久化 Update / Persisted Update.
-        @return 非命令或获准时 Allow；冷却时 Reject + durable feedback / Allow for non-commands or admission; Reject with durable feedback on cooldown.
+        @return 非命令、其他 Bot 的命令或获准时 Allow；冷却时 Reject + durable feedback /
+            Allow for non-commands, commands for another Bot, or admission; reject with durable
+            feedback during cooldown.
         """
 
         parsed = parse_telegram_command(update)
         if parsed is None:
-            return Allow()
-        if parsed.command not in self._commands:
             return Allow()
         if parsed.target is not None and parsed.target.casefold() != self._bot_username:
             return Allow()

@@ -10,30 +10,18 @@ from telegram import Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
 from fogmoe_bot.config import BotSettings
-from fogmoe_bot.application.games.gamble.service import (
-    GAMBLE_SERVICE_DATA_KEY,
-    GambleService,
+from fogmoe_bot.application.banking.service import BANK_SERVICE_DATA_KEY, BankService
+from fogmoe_bot.application.billing.service import (
+    BILLING_SERVICE_DATA_KEY,
+    BillingService,
+)
+from fogmoe_bot.application.chance.workflow import (
+    CHANCE_WORKFLOW_DATA_KEY,
+    ChanceWorkflow,
 )
 from fogmoe_bot.application.games.omikuji.service import (
     OMIKUJI_SERVICE_DATA_KEY,
     OmikujiService,
-)
-from fogmoe_bot.application.games.rpg.character_service import (
-    RPG_CHARACTER_SERVICE_DATA_KEY,
-    RpgCharacterService,
-)
-from fogmoe_bot.application.games.ports.rpg.equipment import (
-    RPG_EQUIPMENT_OPERATIONS_DATA_KEY,
-    RpgEquipmentOperations,
-)
-from fogmoe_bot.application.games.rpg.inventory_service import (
-    RPG_INVENTORY_SERVICE_DATA_KEY,
-    RpgInventoryService,
-)
-from fogmoe_bot.application.games.rps_service import RPS_SERVICE_DATA_KEY
-from fogmoe_bot.application.games.sicbo.service import (
-    SICBO_SERVICE_DATA_KEY,
-    SicBoService,
 )
 from fogmoe_bot.application.media.music_service import (
     MUSIC_SERVICE_DATA_KEY,
@@ -49,6 +37,11 @@ from fogmoe_bot.application.moderation.verification_service import (
 from fogmoe_bot.application.moderation.verification_worker import (
     VERIFICATION_WORKER_DATA_KEY,
 )
+from fogmoe_bot.application.personal_rpg.service import (
+    PERSONAL_RPG_SERVICE_DATA_KEY,
+    PersonalRpgService,
+)
+from fogmoe_bot.application.town.service import TOWN_SERVICE_DATA_KEY, TownService
 from fogmoe_bot.presentation.telegram import handler_composition
 from fogmoe_bot.presentation.telegram.moderation_composition import (
     MODERATION_CAPABILITY_DATA_KEY,
@@ -104,10 +97,6 @@ def test_catalog_explicitly_declares_stable_primary_handlers() -> None:
         "basic.start",
         "monitor.start",
         "monitor.stop",
-        "game.gamble",
-        "game.gamble-callback",
-        "economy.shop",
-        "economy.shop-callback",
         "economy.task",
         "economy.task-callback",
         "verification.command",
@@ -115,40 +104,24 @@ def test_catalog_explicitly_declares_stable_primary_handlers() -> None:
         "verification.callback",
         "verification.member-left",
         "membership.bot-status",
-        "economy.stake",
-        "economy.stake-callback",
-        "crypto.predict",
-        "crypto.predict-callback",
-        "crypto.swap",
         "moderation.keyword",
         "moderation.spam",
         "moderation.spam-help",
         "game.omikuji",
         "game.omikuji-callback",
-        "game.rps",
-        "game.rps-callback",
-        "economy.charge",
-        "economy.create-code",
-        "economy.recharge",
-        "economy.topup-request",
-        "economy.topup-admin",
-        "game.sicbo",
-        "game.sicbo-callback",
         "economy.referral",
         "economy.referral-callback",
         "economy.checkin",
         "moderation.report",
         "crypto.chart",
         "media.picture",
-        "media.picture-hd",
         "media.music",
         "media.music-callback",
-        "game.rpg",
         "admin.web-password",
     ]
     assert Counter(definition.kind for definition in HANDLER_CATALOG) == {
-        HandlerKind.COMMAND: 26,
-        HandlerKind.CALLBACK: 15,
+        HandlerKind.COMMAND: 15,
+        HandlerKind.CALLBACK: 6,
         HandlerKind.MESSAGE: 2,
         HandlerKind.CHAT_MEMBER: 1,
     }
@@ -184,20 +157,11 @@ def test_callback_patterns_preserve_existing_callback_data_protocols() -> None:
         patterns[definition.filter_namespace] = rendered_pattern
 
     assert patterns == {
-        "gamble": r"^(?:gamble:|gamble_)",
-        "shop": r"^shop_",
         "task": r"^task_",
         "verify": r"^verify:",
-        "stake": r"^stake_",
-        "crypto": r"^crypto_",
         "spam_help": r"^spam_help$",
         "omikuji": r"^(?:omikuji:|omikuji_)",
-        "rps": r"^rps:",
-        "topup_req": r"^topup_req_",
-        "topup_admin": r"^topup_admin_",
-        "sicbo": r"^(?:sb:|sicbo_)",
         "ref": r"^ref_",
-        "pic_hd": r"^pic_hd_",
         "music": r"^music_",
     }
 
@@ -209,16 +173,10 @@ def test_capability_assembly_is_named_and_rejects_duplicate_runtime(
     application = FakeApplication()
     verification_service = object()
     verification_worker = object()
-    rps_service = object()
     monkeypatch.setattr(
         handler_composition,
         "create_verification_runtime",
         lambda bot: (verification_service, verification_worker),
-    )
-    monkeypatch.setattr(
-        handler_composition,
-        "create_rps_service",
-        lambda bot, *, identity: rps_service,
     )
     typed_application = cast(TelegramApplication, application)
     assemble_handler_capabilities(
@@ -230,14 +188,20 @@ def test_capability_assembly_is_named_and_rejects_duplicate_runtime(
 
     assert application.bot_data[VERIFICATION_SERVICE_DATA_KEY] is verification_service
     assert application.bot_data[VERIFICATION_WORKER_DATA_KEY] is verification_worker
-    assert application.bot_data[RPS_SERVICE_DATA_KEY] is rps_service
+    assert {
+        "economy.staking.service",
+        "fogmoe.rps_service",
+        "games.gamble.service",
+        "games.sicbo.service",
+        "games.runtime",
+    }.isdisjoint(application.bot_data)
     for key, expected_type in (
-        (GAMBLE_SERVICE_DATA_KEY, GambleService),
-        (SICBO_SERVICE_DATA_KEY, SicBoService),
+        (BANK_SERVICE_DATA_KEY, BankService),
+        (BILLING_SERVICE_DATA_KEY, BillingService),
+        (CHANCE_WORKFLOW_DATA_KEY, ChanceWorkflow),
+        (PERSONAL_RPG_SERVICE_DATA_KEY, PersonalRpgService),
+        (TOWN_SERVICE_DATA_KEY, TownService),
         (OMIKUJI_SERVICE_DATA_KEY, OmikujiService),
-        (RPG_CHARACTER_SERVICE_DATA_KEY, RpgCharacterService),
-        (RPG_EQUIPMENT_OPERATIONS_DATA_KEY, RpgEquipmentOperations),
-        (RPG_INVENTORY_SERVICE_DATA_KEY, RpgInventoryService),
         (PICTURE_SERVICE_DATA_KEY, PictureService),
         (MUSIC_SERVICE_DATA_KEY, MusicService),
     ):

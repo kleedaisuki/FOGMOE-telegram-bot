@@ -72,7 +72,7 @@ def test_real_postgres_lottery_and_gift_replay_without_double_credit(
         gift_key = f"pg-basic:gift:{suffix}"
         now = datetime.now(UTC)
         rewards = PostgresRewardOperations()
-        community = PostgresCommunityOperations(admin_user_id=1)
+        community = PostgresCommunityOperations()
         try:
             async with db_connection.transaction() as connection:
                 await db_connection.execute(

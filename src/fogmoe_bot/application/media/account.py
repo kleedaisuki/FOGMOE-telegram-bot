@@ -14,14 +14,14 @@ class MediaAccountProfile(Protocol):
     @property
     def permission(self) -> int: ...
 
-    @property
-    def coins(self) -> int: ...
-
-
 class MediaAccountProfiles(Protocol):
-    """读取媒体账户并推进既有预览恢复窗口 / Read media accounts and advance established preview recovery."""
+    """@brief 读取媒体准入资料 / Read media-admission profiles."""
 
     async def profile(self, user_id: UserId) -> MediaAccountProfile:
-        """读取媒体准入快照 / Read a media-admission snapshot."""
+        """@brief 读取媒体准入快照 / Read a media-admission snapshot.
+
+        @param user_id 用户标识 / User identity.
+        @return 注册与权限快照 / Registration and permission snapshot.
+        """
 
         ...

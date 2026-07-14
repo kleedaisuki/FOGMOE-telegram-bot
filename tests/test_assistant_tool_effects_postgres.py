@@ -68,10 +68,14 @@ def _postgres_url() -> str:
     pytest.skip("set FOGMOE_TEST_DATABASE_URL to run the real PostgreSQL contract")
 
 
-def test_diary_schedule_and_kindness_share_atomic_receipt_transactions(
+def test_diary_and_schedule_share_atomic_receipt_transactions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """三类业务 mutation 与 succeeded receipt 原子提交且重放不重复。"""
+    """@brief 日记与日程共用原子回执 / Diary and schedule share atomic receipts.
+
+    @param monkeypatch pytest 替换工具 / pytest replacement utility.
+    @return None / None.
+    """
 
     async def scenario() -> None:
         await db.dispose_current_engine()
@@ -141,13 +145,6 @@ def test_diary_schedule_and_kindness_share_atomic_receipt_transactions(
             },
             request_hash="b" * 64,
         )
-        kindness = request(
-            invocation_id="step:0:call:2",
-            tool_name="kindness_gift",
-            effect_kind="account.kindness_gift",
-            arguments={"amount": 4},
-            request_hash="c" * 64,
-        )
         try:
             async with db_connection.transaction() as connection:
                 await db_connection.execute(
@@ -168,7 +165,7 @@ def test_diary_schedule_and_kindness_share_atomic_receipt_transactions(
                 )
 
             store = PostgresAssistantToolStore(operations=operations)
-            for operation in (diary, schedule, kindness):
+            for operation in (diary, schedule):
                 assert (
                     operations.transaction_mode(operation)
                     is ToolTransactionMode.ATOMIC_MUTATION
@@ -178,7 +175,6 @@ def test_diary_schedule_and_kindness_share_atomic_receipt_transactions(
                 assert first.replayed is False
                 assert replay.replayed is True
                 assert replay.result == first.result
-
             diary_row = await db_connection.fetch_one(
                 "SELECT content FROM conversation.ai_user_diary_pages "
                 "WHERE user_id = %s AND page_no = 1",
@@ -196,19 +192,13 @@ def test_diary_schedule_and_kindness_share_atomic_receipt_transactions(
                 "SELECT coins FROM identity.users WHERE id = %s",
                 (user_id,),
             )
-            assert account_row is not None and account_row[0] == 4
-            gift_rows = await db_connection.fetch_all(
-                "SELECT amount FROM economy.kindness_gifts WHERE recipient_id = %s",
-                (user_id,),
-            )
-            assert [int(row[0]) for row in gift_rows] == [4]
+            assert account_row is not None and account_row[0] == 0
             receipts = await db_connection.fetch_all(
                 "SELECT status, attempt_count FROM assistant.tool_effect_receipts "
                 "WHERE turn_id = CAST(%s AS UUID) ORDER BY invocation_id",
                 (str(turn_id),),
             )
             assert [tuple(row) for row in receipts] == [
-                ("succeeded", 1),
                 ("succeeded", 1),
                 ("succeeded", 1),
             ]
@@ -227,11 +217,6 @@ def test_diary_schedule_and_kindness_share_atomic_receipt_transactions(
                 )
                 await db_connection.execute(
                     "DELETE FROM assistant.ai_schedules WHERE user_id = %s",
-                    (user_id,),
-                    connection=connection,
-                )
-                await db_connection.execute(
-                    "DELETE FROM economy.kindness_gifts WHERE recipient_id = %s",
                     (user_id,),
                     connection=connection,
                 )

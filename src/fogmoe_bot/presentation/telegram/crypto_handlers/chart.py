@@ -1,4 +1,4 @@
-"""Telegram handler for group chart-token bindings."""
+"""@brief 群组代币图表绑定 Telegram handler / Telegram handler for group chart-token bindings."""
 
 from __future__ import annotations
 
@@ -9,22 +9,34 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
-from fogmoe_bot.application.crypto.workflow import BindChartToken, ClearChartToken
+from fogmoe_bot.application.crypto.chart_service import (
+    BindChartToken,
+    ClearChartToken,
+)
 from fogmoe_bot.domain.crypto import Blockchain, ChartToken, ContractAddress
 
-from .common import crypto_service
+from .common import chart_service
 
 
 logger = logging.getLogger(__name__)
+"""@brief 图表 handler 的结构化日志器 / Structured logger for the chart handler."""
 
 _SUPPORTED_CHAIN_TEXT = "sol, solana, eth, ethereum, blast, bsc, bnb"
+"""@brief 用户可输入的链别名列表 / Supported user-input chain aliases."""
 
 
 async def chart_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Parse ``/chart``, authorize mutations, and render the result."""
+    """@brief 解析 `/chart`、授权变更并渲染图表 / Parse `/chart`, authorize mutations, and render the chart.
+
+    @param update Telegram Update / Telegram Update.
+    @param context PTB 默认 callback context / PTB default callback context.
+    @return None / None.
+    @note 仅群组管理员可修改绑定；读取不涉及余额、报价或外部资产交易 /
+        Only group administrators may mutate a binding; reads involve no balance, quote, or asset trade.
+    """
 
     chat = update.effective_chat
     user = update.effective_user
@@ -35,7 +47,7 @@ async def chart_command(
         await message.reply_text("此命令只能在群组中使用。")
         return
     args = tuple(context.args or ())
-    service = crypto_service(context)
+    service = chart_service(context)
     if len(args) >= 3 and args[0].lower() == "bind":
         if not await _is_group_admin(update):
             await message.reply_text("只有群组管理员才能绑定代币。")
@@ -101,7 +113,12 @@ async def chart_command(
 
 
 async def _is_group_admin(update: Update) -> bool:
-    """Verify group-administrator identity at the Telegram boundary."""
+    """@brief 在 Telegram 边界验证群管理员身份 / Verify group-administrator identity at the Telegram boundary.
+
+    @param update Telegram Update / Telegram Update.
+    @return 当前用户是管理员时为 True / True when the current user is an administrator.
+    @note Telegram API 暂不可用时 fail closed / Fail closed when the Telegram API is unavailable.
+    """
 
     chat = update.effective_chat
     user = update.effective_user
@@ -116,7 +133,11 @@ async def _is_group_admin(update: Update) -> bool:
 
 
 def _chart_help(*, unbound: bool) -> str:
-    """Render the existing chart help text."""
+    """@brief 渲染图表命令帮助 / Render chart-command help text.
+
+    @param unbound 当前群组是否尚未绑定代币 / Whether the current group has no bound token.
+    @return 用户可见帮助文本 / User-visible help text.
+    """
 
     prefix = (
         "此群组尚未绑定代币。\n\n管理员可使用以下命令绑定:\n"

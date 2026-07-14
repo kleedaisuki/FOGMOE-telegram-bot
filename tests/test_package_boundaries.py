@@ -44,6 +44,36 @@ def test_context_and_conversation_have_distinct_domain_ownership():
     )
 
 
+def test_personal_scope_has_neutral_world_ownership_not_town_ownership() -> None:
+    """@brief PersonalScope 属于共享 world 域，个人 RPG 不依赖 Town /
+    PersonalScope belongs to the shared world domain and personal RPG does not depend on Town.
+
+    @return None / None.
+    """
+
+    world_scope = SRC_ROOT / "domain" / "world" / "scope.py"
+    town_scope = SRC_ROOT / "domain" / "town" / "scope.py"
+    personal_sources = (
+        SRC_ROOT / "domain" / "personal_rpg",
+        SRC_ROOT / "application" / "personal_rpg",
+        SRC_ROOT / "infrastructure" / "database" / "personal_rpg.py",
+        SRC_ROOT / "presentation" / "telegram" / "personal_rpg_handlers.py",
+    )
+
+    assert world_scope.is_file()
+    assert "class PersonalScope" in world_scope.read_text(encoding="utf-8")
+    assert "PersonalScope" not in town_scope.read_text(encoding="utf-8")
+
+    offenders: list[str] = []
+    for source in personal_sources:
+        paths = source.rglob("*.py") if source.is_dir() else (source,)
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            if "fogmoe_bot.domain.town" in text:
+                offenders.append(str(path.relative_to(PROJECT_ROOT)))
+    assert offenders == []
+
+
 def test_conversation_types_are_imported_from_owning_feature_modules() -> None:
     """代码与测试不得依赖 Conversation root 或已删除的 mega models。"""
 
@@ -263,7 +293,6 @@ def test_crypto_workflows_have_pure_core_thin_telegram_and_no_process_locks() ->
     removed = (
         application_root / "crypto_predict.py",
         application_root / "chart.py",
-        application_root / "swap_fogmoe_solana_token.py",
     )
     assert [path for path in removed if path.exists()] == []
     assert presentation_root.is_dir()
@@ -299,8 +328,8 @@ def test_crypto_workflows_have_pure_core_thin_telegram_and_no_process_locks() ->
     assert "db.run_sync" not in crypto_text
 
 
-def test_games_workflows_have_pure_core_durable_sessions_and_thin_telegram() -> None:
-    """@brief Games 正确性不依赖进程全局状态或 Telegram / Games correctness depends on neither process globals nor Telegram."""
+def test_games_keep_only_omikuji_and_reject_retired_wager_modules() -> None:
+    """@brief Games 仅保留御神签并物理移除旧押注模块 / Games keep only Omikuji and physically remove retired wager modules."""
 
     application_root = SRC_ROOT / "application" / "games"
     ports_root = application_root / "ports"
@@ -331,20 +360,37 @@ def test_games_workflows_have_pure_core_durable_sessions_and_thin_telegram() -> 
     assert adapter_root.is_dir()
     assert not removed_port.exists()
     assert ports_root.is_dir()
-    for feature in ("gamble", "sicbo", "omikuji", "rpg"):
-        assert (application_root / feature).is_dir()
-        assert "from " not in (application_root / feature / "__init__.py").read_text(
-            encoding="utf-8"
-        )
-    for service in (
-        application_root / "gamble" / "service.py",
-        application_root / "sicbo" / "service.py",
-        application_root / "omikuji" / "service.py",
-        application_root / "rpg" / "character_service.py",
-        application_root / "rpg" / "inventory_service.py",
-    ):
-        assert service.is_file()
-    assert not (application_root / "rpg" / "equipment_service.py").exists()
+    assert (application_root / "omikuji" / "service.py").is_file()
+    assert (ports_root / "omikuji.py").is_file()
+    assert (adapter_root / "omikuji.py").is_file()
+    assert (presentation_root / "omikuji.py").is_file()
+    retired_paths = (
+        application_root / "gamble" / "__init__.py",
+        application_root / "sicbo" / "__init__.py",
+        application_root / "rps_delivery.py",
+        application_root / "rps_operations.py",
+        application_root / "rps_service.py",
+        application_root / "runtime.py",
+        ports_root / "gamble.py",
+        ports_root / "sicbo.py",
+        domain_root / "chance.py",
+        domain_root / "rock_paper_scissors.py",
+        adapter_root / "common.py",
+        adapter_root / "gamble.py",
+        adapter_root / "sicbo.py",
+        SRC_ROOT / "infrastructure" / "database" / "rps_codec.py",
+        SRC_ROOT / "infrastructure" / "database" / "rps_ledger.py",
+        SRC_ROOT / "infrastructure" / "database" / "economy_staking.py",
+        SRC_ROOT / "presentation" / "telegram" / "rps_handlers.py",
+        SRC_ROOT / "presentation" / "telegram" / "stake_handlers.py",
+        presentation_root / "gamble.py",
+        presentation_root / "sicbo.py",
+        SRC_ROOT / "application" / "economy" / "staking.py",
+        SRC_ROOT / "application" / "economy" / "staking_ports.py",
+        SRC_ROOT / "domain" / "economy" / "staking.py",
+    )
+    assert [path for path in retired_paths if path.exists()] == []
+    assert not (application_root / "rpg" / "__init__.py").exists()
     assert not (application_root / "common.py").exists()
     assert "from ." not in (adapter_root / "__init__.py").read_text(encoding="utf-8")
     assert "from ." not in (ports_root / "__init__.py").read_text(encoding="utf-8")
@@ -360,7 +406,7 @@ def test_games_workflows_have_pure_core_durable_sessions_and_thin_telegram() -> 
     assert "db_connection" not in core_text
     assert "command_cooldown" not in core_text
 
-    migrated_text = "\n".join(
+    active_text = "\n".join(
         path.read_text(encoding="utf-8")
         for path in (
             *presentation_root.rglob("*.py"),
@@ -368,15 +414,15 @@ def test_games_workflows_have_pure_core_durable_sessions_and_thin_telegram() -> 
             *application_root.rglob("*.py"),
         )
     )
-    assert "gamble_game =" not in migrated_text
-    assert "active_games" not in migrated_text
-    assert "player_battle_cooldowns" not in migrated_text
-    assert "monster_battle_cooldowns" not in migrated_text
-    assert "db.run_sync" not in migrated_text
-    assert "class GamesOperations" not in migrated_text
-    assert "PostgresGamesOperations" not in migrated_text
-    assert "class GamesService" not in migrated_text
-    assert "GAMES_SERVICE_DATA_KEY" not in migrated_text
+    for retired_symbol in (
+        "PostgresGambleOperations",
+        "PostgresSicBoOperations",
+        "RpsService",
+        "StakingService",
+        "_lock_account",
+        "_AccountOperations",
+    ):
+        assert retired_symbol not in active_text
 
 
 def test_telegram_handlers_do_not_return_to_presentation_layer():
@@ -769,7 +815,6 @@ def test_assistant_tool_operations_have_explicit_feature_ownership() -> None:
         "outbound.py",
         "parsing.py",
         "schedule.py",
-        "social.py",
     ):
         assert (operation_root / feature).is_file()
     assert "from ." not in (operation_root / "__init__.py").read_text(encoding="utf-8")
@@ -925,10 +970,9 @@ def test_media_picture_and_music_have_explicit_feature_ownership() -> None:
         assert not path.exists()
     for path in (
         application_root / "picture_service.py",
-        application_root / "picture_ports.py",
+        application_root / "picture_source.py",
         application_root / "music_service.py",
         application_root / "music_ports.py",
-        adapter_root / "picture.py",
         adapter_root / "music.py",
         http_root / "picture.py",
         http_root / "music.py",
@@ -937,6 +981,12 @@ def test_media_picture_and_music_have_explicit_feature_ownership() -> None:
         handler_root / "music.py",
     ):
         assert path.is_file()
+    for retired_path in (
+        application_root / "picture_ports.py",
+        adapter_root / "picture.py",
+        http_root / "binary.py",
+    ):
+        assert not retired_path.exists()
     for package in (
         application_root,
         domain_root,
@@ -967,3 +1017,14 @@ def test_media_picture_and_music_have_explicit_feature_ownership() -> None:
         assert symbol not in source_text
     assert "from fogmoe_bot.domain.media import" not in source_text
     assert "from fogmoe_bot.application.media import" not in source_text
+    for retired_symbol in (
+        "PostgresPictureRepository",
+        "PicturePreviewOutboundFactory",
+        "PictureDeliveryTarget",
+        "AiohttpBinaryFetcher",
+        "pic_hd_",
+    ):
+        assert retired_symbol not in source_text
+    media_account_source = (adapter_root / "account.py").read_text(encoding="utf-8")
+    assert "SELECT permission FROM identity.users" in media_account_source
+    assert "SELECT permission, coins" not in media_account_source

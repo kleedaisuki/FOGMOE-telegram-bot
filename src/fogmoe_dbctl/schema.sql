@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0046_group_aware_context
--- Alembic head: 0046_group_aware_context
+-- Source migrations: 0001_initial through 0058_retire_assistant_legacy_billing
+-- Alembic head: 0058_retire_assistant_legacy_billing
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and user-plan backfill) and the
@@ -21,6 +21,11 @@ CREATE SCHEMA IF NOT EXISTS observability;
 CREATE SCHEMA IF NOT EXISTS context_window;
 CREATE SCHEMA IF NOT EXISTS retrieval;
 CREATE SCHEMA IF NOT EXISTS user_profile;
+CREATE SCHEMA IF NOT EXISTS bank;
+CREATE SCHEMA IF NOT EXISTS billing;
+CREATE SCHEMA IF NOT EXISTS town;
+CREATE SCHEMA IF NOT EXISTS chance;
+CREATE SCHEMA IF NOT EXISTS personal_rpg;
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -534,13 +539,458 @@ CREATE TABLE identity.users (
   provider TEXT NOT NULL DEFAULT 'telegram'
     CHECK (provider IN ('telegram','local','web')),
   name TEXT NOT NULL,
-  coins INT NOT NULL DEFAULT 0,
+  coins BIGINT NOT NULL DEFAULT 0,
   permission INT DEFAULT 0,
   info VARCHAR(500) DEFAULT NULL,
-  recharge_blocked_until TIMESTAMP NULL,
-  coins_paid INT NOT NULL DEFAULT 0,
-  user_plan VARCHAR(10) NOT NULL DEFAULT 'free'
+  coins_paid BIGINT NOT NULL DEFAULT 0,
+  user_plan VARCHAR(10) NOT NULL DEFAULT 'free',
+  CONSTRAINT identity_users_coins_projection_nonnegative_ck CHECK (coins >= 0),
+  CONSTRAINT identity_users_coins_paid_projection_nonnegative_ck CHECK (
+    coins_paid >= 0
+  )
 );
+
+CREATE TABLE bank.accounts (
+  account_key VARCHAR(240) PRIMARY KEY
+    CHECK (account_key ~ '^[a-z][a-z0-9:_-]{0,239}$'),
+  account_scope TEXT NOT NULL
+    CHECK (account_scope IN ('user', 'group', 'system')),
+  owner_id BIGINT NULL,
+  token_bucket TEXT NULL
+    CHECK (token_bucket IS NULL OR token_bucket IN ('free', 'paid')),
+  system_kind TEXT NULL,
+  allow_negative BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT bank_accounts_shape_ck CHECK (
+    (
+      account_scope = 'user'
+      AND owner_id IS NOT NULL AND owner_id > 0
+      AND token_bucket IS NOT NULL AND system_kind IS NULL
+      AND NOT allow_negative
+    )
+    OR (
+      account_scope = 'group'
+      AND owner_id IS NOT NULL AND owner_id <> 0
+      AND token_bucket IS NULL AND system_kind = 'group_treasury'
+      AND NOT allow_negative
+    )
+    OR (
+      account_scope = 'system'
+      AND owner_id IS NULL AND token_bucket IS NULL AND system_kind IS NOT NULL
+      AND system_kind IN ('issuance', 'burn', 'activity_pot')
+      AND allow_negative = (system_kind = 'issuance')
+    )
+  ),
+  CONSTRAINT bank_accounts_system_kind_ck CHECK (
+    system_kind IS NULL OR system_kind IN (
+      'issuance', 'burn', 'group_treasury', 'activity_pot'
+    )
+  )
+);
+
+CREATE UNIQUE INDEX bank_accounts_user_identity_uq
+  ON bank.accounts (owner_id, token_bucket)
+  WHERE account_scope = 'user';
+
+CREATE UNIQUE INDEX bank_accounts_group_identity_uq
+  ON bank.accounts (owner_id)
+  WHERE account_scope = 'group';
+
+CREATE UNIQUE INDEX bank_accounts_system_identity_uq
+  ON bank.accounts (system_kind)
+  WHERE account_scope = 'system';
+
+CREATE TABLE bank.account_balances (
+  account_key VARCHAR(240) PRIMARY KEY
+    REFERENCES bank.accounts(account_key) ON DELETE RESTRICT,
+  balance BIGINT NOT NULL DEFAULT 0,
+  version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE bank.ledger_entries (
+  entry_id UUID PRIMARY KEY,
+  idempotency_key VARCHAR(200) NOT NULL UNIQUE
+    CHECK (char_length(btrim(idempotency_key)) BETWEEN 1 AND 200),
+  reason TEXT NOT NULL CHECK (reason IN (
+    'bank_issuance', 'migration_opening', 'bank_burn', 'user_transfer',
+    'group_contribution', 'activity_stake', 'activity_payout'
+  )),
+  actor_id BIGINT NULL REFERENCES identity.users(id) ON DELETE RESTRICT,
+  metadata JSONB NOT NULL DEFAULT '{}'::JSONB
+    CHECK (jsonb_typeof(metadata) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX bank_ledger_entries_actor_created_idx
+  ON bank.ledger_entries (actor_id, created_at DESC, entry_id DESC)
+  WHERE actor_id IS NOT NULL;
+
+CREATE INDEX bank_ledger_entries_reason_created_idx
+  ON bank.ledger_entries (reason, created_at DESC, entry_id DESC);
+
+CREATE TABLE bank.ledger_postings (
+  entry_id UUID NOT NULL
+    REFERENCES bank.ledger_entries(entry_id) ON DELETE RESTRICT,
+  line_no SMALLINT NOT NULL CHECK (line_no > 0),
+  account_key VARCHAR(240) NOT NULL
+    REFERENCES bank.accounts(account_key) ON DELETE RESTRICT,
+  delta BIGINT NOT NULL CHECK (delta <> 0),
+  PRIMARY KEY (entry_id, line_no),
+  CONSTRAINT bank_ledger_postings_account_once_uq UNIQUE (entry_id, account_key)
+);
+
+CREATE INDEX bank_ledger_postings_account_entry_idx
+  ON bank.ledger_postings (account_key, entry_id, line_no);
+
+CREATE FUNCTION bank.assert_ledger_entry_balanced()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  affected_entry_id UUID := COALESCE(NEW.entry_id, OLD.entry_id);
+  posting_count INTEGER;
+  total_delta NUMERIC;
+BEGIN
+  SELECT count(*), COALESCE(sum(delta), 0)
+    INTO posting_count, total_delta
+  FROM bank.ledger_postings
+  WHERE entry_id = affected_entry_id;
+
+  IF posting_count < 2 OR total_delta <> 0 THEN
+    RAISE EXCEPTION 'bank ledger entry % is not balanced', affected_entry_id
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER bank_ledger_entries_balanced_ct
+AFTER INSERT OR UPDATE OR DELETE ON bank.ledger_postings
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION bank.assert_ledger_entry_balanced();
+
+-- /**
+--  * @brief 在分录头写入时延迟验证双重记账完整性 / Defer double-entry completeness validation from ledger-entry insertion.
+--  * @param NEW 新建账本分录头 / Newly inserted ledger-entry header.
+--  * @return NULL，约束触发器不替换行 / NULL because a constraint trigger does not replace a row.
+--  * @note 阻止提交零行或单边分录 / Rejects zero-line and one-sided entries at commit time.
+--  */
+CREATE CONSTRAINT TRIGGER bank_ledger_entries_complete_ct
+AFTER INSERT ON bank.ledger_entries
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION bank.assert_ledger_entry_balanced();
+
+CREATE FUNCTION bank.assert_nonnegative_account_balance()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  can_be_negative BOOLEAN;
+BEGIN
+  SELECT allow_negative INTO can_be_negative
+  FROM bank.accounts
+  WHERE account_key = NEW.account_key;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'bank account % is missing', NEW.account_key
+      USING ERRCODE = '23503';
+  END IF;
+  IF NEW.balance < 0 AND NOT can_be_negative THEN
+    RAISE EXCEPTION 'bank account % cannot become negative', NEW.account_key
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER bank_account_balances_nonnegative_tr
+BEFORE INSERT OR UPDATE OF balance ON bank.account_balances
+FOR EACH ROW EXECUTE FUNCTION bank.assert_nonnegative_account_balance();
+
+-- /**
+--  * @brief 通过零初始化和独立更新应用账本余额投影 / Apply a ledger balance projection through zero initialization and a separate update.
+--  * @param NEW 新增账本过账行 / Newly inserted ledger posting.
+--  * @return NEW，保留新增过账行 / NEW to retain the inserted posting.
+--  * @note 零初始化的冲突 no-op 处理并发缺失投影；独立 UPDATE 保留行锁和最终非负校验 /
+--  *       The zero-initialization conflict no-op handles a concurrently missing projection; the separate UPDATE preserves row locking and final nonnegative validation.
+--  */
+CREATE FUNCTION bank.apply_ledger_posting_balance()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  -- @brief 进入账本投影前的事务本地上下文 / Transaction-local context before entering the ledger projection.
+  previous_apply_context TEXT;
+  -- @brief 受影响账户的逻辑范围 / Logical scope of the affected account.
+  affected_scope TEXT;
+  -- @brief 受影响用户账户的所有者 / Owner of the affected user account.
+  affected_owner_id BIGINT;
+  -- @brief 受影响用户账户的钱包类别 / Token bucket of the affected user account.
+  affected_bucket TEXT;
+BEGIN
+  previous_apply_context := current_setting('bank.ledger_posting_apply', TRUE);
+  PERFORM set_config('bank.ledger_posting_apply', 'on', TRUE);
+
+  -- PostgreSQL runs BEFORE INSERT triggers before ON CONFLICT arbitration.
+  -- The provisional row must therefore be zero, not NEW.delta: a debit is
+  -- validated by the final row-locking UPDATE below.
+  INSERT INTO bank.account_balances (
+    account_key, balance, version, updated_at
+  ) VALUES (
+    NEW.account_key, 0, 0, CURRENT_TIMESTAMP
+  )
+  ON CONFLICT (account_key) DO NOTHING;
+
+  UPDATE bank.account_balances AS current_balance
+  SET balance = current_balance.balance + NEW.delta,
+      version = current_balance.version + 1,
+      updated_at = CURRENT_TIMESTAMP
+  WHERE current_balance.account_key = NEW.account_key;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION
+      'bank balance projection % was unavailable after initialization', NEW.account_key
+      USING ERRCODE = '40001';
+  END IF;
+
+  -- Legacy integer columns are a guarded read projection of the Bank ledger.
+  SELECT account_scope, owner_id, token_bucket
+    INTO affected_scope, affected_owner_id, affected_bucket
+  FROM bank.accounts
+  WHERE account_key = NEW.account_key;
+  IF affected_scope = 'user' AND affected_owner_id IS NOT NULL THEN
+    IF affected_bucket = 'free' THEN
+      UPDATE identity.users AS users
+      SET coins = balances.balance
+      FROM bank.account_balances AS balances
+      WHERE balances.account_key = NEW.account_key
+        AND users.id = affected_owner_id;
+    ELSIF affected_bucket = 'paid' THEN
+      UPDATE identity.users AS users
+      SET coins_paid = balances.balance
+      FROM bank.account_balances AS balances
+      WHERE balances.account_key = NEW.account_key
+        AND users.id = affected_owner_id;
+    END IF;
+  END IF;
+  PERFORM set_config(
+    'bank.ledger_posting_apply',
+    COALESCE(previous_apply_context, 'off'),
+    TRUE
+  );
+  RETURN NEW;
+END;
+$$;
+
+COMMENT ON FUNCTION bank.apply_ledger_posting_balance() IS
+  '@brief 在账本过账触发器内安全更新余额投影 / Safely update balance projections inside the ledger-posting trigger.
+@return NEW，保留账本过账行 / NEW to retain the ledger posting.
+@note 先零初始化再更新，避免 PostgreSQL 在 UPSERT 冲突仲裁前把借记误判为负插入 /
+      Zero initialization before UPDATE avoids PostgreSQL misclassifying a debit as a negative insert before UPSERT conflict arbitration.';
+
+CREATE TRIGGER bank_ledger_postings_apply_balance_tr
+AFTER INSERT ON bank.ledger_postings
+FOR EACH ROW EXECUTE FUNCTION bank.apply_ledger_posting_balance();
+
+-- /**
+--  * @brief 拒绝直接改写账户元数据 / Reject direct account-metadata mutation.
+--  * @param OLD 修改或删除前的账户行 / Account row before update or delete.
+--  * @param NEW 修改后的账户行 / Account row after update.
+--  * @return 永不返回；抛出完整性异常 / Never returns; raises an integrity exception.
+--  * @note 新账户初始化仍允许 INSERT；任何属性变更必须通过显式迁移完成 /
+--  *       New-account initialization still permits INSERT; attribute changes require an explicit migration.
+--  */
+CREATE FUNCTION bank.forbid_account_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION
+    'bank.accounts is immutable after creation; use an explicit migration instead'
+    USING ERRCODE = '55000';
+  RETURN NULL;
+END;
+$$;
+
+COMMENT ON FUNCTION bank.forbid_account_mutation() IS
+  '@brief 拒绝直接更新或删除 bank.accounts / Reject direct UPDATE or DELETE of bank.accounts.
+@return 永不返回；抛出 SQLSTATE 55000 / Never returns; raises SQLSTATE 55000.';
+
+CREATE TRIGGER bank_accounts_no_direct_mutation_tr
+BEFORE UPDATE OR DELETE ON bank.accounts
+FOR EACH ROW EXECUTE FUNCTION bank.forbid_account_mutation();
+
+-- /**
+--  * @brief 仅允许账本过账触发器改写余额投影 / Allow balance-projection mutation only from the ledger-posting trigger.
+--  * @param OLD 修改或删除前的余额行 / Balance row before update or delete.
+--  * @param NEW 新增或修改后的余额行 / Balance row after insert or update.
+--  * @return NEW，保留经授权的初始化或投影行 / NEW to retain an authorized initialization or projection row.
+--  * @note 零余额、零版本 INSERT 用于新账户初始化；非零写入必须由嵌套的账本触发器发起 /
+--  *       A zero-balance, zero-version INSERT initializes a new account; nonzero writes must originate in the nested ledger trigger.
+--  */
+CREATE FUNCTION bank.guard_account_balance_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.balance = 0 AND NEW.version = 0 THEN
+      RETURN NEW;
+    END IF;
+  END IF;
+
+  IF TG_OP IN ('INSERT', 'UPDATE')
+    AND current_setting('bank.ledger_posting_apply', TRUE) = 'on'
+    AND pg_trigger_depth() > 1 THEN
+    RETURN NEW;
+  END IF;
+
+  RAISE EXCEPTION
+    'bank.account_balances is a ledger projection; post a balanced ledger entry instead'
+    USING ERRCODE = '55000';
+  RETURN NULL;
+END;
+$$;
+
+COMMENT ON FUNCTION bank.guard_account_balance_mutation() IS
+  '@brief 保护 bank.account_balances 免受直接写入 / Protect bank.account_balances from direct writes.
+@return NEW，保留经授权的账户初始化或账本投影 / NEW to retain authorized account initialization or ledger projection.
+@note 仅 bank.apply_ledger_posting_balance() 的嵌套触发器写入可修改已有余额 / Only nested writes from bank.apply_ledger_posting_balance() can modify an existing balance.';
+
+CREATE TRIGGER bank_account_balances_authorize_mutation_tr
+BEFORE INSERT OR UPDATE OR DELETE ON bank.account_balances
+FOR EACH ROW EXECUTE FUNCTION bank.guard_account_balance_mutation();
+
+-- /**
+--  * @brief 仅允许账本投影触发器更新旧余额镜像 / Allow legacy balance mirrors to be updated only by the ledger-projection trigger.
+--  * @param OLD 更新前 identity 用户行 / Identity user row before update.
+--  * @param NEW 待插入或更新的 identity 用户行 / Identity user row to insert or update.
+--  * @return NEW，保留合法的零初始化或账本投影 / NEW, retaining legal zero initialization or ledger projection.
+--  * @note pg_trigger_depth 与 transaction-local 标志共同防止应用 SQL 伪造投影写入 /
+--  *       pg_trigger_depth and the transaction-local flag jointly prevent application SQL from forging a projection write.
+--  */
+CREATE FUNCTION bank.guard_identity_user_money_projection()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.coins = 0 AND NEW.coins_paid = 0 THEN
+      RETURN NEW;
+    END IF;
+  ELSIF TG_OP = 'UPDATE' THEN
+    IF NEW.coins = OLD.coins AND NEW.coins_paid = OLD.coins_paid THEN
+      RETURN NEW;
+    END IF;
+    IF current_setting('bank.ledger_posting_apply', TRUE) = 'on'
+      AND pg_trigger_depth() > 1 THEN
+      RETURN NEW;
+    END IF;
+  END IF;
+
+  RAISE EXCEPTION
+    'identity.users coins are bank-ledger projections; post a balanced bank entry instead'
+    USING ERRCODE = '55000';
+  RETURN NULL;
+END;
+$$;
+
+COMMENT ON FUNCTION bank.guard_identity_user_money_projection() IS
+  '@brief 守卫 identity.users 的金币投影 / Guard identity.users token projections.
+@return NEW，保留零初始化或账本触发器投影 / NEW, retaining zero initialization or ledger-trigger projection.
+@note 直接金币写入必须改为 bank.ledger_entries 加平衡 postings / Direct token writes must become bank.ledger_entries plus balanced postings.';
+
+CREATE TRIGGER identity_users_money_projection_tr
+BEFORE INSERT OR UPDATE OF coins, coins_paid ON identity.users
+FOR EACH ROW EXECUTE FUNCTION bank.guard_identity_user_money_projection();
+
+CREATE FUNCTION bank.forbid_ledger_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'bank ledger is append-only; use a compensating entry instead'
+    USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER bank_ledger_entries_append_only_tr
+BEFORE UPDATE OR DELETE ON bank.ledger_entries
+FOR EACH ROW EXECUTE FUNCTION bank.forbid_ledger_mutation();
+
+CREATE TRIGGER bank_ledger_postings_append_only_tr
+BEFORE UPDATE OR DELETE ON bank.ledger_postings
+FOR EACH ROW EXECUTE FUNCTION bank.forbid_ledger_mutation();
+
+CREATE TABLE bank.token_requests (
+  request_id UUID PRIMARY KEY,
+  requester_id BIGINT NOT NULL
+    REFERENCES identity.users(id) ON DELETE RESTRICT,
+  requested_amount BIGINT NOT NULL CHECK (requested_amount > 0),
+  requested_bucket TEXT NOT NULL DEFAULT 'free'
+    CHECK (requested_bucket = 'free'),
+  purpose TEXT NOT NULL CHECK (char_length(btrim(purpose)) BETWEEN 1 AND 500),
+  status TEXT NOT NULL CHECK (status IN (
+    'pending', 'approved', 'rejected', 'cancelled'
+  )),
+  requested_at TIMESTAMPTZ NOT NULL,
+  reviewed_at TIMESTAMPTZ NULL,
+  reviewer_id BIGINT NULL REFERENCES identity.users(id) ON DELETE RESTRICT,
+  review_note TEXT NULL CHECK (
+    review_note IS NULL OR char_length(btrim(review_note)) <= 500
+  ),
+  ledger_entry_id UUID NULL UNIQUE
+    REFERENCES bank.ledger_entries(entry_id) ON DELETE RESTRICT,
+  version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT bank_token_requests_terminal_shape_ck CHECK (
+    (
+      status = 'pending'
+      AND reviewed_at IS NULL AND reviewer_id IS NULL AND ledger_entry_id IS NULL
+    )
+    OR (
+      status = 'approved'
+      AND reviewed_at IS NOT NULL AND reviewer_id IS NOT NULL
+      AND reviewer_id <> requester_id AND ledger_entry_id IS NOT NULL
+    )
+    OR (
+      status = 'rejected'
+      AND reviewed_at IS NOT NULL AND reviewer_id IS NOT NULL
+      AND reviewer_id <> requester_id AND ledger_entry_id IS NULL
+    )
+    OR (
+      status = 'cancelled'
+      AND reviewed_at IS NOT NULL AND reviewer_id = requester_id
+      AND ledger_entry_id IS NULL
+    )
+  ),
+  CONSTRAINT bank_token_requests_time_order_ck CHECK (
+    reviewed_at IS NULL OR reviewed_at >= requested_at
+  )
+);
+
+CREATE INDEX bank_token_requests_pending_idx
+  ON bank.token_requests (requested_at, request_id)
+  WHERE status = 'pending';
+
+CREATE INDEX bank_token_requests_requester_created_idx
+  ON bank.token_requests (requester_id, requested_at DESC, request_id DESC);
+
+CREATE TABLE bank.operation_receipts (
+  idempotency_key VARCHAR(200) PRIMARY KEY
+    CHECK (char_length(btrim(idempotency_key)) BETWEEN 1 AND 200),
+  operation_kind VARCHAR(80) NOT NULL
+    CHECK (char_length(btrim(operation_kind)) BETWEEN 1 AND 80),
+  actor_id BIGINT NOT NULL
+    REFERENCES identity.users(id) ON DELETE RESTRICT,
+  result JSONB NOT NULL CHECK (jsonb_typeof(result) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX bank_operation_receipts_actor_created_idx
+  ON bank.operation_receipts (actor_id, created_at DESC);
 
 CREATE TABLE retrieval.embedding_spaces (
   space_id VARCHAR(100) PRIMARY KEY CHECK (
@@ -1104,51 +1554,6 @@ CREATE INDEX tool_effect_receipts_recovery_idx
 CREATE INDEX tool_effect_receipts_kind_created_idx
   ON assistant.tool_effect_receipts (effect_kind, created_at, turn_id);
 
-CREATE TABLE assistant.billing_reservations (
-  turn_id UUID PRIMARY KEY
-    REFERENCES conversation.conversation_turns(turn_id) ON DELETE RESTRICT,
-  user_id BIGINT NOT NULL
-    REFERENCES identity.users(id) ON DELETE RESTRICT,
-  cost SMALLINT NOT NULL CHECK (cost > 0),
-  free_reserved SMALLINT,
-  paid_reserved SMALLINT,
-  pool_contribution NUMERIC(20, 2) NOT NULL
-    CHECK (pool_contribution > 0),
-  status TEXT NOT NULL CHECK (status IN ('reserved', 'settled', 'released')),
-  reserved_at TIMESTAMPTZ NOT NULL,
-  settled_at TIMESTAMPTZ,
-  released_at TIMESTAMPTZ,
-  legacy_eager BOOLEAN NOT NULL DEFAULT FALSE,
-  CONSTRAINT assistant_billing_native_split_ck CHECK (
-    (
-      NOT legacy_eager
-      AND free_reserved IS NOT NULL
-      AND paid_reserved IS NOT NULL
-      AND free_reserved >= 0
-      AND paid_reserved >= 0
-      AND free_reserved + paid_reserved = cost
-    ) OR (
-      legacy_eager
-      AND free_reserved IS NULL
-      AND paid_reserved IS NULL
-      AND status = 'settled'
-    )
-  ),
-  CONSTRAINT assistant_billing_terminal_shape_ck CHECK (
-    (status = 'reserved' AND settled_at IS NULL AND released_at IS NULL)
-    OR (status = 'settled' AND settled_at IS NOT NULL AND released_at IS NULL)
-    OR (status = 'released' AND settled_at IS NULL AND released_at IS NOT NULL)
-  ),
-  CONSTRAINT assistant_billing_time_order_ck CHECK (
-    (settled_at IS NULL OR settled_at >= reserved_at)
-    AND (released_at IS NULL OR released_at >= reserved_at)
-  )
-);
-
-CREATE INDEX assistant_billing_reservations_user_reserved_idx
-  ON assistant.billing_reservations (user_id, reserved_at, turn_id)
-  WHERE status = 'reserved';
-
 CREATE TABLE economy.user_lottery (
   user_id BIGINT NOT NULL PRIMARY KEY,
   last_lottery_date TIMESTAMP DEFAULT NULL
@@ -1160,32 +1565,6 @@ CREATE TABLE economy.user_task (
   completed_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (user_id, task_id)
 );
-
-CREATE TABLE economy.user_stakes (
-  user_id BIGINT NOT NULL PRIMARY KEY,
-  stake_amount INT NOT NULL,
-  stake_time TIMESTAMP NOT NULL,
-  last_reward_time TIMESTAMP NULL,
-  version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0)
-);
-
-CREATE TABLE economy.stake_reward_pool (
-  id SMALLINT NOT NULL PRIMARY KEY,
-  balance DECIMAL(20,2) NOT NULL DEFAULT 0,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE economy.stake_pool_postings (
-  posting_id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-  pool_id SMALLINT NOT NULL,
-  idempotency_key VARCHAR(200) NOT NULL UNIQUE
-    CHECK (char_length(btrim(idempotency_key)) > 0),
-  delta NUMERIC(20, 2) NOT NULL CHECK (delta <> 0),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX stake_pool_postings_pool_created_idx
-  ON economy.stake_pool_postings (pool_id, created_at, posting_id);
 
 CREATE TABLE economy.operation_receipts (
   idempotency_key VARCHAR(200) PRIMARY KEY
@@ -1200,16 +1579,6 @@ CREATE TABLE economy.operation_receipts (
 
 CREATE INDEX operation_receipts_user_created_idx
   ON economy.operation_receipts (user_id, created_at);
-
-CREATE TABLE economy.redemption_codes (
-  id INT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-  code VARCHAR(255) NOT NULL UNIQUE,
-  amount INT NOT NULL,
-  is_used BOOLEAN NOT NULL DEFAULT FALSE,
-  used_by BIGINT DEFAULT NULL,
-  used_at TIMESTAMP DEFAULT NULL,
-  FOREIGN KEY (used_by) REFERENCES identity.users(id) ON DELETE SET NULL
-);
 
 CREATE TABLE economy.user_invitations (
   invited_user_id BIGINT NOT NULL,
@@ -1228,26 +1597,6 @@ CREATE TABLE economy.user_checkin (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-
-CREATE TABLE economy.shop_pity (
-  user_id BIGINT NOT NULL
-    REFERENCES identity.users(id) ON DELETE CASCADE,
-  game TEXT NOT NULL CHECK (game IN ('scratch', 'huanle')),
-  business_date DATE NOT NULL,
-  misses INTEGER NOT NULL DEFAULT 0 CHECK (misses >= 0),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (user_id, game)
-);
-
-CREATE TABLE economy.kindness_gifts (
-  id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-  recipient_id BIGINT NOT NULL,
-  amount INT NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_kindness_recipient_created
-  ON economy.kindness_gifts (recipient_id, created_at);
 
 CREATE TABLE economy.user_give_daily (
   user_id BIGINT NOT NULL,
@@ -1410,84 +1759,6 @@ CREATE INDEX toggle_command_receipts_chat_created_idx
   ON moderation.toggle_command_receipts
     (operation_kind, chat_id, created_at, idempotency_key);
 
-CREATE TABLE crypto.user_btc_predictions (
-  user_id BIGINT NOT NULL PRIMARY KEY,
-  predict_type VARCHAR(10) NOT NULL,
-  amount INT NOT NULL,
-  start_price DECIMAL(20,8) NOT NULL,
-  start_time TIMESTAMP NOT NULL,
-  end_time TIMESTAMP NOT NULL,
-  is_completed BOOLEAN DEFAULT FALSE,
-  request_key TEXT NOT NULL,
-  chat_id BIGINT NOT NULL,
-  end_price DECIMAL(20,8),
-  is_correct BOOLEAN,
-  reward INTEGER,
-  settled_at TIMESTAMPTZ,
-  CONSTRAINT user_btc_predictions_request_key_ck
-    CHECK (char_length(btrim(request_key)) BETWEEN 1 AND 512),
-  CONSTRAINT user_btc_predictions_request_key_uk UNIQUE (request_key),
-  CONSTRAINT user_btc_predictions_reward_ck
-    CHECK (reward IS NULL OR reward >= 0),
-  CONSTRAINT user_btc_predictions_outcome_shape_ck CHECK (
-    (
-      end_price IS NULL
-      AND is_correct IS NULL
-      AND reward IS NULL
-      AND settled_at IS NULL
-    )
-    OR
-    (
-      end_price IS NOT NULL
-      AND end_price > 0
-      AND is_correct IS NOT NULL
-      AND reward IS NOT NULL
-      AND settled_at IS NOT NULL
-    )
-  ),
-  CONSTRAINT user_btc_predictions_pending_outcome_ck CHECK (
-    is_completed
-    OR (
-      end_price IS NULL
-      AND is_correct IS NULL
-      AND reward IS NULL
-      AND settled_at IS NULL
-    )
-  )
-);
-
-CREATE INDEX idx_user_btc_predictions_due
-  ON crypto.user_btc_predictions (end_time, user_id)
-  WHERE is_completed = FALSE;
-
-CREATE TABLE crypto.token_swap_requests (
-  id INT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-  user_id BIGINT NOT NULL,
-  username VARCHAR(255) NOT NULL,
-  wallet_address VARCHAR(50) NOT NULL,
-  amount INT NOT NULL,
-  request_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  status VARCHAR(20) DEFAULT 'pending',
-  idempotency_key TEXT NOT NULL,
-  CONSTRAINT token_swap_request_idempotency_key_ck
-    CHECK (char_length(btrim(idempotency_key)) BETWEEN 1 AND 512),
-  CONSTRAINT token_swap_request_idempotency_key_uk UNIQUE (idempotency_key)
-);
-
-CREATE UNIQUE INDEX uq_token_swap_requests_one_pending_per_user
-  ON crypto.token_swap_requests (user_id)
-  WHERE status = 'pending';
-
-CREATE TABLE crypto.swap_request_conflicts (
-  request_id INTEGER PRIMARY KEY
-    REFERENCES crypto.token_swap_requests(id) ON DELETE RESTRICT,
-  canonical_request_id INTEGER NOT NULL
-    REFERENCES crypto.token_swap_requests(id) ON DELETE RESTRICT,
-  reason TEXT NOT NULL,
-  captured_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CHECK (request_id <> canonical_request_id)
-);
-
 CREATE TABLE crypto.operation_receipts (
   idempotency_key TEXT PRIMARY KEY
     CHECK (char_length(btrim(idempotency_key)) BETWEEN 1 AND 512),
@@ -1529,186 +1800,10 @@ CREATE TABLE game.migration_0027_omikuji_repairs (
     REFERENCES game.user_omikuji(user_id, fortune_date) ON DELETE CASCADE
 );
 
-CREATE TABLE game.rpg_characters (
-  character_id INT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-  user_id BIGINT UNIQUE NOT NULL,
-  level INT NOT NULL DEFAULT 1,
-  hp INT NOT NULL DEFAULT 10,
-  max_hp INT NOT NULL DEFAULT 10,
-  atk INT NOT NULL DEFAULT 2,
-  matk INT NOT NULL DEFAULT 0,
-  def INT NOT NULL DEFAULT 1,
-  experience BIGINT NOT NULL DEFAULT 0,
-  allow_battle BOOLEAN NOT NULL DEFAULT TRUE,
-  version BIGINT NOT NULL DEFAULT 0,
-  CONSTRAINT rpg_characters_version_ck CHECK (version >= 0),
-  CONSTRAINT rpg_characters_stats_ck CHECK (
-    level > 0
-    AND max_hp > 0
-    AND hp BETWEEN 0 AND max_hp
-    AND atk >= 0
-    AND matk >= 0
-    AND def >= 0
-    AND experience >= 0
-  ),
-  FOREIGN KEY (user_id) REFERENCES identity.users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE game.migration_0027_character_repairs (
-  character_id INTEGER PRIMARY KEY
-    REFERENCES game.rpg_characters(character_id) ON DELETE CASCADE,
-  level INTEGER,
-  hp INTEGER,
-  max_hp INTEGER,
-  atk INTEGER,
-  matk INTEGER,
-  def INTEGER,
-  experience BIGINT,
-  allow_battle BOOLEAN,
-  captured_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE game.rpg_equipment (
-  id INT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-  name VARCHAR(50) NOT NULL,
-  type TEXT NOT NULL
-    CHECK (type IN ('weapon', 'offhand', 'armor', 'treasure1', 'treasure2')),
-  atk_bonus INT DEFAULT 0,
-  def_bonus INT DEFAULT 0,
-  hp_bonus INT DEFAULT 0,
-  matk_bonus INT DEFAULT 0,
-  description TEXT,
-  price INT NOT NULL,
-  rarity INT DEFAULT 1,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE game.rpg_items (
-  id INT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-  name VARCHAR(50) NOT NULL,
-  type TEXT NOT NULL
-    CHECK (type IN ('consumable', 'material', 'quest')),
-  effect TEXT,
-  description TEXT,
-  price INT NOT NULL,
-  use_limit INT DEFAULT 1,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE game.rpg_player_equipment (
-  user_id BIGINT NOT NULL PRIMARY KEY,
-  weapon_id INT DEFAULT NULL,
-  offhand_id INT DEFAULT NULL,
-  armor_id INT DEFAULT NULL,
-  treasure1_id INT DEFAULT NULL,
-  treasure2_id INT DEFAULT NULL,
-  version BIGINT NOT NULL DEFAULT 0,
-  CONSTRAINT rpg_player_equipment_version_ck CHECK (version >= 0),
-  FOREIGN KEY (user_id) REFERENCES identity.users(id) ON DELETE CASCADE,
-  FOREIGN KEY (weapon_id) REFERENCES game.rpg_equipment(id) ON DELETE SET NULL,
-  FOREIGN KEY (offhand_id) REFERENCES game.rpg_equipment(id) ON DELETE SET NULL,
-  FOREIGN KEY (armor_id) REFERENCES game.rpg_equipment(id) ON DELETE SET NULL,
-  FOREIGN KEY (treasure1_id) REFERENCES game.rpg_equipment(id) ON DELETE SET NULL,
-  FOREIGN KEY (treasure2_id) REFERENCES game.rpg_equipment(id) ON DELETE SET NULL
-);
-
-CREATE TABLE game.rpg_player_inventory (
-  id INT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-  user_id BIGINT NOT NULL,
-  item_id INT NOT NULL,
-  quantity INT NOT NULL DEFAULT 1,
-  version BIGINT NOT NULL DEFAULT 0,
-  CONSTRAINT rpg_player_inventory_quantity_ck CHECK (quantity > 0),
-  CONSTRAINT rpg_player_inventory_version_ck CHECK (version >= 0),
-  FOREIGN KEY (user_id) REFERENCES identity.users(id) ON DELETE CASCADE,
-  FOREIGN KEY (item_id) REFERENCES game.rpg_items(id) ON DELETE CASCADE,
-  CONSTRAINT rpg_player_inventory_unique UNIQUE (user_id, item_id)
-);
-
-CREATE TABLE game.migration_0027_inventory_repairs (
-  inventory_id INTEGER PRIMARY KEY
-    REFERENCES game.rpg_player_inventory(id) ON DELETE CASCADE,
-  quantity INTEGER,
-  captured_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE game.rpg_shop (
-  id INT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-  item_type TEXT NOT NULL CHECK (item_type IN ('equipment', 'item')),
-  item_id INT NOT NULL,
-  price INT NOT NULL,
-  stock INT DEFAULT -1,
-  available BOOLEAN DEFAULT TRUE,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT rpg_shop_item_unique UNIQUE (item_type, item_id)
-);
-
-CREATE INDEX idx_rpg_shop_item ON game.rpg_shop (item_type, item_id);
-
-CREATE TABLE game.rpg_player_equipment_stats (
-  user_id BIGINT NOT NULL PRIMARY KEY,
-  total_atk_bonus INT DEFAULT 0,
-  total_def_bonus INT DEFAULT 0,
-  total_hp_bonus INT DEFAULT 0,
-  total_matk_bonus INT DEFAULT 0,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (user_id) REFERENCES identity.users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE game.game_sessions (
-  session_id UUID PRIMARY KEY,
-  kind TEXT NOT NULL CHECK (kind IN ('gamble', 'sicbo')),
-  scope_key TEXT NOT NULL
-    CHECK (char_length(btrim(scope_key)) BETWEEN 1 AND 255),
-  owner_id BIGINT NOT NULL
-    REFERENCES identity.users(id) ON DELETE RESTRICT,
-  chat_id BIGINT NOT NULL CHECK (chat_id <> 0),
-  message_id BIGINT NOT NULL CHECK (message_id > 0),
-  state JSONB NOT NULL CHECK (jsonb_typeof(state) = 'object'),
-  status TEXT NOT NULL CHECK (
-    status IN ('active', 'settled', 'cancelled', 'expired')
-  ),
-  version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0),
-  expires_at TIMESTAMPTZ NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  settled_at TIMESTAMPTZ,
-  notification_enqueued_at TIMESTAMPTZ,
-  CONSTRAINT game_sessions_time_order_ck CHECK (
-    expires_at > created_at AND updated_at >= created_at
-  ),
-  CONSTRAINT game_sessions_settlement_shape_ck CHECK (
-    (status = 'settled') = (settled_at IS NOT NULL)
-  ),
-  CONSTRAINT game_sessions_notification_shape_ck CHECK (
-    notification_enqueued_at IS NULL OR status = 'settled'
-  )
-);
-
-CREATE UNIQUE INDEX uq_game_sessions_active_scope
-  ON game.game_sessions (kind, scope_key)
-  WHERE status = 'active';
-CREATE INDEX idx_game_sessions_due
-  ON game.game_sessions (expires_at, session_id)
-  WHERE status = 'active';
-CREATE INDEX idx_game_sessions_unnotified_gamble
-  ON game.game_sessions (settled_at, session_id)
-  WHERE kind = 'gamble'
-    AND status = 'settled'
-    AND notification_enqueued_at IS NULL;
-
 CREATE TABLE game.game_receipts (
   idempotency_key TEXT PRIMARY KEY
     CHECK (char_length(btrim(idempotency_key)) BETWEEN 1 AND 255),
-  operation TEXT NOT NULL CHECK (
-    operation IN (
-      'gamble.open', 'gamble.bet', 'sicbo.open', 'sicbo.select',
-      'sicbo.cancel', 'sicbo.play', 'omikuji.draw', 'rpg.allow',
-      'rpg.heal', 'rpg.monster_battle', 'rpg.player_battle',
-      'rpg.equip', 'rpg.unequip', 'rpg.use_item',
-      'rpg.add_item', 'rpg.remove_item'
-    )
-  ),
+  operation TEXT NOT NULL CHECK (operation = 'omikuji.draw'),
   user_id BIGINT NOT NULL CHECK (user_id > 0),
   result JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1720,78 +1815,6 @@ CREATE TABLE game.game_receipts (
     AND jsonb_typeof(result -> 'code') = 'string'
   )
 );
-
-CREATE TABLE game.rpg_battle_cooldowns (
-  user_id BIGINT NOT NULL
-    REFERENCES identity.users(id) ON DELETE CASCADE,
-  battle_kind TEXT NOT NULL CHECK (battle_kind IN ('player', 'monster')),
-  last_battle_at TIMESTAMPTZ,
-  version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0),
-  PRIMARY KEY (user_id, battle_kind)
-);
-
-CREATE TABLE game.rps_sessions (
-  game_id TEXT PRIMARY KEY CHECK (game_id ~ '^[A-Za-z0-9_-]{8,24}$'),
-  status TEXT NOT NULL CHECK (
-    status IN ('waiting', 'choosing', 'finished', 'cancelled', 'expired', 'invalidated')
-  ),
-  version BIGINT NOT NULL CHECK (version >= 0),
-  player_one_id BIGINT NOT NULL
-    REFERENCES identity.users(id) ON DELETE RESTRICT,
-  player_two_id BIGINT
-    REFERENCES identity.users(id) ON DELETE RESTRICT,
-  state JSONB NOT NULL CHECK (
-    jsonb_typeof(state) = 'object'
-    AND state -> 'schema' = '1'::JSONB
-  ),
-  delivery JSONB CHECK (
-    delivery IS NULL OR jsonb_typeof(delivery) = 'object'
-  ),
-  expires_at TIMESTAMPTZ NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL,
-  updated_at TIMESTAMPTZ NOT NULL,
-  terminal_at TIMESTAMPTZ,
-  CONSTRAINT rps_sessions_players_ck CHECK (
-    player_two_id IS NULL OR player_two_id <> player_one_id
-  ),
-  CONSTRAINT rps_sessions_time_ck CHECK (
-    expires_at > created_at
-    AND updated_at >= created_at
-    AND (terminal_at IS NULL OR terminal_at >= created_at)
-  ),
-  CONSTRAINT rps_sessions_terminal_ck CHECK (
-    (status IN ('waiting', 'choosing')) = (terminal_at IS NULL)
-  ),
-  CONSTRAINT rps_sessions_phase_ck CHECK (
-    (status = 'waiting' AND version = 0 AND player_two_id IS NULL)
-    OR (status = 'choosing' AND version >= 1 AND player_two_id IS NOT NULL)
-    OR (status = 'finished' AND version >= 2 AND player_two_id IS NOT NULL)
-    OR (status = 'cancelled')
-    OR (status IN ('expired', 'invalidated') AND player_two_id IS NULL)
-  )
-);
-
-CREATE UNIQUE INDEX uq_rps_single_waiting_room
-  ON game.rps_sessions (status)
-  WHERE status = 'waiting';
-
-CREATE INDEX idx_rps_sessions_due
-  ON game.rps_sessions (expires_at, game_id)
-  WHERE status IN ('waiting', 'choosing');
-
-CREATE INDEX idx_rps_sessions_terminal
-  ON game.rps_sessions (terminal_at DESC, game_id)
-  WHERE terminal_at IS NOT NULL;
-
-CREATE TABLE game.rps_player_slots (
-  user_id BIGINT PRIMARY KEY
-    REFERENCES identity.users(id) ON DELETE RESTRICT,
-  game_id TEXT NOT NULL
-    REFERENCES game.rps_sessions(game_id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_rps_player_slots_game
-  ON game.rps_player_slots (game_id);
 
 CREATE TABLE observability.resources (
   resource_id UUID PRIMARY KEY,
@@ -2069,3 +2092,865 @@ LEFT JOIN LATERAL (
   FROM conversation.outbound_messages AS outbound
   WHERE outbound.turn_id = turn.turn_id
 ) AS delivery ON TRUE;
+
+-- Billing is deliberately independent of bank.  It records provider-native
+-- payment units and entitlement rights only; no table contains a token amount,
+-- exchange rate, or a payment-to-token conversion.
+CREATE TABLE billing.products (
+  product_id UUID PRIMARY KEY,
+  code VARCHAR(96) NOT NULL UNIQUE
+    CHECK (code ~ '^[a-z][a-z0-9_.-]{0,95}$'),
+  display_name VARCHAR(120) NOT NULL
+    CHECK (char_length(btrim(display_name)) BETWEEN 1 AND 120),
+  kind TEXT NOT NULL CHECK (kind IN ('one_time', 'subscription')),
+  status TEXT NOT NULL CHECK (status IN ('active', 'retired')),
+  description TEXT NOT NULL DEFAULT '' CHECK (char_length(description) <= 2000),
+  created_at TIMESTAMPTZ NOT NULL,
+  retired_at TIMESTAMPTZ NULL,
+  version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT billing_products_id_kind_uq UNIQUE (product_id, kind),
+  CONSTRAINT billing_products_retirement_shape_ck CHECK (
+    (status = 'active' AND retired_at IS NULL)
+    OR (status = 'retired' AND retired_at IS NOT NULL AND retired_at >= created_at)
+  )
+);
+
+CREATE TABLE billing.offers (
+  offer_id UUID PRIMARY KEY,
+  product_id UUID NOT NULL
+    REFERENCES billing.products(product_id) ON DELETE RESTRICT,
+  product_kind TEXT NOT NULL CHECK (product_kind IN ('one_time', 'subscription')),
+  currency VARCHAR(16) NOT NULL CHECK (currency ~ '^[A-Z0-9]{3,16}$'),
+  price_units BIGINT NOT NULL CHECK (price_units > 0),
+  entitlement_codes JSONB NOT NULL CHECK (
+    jsonb_typeof(entitlement_codes) = 'array'
+    AND jsonb_array_length(entitlement_codes) > 0
+  ),
+  created_at TIMESTAMPTZ NOT NULL,
+  subscription_period_seconds BIGINT NULL CHECK (
+    subscription_period_seconds IS NULL OR subscription_period_seconds > 0
+  ),
+  available_from TIMESTAMPTZ NULL,
+  available_until TIMESTAMPTZ NULL,
+  status TEXT NOT NULL CHECK (status IN ('active', 'retired')),
+  retired_at TIMESTAMPTZ NULL,
+  version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT billing_offers_kind_period_shape_ck CHECK (
+    (product_kind = 'one_time' AND subscription_period_seconds IS NULL)
+    OR (product_kind = 'subscription' AND subscription_period_seconds IS NOT NULL)
+  ),
+  CONSTRAINT billing_offers_availability_shape_ck CHECK (
+    available_from IS NULL OR available_until IS NULL OR available_until > available_from
+  ),
+  CONSTRAINT billing_offers_retirement_shape_ck CHECK (
+    (status = 'active' AND retired_at IS NULL)
+    OR (status = 'retired' AND retired_at IS NOT NULL AND retired_at >= created_at)
+  ),
+  CONSTRAINT billing_offers_product_kind_fk FOREIGN KEY (product_id, product_kind)
+    REFERENCES billing.products(product_id, kind) ON DELETE RESTRICT,
+  CONSTRAINT billing_offers_frozen_snapshot_uq UNIQUE (
+    offer_id, product_id, product_kind, currency, price_units
+  )
+);
+
+CREATE INDEX billing_offers_product_available_idx
+  ON billing.offers (product_id, status, available_from, available_until, offer_id);
+
+CREATE TABLE billing.orders (
+  order_id UUID PRIMARY KEY,
+  buyer_id BIGINT NOT NULL
+    REFERENCES identity.users(id) ON DELETE RESTRICT,
+  product_id UUID NOT NULL
+    REFERENCES billing.products(product_id) ON DELETE RESTRICT,
+  offer_id UUID NOT NULL
+    REFERENCES billing.offers(offer_id) ON DELETE RESTRICT,
+  renewal_subscription_id UUID NULL,
+  product_kind TEXT NOT NULL CHECK (product_kind IN ('one_time', 'subscription')),
+  currency VARCHAR(16) NOT NULL CHECK (currency ~ '^[A-Z0-9]{3,16}$'),
+  price_units BIGINT NOT NULL CHECK (price_units > 0),
+  status TEXT NOT NULL CHECK (status IN (
+    'awaiting_payment', 'paid', 'fulfilled', 'cancelled', 'refund_pending',
+    'refunded', 'chargeback'
+  )),
+  created_at TIMESTAMPTZ NOT NULL,
+  payment_provider TEXT NULL CHECK (
+    payment_provider IS NULL OR payment_provider IN (
+      'telegram_stars', 'external', 'backoffice'
+    )
+  ),
+  provider_payment_id VARCHAR(256) NULL CHECK (
+    provider_payment_id IS NULL OR char_length(btrim(provider_payment_id)) BETWEEN 1 AND 256
+  ),
+  paid_at TIMESTAMPTZ NULL,
+  fulfilled_at TIMESTAMPTZ NULL,
+  refund_requested_at TIMESTAMPTZ NULL,
+  refunded_at TIMESTAMPTZ NULL,
+  cancelled_at TIMESTAMPTZ NULL,
+  chargeback_at TIMESTAMPTZ NULL,
+  version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT billing_orders_payment_pair_ck CHECK (
+    (payment_provider IS NULL) = (provider_payment_id IS NULL)
+  ),
+  CONSTRAINT billing_orders_renewal_kind_ck CHECK (
+    renewal_subscription_id IS NULL OR product_kind = 'subscription'
+  ),
+  CONSTRAINT billing_orders_state_shape_ck CHECK (
+    (
+      status = 'awaiting_payment'
+      AND payment_provider IS NULL AND paid_at IS NULL AND fulfilled_at IS NULL
+      AND refund_requested_at IS NULL AND refunded_at IS NULL
+      AND cancelled_at IS NULL AND chargeback_at IS NULL
+    )
+    OR (
+      status = 'paid'
+      AND payment_provider IS NOT NULL AND paid_at IS NOT NULL
+      AND fulfilled_at IS NULL AND refund_requested_at IS NULL AND refunded_at IS NULL
+      AND cancelled_at IS NULL AND chargeback_at IS NULL
+    )
+    OR (
+      status = 'fulfilled'
+      AND payment_provider IS NOT NULL AND paid_at IS NOT NULL AND fulfilled_at IS NOT NULL
+      AND refunded_at IS NULL AND cancelled_at IS NULL AND chargeback_at IS NULL
+    )
+    OR (
+      status = 'refund_pending'
+      AND payment_provider IS NOT NULL AND paid_at IS NOT NULL AND fulfilled_at IS NOT NULL
+      AND refund_requested_at IS NOT NULL AND refunded_at IS NULL
+      AND cancelled_at IS NULL AND chargeback_at IS NULL
+    )
+    OR (
+      status = 'refunded'
+      AND payment_provider IS NOT NULL AND paid_at IS NOT NULL AND fulfilled_at IS NOT NULL
+      AND refund_requested_at IS NOT NULL AND refunded_at IS NOT NULL
+      AND cancelled_at IS NULL AND chargeback_at IS NULL
+    )
+    OR (
+      status = 'cancelled'
+      AND payment_provider IS NULL AND paid_at IS NULL AND fulfilled_at IS NULL
+      AND refund_requested_at IS NULL AND refunded_at IS NULL
+      AND cancelled_at IS NOT NULL AND chargeback_at IS NULL
+    )
+    OR (
+      status = 'chargeback'
+      AND payment_provider IS NOT NULL AND paid_at IS NOT NULL
+      AND cancelled_at IS NULL AND chargeback_at IS NOT NULL
+    )
+  ),
+  CONSTRAINT billing_orders_timeline_ck CHECK (
+    (paid_at IS NULL OR paid_at >= created_at)
+    AND (fulfilled_at IS NULL OR fulfilled_at >= paid_at)
+    AND (refund_requested_at IS NULL OR refund_requested_at >= fulfilled_at)
+    AND (refunded_at IS NULL OR refunded_at >= refund_requested_at)
+    AND (cancelled_at IS NULL OR cancelled_at >= created_at)
+    AND (chargeback_at IS NULL OR chargeback_at >= paid_at)
+  ),
+  CONSTRAINT billing_orders_offer_snapshot_fk FOREIGN KEY (
+    offer_id, product_id, product_kind, currency, price_units
+  ) REFERENCES billing.offers (
+    offer_id, product_id, product_kind, currency, price_units
+  )
+);
+
+CREATE INDEX billing_orders_buyer_created_idx
+  ON billing.orders (buyer_id, created_at DESC, order_id DESC);
+CREATE INDEX billing_orders_status_created_idx
+  ON billing.orders (status, created_at, order_id);
+CREATE INDEX billing_orders_renewal_subscription_idx
+  ON billing.orders (renewal_subscription_id)
+  WHERE renewal_subscription_id IS NOT NULL;
+-- @brief 每个订阅最多一笔待付款、待履约或退款结算中的续费订单 / Permit at most one awaiting-payment, paid, or refund-pending renewal order per subscription.
+CREATE UNIQUE INDEX billing_orders_one_open_renewal_uq
+  ON billing.orders (renewal_subscription_id)
+  WHERE renewal_subscription_id IS NOT NULL
+    AND status IN ('awaiting_payment', 'paid', 'refund_pending');
+
+CREATE TABLE billing.refunds (
+  refund_id UUID PRIMARY KEY,
+  order_id UUID NOT NULL
+    REFERENCES billing.orders(order_id) ON DELETE RESTRICT,
+  requester_id BIGINT NOT NULL
+    REFERENCES identity.users(id) ON DELETE RESTRICT,
+  currency VARCHAR(16) NOT NULL CHECK (currency ~ '^[A-Z0-9]{3,16}$'),
+  amount_units BIGINT NOT NULL CHECK (amount_units > 0),
+  reason TEXT NOT NULL CHECK (char_length(btrim(reason)) BETWEEN 1 AND 1000),
+  status TEXT NOT NULL CHECK (status IN (
+    'requested', 'approved', 'rejected', 'succeeded', 'failed', 'cancelled'
+  )),
+  requested_at TIMESTAMPTZ NOT NULL,
+  reviewer_id BIGINT NULL
+    REFERENCES identity.users(id) ON DELETE RESTRICT,
+  reviewed_at TIMESTAMPTZ NULL,
+  review_note TEXT NULL CHECK (
+    review_note IS NULL OR char_length(btrim(review_note)) BETWEEN 1 AND 1000
+  ),
+  settlement_provider TEXT NULL CHECK (
+    settlement_provider IS NULL OR settlement_provider IN (
+      'telegram_stars', 'external', 'backoffice'
+    )
+  ),
+  provider_settlement_id VARCHAR(256) NULL CHECK (
+    provider_settlement_id IS NULL
+    OR char_length(btrim(provider_settlement_id)) BETWEEN 1 AND 256
+  ),
+  settled_at TIMESTAMPTZ NULL,
+  cancelled_at TIMESTAMPTZ NULL,
+  version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT billing_refunds_reviewer_not_requester_ck CHECK (
+    reviewer_id IS NULL OR reviewer_id <> requester_id
+  ),
+  CONSTRAINT billing_refunds_settlement_pair_ck CHECK (
+    (settlement_provider IS NULL) = (provider_settlement_id IS NULL)
+  ),
+  CONSTRAINT billing_refunds_timeline_ck CHECK (
+    (reviewed_at IS NULL OR reviewed_at >= requested_at)
+    AND (settled_at IS NULL OR (reviewed_at IS NOT NULL AND settled_at >= reviewed_at))
+    AND (cancelled_at IS NULL OR cancelled_at >= requested_at)
+  ),
+  CONSTRAINT billing_refunds_state_shape_ck CHECK (
+    (
+      status = 'requested'
+      AND reviewer_id IS NULL AND reviewed_at IS NULL AND settled_at IS NULL
+      AND settlement_provider IS NULL AND cancelled_at IS NULL
+    )
+    OR (
+      status IN ('approved', 'rejected')
+      AND reviewer_id IS NOT NULL AND reviewed_at IS NOT NULL AND settled_at IS NULL
+      AND settlement_provider IS NULL AND cancelled_at IS NULL
+    )
+    OR (
+      status IN ('succeeded', 'failed')
+      AND reviewer_id IS NOT NULL AND reviewed_at IS NOT NULL AND settled_at IS NOT NULL
+      AND settlement_provider IS NOT NULL AND cancelled_at IS NULL
+    )
+    OR (
+      status = 'cancelled'
+      AND reviewer_id IS NULL AND reviewed_at IS NULL AND settled_at IS NULL
+      AND settlement_provider IS NULL AND cancelled_at IS NOT NULL
+    )
+  )
+);
+
+CREATE UNIQUE INDEX billing_refunds_one_open_order_uq
+  ON billing.refunds (order_id)
+  WHERE status IN ('requested', 'approved');
+CREATE INDEX billing_refunds_requester_created_idx
+  ON billing.refunds (requester_id, requested_at DESC, refund_id DESC);
+
+CREATE TABLE billing.payment_events (
+  event_id UUID PRIMARY KEY,
+  provider TEXT NOT NULL CHECK (provider IN (
+    'telegram_stars', 'external', 'backoffice'
+  )),
+  provider_event_id VARCHAR(256) NOT NULL
+    CHECK (char_length(btrim(provider_event_id)) BETWEEN 1 AND 256),
+  provider_payment_id VARCHAR(256) NOT NULL
+    CHECK (char_length(btrim(provider_payment_id)) BETWEEN 1 AND 256),
+  order_id UUID NOT NULL
+    REFERENCES billing.orders(order_id) ON DELETE RESTRICT,
+  refund_id UUID NULL
+    REFERENCES billing.refunds(refund_id) ON DELETE RESTRICT,
+  event_kind TEXT NOT NULL CHECK (event_kind IN (
+    'payment_succeeded', 'payment_failed', 'refund_succeeded', 'refund_failed',
+    'chargeback_opened'
+  )),
+  currency VARCHAR(16) NOT NULL CHECK (currency ~ '^[A-Z0-9]{3,16}$'),
+  amount_units BIGINT NOT NULL CHECK (amount_units > 0),
+  occurred_at TIMESTAMPTZ NOT NULL,
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT billing_payment_events_refund_link_ck CHECK (
+    (event_kind IN ('refund_succeeded', 'refund_failed')) = (refund_id IS NOT NULL)
+  ),
+  CONSTRAINT billing_payment_events_provider_event_uq UNIQUE (provider, provider_event_id)
+);
+
+CREATE INDEX billing_payment_events_order_occurred_idx
+  ON billing.payment_events (order_id, occurred_at, event_id);
+CREATE INDEX billing_payment_events_refund_occurred_idx
+  ON billing.payment_events (refund_id, occurred_at, event_id)
+  WHERE refund_id IS NOT NULL;
+CREATE UNIQUE INDEX billing_payment_events_success_payment_uq
+  ON billing.payment_events (provider, provider_payment_id)
+  WHERE event_kind = 'payment_succeeded';
+
+CREATE TABLE billing.fulfillments (
+  fulfillment_id UUID PRIMARY KEY,
+  order_id UUID NOT NULL UNIQUE
+    REFERENCES billing.orders(order_id) ON DELETE RESTRICT,
+  operator_id BIGINT NOT NULL
+    REFERENCES identity.users(id) ON DELETE RESTRICT,
+  fulfilled_at TIMESTAMPTZ NOT NULL,
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX billing_fulfillments_operator_time_idx
+  ON billing.fulfillments (operator_id, fulfilled_at DESC, fulfillment_id DESC);
+
+CREATE TABLE billing.entitlement_grants (
+  grant_id UUID PRIMARY KEY,
+  code VARCHAR(96) NOT NULL CHECK (code ~ '^[a-z][a-z0-9_.-]{0,95}$'),
+  scope TEXT NOT NULL CHECK (scope IN ('user', 'group')),
+  subject_id BIGINT NOT NULL,
+  source_order_id UUID NOT NULL
+    REFERENCES billing.orders(order_id) ON DELETE RESTRICT,
+  fulfillment_id UUID NOT NULL
+    REFERENCES billing.fulfillments(fulfillment_id) ON DELETE RESTRICT,
+  starts_at TIMESTAMPTZ NOT NULL,
+  expires_at TIMESTAMPTZ NULL,
+  status TEXT NOT NULL CHECK (status IN ('active', 'expired', 'revoked')),
+  ended_at TIMESTAMPTZ NULL,
+  revocation_reason TEXT NULL CHECK (
+    revocation_reason IS NULL
+    OR char_length(btrim(revocation_reason)) BETWEEN 1 AND 1000
+  ),
+  version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT billing_entitlement_grants_subject_shape_ck CHECK (
+    (scope = 'user' AND subject_id > 0)
+    OR (scope = 'group' AND subject_id <> 0)
+  ),
+  CONSTRAINT billing_entitlement_grants_time_ck CHECK (
+    (expires_at IS NULL OR expires_at > starts_at)
+    AND (ended_at IS NULL OR ended_at >= starts_at)
+  ),
+  CONSTRAINT billing_entitlement_grants_state_shape_ck CHECK (
+    (status = 'active' AND ended_at IS NULL AND revocation_reason IS NULL)
+    OR (
+      status = 'expired' AND expires_at IS NOT NULL AND ended_at = expires_at
+      AND revocation_reason IS NULL
+    )
+    OR (
+      status = 'revoked' AND ended_at IS NOT NULL AND revocation_reason IS NOT NULL
+    )
+  ),
+  CONSTRAINT billing_entitlement_grants_source_code_uq UNIQUE (
+    source_order_id, code, scope, subject_id
+  )
+);
+
+CREATE INDEX billing_entitlement_grants_active_subject_idx
+  ON billing.entitlement_grants (scope, subject_id, expires_at, grant_id)
+  WHERE status = 'active';
+CREATE INDEX billing_entitlement_grants_source_order_idx
+  ON billing.entitlement_grants (source_order_id, grant_id);
+
+CREATE TABLE billing.subscriptions (
+  subscription_id UUID PRIMARY KEY,
+  owner_id BIGINT NOT NULL
+    REFERENCES identity.users(id) ON DELETE RESTRICT,
+  product_id UUID NOT NULL
+    REFERENCES billing.products(product_id) ON DELETE RESTRICT,
+  offer_id UUID NOT NULL
+    REFERENCES billing.offers(offer_id) ON DELETE RESTRICT,
+  source_order_id UUID NOT NULL UNIQUE
+    REFERENCES billing.orders(order_id) ON DELETE RESTRICT,
+  current_order_id UUID NOT NULL UNIQUE
+    REFERENCES billing.orders(order_id) ON DELETE RESTRICT,
+  period_starts_at TIMESTAMPTZ NOT NULL,
+  period_ends_at TIMESTAMPTZ NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('active', 'cancelled', 'expired', 'revoked')),
+  cancellation_requested_at TIMESTAMPTZ NULL,
+  ended_at TIMESTAMPTZ NULL,
+  revocation_reason TEXT NULL CHECK (
+    revocation_reason IS NULL
+    OR char_length(btrim(revocation_reason)) BETWEEN 1 AND 1000
+  ),
+  version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT billing_subscriptions_period_ck CHECK (period_ends_at > period_starts_at),
+  CONSTRAINT billing_subscriptions_cancellation_time_ck CHECK (
+    cancellation_requested_at IS NULL
+    OR cancellation_requested_at >= period_starts_at
+       AND cancellation_requested_at < period_ends_at
+  ),
+  CONSTRAINT billing_subscriptions_end_time_ck CHECK (
+    ended_at IS NULL OR ended_at >= period_starts_at
+  ),
+  CONSTRAINT billing_subscriptions_state_shape_ck CHECK (
+    (status = 'active' AND ended_at IS NULL AND revocation_reason IS NULL)
+    OR (
+      status = 'cancelled' AND cancellation_requested_at IS NOT NULL
+      AND ended_at = period_ends_at AND revocation_reason IS NULL
+    )
+    OR (
+      status = 'expired' AND cancellation_requested_at IS NULL
+      AND ended_at = period_ends_at AND revocation_reason IS NULL
+    )
+    OR (
+      status = 'revoked' AND ended_at IS NOT NULL AND revocation_reason IS NOT NULL
+    )
+  )
+);
+
+CREATE INDEX billing_subscriptions_owner_active_idx
+  ON billing.subscriptions (owner_id, period_ends_at, subscription_id)
+  WHERE status = 'active';
+
+ALTER TABLE billing.orders
+  ADD CONSTRAINT billing_orders_renewal_subscription_fk
+  FOREIGN KEY (renewal_subscription_id)
+  REFERENCES billing.subscriptions(subscription_id) ON DELETE RESTRICT;
+
+CREATE TABLE billing.subscription_periods (
+  subscription_id UUID NOT NULL
+    REFERENCES billing.subscriptions(subscription_id) ON DELETE RESTRICT,
+  order_id UUID NOT NULL UNIQUE
+    REFERENCES billing.orders(order_id) ON DELETE RESTRICT,
+  period_starts_at TIMESTAMPTZ NOT NULL,
+  period_ends_at TIMESTAMPTZ NOT NULL,
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (subscription_id, period_starts_at),
+  CONSTRAINT billing_subscription_periods_time_ck CHECK (period_ends_at > period_starts_at)
+);
+
+CREATE TABLE billing.subscription_entitlement_grants (
+  subscription_id UUID NOT NULL
+    REFERENCES billing.subscriptions(subscription_id) ON DELETE RESTRICT,
+  source_order_id UUID NOT NULL
+    REFERENCES billing.orders(order_id) ON DELETE RESTRICT,
+  grant_id UUID NOT NULL
+    REFERENCES billing.entitlement_grants(grant_id) ON DELETE RESTRICT,
+  attached_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (subscription_id, grant_id),
+  CONSTRAINT billing_subscription_entitlement_grants_source_uq UNIQUE (
+    subscription_id, source_order_id, grant_id
+  )
+);
+
+CREATE INDEX billing_subscription_entitlement_current_idx
+  ON billing.subscription_entitlement_grants (subscription_id, source_order_id, grant_id);
+
+CREATE TABLE billing.operation_receipts (
+  idempotency_key VARCHAR(200) PRIMARY KEY
+    CHECK (char_length(btrim(idempotency_key)) BETWEEN 1 AND 200),
+  operation_kind VARCHAR(80) NOT NULL
+    CHECK (char_length(btrim(operation_kind)) BETWEEN 1 AND 80),
+  actor_id BIGINT NULL
+    REFERENCES identity.users(id) ON DELETE RESTRICT,
+  request_fingerprint CHAR(64) NOT NULL CHECK (
+    request_fingerprint ~ '^[0-9a-f]{64}$'
+  ),
+  result JSONB NOT NULL CHECK (jsonb_typeof(result) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX billing_operation_receipts_actor_created_idx
+  ON billing.operation_receipts (actor_id, created_at DESC)
+  WHERE actor_id IS NOT NULL;
+
+CREATE FUNCTION billing.forbid_append_only_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'billing.% is append-only; write a compensating state transition instead', TG_TABLE_NAME
+    USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER billing_payment_events_append_only_tr
+BEFORE UPDATE OR DELETE ON billing.payment_events
+FOR EACH ROW EXECUTE FUNCTION billing.forbid_append_only_mutation();
+
+CREATE TRIGGER billing_fulfillments_append_only_tr
+BEFORE UPDATE OR DELETE ON billing.fulfillments
+FOR EACH ROW EXECUTE FUNCTION billing.forbid_append_only_mutation();
+
+CREATE TRIGGER billing_subscription_periods_append_only_tr
+BEFORE UPDATE OR DELETE ON billing.subscription_periods
+FOR EACH ROW EXECUTE FUNCTION billing.forbid_append_only_mutation();
+
+CREATE TRIGGER billing_subscription_grants_append_only_tr
+BEFORE UPDATE OR DELETE ON billing.subscription_entitlement_grants
+FOR EACH ROW EXECUTE FUNCTION billing.forbid_append_only_mutation();
+
+CREATE TRIGGER billing_operation_receipts_append_only_tr
+BEFORE UPDATE OR DELETE ON billing.operation_receipts
+FOR EACH ROW EXECUTE FUNCTION billing.forbid_append_only_mutation();
+
+-- The town header is an audited read projection of the bank group-treasury
+-- account.  Monetary truth remains in bank.ledger_entries/postings; all writes
+-- are made in the same transaction by PostgresTownOperations.
+CREATE TABLE town.towns (
+  group_id BIGINT PRIMARY KEY CHECK (group_id <> 0),
+  title VARCHAR(120) NOT NULL
+    CHECK (char_length(btrim(title)) BETWEEN 1 AND 120),
+  created_at TIMESTAMPTZ NOT NULL,
+  treasury_balance BIGINT NOT NULL DEFAULT 0 CHECK (treasury_balance >= 0),
+  treasury_reserved BIGINT NOT NULL DEFAULT 0 CHECK (
+    treasury_reserved >= 0 AND treasury_reserved <= treasury_balance
+  ),
+  lifetime_contributed BIGINT NOT NULL DEFAULT 0 CHECK (lifetime_contributed >= 0),
+  lifetime_settled BIGINT NOT NULL DEFAULT 0 CHECK (lifetime_settled >= 0),
+  contribution_count BIGINT NOT NULL DEFAULT 0 CHECK (contribution_count >= 0),
+  prosperity BIGINT NOT NULL DEFAULT 0 CHECK (prosperity >= 0),
+  version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT town_treasury_conservation_ck CHECK (
+    lifetime_contributed = treasury_balance + lifetime_settled
+  ),
+  CONSTRAINT town_towns_timeline_ck CHECK (updated_at >= created_at)
+);
+
+CREATE TABLE town.projects (
+  project_id UUID PRIMARY KEY,
+  group_id BIGINT NOT NULL
+    REFERENCES town.towns(group_id) ON DELETE RESTRICT,
+  kind TEXT NOT NULL CHECK (kind IN (
+    'community_hall', 'workshop', 'garden', 'observatory'
+  )),
+  title VARCHAR(120) NOT NULL
+    CHECK (char_length(btrim(title)) BETWEEN 1 AND 120),
+  required_amount BIGINT NOT NULL CHECK (required_amount > 0),
+  created_by BIGINT NOT NULL
+    REFERENCES identity.users(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  prosperity_reward BIGINT NOT NULL CHECK (prosperity_reward > 0),
+  funded_amount BIGINT NOT NULL DEFAULT 0 CHECK (
+    funded_amount >= 0 AND funded_amount <= required_amount
+  ),
+  status TEXT NOT NULL CHECK (status IN ('funding', 'ready', 'completed')),
+  completed_at TIMESTAMPTZ NULL,
+  settlement_ledger_entry_id UUID NULL UNIQUE
+    REFERENCES bank.ledger_entries(entry_id) ON DELETE RESTRICT,
+  version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT town_projects_scope_identity_uq UNIQUE (group_id, project_id),
+  CONSTRAINT town_projects_state_shape_ck CHECK (
+    (status = 'funding' AND funded_amount < required_amount
+      AND completed_at IS NULL AND settlement_ledger_entry_id IS NULL)
+    OR (status = 'ready' AND funded_amount = required_amount
+      AND completed_at IS NULL AND settlement_ledger_entry_id IS NULL)
+    OR (status = 'completed' AND funded_amount = required_amount
+      AND completed_at IS NOT NULL AND settlement_ledger_entry_id IS NOT NULL)
+  ),
+  CONSTRAINT town_projects_timeline_ck CHECK (
+    completed_at IS NULL OR completed_at >= created_at
+  )
+);
+
+CREATE INDEX town_projects_group_created_idx
+  ON town.projects (group_id, created_at ASC, project_id ASC);
+CREATE INDEX town_projects_group_open_idx
+  ON town.projects (group_id, status, created_at ASC, project_id ASC)
+  WHERE status IN ('funding', 'ready');
+
+CREATE TABLE town.contributions (
+  contribution_id UUID PRIMARY KEY,
+  group_id BIGINT NOT NULL
+    REFERENCES town.towns(group_id) ON DELETE RESTRICT,
+  contributor_id BIGINT NOT NULL
+    REFERENCES identity.users(id) ON DELETE RESTRICT,
+  amount BIGINT NOT NULL CHECK (amount > 0),
+  contributed_at TIMESTAMPTZ NOT NULL,
+  ledger_entry_id UUID NOT NULL UNIQUE
+    REFERENCES bank.ledger_entries(entry_id) ON DELETE RESTRICT,
+  project_id UUID NULL,
+  CONSTRAINT town_contributions_project_scope_fk
+    FOREIGN KEY (group_id, project_id)
+    REFERENCES town.projects(group_id, project_id) ON DELETE RESTRICT
+);
+
+CREATE INDEX town_contributions_group_created_idx
+  ON town.contributions (group_id, contributed_at DESC, contribution_id DESC);
+CREATE INDEX town_contributions_contributor_created_idx
+  ON town.contributions (contributor_id, contributed_at DESC, contribution_id DESC);
+
+CREATE TABLE town.operation_receipts (
+  idempotency_key VARCHAR(200) PRIMARY KEY
+    CHECK (char_length(btrim(idempotency_key)) BETWEEN 1 AND 200),
+  operation_kind VARCHAR(80) NOT NULL
+    CHECK (char_length(btrim(operation_kind)) BETWEEN 1 AND 80),
+  actor_id BIGINT NULL
+    REFERENCES identity.users(id) ON DELETE RESTRICT,
+  group_id BIGINT NOT NULL CHECK (group_id <> 0)
+    REFERENCES town.towns(group_id) ON DELETE RESTRICT,
+  request_fingerprint JSONB NOT NULL
+    CHECK (jsonb_typeof(request_fingerprint) = 'object'),
+  result JSONB NOT NULL CHECK (jsonb_typeof(result) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX town_operation_receipts_group_created_idx
+  ON town.operation_receipts (group_id, created_at DESC, idempotency_key DESC);
+
+CREATE FUNCTION town.forbid_append_only_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'town.% is append-only; write a compensating state transition instead', TG_TABLE_NAME
+    USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER town_contributions_append_only_tr
+BEFORE UPDATE OR DELETE ON town.contributions
+FOR EACH ROW EXECUTE FUNCTION town.forbid_append_only_mutation();
+
+CREATE TRIGGER town_operation_receipts_append_only_tr
+BEFORE UPDATE OR DELETE ON town.operation_receipts
+FOR EACH ROW EXECUTE FUNCTION town.forbid_append_only_mutation();
+
+-- A chance round first commits a server seed, then atomically takes a Free
+-- wallet stake and settles.  The private seed is intentionally retained only
+-- while status = committed; the settlement transition clears it after the
+-- publicly verifiable proof has disclosed the seed.
+CREATE TABLE chance.rounds (
+  round_id UUID PRIMARY KEY,
+  owner_id BIGINT NOT NULL
+    REFERENCES identity.users(id) ON DELETE RESTRICT,
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('personal', 'group')),
+  scope_id BIGINT NOT NULL,
+  topic_id BIGINT NULL CHECK (topic_id IS NULL OR topic_id > 0),
+  ruleset JSONB NOT NULL CHECK (jsonb_typeof(ruleset) = 'object'),
+  ruleset_fingerprint CHAR(64) NOT NULL CHECK (
+    ruleset_fingerprint ~ '^[0-9a-f]{64}$'
+  ),
+  rule_code VARCHAR(64) NOT NULL CHECK (
+    rule_code ~ '^[a-z][a-z0-9_.-]{0,63}$'
+  ),
+  stake BIGINT NOT NULL CHECK (stake > 0),
+  nonce BIGINT NOT NULL CHECK (nonce >= 0),
+  commitment CHAR(64) NOT NULL CHECK (commitment ~ '^[0-9a-f]{64}$'),
+  server_seed BYTEA NULL CHECK (
+    server_seed IS NULL OR octet_length(server_seed) >= 16
+  ),
+  client_seed TEXT NULL CHECK (
+    client_seed IS NULL OR octet_length(client_seed) BETWEEN 1 AND 512
+  ),
+  status TEXT NOT NULL CHECK (status IN ('committed', 'settled')),
+  outcome_code VARCHAR(64) NULL CHECK (
+    outcome_code IS NULL OR outcome_code ~ '^[a-z][a-z0-9_.-]{0,63}$'
+  ),
+  payout BIGINT NULL CHECK (payout IS NULL OR payout > 0),
+  proof JSONB NULL CHECK (proof IS NULL OR jsonb_typeof(proof) = 'object'),
+  committed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  settled_at TIMESTAMPTZ NULL,
+  CONSTRAINT chance_rounds_scope_shape_ck CHECK (
+    (scope_kind = 'personal' AND scope_id > 0 AND topic_id IS NULL AND owner_id = scope_id)
+    OR (scope_kind = 'group' AND scope_id <> 0)
+  ),
+  CONSTRAINT chance_rounds_state_shape_ck CHECK (
+    (
+      status = 'committed'
+      AND server_seed IS NOT NULL
+      AND client_seed IS NULL
+      AND outcome_code IS NULL
+      AND payout IS NULL
+      AND proof IS NULL
+      AND settled_at IS NULL
+    )
+    OR (
+      status = 'settled'
+      AND server_seed IS NULL
+      AND client_seed IS NOT NULL
+      AND outcome_code IS NOT NULL
+      AND proof IS NOT NULL
+      AND settled_at IS NOT NULL
+    )
+  ),
+  CONSTRAINT chance_rounds_timeline_ck CHECK (
+    settled_at IS NULL OR settled_at >= committed_at
+  )
+);
+
+CREATE INDEX chance_rounds_owner_created_idx
+  ON chance.rounds (owner_id, committed_at DESC, round_id DESC);
+CREATE INDEX chance_rounds_scope_status_created_idx
+  ON chance.rounds (scope_kind, scope_id, topic_id, status, committed_at DESC, round_id DESC);
+
+-- The application adapter is the only runtime component that reads
+-- server_seed, and only through a locked settlement path.  This trigger makes
+-- the committed-to-settled transition one-way: it freezes the published
+-- commitment and ruleset, clears the private seed, and prevents a settled
+-- proof from being replaced later.
+CREATE FUNCTION chance.enforce_round_lifecycle()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'chance round % is durable and cannot be deleted', OLD.round_id
+      USING ERRCODE = '55000';
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.status <> 'committed' THEN
+      RAISE EXCEPTION 'chance round % must first be inserted as committed', NEW.round_id
+        USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF OLD.status <> 'committed' OR NEW.status <> 'settled' THEN
+    RAISE EXCEPTION 'chance round % permits only committed-to-settled transition', OLD.round_id
+      USING ERRCODE = '55000';
+  END IF;
+  IF NEW.round_id IS DISTINCT FROM OLD.round_id
+    OR NEW.owner_id IS DISTINCT FROM OLD.owner_id
+    OR NEW.scope_kind IS DISTINCT FROM OLD.scope_kind
+    OR NEW.scope_id IS DISTINCT FROM OLD.scope_id
+    OR NEW.topic_id IS DISTINCT FROM OLD.topic_id
+    OR NEW.ruleset IS DISTINCT FROM OLD.ruleset
+    OR NEW.ruleset_fingerprint IS DISTINCT FROM OLD.ruleset_fingerprint
+    OR NEW.rule_code IS DISTINCT FROM OLD.rule_code
+    OR NEW.stake IS DISTINCT FROM OLD.stake
+    OR NEW.nonce IS DISTINCT FROM OLD.nonce
+    OR NEW.commitment IS DISTINCT FROM OLD.commitment
+    OR NEW.committed_at IS DISTINCT FROM OLD.committed_at THEN
+    RAISE EXCEPTION 'chance round % immutable commitment fields changed', OLD.round_id
+      USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER chance_rounds_one_way_settlement_tr
+BEFORE INSERT OR UPDATE OR DELETE ON chance.rounds
+FOR EACH ROW EXECUTE FUNCTION chance.enforce_round_lifecycle();
+
+CREATE TABLE chance.operation_receipts (
+  idempotency_key VARCHAR(200) PRIMARY KEY
+    CHECK (char_length(btrim(idempotency_key)) BETWEEN 1 AND 200),
+  operation_kind VARCHAR(80) NOT NULL CHECK (
+    operation_kind IN ('chance.commit', 'chance.bind_and_settle')
+  ),
+  actor_id BIGINT NOT NULL
+    REFERENCES identity.users(id) ON DELETE RESTRICT,
+  request_fingerprint CHAR(64) NOT NULL CHECK (
+    request_fingerprint ~ '^[0-9a-f]{64}$'
+  ),
+  result JSONB NOT NULL CHECK (jsonb_typeof(result) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX chance_operation_receipts_actor_created_idx
+  ON chance.operation_receipts (actor_id, created_at DESC, idempotency_key DESC);
+
+CREATE FUNCTION chance.forbid_receipt_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'chance operation receipts are append-only'
+    USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER chance_operation_receipts_append_only_tr
+BEFORE UPDATE OR DELETE ON chance.operation_receipts
+FOR EACH ROW EXECUTE FUNCTION chance.forbid_receipt_mutation();
+
+-- Personal RPG is deliberately a private, non-monetary progression context.
+-- `characters` is the mutable aggregate header; material rows are a small
+-- replaceable projection under that header lock.  Exploration, crafting and
+-- operation receipts are durable audit facts and are append-only.
+CREATE TABLE personal_rpg.characters (
+  user_id BIGINT PRIMARY KEY
+    REFERENCES identity.users(id) ON DELETE RESTRICT,
+  name VARCHAR(40) NOT NULL
+    CHECK (char_length(btrim(name)) BETWEEN 1 AND 40),
+  experience BIGINT NOT NULL DEFAULT 0 CHECK (experience >= 0),
+  last_exploration_day DATE NULL,
+  character_version BIGINT NOT NULL DEFAULT 0 CHECK (character_version >= 0),
+  profile_version BIGINT NOT NULL DEFAULT 0 CHECK (profile_version >= 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE personal_rpg.materials (
+  user_id BIGINT NOT NULL
+    REFERENCES personal_rpg.characters(user_id) ON DELETE RESTRICT,
+  material_kind TEXT NOT NULL CHECK (material_kind IN (
+    'fiber', 'herb', 'stone', 'ore', 'shell', 'algae'
+  )),
+  quantity BIGINT NOT NULL CHECK (quantity > 0),
+  PRIMARY KEY (user_id, material_kind)
+);
+
+CREATE TABLE personal_rpg.explorations (
+  exploration_id UUID PRIMARY KEY,
+  user_id BIGINT NOT NULL
+    REFERENCES personal_rpg.characters(user_id) ON DELETE RESTRICT,
+  exploration_day DATE NOT NULL,
+  route TEXT NOT NULL CHECK (route IN ('woodland', 'quarry', 'shore')),
+  explored_at TIMESTAMPTZ NOT NULL,
+  experience_reward BIGINT NOT NULL CHECK (experience_reward > 0),
+  material_rewards JSONB NOT NULL
+    CHECK (jsonb_typeof(material_rewards) = 'object'),
+  audit_digest CHAR(64) NOT NULL CHECK (audit_digest ~ '^[0-9a-f]{64}$'),
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT personal_rpg_explorations_user_day_uq UNIQUE (user_id, exploration_day),
+  CONSTRAINT personal_rpg_explorations_utc_day_ck CHECK (
+    (explored_at AT TIME ZONE 'UTC')::date = exploration_day
+  )
+);
+
+CREATE INDEX personal_rpg_explorations_user_created_idx
+  ON personal_rpg.explorations (user_id, exploration_day DESC, exploration_id DESC);
+
+CREATE TABLE personal_rpg.collections (
+  user_id BIGINT NOT NULL
+    REFERENCES personal_rpg.characters(user_id) ON DELETE RESTRICT,
+  collectible_kind TEXT NOT NULL CHECK (collectible_kind IN (
+    'herbal_lantern', 'rune_charm', 'tidal_mobile'
+  )),
+  recipe_code TEXT NOT NULL CHECK (recipe_code IN (
+    'herbal_lantern', 'rune_charm', 'tidal_mobile'
+  )),
+  craft_id UUID NOT NULL UNIQUE,
+  crafted_at TIMESTAMPTZ NOT NULL,
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, collectible_kind),
+  CONSTRAINT personal_rpg_collections_recipe_output_ck CHECK (
+    collectible_kind = recipe_code
+  )
+);
+
+CREATE INDEX personal_rpg_collections_user_crafted_idx
+  ON personal_rpg.collections (user_id, crafted_at DESC, collectible_kind);
+
+CREATE TABLE personal_rpg.operation_receipts (
+  idempotency_key VARCHAR(200) PRIMARY KEY
+    CHECK (char_length(btrim(idempotency_key)) BETWEEN 1 AND 200),
+  operation_kind VARCHAR(80) NOT NULL CHECK (operation_kind IN (
+    'personal_rpg.create_character',
+    'personal_rpg.explore_daily',
+    'personal_rpg.craft_recipe'
+  )),
+  -- A NOT_REGISTERED result is itself idempotent.  Therefore this actor is a
+  -- stable personal-scope identifier rather than an FK: the first command may
+  -- legitimately arrive before identity.users has a row.
+  actor_id BIGINT NOT NULL CHECK (actor_id > 0),
+  request_fingerprint JSONB NOT NULL
+    CHECK (jsonb_typeof(request_fingerprint) = 'object'),
+  result JSONB NOT NULL CHECK (jsonb_typeof(result) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX personal_rpg_operation_receipts_actor_created_idx
+  ON personal_rpg.operation_receipts (actor_id, created_at DESC, idempotency_key DESC);
+
+CREATE FUNCTION personal_rpg.forbid_append_only_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'personal_rpg.% is append-only; write a new fact instead', TG_TABLE_NAME
+    USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER personal_rpg_explorations_append_only_tr
+BEFORE UPDATE OR DELETE ON personal_rpg.explorations
+FOR EACH ROW EXECUTE FUNCTION personal_rpg.forbid_append_only_mutation();
+
+CREATE TRIGGER personal_rpg_collections_append_only_tr
+BEFORE UPDATE OR DELETE ON personal_rpg.collections
+FOR EACH ROW EXECUTE FUNCTION personal_rpg.forbid_append_only_mutation();
+
+CREATE TRIGGER personal_rpg_operation_receipts_append_only_tr
+BEFORE UPDATE OR DELETE ON personal_rpg.operation_receipts
+FOR EACH ROW EXECUTE FUNCTION personal_rpg.forbid_append_only_mutation();

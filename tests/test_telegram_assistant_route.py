@@ -10,13 +10,10 @@ from telegram import Update
 
 from fogmoe_bot.application.conversation.assistant_ingress import (
     AssistantAccountContext,
-    AssistantFeedbackReason,
     AssistantIngressCoordinator,
-    AssistantInsufficientCoins,
     AssistantTurnAccepted,
     AssistantTurnRequest,
     AssistantUserNotRegistered,
-    assistant_text_cost,
 )
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
@@ -423,9 +420,11 @@ def test_request_contains_strict_adapter_metadata_and_normalized_user_content() 
     )
     parsed = parse_telegram_assistant_update(inbound)
     request = parsed.to_request(inbound)
+    assert not hasattr(request, "coin_cost")
+    assert "coin_cost" not in request.user_content
     command = request.to_accept_turn(
         AssistantAccountContext(
-            coins=9,
+            coins=0,
             plan="paid",
             permission=1,
             profile=None,
@@ -466,7 +465,7 @@ def test_request_contains_strict_adapter_metadata_and_normalized_user_content() 
         "user_id": 42,
         "username": "klee",
         "display_name": "Klee Spark",
-        "coins": 9,
+        "coins": 0,
         "plan": "paid",
         "permission": 1,
         "profile": None,
@@ -510,7 +509,7 @@ def test_group_request_rejects_private_state_before_durable_serialization() -> N
     with pytest.raises(ValueError, match="cannot freeze private User Profile"):
         request.to_accept_turn(
             AssistantAccountContext(
-                coins=9,
+                coins=0,
                 plan="paid",
                 permission=1,
                 profile=None,
@@ -519,31 +518,6 @@ def test_group_request_rejects_private_state_before_durable_serialization() -> N
             ),
             accepted_at=NOW + timedelta(seconds=1),
         )
-
-
-@pytest.mark.parametrize(
-    ("length", "expected"),
-    [
-        (1, 1),
-        (100, 1),
-        (101, 2),
-        (500, 2),
-        (501, 3),
-        (1000, 3),
-        (1001, 4),
-        (2000, 4),
-        (2001, 5),
-        (4096, 5),
-    ],
-)
-def test_text_pricing_preserves_every_boundary(length: int, expected: int) -> None:
-    """@brief 文本计费边界与旧产品一致 / Every text-pricing boundary matches the legacy product.
-
-    @param length 文本长度 / Text length.
-    @param expected 费用 / Expected charge.
-    """
-
-    assert assistant_text_cost("x" * length) == expected
 
 
 def test_overlong_text_enqueues_idempotent_feedback_without_accepting() -> None:
@@ -643,24 +617,11 @@ def test_media_size_boundary_and_unknown_size_reach_acceptance_with_download_cap
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize(
-    ("result", "reason"),
-    [
-        (AssistantUserNotRegistered(), AssistantFeedbackReason.USER_NOT_REGISTERED),
-        (
-            AssistantInsufficientCoins(available=0, required=1),
-            AssistantFeedbackReason.INSUFFICIENT_COINS,
-        ),
-    ],
-)
-def test_account_rejections_use_typed_feedback_capability(
-    result: object,
-    reason: AssistantFeedbackReason,
-) -> None:
-    """@brief 未注册和余额不足通过 typed feedback，不直发 Telegram / Registration and balance rejections use typed feedback instead of direct Telegram sends.
+def test_unregistered_user_rejection_uses_typed_feedback_capability() -> None:
+    """@brief 未注册通过 typed feedback，不直发 Telegram / Unregistered users use typed feedback instead of direct Telegram sends.
 
-    @param result UoW 拒绝 / UoW rejection.
-    @param reason 期望 feedback 原因 / Expected feedback reason.
+    @note Assistant 金币不足分支已随无计费直接入口删除 /
+        The insufficient-coins branch is removed together with direct no-charge ingress.
     """
 
     async def scenario() -> None:
@@ -669,7 +630,7 @@ def test_account_rejections_use_typed_feedback_capability(
         @return None / None.
         """
 
-        acceptance = RecordingAcceptance(result)
+        acceptance = RecordingAcceptance(AssistantUserNotRegistered())
         route, _acceptance, feedback = _route(acceptance=acceptance)
         inbound = _inbound(_message_payload(text="hello"))
 
@@ -677,7 +638,7 @@ def test_account_rejections_use_typed_feedback_capability(
 
         assert len(acceptance.calls) == 1
         assert list(feedback.commands) == [
-            f"update:100:assistant-feedback:{reason.value}"
+            "update:100:assistant-feedback:user_not_registered"
         ]
 
     asyncio.run(scenario())

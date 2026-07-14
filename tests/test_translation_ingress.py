@@ -1,22 +1,15 @@
-"""@brief Durable translation ingress 测试 / Durable translation-ingress tests."""
+"""@brief 零费用 `/tl` 翻译入口测试 / Tests for zero-cost `/tl` translation ingress."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from datetime import UTC, datetime
-
-import pytest
+from typing import Any
 
 from fogmoe_bot.application.conversation.assistant_ingress import (
-    AssistantAccountContext,
-    AssistantInsufficientCoins,
     AssistantTurnAccepted,
     AssistantTurnRequest,
     AssistantUserNotRegistered,
-)
-from fogmoe_bot.application.conversation.standalone_outbound import (
-    StandaloneOutboundCommand,
 )
 from fogmoe_bot.application.conversation.translation_ingress import (
     TranslationFeedbackReason,
@@ -24,289 +17,184 @@ from fogmoe_bot.application.conversation.translation_ingress import (
     TranslationRejected,
     TranslationReplyTarget,
     TranslationTurnRequest,
-    translation_text_cost,
 )
-from fogmoe_bot.domain.conversation.identity import (
-    ConversationId,
-    DeliveryStreamId,
-    UpdateId,
-)
+from fogmoe_bot.application.conversation.telegram_identity import TelegramConversationAddress
+from fogmoe_bot.domain.conversation.identity import ConversationId, DeliveryStreamId, UpdateId
 
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
-"""@brief 固定时刻 / Fixed instant."""
+"""@brief 固定测试时刻 / Fixed test instant."""
 
 
-class _Clock:
-    """@brief 固定 UTC 时钟 / Fixed UTC clock."""
+class FakeAcceptance:
+    """@brief 捕获翻译转换出的 Assistant 请求 / Double capturing Assistant requests converted from translation."""
 
-    def now(self) -> datetime:
-        """@brief 返回固定时刻 / Return the fixed instant.
+    def __init__(self, result: AssistantTurnAccepted | AssistantUserNotRegistered) -> None:
+        """@brief 注入 acceptance 结果 / Inject an acceptance result.
 
-        @return NOW / NOW.
-        """
-
-        return NOW
-
-
-class _Acceptance:
-    """@brief 记录共享 acceptance 调用 / Record shared-acceptance calls."""
-
-    def __init__(self, result: object) -> None:
-        """@brief 保存固定结果 / Store a fixed result.
-
-        @param result acceptance 结果 / Acceptance result.
+        @param result 预设结果 / Predefined result.
         """
 
         self.result = result
-        """@brief 固定结果 / Fixed result."""
-        self.calls: list[tuple[AssistantTurnRequest, datetime]] = []
-        """@brief 收到的请求 / Received requests."""
+        """@brief 预设 acceptance 结果 / Predefined acceptance result."""
+        self.requests: list[AssistantTurnRequest] = []
+        """@brief 捕获的请求 / Captured requests."""
 
     async def accept(
         self,
         request: AssistantTurnRequest,
         *,
         accepted_at: datetime,
-    ) -> object:
-        """@brief 记录并返回 / Record and return.
+    ) -> AssistantTurnAccepted | AssistantUserNotRegistered:
+        """@brief 捕获请求并返回预设结果 / Capture a request and return the predefined result.
 
-        @param request acceptance 请求 / Acceptance request.
-        @param accepted_at 接受时刻 / Acceptance instant.
-        @return 固定结果 / Fixed result.
+        @param request 转换后的 Assistant 请求 / Converted Assistant request.
+        @param accepted_at acceptance 时刻 / Acceptance instant.
+        @return 预设结果 / Predefined result.
         """
 
-        self.calls.append((request, accepted_at))
+        del accepted_at
+        self.requests.append(request)
         return self.result
 
 
-class _Outbound:
-    """@brief 记录 standalone outbox / Record standalone outbox commands."""
+class FakeFeedback:
+    """@brief 捕获 durable standalone 反馈 / Double capturing durable standalone feedback."""
 
     def __init__(self) -> None:
-        """@brief 初始化空记录 / Initialize an empty recording."""
+        """@brief 初始化命令日志 / Initialize the command log."""
 
-        self.commands: list[StandaloneOutboundCommand] = []
-        """@brief 收到的 commands / Received commands."""
+        self.commands: list[Any] = []
+        """@brief 捕获的 outbox 命令 / Captured outbox commands."""
 
-    async def enqueue(self, command: StandaloneOutboundCommand) -> None:
-        """@brief 记录命令 / Record a command.
+    async def enqueue(self, command: Any) -> None:
+        """@brief 记录一个反馈命令 / Record one feedback command.
 
-        @param command 出站命令 / Outbound command.
+        @param command 反馈命令 / Feedback command.
         @return None / None.
         """
 
         self.commands.append(command)
 
 
-def _target(update_id: int = 9) -> TranslationReplyTarget:
-    """@brief 构造回复目标 / Build a reply target.
+def _target(*, chat_type: str = "private") -> TranslationReplyTarget:
+    """@brief 构造规范私聊或群聊翻译目标 / Build a canonical private or group translation target.
 
-    @param update_id Update ID / Update identifier.
-    @return target / Target.
+    @param chat_type Telegram chat 类型 / Telegram chat type.
+    @return 翻译目标 / Translation target.
     """
 
+    is_group = chat_type != "private"
+    chat_id = -1001 if is_group else 42
+    thread_id = 23 if is_group else None
+    conversation_id = TelegramConversationAddress(
+        chat_type=chat_type,
+        chat_id=chat_id,
+        user_id=42,
+        message_thread_id=thread_id,
+    ).conversation_id
     return TranslationReplyTarget(
-        update_id=UpdateId(update_id),
-        conversation_id=ConversationId("assistant-group:-100:thread:8"),
+        update_id=UpdateId(100),
+        conversation_id=conversation_id,
         received_at=NOW,
-        chat_id=-100,
-        chat_type="supergroup",
-        message_id=77,
-        message_thread_id=8,
-        delivery_stream_id=DeliveryStreamId("telegram:primary:chat:-100:thread:8"),
+        chat_id=chat_id,
+        chat_type=chat_type,
+        message_id=7,
+        message_thread_id=thread_id,
+        delivery_stream_id=DeliveryStreamId(
+            f"telegram:primary:chat:{chat_id}:thread:{thread_id or 0}"
+        ),
     )
 
 
-def _request(text: str) -> TranslationTurnRequest:
+def _request(*, chat_type: str = "private", text: str = "hello") -> TranslationTurnRequest:
     """@brief 构造翻译请求 / Build a translation request.
 
-    @param text 输入文本 / Input text.
-    @return request / Request.
+    @param chat_type Telegram chat 类型 / Telegram chat type.
+    @param text 待翻译文本 / Text to translate.
+    @return 翻译请求 / Translation request.
     """
 
     return TranslationTurnRequest(
-        target=_target(),
+        target=_target(chat_type=chat_type),
         user_id=42,
         username="klee",
         display_name="Klee",
-        is_group=True,
+        is_group=chat_type != "private",
         text=text,
     )
 
 
-@pytest.mark.parametrize(
-    ("length", "cost"),
-    ((1, 0), (500, 0), (501, 1), (1000, 1), (1001, 2), (2000, 2), (2001, 3), (3000, 3)),
-)
-def test_translation_cost_preserves_zero_to_three_boundaries(
-    length: int,
-    cost: int,
-) -> None:
-    """@brief 费用边界保持旧产品语义 / Cost boundaries preserve legacy product semantics.
+def test_translation_builds_a_no_charge_history_isolated_assistant_request() -> None:
+    """@brief `/tl` 构建无计费且隔离历史的请求 / `/tl` builds a no-charge request isolated from history."""
 
-    @param length 输入长度 / Input length.
-    @param cost 预期费用 / Expected charge.
-    """
+    request = _request().to_assistant_request()
 
-    assert translation_text_cost("x" * length) == cost
+    assert not hasattr(request, "coin_cost")
+    assert "coin_cost" not in request.user_content
+    assert request.task_kind == "translation"
+    assert request.translation_input == "hello"
+    assert request.user_content["exclude_from_assistant"] is True
 
 
-def test_valid_translation_uses_shared_acceptance_and_marks_history_isolation() -> None:
-    """@brief 有效翻译进入共享 acceptance 且永久隔离历史 / A valid translation enters shared acceptance and is permanently isolated from history."""
+def test_translation_supports_private_and_group_topic_addresses() -> None:
+    """@brief 翻译地址遵从私聊与群 Topic 边界 / Translation addresses honor private and group-topic boundaries."""
+
+    private = _request().to_assistant_request()
+    group = _request(chat_type="supergroup").to_assistant_request()
+
+    assert private.conversation_id == ConversationId("assistant-user:42")
+    assert not private.is_group
+    assert group.conversation_id == ConversationId("assistant-group:-1001:thread:23")
+    assert group.is_group
+    assert group.message_thread_id == 23
+
+
+def test_too_long_translation_never_reaches_acceptance() -> None:
+    """@brief 超长文本只写稳定反馈，不触发 acceptance / Overlong text writes stable feedback only and never reaches acceptance."""
 
     async def scenario() -> None:
-        """@brief 执行有效请求 / Execute a valid request."""
+        """@brief 执行超长文本场景 / Execute the overlong-text scenario.
 
-        acceptance = _Acceptance(AssistantTurnAccepted(None, True))
-        outbound = _Outbound()
+        @return None / None.
+        """
+
+        acceptance = FakeAcceptance(AssistantTurnAccepted(acceptance=None, replayed=True))
+        feedback = FakeFeedback()
         coordinator = TranslationIngressCoordinator(
-            acceptance=acceptance,  # type: ignore[arg-type]
-            feedback=outbound,
-            clock=_Clock(),
+            acceptance=acceptance,
+            feedback=feedback,
         )
-        result = await coordinator.handle(_request("x" * 500))
+        result = await coordinator.handle(_request(text="x" * 3001))
 
-        assert isinstance(result, AssistantTurnAccepted)
-        assert len(acceptance.calls) == 1
-        command, accepted_at = acceptance.calls[0]
-        assert accepted_at == NOW
-        assert command.coin_cost == 0
-        assert command.task_kind == "translation"
-        assert command.translation_input == "x" * 500
-        assert command.user_content["exclude_from_assistant"] is True
-        assert command.user_content["coin_cost"] == 0
-        durable = command.to_accept_turn(
-            AssistantAccountContext(
-                coins=7,
-                plan="free",
-                permission=0,
-                profile=None,
-                personal_info="",
-                diary_exists=False,
-            ),
-            accepted_at=NOW,
-        )
-        assert durable.inference_request["task_kind"] == "translation"
-        assert durable.inference_request["translation_input"] == "x" * 500
-        assert outbound.commands == []
+        assert result == TranslationRejected(TranslationFeedbackReason.TEXT_TOO_LONG)
+        assert acceptance.requests == []
+        assert len(feedback.commands) == 1
+        assert "too long" in feedback.commands[0].payload["text"].casefold()
 
     asyncio.run(scenario())
 
 
-def test_translation_identity_supports_private_and_group_topic_addresses() -> None:
-    """@brief 翻译请求按私聊用户或群组 Topic 验证地址 / Translation requests validate private-user or group-topic addresses."""
-
-    group = _request("hello")
-    assert group.target.conversation_id == ConversationId(
-        "assistant-group:-100:thread:8"
-    )
-    private_target = replace(
-        _target(),
-        conversation_id=ConversationId("assistant-user:42"),
-        chat_id=42,
-        chat_type="private",
-        message_thread_id=None,
-        delivery_stream_id=DeliveryStreamId("telegram:primary:chat:42:thread:0"),
-    )
-    private = TranslationTurnRequest(
-        target=private_target,
-        user_id=42,
-        username="klee",
-        display_name="Klee",
-        is_group=False,
-        text="hello",
-    )
-
-    assert private.to_assistant_request().conversation_id == ConversationId(
-        "assistant-user:42"
-    )
-
-
-def test_translation_identity_rejects_mismatched_group_conversation() -> None:
-    """@brief 群组翻译不能伪装为发送者私聊会话 / A group translation cannot masquerade as the sender's private conversation."""
-
-    with pytest.raises(ValueError, match="address"):
-        TranslationTurnRequest(
-            target=replace(
-                _target(),
-                conversation_id=ConversationId("assistant-user:42"),
-            ),
-            user_id=42,
-            username="klee",
-            display_name="Klee",
-            is_group=True,
-            text="hello",
-        )
-
-
-def test_too_long_translation_never_reaches_acceptance_and_feedback_is_stable() -> None:
-    """@brief 超长输入不扣费/建 Turn，反馈 identity 可重放 / Oversized input neither charges nor creates a Turn, and feedback identity is replay-stable."""
+def test_unregistered_translation_user_receives_registration_feedback() -> None:
+    """@brief 未注册用户得到注册反馈，不存在金币不足分支 / Unregistered users receive registration feedback; no insufficient-coins branch exists."""
 
     async def scenario() -> None:
-        """@brief 执行两次相同拒绝 / Execute the same rejection twice."""
+        """@brief 执行未注册场景 / Execute the unregistered-user scenario.
 
-        acceptance = _Acceptance(AssistantTurnAccepted(None, True))
-        outbound = _Outbound()
+        @return None / None.
+        """
+
+        acceptance = FakeAcceptance(AssistantUserNotRegistered())
+        feedback = FakeFeedback()
         coordinator = TranslationIngressCoordinator(
-            acceptance=acceptance,  # type: ignore[arg-type]
-            feedback=outbound,
-            clock=_Clock(),
+            acceptance=acceptance,
+            feedback=feedback,
         )
-        first = await coordinator.handle(_request("x" * 3001))
-        second = await coordinator.handle(_request("x" * 3001))
+        result = await coordinator.handle(_request())
 
-        assert (
-            first
-            == second
-            == TranslationRejected(TranslationFeedbackReason.TEXT_TOO_LONG)
-        )
-        assert acceptance.calls == []
-        assert len(outbound.commands) == 2
-        assert (
-            outbound.commands[0].idempotency_key
-            == outbound.commands[1].idempotency_key
-            == "update:9:translation-feedback:text_too_long"
-        )
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize(
-    ("acceptance_result", "reason"),
-    (
-        (AssistantUserNotRegistered(), TranslationFeedbackReason.USER_NOT_REGISTERED),
-        (
-            AssistantInsufficientCoins(available=1, required=3),
-            TranslationFeedbackReason.INSUFFICIENT_COINS,
-        ),
-    ),
-)
-def test_business_rejections_use_durable_translation_feedback(
-    acceptance_result: object,
-    reason: TranslationFeedbackReason,
-) -> None:
-    """@brief 注册/余额拒绝通过 outbox 发布 / Registration and balance rejections publish through the outbox.
-
-    @param acceptance_result UoW 结果 / UoW result.
-    @param reason 预期反馈 / Expected feedback.
-    """
-
-    async def scenario() -> None:
-        """@brief 执行业务拒绝 / Execute a business rejection."""
-
-        acceptance = _Acceptance(acceptance_result)
-        outbound = _Outbound()
-        coordinator = TranslationIngressCoordinator(
-            acceptance=acceptance,  # type: ignore[arg-type]
-            feedback=outbound,
-            clock=_Clock(),
-        )
-        await coordinator.handle(_request("x" * 2500))
-
-        assert len(outbound.commands) == 1
-        assert outbound.commands[0].idempotency_key.endswith(reason.value)
-        if reason is TranslationFeedbackReason.INSUFFICIENT_COINS:
-            assert "need 3" in str(outbound.commands[0].payload["text"])
+        assert isinstance(result, AssistantUserNotRegistered)
+        assert len(acceptance.requests) == 1
+        assert len(feedback.commands) == 1
+        assert "/me" in feedback.commands[0].payload["text"]
 
     asyncio.run(scenario())

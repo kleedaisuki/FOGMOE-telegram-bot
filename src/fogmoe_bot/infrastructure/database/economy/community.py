@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from fogmoe_bot.application.economy.common import EconomyCode
@@ -16,40 +17,44 @@ from fogmoe_bot.application.economy.community import (
     TaskClaimCommand,
     TaskClaimResult,
 )
-from fogmoe_bot.domain.economy import AccountBalance
+from fogmoe_bot.domain.banking.ledger import LedgerAccount, LedgerReason
+from fogmoe_bot.domain.banking.money import (
+    SystemAccountKind,
+    TokenAmount,
+    TokenBucket,
+)
 from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database.banking import (
+    lock_bank_account_balances,
+    post_bank_transfer,
+)
 
 from .common import (
-    _credit_free,
     _load_result,
-    _lock_account,
-    _plan_after_spend,
+    _lock_operation_key,
+    _registered_user_exists,
     _save_result,
 )
 
 
 class PostgresCommunityOperations(CommunityOperations):
-    """@brief 执行经济社区事务 / Execute economy community transactions."""
-
-    def __init__(self, *, admin_user_id: int) -> None:
-        """@brief 注入管理员身份 / Inject administrator identity.
-
-        @param admin_user_id 管理员用户 ID / Administrator user ID.
-        """
-
-        self._admin_user_id = admin_user_id
+    """@brief 通过银行账本执行社区金币事务 / Execute community-token transactions through the bank ledger."""
 
     async def give(self, command: GiftCommand) -> GiftResult:
-        """@brief 以排序账户锁原子赠送金币 / Atomically gift coins with sorted account locks.
+        """@brief 以银行钱包稳定锁序原子赠送金币 / Atomically gift tokens in the bank wallet's stable lock order.
 
         @param command 赠送命令 / Gift command.
         @return 稳定、可回放结果 / Stable replayable result.
-        @note 锁顺序固定为 account ID 升序，随后才锁每日计数行。/ Accounts are locked in
-            ascending ID order before the daily-counter row.
+        @note 余额只读取 ``bank.account_balances``。身份表只提供用户名和账户存在性，
+            且从不先锁身份行，避免与账本投影的用户行更新形成死锁环。/
+            Balances are read only from ``bank.account_balances``.  The identity table supplies
+            names and existence only and is never locked first, preventing a deadlock cycle with
+            the ledger projection's user-row update.
         """
 
         operation_kind = "coin_gift"
         async with db_connection.transaction() as connection:
+            await _lock_operation_key(command.idempotency_key, connection)
             target = await db_connection.fetch_one(
                 "SELECT id, name FROM identity.users WHERE name = %s "
                 "ORDER BY id LIMIT 1",
@@ -57,20 +62,7 @@ class PostgresCommunityOperations(CommunityOperations):
                 connection=connection,
             )
             target_id = cast(int, target[0]) if target is not None else None
-            account_ids = (
-                (command.sender_id,)
-                if target_id is None
-                else tuple(sorted({command.sender_id, target_id}))
-            )
-            locked_rows = await db_connection.fetch_all(
-                "SELECT id, coins, coins_paid, user_plan, name "
-                "FROM identity.users WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
-                (list(account_ids),),
-                connection=connection,
-            )
-            locked = {cast(int, row[0]): row for row in locked_rows}
-            sender_row = locked.get(command.sender_id)
-            if sender_row is None:
+            if not await _registered_user_exists(command.sender_id, connection):
                 return GiftResult(EconomyCode.NOT_REGISTERED)
             replay = await _load_result(
                 command.idempotency_key,
@@ -81,28 +73,31 @@ class PostgresCommunityOperations(CommunityOperations):
             if replay is not None:
                 return _gift_from_mapping(command, replay, replayed=True)
 
-            sender = AccountBalance(
-                command.sender_id,
-                cast(int, sender_row[1]),
-                cast(int, sender_row[2]),
-                cast(str, sender_row[3]),
-            )
             if target_id is None:
                 result = GiftResult(
                     EconomyCode.NOT_FOUND,
                     target_name=command.target_name,
-                    available=sender.total,
+                    available=0,
                 )
             elif target_id == command.sender_id:
+                assert target is not None
                 result = GiftResult(
                     EconomyCode.SELF_TRANSFER,
-                    target_name=cast(str, sender_row[4]),
-                    available=sender.total,
+                    target_name=cast(str, target[1]),
+                    available=0,
                 )
             else:
-                target_row = locked.get(target_id)
-                if target_row is None:
-                    raise RuntimeError("Gift target disappeared while acquiring locks")
+                assert target is not None
+                sender_wallet = LedgerAccount.user(command.sender_id, TokenBucket.FREE)
+                """@brief 赠送者唯一可消费的免费钱包 / Sender's sole spendable free wallet."""
+                target_wallet = LedgerAccount.user(target_id, TokenBucket.FREE)
+                """@brief 收款人的免费钱包 / Recipient's free wallet."""
+                balances = await lock_bank_account_balances(
+                    (sender_wallet, target_wallet),
+                    connection,
+                )
+                sender_free = balances[sender_wallet]
+                """@brief 账本稳定锁下的赠送者可用免费金币 / Sender free balance under the stable ledger lock."""
                 counter = await db_connection.fetch_one(
                     "SELECT give_count FROM economy.user_give_daily "
                     "WHERE user_id = %s AND give_date = %s FOR UPDATE",
@@ -111,38 +106,54 @@ class PostgresCommunityOperations(CommunityOperations):
                 )
                 count = cast(int, counter[0]) if counter is not None else 0
                 total_cost = command.amount + command.fee
-                charged = sender.spend(total_cost)
                 if count >= command.daily_limit:
                     result = GiftResult(
                         EconomyCode.DAILY_LIMIT,
-                        target_name=cast(str, target_row[4]),
-                        available=sender.total,
+                        target_name=cast(str, target[1]),
+                        available=sender_free,
                     )
-                elif charged is None:
+                elif sender_free < total_cost:
                     result = GiftResult(
                         EconomyCode.INSUFFICIENT_COINS,
-                        target_name=cast(str, target_row[4]),
+                        target_name=cast(str, target[1]),
                         amount=command.amount,
                         fee=command.fee,
-                        available=sender.total,
+                        available=sender_free,
                     )
                 else:
-                    await db_connection.execute(
-                        "UPDATE identity.users SET coins = %s, coins_paid = %s, "
-                        "user_plan = %s WHERE id = %s",
-                        (
-                            charged.free,
-                            charged.paid,
-                            _plan_after_spend(
-                                command.sender_id,
-                                charged.paid,
-                                self._admin_user_id,
-                            ),
-                            command.sender_id,
+                    await post_bank_transfer(
+                        namespace="economy-gift-transfer",
+                        source_idempotency_key=command.idempotency_key,
+                        reason=LedgerReason.USER_TRANSFER,
+                        source=sender_wallet,
+                        destination=target_wallet,
+                        amount=TokenAmount(command.amount),
+                        created_at=datetime.combine(
+                            command.business_date,
+                            datetime.min.time(),
+                            tzinfo=UTC,
                         ),
+                        actor_id=command.sender_id,
                         connection=connection,
+                        metadata={"transfer_kind": "gift"},
                     )
-                    await _credit_free(target_id, command.amount, connection)
+                    if command.fee:
+                        await post_bank_transfer(
+                            namespace="economy-gift-fee",
+                            source_idempotency_key=command.idempotency_key,
+                            reason=LedgerReason.BANK_BURN,
+                            source=sender_wallet,
+                            destination=LedgerAccount.system(SystemAccountKind.BURN),
+                            amount=TokenAmount(command.fee),
+                            created_at=datetime.combine(
+                                command.business_date,
+                                datetime.min.time(),
+                                tzinfo=UTC,
+                            ),
+                            actor_id=command.sender_id,
+                            connection=connection,
+                            metadata={"burn_kind": "gift_fee"},
+                        )
                     await db_connection.execute(
                         "INSERT INTO economy.user_give_daily "
                         "(user_id, give_date, give_count) VALUES (%s, %s, 1) "
@@ -153,10 +164,10 @@ class PostgresCommunityOperations(CommunityOperations):
                     )
                     result = GiftResult(
                         EconomyCode.SUCCESS,
-                        target_name=cast(str, target_row[4]),
+                        target_name=cast(str, target[1]),
                         amount=command.amount,
                         fee=command.fee,
-                        available=sender.total,
+                        available=sender_free - total_cost,
                     )
             await _save_result(
                 command.idempotency_key,
@@ -176,7 +187,8 @@ class PostgresCommunityOperations(CommunityOperations):
 
         operation_kind = "coin_leaderboard"
         async with db_connection.transaction() as connection:
-            if await _lock_account(command.requester_id, connection) is None:
+            await _lock_operation_key(command.idempotency_key, connection)
+            if not await _registered_user_exists(command.requester_id, connection):
                 return LeaderboardResult(EconomyCode.NOT_REGISTERED)
             replay = await _load_result(
                 command.idempotency_key,
@@ -187,8 +199,14 @@ class PostgresCommunityOperations(CommunityOperations):
             if replay is not None:
                 return _leaderboard_from_mapping(command, replay, replayed=True)
             rows = await db_connection.fetch_all(
-                "SELECT name, coins + coins_paid AS total FROM identity.users "
-                "ORDER BY total DESC, id ASC LIMIT %s",
+                "SELECT users.name, COALESCE(SUM(balances.balance), 0) AS total "
+                "FROM identity.users AS users "
+                "LEFT JOIN bank.accounts AS accounts "
+                "ON accounts.account_scope = 'user' AND accounts.owner_id = users.id "
+                "LEFT JOIN bank.account_balances AS balances "
+                "ON balances.account_key = accounts.account_key "
+                "GROUP BY users.id, users.name "
+                "ORDER BY total DESC, users.id ASC LIMIT %s",
                 (command.limit,),
                 connection=connection,
             )
@@ -219,7 +237,8 @@ class PostgresCommunityOperations(CommunityOperations):
         """
 
         async with db_connection.transaction() as connection:
-            if await _lock_account(command.user_id, connection) is None:
+            await _lock_operation_key(command.idempotency_key, connection)
+            if not await _registered_user_exists(command.user_id, connection):
                 return TaskClaimResult(EconomyCode.NOT_REGISTERED)
             replay = await _load_result(command.idempotency_key, connection)
             if replay is not None:
@@ -235,7 +254,18 @@ class PostgresCommunityOperations(CommunityOperations):
             )
             result = TaskClaimResult(EconomyCode.ALREADY_CLAIMED)
             if inserted == 1:
-                await _credit_free(command.user_id, command.reward, connection)
+                await post_bank_transfer(
+                    namespace="economy-task-reward",
+                    source_idempotency_key=command.idempotency_key,
+                    reason=LedgerReason.BANK_ISSUANCE,
+                    source=LedgerAccount.system(SystemAccountKind.ISSUANCE),
+                    destination=LedgerAccount.user(command.user_id, TokenBucket.FREE),
+                    amount=TokenAmount(command.reward),
+                    created_at=datetime.now(UTC),
+                    actor_id=command.user_id,
+                    connection=connection,
+                    metadata={"grant_kind": "verified_task", "task_id": command.task_id},
+                )
                 result = TaskClaimResult(EconomyCode.SUCCESS, command.reward)
             await _save_result(
                 command.idempotency_key,

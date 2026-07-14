@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from typing import cast
 
 import pytest
+from alembic.config import Config
 
 from fogmoe_dbctl import cli
 from fogmoe_dbctl.commands import bootstrap, export_csv, migrate, shell
@@ -135,7 +137,8 @@ def test_migrate_injects_all_migration_inputs(
 
     migrate.run_alembic(settings=_settings(), revision="head", dry_run=False)
 
-    config, revision = calls[0]
+    raw_config, revision = calls[0]
+    config = cast(Config, raw_config)
     assert revision == "head"
     assert Path(config.get_main_option("script_location")).is_absolute()
     assert config.attributes["database_url"] == (
@@ -144,6 +147,23 @@ def test_migrate_injects_all_migration_inputs(
     )
     assert config.attributes["migration_schema"] == "infra"
     assert config.attributes["admin_user_id"] == 42
+
+
+def test_runtime_grants_include_every_new_economy_boundary_schema() -> None:
+    """@brief 运行时角色必须获得银行、账单、活动和 RPG schema 权限 / The runtime role must receive bank, billing, activity, and RPG schema privileges.
+
+    @return None / None.
+    """
+
+    sql = migrate.build_runtime_grant_sql(
+        schemas=migrate._APPLICATION_SCHEMAS,
+        application_role="fogmoe-app",
+        owner_role="fogmoe-maintenance",
+    )
+
+    for schema in ("bank", "billing", "town", "chance", "personal_rpg"):
+        assert schema in migrate._APPLICATION_SCHEMAS
+        assert f'GRANT USAGE ON SCHEMA "{schema}" TO "fogmoe-app";' in sql
 
 
 def test_bootstrap_dry_run_redacts_passwords(

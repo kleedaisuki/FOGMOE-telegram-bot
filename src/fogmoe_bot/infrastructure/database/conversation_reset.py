@@ -27,9 +27,6 @@ from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.command_source import (
     validate_telegram_command_source,
 )
-from fogmoe_bot.infrastructure.database.assistant_billing import (
-    AssistantBillingTransactions,
-)
 from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
     PostgresOutboxRepository,
     StandaloneOutboxWriter,
@@ -41,19 +38,15 @@ class PostgresConversationResetUoW:
 
     def __init__(
         self,
-        billing: AssistantBillingTransactions,
         outbox: StandaloneOutboxWriter | None = None,
     ) -> None:
-        """@brief 注入 connection-bound outbox 与计费原语 / Inject connection-bound outbox and billing primitives.
+        """@brief 注入 connection-bound outbox / Inject a connection-bound outbox.
 
         @param outbox Conversation workflow repository / Conversation workflow repository.
-        @param billing reserve/settle/release 计费原语 / Reserve/settle/release billing primitive.
         """
 
         self._outbox = outbox or PostgresOutboxRepository()
         """@brief 同事务 standalone outbox primitive / Same-transaction standalone-outbox primitive."""
-        self._billing = billing
-        """@brief reset 释放未结算 Turn 的计费原语 / Billing primitive releasing unsettled Turns during reset."""
 
     async def reset(self, command: ResetConversation) -> ConversationResetResult:
         """@brief 幂等写入 reset 与确认副作用 / Idempotently write the reset and confirmation effect.
@@ -153,17 +146,16 @@ class PostgresConversationResetUoW:
         cancelled_at: datetime,
         connection: AsyncConnection,
     ) -> None:
-        """@brief fence 并取消会话内活动推理，再精确释放可选预留 / Fence and cancel active inference in a conversation, then release optional reservations.
+        """@brief fence 并取消会话内活动推理 / Fence and cancel active inference in a conversation.
 
         @param conversation_id 长期会话 identity / Long-lived conversation identity.
         @param cancelled_at reset 请求时刻 / Reset request time.
         @param connection 调用方事务连接 / Caller-owned transaction connection.
         @return None / None.
-        @raise ConcurrentTurnUpdateError 活动、可选预留与 Turn 状态不一致 / Activity, optional reservation, and Turn states disagree.
-        @note 零费用 Turn 没有 reservation，但仍必须被 reset fence；正费用 Turn 的原桶退款
-            由同事务 billing 状态机完成。/ Zero-cost Turns own no reservation but must still be
-            fenced by reset; the same-transaction billing state machine refunds positive-cost
-            Turns to their exact buckets.
+        @raise ConcurrentTurnUpdateError 活动与 Turn 状态不一致 / Activity and Turn states disagree.
+        @note Assistant 与翻译 Turn 无计费预留；reset 只围栏并取消 durable Conversation
+            工作流。/ Assistant and translation Turns have no billing reservation; reset only
+            fences and cancels the durable Conversation workflow.
         @note 调用方已经持有 conversation advisory lock；活动 claim token 在同事务失效，
             因而任何已在网络 I/O 中的 worker 都只能得到 stale fencing 结果。/ The caller
             already holds the conversation advisory lock; activity claim tokens are invalidated
@@ -222,27 +214,6 @@ class PostgresConversationResetUoW:
                 raise TypeError("Reset Turn updated_at must be a datetime")
             turn_rows[turn_id] = values
 
-        reservation_rows = cast(
-            Sequence[object],
-            await db_connection.fetch_all(
-                "SELECT billing.turn_id FROM assistant.billing_reservations AS billing "
-                "JOIN conversation.conversation_turns AS turn "
-                "ON turn.turn_id = billing.turn_id "
-                "WHERE turn.conversation_id = %s AND billing.status = 'reserved' "
-                "ORDER BY billing.turn_id FOR UPDATE OF billing",
-                (str(conversation_id),),
-                connection=connection,
-            ),
-        )
-        reserved_turn_ids = {
-            TurnId.parse(str(cast(Sequence[object], row)[0]))
-            for row in reservation_rows
-        }
-        if not reserved_turn_ids.issubset(turn_ids):
-            raise ConcurrentTurnUpdateError(
-                "A reset found a reserved billing row without an active inference activity"
-            )
-
         for turn_id in turn_ids:
             activity_values = activity_by_turn[turn_id]
             activity_id = str(activity_values[0])
@@ -275,11 +246,6 @@ class PostgresConversationResetUoW:
                 raise ConcurrentTurnUpdateError(
                     f"Turn {turn_id} changed while row-locked during reset"
                 )
-            await self._billing.release(
-                connection,
-                turn_id=turn_id,
-                released_at=transition_at,
-            )
 
     @staticmethod
     async def _find(

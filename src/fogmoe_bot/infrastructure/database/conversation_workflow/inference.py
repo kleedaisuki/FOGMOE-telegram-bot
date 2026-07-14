@@ -39,9 +39,6 @@ from fogmoe_bot.domain.conversation.errors import (
     TurnNotFoundError,
 )
 from fogmoe_bot.infrastructure.database import connection as db_connection
-from fogmoe_bot.infrastructure.database.assistant_billing import (
-    AssistantBillingTransactions,
-)
 
 from .common import (
     _INFERENCE_ACTIVITY_COLUMNS,
@@ -117,12 +114,13 @@ class PostgresInferenceRepository:
 
     def __init__(
         self,
-        billing: AssistantBillingTransactions,
         outbox: InferenceOutboxWriter | None = None,
     ) -> None:
-        """@brief 注入 billing 与同事务 outbox writer / Inject billing and the same-transaction outbox writer."""
+        """@brief 注入同事务 outbox writer / Inject the same-transaction outbox writer.
 
-        self._billing = billing
+        @param outbox completion 所需的同事务 outbox writer / Same-transaction outbox writer required by completion.
+        """
+
         self._outbox = outbox or PostgresOutboxRepository()
 
     async def get_inference_activity(
@@ -314,11 +312,6 @@ class PostgresInferenceRepository:
                         for outbound in outbounds
                     ]
                 )
-                await self._billing.settle(
-                    connection,
-                    turn_id=current.turn_id,
-                    settled_at=timestamp,
-                )
                 return InferenceCompletionResult(
                     turn=turn,
                     activity=current,
@@ -385,11 +378,6 @@ class PostgresInferenceRepository:
                 updated_turn,
                 expected_version=turn.version,
                 connection=connection,
-            )
-            await self._billing.settle(
-                connection,
-                turn_id=current.turn_id,
-                settled_at=timestamp,
             )
             return InferenceCompletionResult(
                 turn=updated_turn,
@@ -537,11 +525,6 @@ class PostgresInferenceRepository:
                 failed,
                 expected_version=turn.version,
                 connection=connection,
-            )
-            await self._billing.release(
-                connection,
-                turn_id=current.turn_id,
-                released_at=failure_time,
             )
 
     async def recover_expired_inference_leases(self, *, now: datetime) -> int:

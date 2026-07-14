@@ -14,7 +14,6 @@ from datetime import datetime
 from enum import StrEnum
 
 from fogmoe_bot.application.conversation.assistant_ingress import (
-    AssistantInsufficientCoins,
     AssistantTurnAcceptanceResult,
     AssistantTurnAcceptanceUoW,
     AssistantTurnRequest,
@@ -158,14 +157,14 @@ class TranslationTurnRequest:
         @raise ValueError 文本超过产品上限 / Text exceeds the product limit.
         """
 
-        cost = translation_text_cost(self.text)
+        # `/tl` shares the direct Assistant acceptance path.  It creates only
+        # Conversation facts and does not carry a token-price field.
         user_content: JsonObject = {
             "schema_version": 1,
             "text": self.text,
             "content_kind": "translation",
             "task_kind": "translation",
             "exclude_from_assistant": True,
-            "coin_cost": cost,
             "user": {
                 "user_id": self.user_id,
                 "username": self.username,
@@ -195,7 +194,6 @@ class TranslationTurnRequest:
             message_thread_id=self.target.message_thread_id,
             delivery_stream_id=self.target.delivery_stream_id,
             user_content=user_content,
-            coin_cost=cost,
             task_kind="translation",
             translation_input=self.text,
             trace_context=self.target.trace_context,
@@ -208,7 +206,6 @@ class TranslationFeedbackReason(StrEnum):
     USAGE = "usage"
     TEXT_TOO_LONG = "text_too_long"
     USER_NOT_REGISTERED = "user_not_registered"
-    INSUFFICIENT_COINS = "insufficient_coins"
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,7 +223,7 @@ type TranslationIngressResult = AssistantTurnAcceptanceResult | TranslationRejec
 
 
 class TranslationIngressCoordinator:
-    """@brief 协调翻译预检、原子计费/acceptance 与 outbox 反馈 / Coordinate translation preflight, atomic charging/acceptance, and outbox feedback."""
+    """@brief 协调翻译预检、直接 acceptance 与 outbox 反馈 / Coordinate translation preflight, direct acceptance, and outbox feedback."""
 
     def __init__(
         self,
@@ -237,7 +234,7 @@ class TranslationIngressCoordinator:
     ) -> None:
         """@brief 注入共享 acceptance、outbox 与时钟 / Inject shared acceptance, outbox, and clock.
 
-        @param acceptance 账户与 Turn 原子 UoW / Atomic account-and-Turn unit of work.
+        @param acceptance 无计费 Turn 原子 UoW / No-charge turn atomic UoW.
         @param feedback durable standalone outbox / Durable standalone outbox.
         @param clock UTC 时钟 / UTC clock.
         """
@@ -268,31 +265,20 @@ class TranslationIngressCoordinator:
                 request.target,
                 TranslationFeedbackReason.USER_NOT_REGISTERED,
             )
-        elif isinstance(result, AssistantInsufficientCoins):
-            await self.reject(
-                request.target,
-                TranslationFeedbackReason.INSUFFICIENT_COINS,
-                required=result.required,
-            )
         return result
 
     async def reject(
         self,
         target: TranslationReplyTarget,
         reason: TranslationFeedbackReason,
-        *,
-        required: int = 0,
     ) -> None:
         """@brief 将翻译拒绝写入幂等 outbox / Write a translation rejection to the idempotent outbox.
 
         @param target 回复目标 / Reply destination.
         @param reason typed 拒绝原因 / Typed rejection reason.
-        @param required 余额不足时的费用 / Required charge for insufficient funds.
         @return None / None.
         """
 
-        if required < 0:
-            raise ValueError("Translation required charge cannot be negative")
         await self._feedback.enqueue(
             StandaloneOutboundCommand(
                 conversation_id=target.conversation_id,
@@ -300,7 +286,7 @@ class TranslationIngressCoordinator:
                 kind=SEND_TELEGRAM_MESSAGE,
                 payload={
                     "chat_id": target.chat_id,
-                    "text": _feedback_text(reason, required=required),
+                    "text": _feedback_text(reason),
                     "message_thread_id": target.message_thread_id,
                     "reply_to_message_id": target.message_id,
                     "disable_web_page_preview": True,
@@ -313,35 +299,10 @@ class TranslationIngressCoordinator:
         )
 
 
-def translation_text_cost(text: str) -> int:
-    """@brief 按旧 `/tl` 边界计算 0..3 费用 / Compute the 0..3 charge using legacy `/tl` boundaries.
-
-    @param text 非空翻译文本 / Non-empty translation text.
-    @return 0 至 3 枚硬币 / Between zero and three coins.
-    @raise ValueError 文本为空或超过 3000 字符 / Text is blank or exceeds 3000 characters.
-    """
-
-    length = len(text.strip())
-    if length == 0:
-        raise ValueError("Translation text cannot be blank")
-    if length > TRANSLATION_TEXT_LIMIT:
-        raise ValueError(
-            f"Translation text cannot exceed {TRANSLATION_TEXT_LIMIT} characters"
-        )
-    if length > 2000:
-        return 3
-    if length > 1000:
-        return 2
-    if length > 500:
-        return 1
-    return 0
-
-
-def _feedback_text(reason: TranslationFeedbackReason, *, required: int) -> str:
+def _feedback_text(reason: TranslationFeedbackReason) -> str:
     """@brief 渲染稳定双语翻译反馈 / Render stable bilingual translation feedback.
 
     @param reason 拒绝原因 / Rejection reason.
-    @param required 所需费用 / Required charge.
     @return 用户可见文本 / User-visible text.
     """
 
@@ -362,10 +323,7 @@ def _feedback_text(reason: TranslationFeedbackReason, *, required: int) -> str:
             "请先使用 /me 命令注册个人信息后再使用翻译功能。\n"
             "Please register first using /me before using translation."
         )
-    return (
-        f"您的硬币不足，需要 {required} 枚硬币进行翻译。试试通过 /lottery 获取硬币吧！\n"
-        f"You don't have enough coins (need {required}). Try /lottery to get coins!"
-    )
+    raise ValueError(f"Unsupported translation feedback reason: {reason}")
 
 
 __all__ = [
@@ -376,5 +334,4 @@ __all__ = [
     "TranslationRejected",
     "TranslationReplyTarget",
     "TranslationTurnRequest",
-    "translation_text_cost",
 ]

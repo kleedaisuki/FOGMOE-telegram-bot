@@ -8,59 +8,56 @@ from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from fogmoe_bot.domain.economy import AccountBalance
 from fogmoe_bot.infrastructure.database import connection as db_connection
 
 
-async def _lock_account(
+async def _registered_user_exists(
     user_id: int,
     connection: AsyncConnection,
-) -> AccountBalance | None:
-    """@brief 使用 ``FOR UPDATE`` 锁定账户 / Lock an account with ``FOR UPDATE``.
+) -> bool:
+    """@brief 仅检查身份账户存在，不把余额投影当作货币真相 / Check identity existence without treating its balance projection as monetary truth.
 
     @param user_id 用户 ID / User ID.
     @param connection 当前事务 / Current transaction.
-    @return 账户快照；不存在为 None / Account snapshot, or None.
+    @return 身份账户存在时为 True / True when the identity account exists.
+    @note 金币可用性必须由 ``bank.account_balances`` 的稳定锁序检查；这里故意不对
+        ``identity.users`` 做 ``FOR UPDATE``，避免与账本投影触发器形成反向锁依赖。/
+        Token availability must be checked through ``bank.account_balances`` in its stable
+        lock order.  This helper deliberately avoids ``FOR UPDATE`` on ``identity.users``
+        so it cannot form an inverse lock dependency with the ledger-projection trigger.
     """
 
     row = await db_connection.fetch_one(
-        "SELECT id, coins, coins_paid, user_plan FROM identity.users "
-        "WHERE id = %s FOR UPDATE",
+        "SELECT 1 FROM identity.users WHERE id = %s",
         (user_id,),
         connection=connection,
     )
-    if row is None:
-        return None
-    return AccountBalance(
-        cast(int, row[0]),
-        cast(int, row[1]),
-        cast(int, row[2]),
-        cast(str, row[3]),
-    )
+    return row is not None
 
 
-async def _credit_free(
-    user_id: int,
-    amount: int,
+async def _lock_operation_key(
+    key: str,
     connection: AsyncConnection,
 ) -> None:
-    """@brief 增加已锁定账户免费金币 / Credit free coins to an already locked account.
+    """@brief 为同一经济业务键取得事务级串行锁 / Acquire a transaction-scoped serialization lock for one economy business key.
 
-    @param user_id 用户 ID / User ID.
-    @param amount 正整数金币 / Positive coins.
+    @param key 稳定业务或幂等键 / Stable business or idempotency key.
     @param connection 当前事务 / Current transaction.
     @return None / None.
+    @raise ValueError 键为空时抛出 / Raised when the key is blank.
+    @note 哈希冲突最多让不相关操作顺序化，绝不会把两个回执混为一谈。/
+        A hash collision can only serialize unrelated operations; it can never merge their
+        receipts.
     """
 
-    if amount <= 0:
-        raise ValueError("Coin credit must be positive")
-    changed = await db_connection.execute(
-        "UPDATE identity.users SET coins = coins + %s WHERE id = %s",
-        (amount, user_id),
+    normalized = key.strip()
+    if not normalized:
+        raise ValueError("Economy operation lock key cannot be blank")
+    await db_connection.fetch_one(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"economy:operation:{normalized}",),
         connection=connection,
     )
-    if changed != 1:
-        raise RuntimeError("Locked economy account disappeared")
 
 
 async def _load_result(
@@ -122,17 +119,3 @@ async def _save_result(
         (idempotency_key, operation_kind, user_id, json.dumps(dict(result))),
         connection=connection,
     )
-
-
-def _plan_after_spend(user_id: int, paid: int, admin_user_id: int) -> str:
-    """@brief 计算扣费后账户计划 / Calculate the post-spend account plan.
-
-    @param user_id 用户 ID / User ID.
-    @param paid 剩余付费币 / Remaining paid coins.
-    @param admin_user_id 管理员用户 ID / Administrator user ID.
-    @return 新账户计划 / New account plan.
-    """
-
-    if user_id == admin_user_id:
-        return "admin"
-    return "paid" if paid > 0 else "free"

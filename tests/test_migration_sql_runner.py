@@ -2,6 +2,8 @@ import ast
 from pathlib import Path
 import re
 
+import pytest
+
 from fogmoe_dbctl.migrations import runner
 
 
@@ -48,6 +50,52 @@ def test_sql_splitter_keeps_function_body_as_one_statement() -> None:
         "BEGIN PERFORM 1; PERFORM 2; END; $$",
         "SELECT 3",
     ]
+
+
+def test_migration_runner_preserves_colons_inside_quoted_account_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief Driver SQL 保留账户键中的冒号 / Driver SQL preserves colons in quoted account keys.
+
+    @param tmp_path 临时迁移目录 / Temporary migration directory.
+    @param monkeypatch pytest 依赖替换器 / pytest dependency patcher.
+    @return None / None.
+    @note SQLAlchemy TextClause 会把 :free 识别为绑定参数；迁移不得经过该解析器。/
+        SQLAlchemy TextClause recognizes :free as a bind parameter, so migrations must bypass that parser.
+    """
+
+    migration = tmp_path / "demo.py"
+    sql_path = tmp_path / "demo.sql"
+    sql_path.write_text(
+        """-- migrate:up
+SELECT 'user:42:free', 'system:staking_pool';
+
+-- migrate:down
+""",
+        encoding="utf-8",
+    )
+    executed: list[str] = []
+
+    class _Connection:
+        """@brief 记录 driver SQL 的连接替身 / Connection double recording driver SQL."""
+
+        def exec_driver_sql(self, statement: str) -> None:
+            """@brief 记录一条原始 SQL / Record one raw SQL statement.
+
+            @param statement 待执行 SQL / SQL to execute.
+            @return None / None.
+            """
+
+            executed.append(statement)
+
+    connection = _Connection()
+    monkeypatch.setattr(runner, "_sql_file_for_revision", lambda _path: sql_path)
+    monkeypatch.setattr(runner.op, "get_bind", lambda: connection)
+
+    runner.run_migration_sql(migration, "up")
+
+    assert executed == ["SELECT 'user:42:free', 'system:staking_pool'"]
 
 
 def test_schema_snapshot_head_matches_the_single_migration_graph_head() -> None:

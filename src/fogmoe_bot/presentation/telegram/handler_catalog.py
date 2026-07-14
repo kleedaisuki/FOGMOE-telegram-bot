@@ -29,17 +29,12 @@ from telegram.ext import (
 )
 
 from . import (
-    charge_handlers,
     economy_handlers,
     moderation_handlers,
-    rps_handlers,
-    stake_handlers,
     verification_handlers,
 )
 from .crypto_handlers import chart as crypto_chart
-from .crypto_handlers import prediction as crypto_prediction
-from .crypto_handlers import swap as crypto_swap
-from .game_handlers import gamble, omikuji, rpg, sicbo
+from .game_handlers import omikuji
 from .media_handlers import music as media_music
 from .media_handlers import picture as media_picture
 from .monitor_handlers import start_btc_monitor, stop_btc_monitor
@@ -338,20 +333,6 @@ HANDLER_CATALOG = HandlerCatalog(
         _command("basic.start", "start", economy_handlers.start_command),
         _command("monitor.start", "start_test_monitor", start_btc_monitor),
         _command("monitor.stop", "stop_test_monitor", stop_btc_monitor),
-        _command("game.gamble", "gamble", gamble.gamble_command),
-        _callback(
-            "game.gamble-callback",
-            "gamble",
-            r"^(?:gamble:|gamble_)",
-            gamble.gamble_callback,
-        ),
-        _command("economy.shop", "shop", economy_handlers.shop_command),
-        _callback(
-            "economy.shop-callback",
-            "shop",
-            r"^shop_",
-            economy_handlers.shop_callback,
-        ),
         _command("economy.task", "task", economy_handlers.task_command),
         _callback(
             "economy.task-callback",
@@ -385,25 +366,6 @@ HANDLER_CATALOG = HandlerCatalog(
             "membership.my-chat-member",
             bot_membership_changed,
         ),
-        _command("economy.stake", "stake", stake_handlers.stake_command),
-        _callback(
-            "economy.stake-callback",
-            "stake",
-            r"^stake_",
-            stake_handlers.stake_callback,
-        ),
-        _command(
-            "crypto.predict",
-            "btc_predict",
-            crypto_prediction.btc_predict_command,
-        ),
-        _callback(
-            "crypto.predict-callback",
-            "crypto",
-            r"^crypto_",
-            crypto_prediction.crypto_callback,
-        ),
-        _command("crypto.swap", "swap", crypto_swap.swap_command),
         _command("moderation.keyword", "keyword", moderation_handlers.keyword_command),
         _command("moderation.spam", "spam", moderation_handlers.toggle_spam_control),
         _callback(
@@ -419,39 +381,6 @@ HANDLER_CATALOG = HandlerCatalog(
             r"^(?:omikuji:|omikuji_)",
             omikuji.omikuji_callback,
         ),
-        _command("game.rps", "rps_game", rps_handlers.rps_game_command),
-        _callback(
-            "game.rps-callback",
-            "rps",
-            r"^rps:",
-            rps_handlers.rps_callback_handler,
-        ),
-        _command("economy.charge", "charge", charge_handlers.charge_command),
-        _command(
-            "economy.create-code",
-            "create_code",
-            charge_handlers.admin_create_code,
-        ),
-        _command("economy.recharge", "recharge", charge_handlers.recharge_command),
-        _callback(
-            "economy.topup-request",
-            "topup_req",
-            r"^topup_req_",
-            charge_handlers.topup_request_callback,
-        ),
-        _callback(
-            "economy.topup-admin",
-            "topup_admin",
-            r"^topup_admin_",
-            charge_handlers.topup_admin_callback,
-        ),
-        _command("game.sicbo", "sicbo", sicbo.sicbo_command),
-        _callback(
-            "game.sicbo-callback",
-            "sicbo",
-            r"^(?:sb:|sicbo_)",
-            sicbo.sicbo_callback,
-        ),
         _command("economy.referral", "ref", economy_handlers.ref_command),
         _callback(
             "economy.referral-callback",
@@ -463,12 +392,6 @@ HANDLER_CATALOG = HandlerCatalog(
         _command("moderation.report", "report", moderation_handlers.report_command),
         _command("crypto.chart", "chart", crypto_chart.chart_command),
         _command("media.picture", "pic", media_picture.pic_command),
-        _callback(
-            "media.picture-hd",
-            "pic_hd",
-            r"^pic_hd_",
-            media_picture.hd_pic_callback,
-        ),
         _command("media.music", "music", media_music.music_command),
         _callback(
             "media.music-callback",
@@ -476,7 +399,6 @@ HANDLER_CATALOG = HandlerCatalog(
             r"^music_",
             media_music.music_callback,
         ),
-        _command("game.rpg", "rpg", rpg.rpg_command_handler),
         _command(
             "admin.web-password",
             "webpassword",

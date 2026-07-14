@@ -18,12 +18,6 @@ class PictureRuntime:
     recent_pictures: BoundedTtlCache[UserId, tuple[str, ...]] = field(
         default_factory=lambda: BoundedTtlCache(capacity=4096, ttl_seconds=24 * 60 * 60)
     )
-    help_seen: BoundedTtlCache[UserId, bool] = field(
-        default_factory=lambda: BoundedTtlCache(capacity=4096, ttl_seconds=24 * 60 * 60)
-    )
     gallery_bulkhead: AsyncBulkhead = field(
         default_factory=lambda: AsyncBulkhead(capacity=5, queue_timeout_seconds=2)
-    )
-    download_bulkhead: AsyncBulkhead = field(
-        default_factory=lambda: AsyncBulkhead(capacity=4, queue_timeout_seconds=2)
     )

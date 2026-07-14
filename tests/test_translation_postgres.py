@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
-from decimal import Decimal
 import os
 from uuid import uuid4
 
@@ -27,9 +26,6 @@ from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.assistant_turn_acceptance import (
     PostgresAssistantTurnAcceptanceUoW,
 )
-from fogmoe_bot.infrastructure.database.assistant_billing import (
-    PostgresAssistantBilling,
-)
 from fogmoe_bot.infrastructure.database.conversation_workflow.inbox import (
     PostgresInboxRepository,
 )
@@ -37,10 +33,6 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
     PostgresTurnRepository,
 )
 from postgres_test_support import configure_bot_database
-
-ADMINISTRATOR_ID = 1002288404
-"""@brief 测试管理员 Telegram 用户 ID / Test administrator Telegram user ID."""
-
 
 def _postgres_url() -> str:
     """@brief 读取真实 PostgreSQL DSN / Read a real PostgreSQL DSN.
@@ -54,10 +46,10 @@ def _postgres_url() -> str:
     pytest.skip("set FOGMOE_TEST_DATABASE_URL to run the real PostgreSQL contract")
 
 
-def test_translation_charge_turn_and_activity_replay_atomically(
+def test_translation_turn_and_activity_replay_atomically_without_billing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """@brief 翻译扣费、Turn、隔离消息和 activity 原子且只发生一次 / Translation charging, Turn, isolated message, and activity are atomic and occur once.
+    """@brief 翻译、Turn、隔离消息和 activity 原子且只发生一次，不产生计费 / Translation, Turn, isolated message, and activity are atomic and occur once without billing.
 
     @param monkeypatch 临时数据库配置 / Temporary database configuration.
     """
@@ -80,8 +72,7 @@ def test_translation_charge_turn_and_activity_replay_atomically(
             received_at=now,
         )
         inbox = PostgresInboxRepository()
-        billing = PostgresAssistantBilling(ADMINISTRATOR_ID)
-        turns = PostgresTurnRepository(billing)
+        turns = PostgresTurnRepository()
         target = TranslationReplyTarget(
             update_id=inbound.update_id,
             conversation_id=conversation_id,
@@ -112,35 +103,17 @@ def test_translation_charge_turn_and_activity_replay_atomically(
                     connection=connection,
                 )
             assert await inbox.add_inbound(inbound) is True
-            pool_before_row = await db_connection.fetch_one(
-                "SELECT COALESCE(SUM(delta), 0), COALESCE(MAX(posting_id), 0) "
-                "FROM economy.stake_pool_postings WHERE pool_id = 1"
-            )
-            assert pool_before_row is not None
-            pool_before = Decimal(str(pool_before_row[0]))
-            posting_before = int(pool_before_row[1])
-
-            acceptance = PostgresAssistantTurnAcceptanceUoW(
-                turns,
-                billing,
-                administrator_id=ADMINISTRATOR_ID,
-            )
+            acceptance = PostgresAssistantTurnAcceptanceUoW(turns)
             first = await acceptance.accept(request, accepted_at=now)
             replay = await acceptance.accept(request, accepted_at=now)
 
             assert isinstance(first, AssistantTurnAccepted) and not first.replayed
             assert isinstance(replay, AssistantTurnAccepted) and replay.replayed
-            posting_row = await db_connection.fetch_one(
-                "SELECT COUNT(*) FROM economy.stake_pool_postings "
-                "WHERE pool_id = 1 AND posting_id > %s",
-                (posting_before,),
-            )
-            assert posting_row is not None and int(posting_row[0]) == 0
             account = await db_connection.fetch_one(
                 "SELECT coins, coins_paid FROM identity.users WHERE id = %s",
                 (user_id,),
             )
-            assert account is not None and tuple(account) == (4, 0)
+            assert account is not None and tuple(account) == (5, 0)
             facts = await db_connection.fetch_one(
                 "SELECT turn.state, message.content, activity.request "
                 "FROM conversation.conversation_turns AS turn "
@@ -154,17 +127,10 @@ def test_translation_charge_turn_and_activity_replay_atomically(
             assert facts is not None
             assert facts[0] == "waiting_inference"
             assert facts[1]["exclude_from_assistant"] is True
-            assert facts[1]["coin_cost"] == 1
+            assert "coin_cost" not in facts[1]
             assert facts[2]["task_kind"] == "translation"
             assert facts[2]["translation_input"] == "x" * 501
             assert first.acceptance is not None
-            reservation = await db_connection.fetch_one(
-                "SELECT cost, free_reserved, paid_reserved, pool_contribution, status "
-                "FROM assistant.billing_reservations WHERE turn_id = CAST(%s AS UUID)",
-                (str(first.acceptance.turn.turn_id),),
-            )
-            assert reservation is not None
-            assert tuple(reservation) == (1, 1, 0, Decimal("0.20"), "reserved")
             current_messages = await turns.read_conversation_messages(
                 conversation_id,
                 through_turn_id=first.acceptance.turn.turn_id,
@@ -186,7 +152,6 @@ def test_translation_charge_turn_and_activity_replay_atomically(
                 update_id=later_inbound.update_id,
                 message_id=78,
                 user_content={"text": "ordinary follow-up"},
-                coin_cost=0,
                 task_kind="assistant",
                 translation_input=None,
             )
@@ -201,19 +166,8 @@ def test_translation_charge_turn_and_activity_replay_atomically(
             assert [message.draft.content["text"] for message in future_messages] == [
                 "ordinary follow-up"
             ]
-            pool_after_row = await db_connection.fetch_one(
-                "SELECT COALESCE(SUM(delta), 0) "
-                "FROM economy.stake_pool_postings WHERE pool_id = 1"
-            )
-            assert pool_after_row is not None
-            assert Decimal(str(pool_after_row[0])) - pool_before == Decimal("0.00")
         finally:
             async with db_connection.transaction() as connection:
-                await db_connection.execute(
-                    "DELETE FROM assistant.billing_reservations WHERE user_id = %s",
-                    (user_id,),
-                    connection=connection,
-                )
                 await db_connection.execute(
                     "DELETE FROM conversation.inference_activities "
                     "WHERE conversation_id = %s",

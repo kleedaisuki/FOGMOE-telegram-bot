@@ -107,7 +107,7 @@ class _Receipts:
             return PersistedToolResult(self.values[key], True)  # type: ignore[arg-type]
         self.order.append(f"effect:{request.invocation_id}")
         self.mutation_count += 1
-        result = {"status": "granted", "amount": request.arguments["amount"]}
+        result = {"status": "updated"}
         self.values[key] = result
         return PersistedToolResult(result, False)
 
@@ -182,8 +182,8 @@ def test_checkpoint_precedes_effect_and_restart_replays_without_provider_or_muta
                                 "id": "provider-call-a",
                                 "type": "function",
                                 "function": {
-                                    "name": "kindness_gift",
-                                    "arguments": '{"amount":3}',
+                                    "name": "user_diary",
+                                    "arguments": '{"action":"append","content":"note"}',
                                 },
                             }
                         ],
@@ -191,8 +191,8 @@ def test_checkpoint_precedes_effect_and_restart_replays_without_provider_or_muta
                     (
                         CompletionToolCall(
                             "provider-call-a",
-                            "kindness_gift",
-                            {"amount": 3},
+                            "user_diary",
+                            {"action": "append", "content": "note"},
                         ),
                     ),
                 ),

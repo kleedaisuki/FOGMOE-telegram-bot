@@ -91,52 +91,6 @@ class _TransactionContext:
         return None
 
 
-class _Billing:
-    """@brief 记录 workflow 终态计费交互 / Record workflow terminal billing interactions."""
-
-    def __init__(self) -> None:
-        """@brief 初始化空日志 / Initialize empty logs."""
-
-        self.settled: list[tuple[object, TurnId, datetime]] = []
-        """@brief 成功结算调用 / Successful-settlement calls."""
-        self.released: list[tuple[object, TurnId, datetime]] = []
-        """@brief 失败或取消释放调用 / Failure-or-cancellation release calls."""
-
-    async def reserve(self, *args: object, **kwargs: object) -> bool:
-        """@brief workflow repository 不得建立预留 / Workflow repository must not reserve."""
-
-        del args, kwargs
-        raise AssertionError("workflow repository attempted to reserve billing")
-
-    async def validate_expected(self, *args: object, **kwargs: object) -> None:
-        """@brief workflow repository 不得校验 acceptance replay / Workflow repository must not validate acceptance replay."""
-
-        del args, kwargs
-        raise AssertionError("workflow repository attempted acceptance validation")
-
-    async def settle(
-        self,
-        connection: object,
-        *,
-        turn_id: TurnId,
-        settled_at: datetime,
-    ) -> None:
-        """@brief 记录同事务成功结算 / Record same-transaction success settlement."""
-
-        self.settled.append((connection, turn_id, settled_at))
-
-    async def release(
-        self,
-        connection: object,
-        *,
-        turn_id: TurnId,
-        released_at: datetime,
-    ) -> None:
-        """@brief 记录同事务退款释放 / Record same-transaction refund release."""
-
-        self.released.append((connection, turn_id, released_at))
-
-
 def _outbound_row(
     *,
     status: str = "processing",

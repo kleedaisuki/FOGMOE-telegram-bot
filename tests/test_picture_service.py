@@ -1,158 +1,78 @@
-"""图片应用服务的语义与持久 callback 测试 / Semantic and durable-callback tests for the picture service."""
+"""@brief 免费图片预览服务测试 / Tests for the free picture-preview service."""
+
+from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
-from fogmoe_bot.application.media.picture_ports import PictureDeliveryTarget
 from fogmoe_bot.application.media.picture_runtime import PictureRuntime
 from fogmoe_bot.application.media.picture_service import (
-    HdDeliveryReady,
-    PicturePolicy,
-    PictureHelp,
-    PictureReady,
+    PictureFreeReady,
+    PictureNotRegistered,
+    PicturePermissionDenied,
     PictureService,
 )
-from fogmoe_bot.domain.media.identifiers import ArtifactId, UserId
-from fogmoe_bot.domain.media.picture import (
-    HdOffer,
-    HdOfferState,
-    PictureCandidate,
-    PictureRating,
-)
-from fogmoe_bot.domain.conversation.identity import (
-    ConversationId,
-    DeliveryStreamId,
-    OutboundMessageId,
-)
-from fogmoe_bot.domain.conversation.outbox import (
-    SEND_TELEGRAM_PHOTO,
-    OutboundDraft,
-)
+from fogmoe_bot.domain.media.identifiers import UserId
+from fogmoe_bot.domain.media.picture import PictureCandidate, PictureRating
 
 
-@dataclass(frozen=True)
-class Profile:
-    """@brief 测试账户快照 / Test account snapshot."""
+@dataclass(frozen=True, slots=True)
+class _Profile:
+    """@brief 最小媒体准入资料 / Minimal media-admission profile.
+
+    @param registered 是否已注册 / Whether registered.
+    @param permission 权限等级 / Permission level.
+    """
 
     registered: bool = True
     permission: int = 2
-    coins: int = 100
 
 
-@dataclass(frozen=True)
-class Charge:
-    """@brief 测试扣费结果 / Test charge result."""
+class _Accounts:
+    """@brief 返回固定资料的测试端口 / Test port returning fixed profiles."""
 
-    charged: bool
-    balance: int
-    offer: HdOffer | None = None
-    replayed: bool = False
-    cost: int | None = None
+    def __init__(self, profile: _Profile) -> None:
+        """@brief 保存测试资料 / Retain the test profile.
+
+        @param profile 待返回资料 / Profile to return.
+        @return None / None.
+        """
+
+        self._profile = profile
+
+    async def profile(self, user_id: UserId) -> _Profile:
+        """@brief 返回资料而不暴露余额 / Return a profile without exposing a balance.
+
+        @param user_id 请求用户 / Requesting user.
+        @return 固定资料 / Fixed profile.
+        """
+
+        del user_id
+        return self._profile
 
 
-@dataclass(frozen=True)
-class Claim:
-    """@brief 测试高清领取结果 / Test HD-claim result."""
+class _Pictures:
+    """@brief 固定图库读取端口 / Fixed gallery read port."""
 
-    code: str
-    offer: HdOffer | None
-    balance: int | None = None
-
-
-class Repository:
-    """@brief 保存 callback 的内存测试仓储 / In-memory test repository retaining callbacks."""
-
-    def __init__(self) -> None:
-        self.offers: dict[ArtifactId, HdOffer] = {}
-        self.hd_completed = False
-        self.receipts: dict[str, tuple[UserId, PictureRating, str, Charge]] = {}
-        self.charge_calls = 0
-
-    async def profile(self, user_id):
-        return Profile()
-
-    async def load_picture_receipt(
-        self, *, idempotency_key, user_id, rating, request_fingerprint
-    ):
-        receipt = self.receipts.get(idempotency_key)
-        if receipt is None:
-            return None
-        owner, stored_rating, fingerprint, result = receipt
-        if (owner, stored_rating, fingerprint) != (
-            user_id,
-            rating,
-            request_fingerprint,
-        ):
-            raise RuntimeError("test receipt conflict")
-        return Charge(
-            result.charged,
-            result.balance,
-            result.offer,
-            replayed=True,
-            cost=result.cost,
-        )
-
-    async def charge_preview_and_store_offer(
+    async def fetch(
         self,
+        rating: PictureRating,
         *,
-        offer,
-        cost,
-        now,
-        idempotency_key,
-        request_fingerprint,
-        outbound,
-    ):
-        self.charge_calls += 1
-        replay = await self.load_picture_receipt(
-            idempotency_key=idempotency_key,
-            user_id=offer.requester_id,
-            rating=offer.picture.rating,
-            request_fingerprint=request_fingerprint,
-        )
-        if replay is not None:
-            return replay
-        self.offers[offer.offer_id] = offer
-        result = Charge(True, 100 - cost, offer=offer, cost=cost)
-        self.receipts[idempotency_key] = (
-            offer.requester_id,
-            offer.picture.rating,
-            request_fingerprint,
-            result,
-        )
-        return result
+        limit: int,
+    ) -> tuple[PictureCandidate, ...]:
+        """@brief 返回两个候选以测试近期去重 / Return two candidates to exercise recent-item exclusion.
 
-    async def claim_hd(self, offer_id, *, user_id, cost, now, lease_for):
-        offer = self.offers.get(offer_id)
-        if offer is None:
-            return Claim("missing", None)
-        claimed = HdOffer(
-            offer.offer_id,
-            offer.picture,
-            offer.requester_id,
-            offer.expires_at,
-            HdOfferState.CHARGED,
-            user_id,
-        )
-        self.offers[offer_id] = claimed
-        return Claim("claimed", claimed)
+        @param rating 内容分级 / Content rating.
+        @param limit 请求上限 / Requested limit.
+        @return 固定候选 / Fixed candidates.
+        """
 
-    async def complete_hd(self, offer_id, *, cost, now):
-        self.hd_completed = True
-
-    async def refund_hd(self, offer_id, *, cost, now):
-        return None
-
-
-class Pictures:
-    """@brief 固定图库 / Fixed gallery."""
-
-    async def fetch(self, rating, *, limit):
+        del limit
         return (
             PictureCandidate(
-                source_id="42",
-                sample_url="https://example.test/sample.jpg",
-                file_url="https://example.test/full.jpg",
+                source_id="one",
+                sample_url="https://example.test/one.jpg",
+                file_url=None,
                 tags="cat safe",
                 width=1024,
                 height=768,
@@ -160,142 +80,89 @@ class Pictures:
                 score=9,
                 rating=rating,
             ),
-        )
-
-
-class Fetcher:
-    """@brief 固定二进制下载 / Fixed binary fetcher."""
-
-    async def fetch(self, url, *, max_bytes, timeout_seconds):
-        return b"full-image"
-
-
-class PreviewOutbound:
-    """@brief 构造确定性图片 outbox 的测试替身 / Deterministic photo-outbox test double."""
-
-    def create(
-        self,
-        *,
-        target,
-        offer,
-        preview_cost,
-        hd_cost,
-        idempotency_key,
-        created_at,
-    ):
-        outbound_key = f"{idempotency_key}:photo"
-        return OutboundDraft(
-            message_id=OutboundMessageId.for_conversation(
-                target.conversation_id,
-                outbound_key,
+            PictureCandidate(
+                source_id="two",
+                sample_url="https://example.test/two.jpg",
+                file_url=None,
+                tags="fox safe",
+                width=1280,
+                height=720,
+                file_size=4567,
+                score=8,
+                rating=rating,
             ),
-            conversation_id=target.conversation_id,
-            turn_id=None,
-            delivery_stream_id=target.delivery_stream_id,
-            kind=SEND_TELEGRAM_PHOTO,
-            payload={"chat_id": target.chat_id, "photo_url": offer.picture.preview_url},
-            idempotency_key=outbound_key,
-            created_at=created_at,
         )
 
 
-def _target() -> PictureDeliveryTarget:
-    """@brief 创建稳定图片投递目标 / Create a stable picture-delivery target."""
+def _service(profile: _Profile, *, choose_index: int = 0) -> PictureService:
+    """@brief 构造确定性的免费图片服务 / Build a deterministic free-picture service.
 
-    return PictureDeliveryTarget(
-        conversation_id=ConversationId("assistant-user:1"),
-        delivery_stream_id=DeliveryStreamId("telegram:primary:chat:10:thread:0"),
-        chat_id=10,
-        message_thread_id=None,
-        reply_to_message_id=20,
-        mention="@klee",
-    )
+    @param profile 测试准入资料 / Test admission profile.
+    @param choose_index 优先选择的候选下标 / Preferred candidate index.
+    @return 免费图片服务 / Free picture service.
+    """
 
-
-def _service(repository: Repository) -> PictureService:
-    """创建确定性图片服务 / Create a deterministic picture service."""
-
-    ids = iter(("a" * 32, "b" * 32, "c" * 32))
     return PictureService(
-        accounts=repository,
-        repository=repository,
-        source=Pictures(),
-        binary_fetcher=Fetcher(),
+        accounts=_Accounts(profile),
+        source=_Pictures(),
         runtime=PictureRuntime(),
-        preview_outbound=PreviewOutbound(),
-        policy=PicturePolicy(),
-        choose=lambda values: values[0],
-        id_factory=lambda: next(ids),
-        now=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        choose=lambda values: values[choose_index],
     )
 
 
-def test_picture_first_use_help_then_atomic_offer_and_hd() -> None:
-    """@brief 保持首次帮助、预览扣费与高清领取语义 / Preserve first-help, preview-charge, and HD-claim semantics."""
+def test_free_picture_uses_no_balance_field_and_avoids_recent_duplicates() -> None:
+    """@brief 免费预览只依赖准入资料并避免近期重复 / Free previews use only admission data and avoid recent duplicates.
+
+    @return None / None.
+    """
 
     async def scenario() -> None:
-        repository = Repository()
-        service = _service(repository)
-        first = await service.request_picture(
+        """@brief 连续请求两次免费图片 / Request two free pictures in succession.
+
+        @return None / None.
+        """
+
+        service = _service(_Profile())
+        first = await service.request_free_picture(
             user_id=UserId(1),
             rating=PictureRating.SAFE,
-            idempotency_key="update:1:pic",
-            target=_target(),
         )
-        assert isinstance(first, PictureHelp)
-        ready = await service.request_picture(
+        second = await service.request_free_picture(
             user_id=UserId(1),
             rating=PictureRating.SAFE,
-            idempotency_key="update:2:pic",
-            target=_target(),
         )
-        assert isinstance(ready, PictureReady)
-        assert ready.offer.state is HdOfferState.PREVIEW_PENDING
-        hd = await service.request_hd(
-            offer_id=ready.offer.offer_id,
-            user_id=UserId(2),
-        )
-        assert isinstance(hd, HdDeliveryReady)
-        assert hd.content == b"full-image"
-        assert hd.offer.charged_user_id == UserId(2)
-        await service.complete_hd(ready.offer.offer_id)
-        assert repository.hd_completed
+
+        assert isinstance(first, PictureFreeReady)
+        assert isinstance(second, PictureFreeReady)
+        assert first.picture.source_id == "one"
+        assert second.picture.source_id == "two"
 
     asyncio.run(scenario())
 
 
-def test_picture_request_replays_the_first_canonical_offer_without_a_second_charge() -> (
-    None
-):
-    """@brief 同一 source key 重放首次报价且不再扣费 / The same source key replays the first offer without charging twice."""
+def test_free_picture_enforces_registration_and_nsfw_permission() -> None:
+    """@brief 免费预览仍执行注册与 NSFW 准入 / Free previews still enforce registration and NSFW admission.
+
+    @return None / None.
+    """
 
     async def scenario() -> None:
-        repository = Repository()
-        service = _service(repository)
-        await service.request_picture(
+        """@brief 覆盖两个准入失败分支 / Cover both admission-failure branches.
+
+        @return None / None.
+        """
+
+        unregistered = await _service(_Profile(registered=False)).request_free_picture(
             user_id=UserId(1),
             rating=PictureRating.SAFE,
-            idempotency_key="update:help:pic",
-            target=_target(),
         )
-        first = await service.request_picture(
+        denied = await _service(_Profile(permission=1)).request_free_picture(
             user_id=UserId(1),
-            rating=PictureRating.SAFE,
-            idempotency_key="update:canonical:pic",
-            target=_target(),
-        )
-        replay = await _service(repository).request_picture(
-            user_id=UserId(1),
-            rating=PictureRating.SAFE,
-            idempotency_key="update:canonical:pic",
-            target=_target(),
+            rating=PictureRating.NSFW,
         )
 
-        assert isinstance(first, PictureReady)
-        assert isinstance(replay, PictureReady)
-        assert replay.offer == first.offer
-        assert replay.replayed
-        assert repository.charge_calls == 1
-        assert len(repository.offers) == 1
+        assert isinstance(unregistered, PictureNotRegistered)
+        assert isinstance(denied, PicturePermissionDenied)
+        assert denied.required == 2
 
     asyncio.run(scenario())

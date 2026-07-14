@@ -39,9 +39,7 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.inference import (
 
 from conversation_workflow_testkit import (
     NOW,
-    TURN_UUID,
     _activity,
-    _Billing,
     _message_draft,
     _message_result,
     _outbound_draft,
@@ -82,9 +80,7 @@ def test_inference_claim_preserves_conversation_causality_across_workers(
         )
         monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
 
-        claims = await PostgresInferenceRepository(
-            _Billing()  # type: ignore[arg-type]
-        ).claim_inference_activities(
+        claims = await PostgresInferenceRepository().claim_inference_activities(
             now=NOW,
             limit=8,
             lease_for=timedelta(seconds=30),
@@ -107,7 +103,7 @@ def test_expired_inference_recovery_returns_a_complete_activity_projection(
     """@brief 过期推理租约恢复返回含 traceparent 的完整活动行 / Expired inference recovery returns a complete activity row including traceparent."""
 
     connection = object()
-    repository = PostgresInferenceRepository(_Billing())  # type: ignore[arg-type]
+    repository = PostgresInferenceRepository()
     activity = _activity()
     captured: dict[str, object] = {}
 
@@ -212,8 +208,7 @@ def test_inference_uow_failure_exits_the_single_transaction_for_rollback(
 
     connection = object()
     transaction = _TransactionContext(connection)
-    billing = _Billing()
-    repository = PostgresInferenceRepository(billing=billing)  # type: ignore[arg-type]
+    repository = PostgresInferenceRepository()
     assistant_message = _message_draft(role=MessageRole.ASSISTANT)
     outbound = _outbound_draft()
     token = LeaseToken.new()
@@ -323,7 +318,6 @@ def test_inference_uow_failure_exits_the_single_transaction_for_rollback(
 
     assert isinstance(transaction.exception, RuntimeError)
     assert persisted is False
-    assert billing.settled == []
 
 
 @pytest.mark.parametrize(
@@ -342,8 +336,7 @@ def test_inference_uow_replay_returns_existing_atomic_effects(
     """@brief 已提交推理 UoW 的重放返回规范消息而不再次写入 / Replay of a committed inference unit returns canonical effects without rewriting."""
 
     connection = object()
-    billing = _Billing()
-    repository = PostgresInferenceRepository(billing=billing)  # type: ignore[arg-type]
+    repository = PostgresInferenceRepository()
     assistant_message = _message_draft(role=MessageRole.ASSISTANT)
     outbound = _outbound_draft()
     token = LeaseToken.new()
@@ -469,4 +462,3 @@ def test_inference_uow_replay_returns_existing_atomic_effects(
     assert result.turn.state.value == current_state
     assert result.assistant_message.inserted is False
     assert result.outbounds[0].inserted is False
-    assert billing.settled == [(connection, TurnId(TURN_UUID), NOW)]

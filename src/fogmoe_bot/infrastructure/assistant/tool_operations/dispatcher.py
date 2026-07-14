@@ -20,7 +20,6 @@ from .memory import search_memory
 from .outbound import finalize_downstream_effect
 from .parsing import optional_text, required_connection, required_text
 from .schedule import execute_schedule
-from .social import execute_kindness_gift
 
 
 class AssistantToolOperationDispatcher:
@@ -91,11 +90,6 @@ class AssistantToolOperationDispatcher:
                 return await execute_diary(request, connection=connection)
             case "schedule_ai_message":
                 return await execute_schedule(request, connection=connection)
-            case "kindness_gift":
-                return await execute_kindness_gift(
-                    request,
-                    connection=required_connection(connection),
-                )
             case "generate_image" | "generate_voice":
                 return await self._generated_media.generate(request)
             case _:

@@ -451,8 +451,8 @@ def test_sticker_payload_rejects_file_id_and_missing_emoji() -> None:
     assert captured.value.category is DeliveryErrorCategory.INVALID_REQUEST
 
 
-def test_photo_delivery_preserves_reply_thread_spoiler_and_keyboard() -> None:
-    """@brief photo outbox 保留回复、topic、spoiler 与 callback / Photo outbox preserves reply, topic, spoiler, and callback semantics."""
+def test_photo_delivery_preserves_reply_thread_spoiler_and_optional_keyboard() -> None:
+    """@brief photo outbox 保留回复、topic、spoiler 与通用 callback / Photo outbox preserves reply, topic, spoiler, and a generic callback."""
 
     bot = _Bot()
     receipt = asyncio.run(
@@ -461,12 +461,12 @@ def test_photo_delivery_preserves_reply_thread_spoiler_and_keyboard() -> None:
                 {
                     "chat_id": -100,
                     "photo_url": "https://example.test/preview.jpg",
-                    "caption": "@klee 消耗了 5 金币获取此图片。",
+                    "caption": "@klee 的免费预览图片。",
                     "has_spoiler": True,
                     "message_thread_id": 7,
                     "reply_to_message_id": 99,
-                    "button_text": "查看高清原图 (10金币)",
-                    "button_callback_data": f"pic_hd_{'a' * 32}",
+                    "button_text": "打开相关页面",
+                    "button_callback_data": "music_page:example",
                 },
                 kind=SEND_TELEGRAM_PHOTO,
             )
@@ -482,7 +482,7 @@ def test_photo_delivery_preserves_reply_thread_spoiler_and_keyboard() -> None:
     assert call["reply_parameters"].message_id == 99
     assert isinstance(call["reply_markup"], InlineKeyboardMarkup)
     assert (
-        call["reply_markup"].inline_keyboard[0][0].callback_data == f"pic_hd_{'a' * 32}"
+        call["reply_markup"].inline_keyboard[0][0].callback_data == "music_page:example"
     )
 
 

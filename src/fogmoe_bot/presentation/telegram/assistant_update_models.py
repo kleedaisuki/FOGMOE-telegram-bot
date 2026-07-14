@@ -8,9 +8,7 @@ from enum import StrEnum
 
 from fogmoe_bot.application.conversation.assistant_ingress import (
     ASSISTANT_MEDIA_LIMIT_BYTES,
-    ASSISTANT_TEXT_LIMIT,
     AssistantTurnRequest,
-    assistant_text_cost,
 )
 from fogmoe_bot.application.conversation.inbox_worker import PermanentIngressError
 from fogmoe_bot.application.conversation.telegram_identity import (
@@ -254,11 +252,6 @@ class ParsedTelegramAssistantMessage:
                     )
                 ),
             }
-        coin_cost = (
-            5
-            if self.media is not None or len(self.text) > ASSISTANT_TEXT_LIMIT
-            else assistant_text_cost(self.text)
-        )
         is_group = self.chat_type in GROUP_CHAT_TYPES
         return AssistantTurnRequest(
             update_id=inbound.update_id,
@@ -276,6 +269,5 @@ class ParsedTelegramAssistantMessage:
                 self.message_thread_id,
             ),
             user_content=user_content,
-            coin_cost=coin_cost,
             trace_context=inbound.trace_context,
         )

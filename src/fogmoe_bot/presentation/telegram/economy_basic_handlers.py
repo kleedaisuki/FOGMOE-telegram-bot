@@ -155,7 +155,7 @@ def _gift_text(result: GiftResult, *, amount: int) -> str:
     if result.code is EconomyCode.DAILY_LIMIT:
         return "您今天的赠送次数已达上限（5次），请明天再试。"
     required = amount + result.fee
-    return f"您的硬币不足，当前硬币：{result.available}，需要：{required}"
+    return f"您的免费金币不足，当前免费余额：{result.available}，需要：{required}"
 
 
 def _leaderboard_text(result: LeaderboardResult) -> str:

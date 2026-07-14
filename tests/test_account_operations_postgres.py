@@ -124,8 +124,15 @@ def test_real_postgres_registration_and_personal_info_have_stable_receipts(
                 )
                 assert row is not None
                 assert row[0] == command.username
-                assert row[1] == 25
+                assert row[1] == 5
                 assert row[2] == "later value"
+                bank_balance = await db_connection.fetch_one(
+                    "SELECT balance FROM bank.account_balances "
+                    "WHERE account_key = %s",
+                    (f"user:{user_id}:free",),
+                    connection=connection,
+                )
+                assert bank_balance is not None and bank_balance[0] == 20
         finally:
             async with db_connection.transaction() as connection:
                 await db_connection.execute(

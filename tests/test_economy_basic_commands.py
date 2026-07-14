@@ -17,7 +17,6 @@ from fogmoe_bot.application.economy.community import (
     LeaderboardCommand,
     LeaderboardResult,
 )
-from fogmoe_bot.application.economy.redemption import RedemptionOperations
 from fogmoe_bot.application.economy.referral import ReferralOperations
 from fogmoe_bot.application.economy.rewards import (
     LotteryCommand,
@@ -25,8 +24,6 @@ from fogmoe_bot.application.economy.rewards import (
     RewardOperations,
 )
 from fogmoe_bot.application.economy.service import EconomyService
-from fogmoe_bot.application.economy.shop import ShopOperations
-from fogmoe_bot.application.economy.topup import TopUpOperations
 from fogmoe_bot.application.economy.web_password import WebPasswordOperations
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -123,13 +120,10 @@ def _service(operations: RecordingOperations) -> EconomyService:
     """@brief 本测试不会触达的能力占位 / Capability placeholder unused by this test."""
     return EconomyService(
         accounts=cast(AccountLookup, unused),
-        topups=cast(TopUpOperations, unused),
         rewards=cast(RewardOperations, operations),
         community=cast(CommunityOperations, operations),
-        redemption=cast(RedemptionOperations, unused),
         referrals=cast(ReferralOperations, unused),
         web_passwords=cast(WebPasswordOperations, unused),
-        shop=cast(ShopOperations, unused),
     )
 
 

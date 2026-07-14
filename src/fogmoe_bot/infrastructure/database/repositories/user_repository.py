@@ -1,7 +1,5 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
-from typing import cast
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -19,7 +17,6 @@ class UserAccount:
     @param info 用户个人信息 / User personal information.
     @param name 用户名 / User name.
     @param user_plan 用户套餐 / User plan.
-    @param recharge_blocked_until 充值封禁截止时间 / Recharge block deadline.
     @note 这是读取时刻的不可变快照，不代表事务外的最新状态 / This is an immutable read snapshot, not a live value outside the transaction.
     """
 
@@ -30,7 +27,6 @@ class UserAccount:
     info: str
     name: str = ""
     user_plan: str = "free"
-    recharge_blocked_until: datetime | None = None
 
     @property
     def total_coins(self) -> int:
@@ -40,6 +36,30 @@ class UserAccount:
         """
 
         return self.coins + self.coins_paid
+
+
+@dataclass(frozen=True)
+class UserIdentityContext:
+    """@brief 不含货币余额的用户身份快照 / User-identity snapshot without monetary balances.
+
+    @param user_id Telegram 用户 ID / Telegram user ID.
+    @param permission 用户权限等级 / User permission level.
+    @param info 用户个人信息 / User personal information.
+    @param user_plan 历史兼容套餐标签 / Historical compatibility plan label.
+    @note Assistant acceptance 使用此对象，以避免读取任何余额投影 / Assistant acceptance uses this object to avoid reading any balance projection.
+    """
+
+    user_id: int
+    """@brief 用户 ID / User ID."""
+
+    permission: int
+    """@brief 权限等级 / Permission level."""
+
+    info: str
+    """@brief 个人信息 / Personal information."""
+
+    user_plan: str
+    """@brief 兼容套餐标签 / Compatibility plan label."""
 
 
 def _coerce_user_account(row: Sequence[object] | None) -> UserAccount | None:
@@ -59,7 +79,6 @@ def _coerce_user_account(row: Sequence[object] | None) -> UserAccount | None:
         info="" if row[4] is None else str(row[4]),
         name="" if row[5] is None else str(row[5]),
         user_plan=str(row[6] or "free"),
-        recharge_blocked_until=cast(datetime | None, row[7]),
     )
 
 
@@ -78,15 +97,54 @@ async def fetch_user_account(
     @note for_update=True 时调用方应处于事务中 / Callers should be inside a transaction when for_update=True.
     """
 
-    lock_clause = " FOR UPDATE" if for_update else ""
+    lock_clause = " FOR UPDATE OF users" if for_update else ""
     row = await db_connection.fetch_one(
-        "SELECT id, permission, coins, coins_paid, info, "
-        "name, user_plan, recharge_blocked_until "
-        f"FROM users WHERE id = %s{lock_clause}",
+        "SELECT users.id, users.permission, "
+        "COALESCE(free_balance.balance, 0), "
+        "COALESCE(paid_balance.balance, 0), users.info, users.name, users.user_plan "
+        "FROM identity.users AS users "
+        "LEFT JOIN bank.account_balances AS free_balance "
+        "ON free_balance.account_key = 'user:' || users.id::TEXT || ':free' "
+        "LEFT JOIN bank.account_balances AS paid_balance "
+        "ON paid_balance.account_key = 'user:' || users.id::TEXT || ':paid' "
+        f"WHERE users.id = %s{lock_clause}",
         (user_id,),
         connection=connection,
     )
     return _coerce_user_account(row)
+
+
+async def fetch_user_identity_context(
+    user_id: int,
+    *,
+    connection: AsyncConnection | None = None,
+    for_update: bool = False,
+) -> UserIdentityContext | None:
+    """@brief 读取不含任何余额的用户身份上下文 / Fetch user identity context without any balance.
+
+    @param user_id Telegram 用户 ID / Telegram user ID.
+    @param connection 可选数据库连接 / Optional database connection.
+    @param for_update 是否锁定 identity 用户行 / Whether to lock the identity user row.
+    @return 用户身份上下文；不存在时返回 None / User identity context, or None when absent.
+    @note 仅供不应接触银行余额的工作流使用，例如零费用 Assistant acceptance /
+        Intended only for workflows that must not access bank balances, such as zero-cost Assistant acceptance.
+    """
+
+    lock_clause = " FOR UPDATE" if for_update else ""
+    row = await db_connection.fetch_one(
+        "SELECT id, permission, info, user_plan "
+        f"FROM identity.users WHERE id = %s{lock_clause}",
+        (user_id,),
+        connection=connection,
+    )
+    if row is None:
+        return None
+    return UserIdentityContext(
+        user_id=int(str(row[0])),
+        permission=int(str(row[1] or 0)),
+        info="" if row[2] is None else str(row[2]),
+        user_plan=str(row[3] or "free"),
+    )
 
 
 async def add_free_coins(
@@ -95,18 +153,18 @@ async def add_free_coins(
     *,
     connection: AsyncConnection | None = None,
 ) -> None:
-    """@brief 增加免费硬币 / Add free coins.
+    """@brief 拒绝已退役的直接免费金币写入 / Reject a retired direct free-token mutation.
 
     @param user_id Telegram 用户 ID / Telegram user ID.
     @param coins 增加数量 / Amount to add.
     @param connection 可选数据库连接 / Optional database connection.
-    @return None / None.
+    @return 永不返回 / Never returns.
+    @raise RuntimeError 必须改用 BankOperations / Raised because callers must use BankOperations.
     """
 
-    await db_connection.execute(
-        "UPDATE users SET coins = coins + %s WHERE id = %s",
-        (coins, user_id),
-        connection=connection,
+    del user_id, coins, connection
+    raise RuntimeError(
+        "Direct identity token mutation is retired; use BankOperations instead"
     )
 
 
@@ -118,18 +176,18 @@ async def set_coin_balances_and_plan(
     *,
     connection: AsyncConnection | None = None,
 ) -> None:
-    """@brief 设置硬币余额和用户计划 / Set coin balances and user plan.
+    """@brief 拒绝已退役的直接余额设置 / Reject a retired direct balance assignment.
 
     @param user_id Telegram 用户 ID / Telegram user ID.
     @param coins 免费硬币余额 / Free coin balance.
     @param coins_paid 付费硬币余额 / Paid coin balance.
     @param user_plan 用户计划值 / User plan value.
     @param connection 可选数据库连接 / Optional database connection.
-    @return None / None.
+    @return 永不返回 / Never returns.
+    @raise RuntimeError 必须改用 BankOperations / Raised because callers must use BankOperations.
     """
 
-    await db_connection.execute(
-        "UPDATE users SET coins = %s, coins_paid = %s, user_plan = %s WHERE id = %s",
-        (coins, coins_paid, user_plan, user_id),
-        connection=connection,
+    del user_id, coins, coins_paid, user_plan, connection
+    raise RuntimeError(
+        "Direct identity token mutation is retired; use BankOperations instead"
     )

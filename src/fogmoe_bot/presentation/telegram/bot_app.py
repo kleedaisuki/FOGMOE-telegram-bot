@@ -18,6 +18,15 @@ from fogmoe_bot.application.accounts.operations import (
     ACCOUNT_SERVICE_DATA_KEY,
     AccountService,
 )
+from fogmoe_bot.application.banking.service import BANK_SERVICE_DATA_KEY, BankService
+from fogmoe_bot.application.billing.service import (
+    BILLING_SERVICE_DATA_KEY,
+    BillingService,
+)
+from fogmoe_bot.application.chance.workflow import (
+    CHANCE_WORKFLOW_DATA_KEY,
+    ChanceWorkflow,
+)
 from fogmoe_bot.application.admin.models import (
     ADMIN_RUNTIME_DATA_KEY,
     ADMIN_SERVICE_DATA_KEY,
@@ -44,19 +53,17 @@ from fogmoe_bot.application.crypto.market_monitor import (
     BTC_MONITOR_DATA_KEY,
     BtcPatternMonitor,
 )
-from fogmoe_bot.application.crypto.workflow import (
-    CRYPTO_SERVICE_DATA_KEY,
-    CryptoService,
-)
 from fogmoe_bot.application.economy.service import (
     ECONOMY_SERVICE_DATA_KEY,
     EconomyService,
 )
-from fogmoe_bot.application.games.rps_service import RPS_SERVICE_DATA_KEY, RpsService
-from fogmoe_bot.application.games.runtime import GAMES_RUNTIME_DATA_KEY, GamesRuntime
 from fogmoe_bot.application.moderation.verification_worker import (
     VERIFICATION_WORKER_DATA_KEY,
     VerificationTimeoutWorker,
+)
+from fogmoe_bot.application.personal_rpg.service import (
+    PERSONAL_RPG_SERVICE_DATA_KEY,
+    PersonalRpgService,
 )
 from fogmoe_bot.application.runtime import (
     BOT_RUNTIME_DATA_KEY,
@@ -70,6 +77,7 @@ from fogmoe_bot.application.runtime import (
 from fogmoe_bot.application.scheduling.dispatcher import ScheduleDispatcher
 from fogmoe_bot.application.scheduling.prompt_turn import PromptTurnHandler
 from fogmoe_bot.application.telegram import DurableGroupAdministratorAuthorization
+from fogmoe_bot.application.town.service import TOWN_SERVICE_DATA_KEY, TownService
 from fogmoe_bot.application.scheduling.runtime import SchedulingWorkLoop
 from fogmoe_bot.application.observability.runtime_metrics import RuntimeMetricsService
 from fogmoe_bot.infrastructure.blocking import (
@@ -89,9 +97,6 @@ from fogmoe_bot.infrastructure.database.standalone_outbound import (
 )
 from fogmoe_bot.infrastructure.database.assistant_turn_acceptance import (
     PostgresAssistantTurnAcceptanceUoW,
-)
-from fogmoe_bot.infrastructure.database.assistant_billing import (
-    PostgresAssistantBilling,
 )
 from fogmoe_bot.infrastructure.database.conversation_reset import (
     PostgresConversationResetUoW,
@@ -143,6 +148,9 @@ from .admin_handlers import (
 )
 from .assistant_primary_route import TelegramAssistantPrimaryRoute
 from .basic_handlers import StaticTelegramCommandHandler
+from .bank_handlers import BankTelegramCommandHandler
+from .billing_handlers import BillingTelegramCommandHandler
+from .chance_handlers import ChanceTelegramCommandHandler
 from .command_cooldown_guard import TelegramCommandCooldownGuard
 from .command_route import TelegramDurableCommandPrimaryRoute
 from .economy_basic_handlers import EconomyBasicTelegramCommandHandler
@@ -153,10 +161,8 @@ from .handler_catalog import (
     install_error_policy,
 )
 from .memory_handlers import MemoryManagementTelegramCommandHandler
-from .handler_composition import (
-    HANDLER_BLOCKING_BULKHEADS_DATA_KEY,
-    assemble_handler_capabilities,
-)
+from .personal_rpg_handlers import PersonalRpgTelegramCommandHandler
+from .handler_composition import assemble_handler_capabilities
 from .catalog_route import (
     TelegramCatalogDispatcher,
     TelegramCatalogPrimaryRoute,
@@ -173,6 +179,8 @@ from .runtime_settings import (
     resolve_administrator_contact_name,
 )
 from .translation_handlers import TranslationTelegramCommandHandler
+from .town_handlers import TownTelegramCommandHandler
+from .unknown_command_route import TelegramUnknownCommandPrimaryRoute
 
 
 logger = logging.getLogger(__name__)
@@ -183,7 +191,6 @@ class _RuntimePrimitives:
     """@brief 跨运行时切片共享的进程级资源 / Process resources shared across runtime slices."""
 
     execution: KeyedMailboxRuntime
-    billing: PostgresAssistantBilling
     inbox: PostgresInboxRepository
     turns: PostgresTurnRepository
     inference: PostgresInferenceRepository
@@ -248,8 +255,7 @@ def _compose_primitives(
         idle_ttl=mailbox.idle_ttl_seconds,
     )
     outbox_repository = PostgresOutboxRepository()
-    billing = PostgresAssistantBilling(identity.administrator.user_id)
-    turns = PostgresTurnRepository(billing)
+    turns = PostgresTurnRepository()
     outbound = PostgresStandaloneOutboundCapability(
         outbox_repository,
         telemetry=observability.telemetry,
@@ -257,17 +263,12 @@ def _compose_primitives(
     admin_operations = PostgresAdminAnnouncementOperations()
     return _RuntimePrimitives(
         execution=execution,
-        billing=billing,
         inbox=PostgresInboxRepository(),
         turns=turns,
-        inference=PostgresInferenceRepository(billing, outbox=outbox_repository),
+        inference=PostgresInferenceRepository(outbox=outbox_repository),
         outbox_repository=outbox_repository,
         outbound=outbound,
-        acceptance=PostgresAssistantTurnAcceptanceUoW(
-            turns,
-            billing,
-            administrator_id=identity.administrator.user_id,
-        ),
+        acceptance=PostgresAssistantTurnAcceptanceUoW(turns),
         inference_limits=InferenceRuntimeLimits(
             provider_timeout=timedelta(
                 seconds=inference_runtime.provider_timeout_seconds
@@ -319,7 +320,6 @@ def _compose_ingress(
     )
     reset_route = TelegramConversationResetPrimaryRoute(
         persistence=PostgresConversationResetUoW(
-            primitives.billing,
             outbox=primitives.outbox_repository,
         ),
         bot_username=bot_username,
@@ -357,6 +357,46 @@ def _compose_ingress(
                 ),
                 outbound=primitives.outbound,
             ),
+            BankTelegramCommandHandler(
+                bank=_required_capability(
+                    application,
+                    BANK_SERVICE_DATA_KEY,
+                    BankService,
+                ),
+                outbound=primitives.outbound,
+            ),
+            BillingTelegramCommandHandler(
+                billing=_required_capability(
+                    application,
+                    BILLING_SERVICE_DATA_KEY,
+                    BillingService,
+                ),
+                outbound=primitives.outbound,
+            ),
+            ChanceTelegramCommandHandler(
+                workflow=_required_capability(
+                    application,
+                    CHANCE_WORKFLOW_DATA_KEY,
+                    ChanceWorkflow,
+                ),
+                outbound=primitives.outbound,
+            ),
+            PersonalRpgTelegramCommandHandler(
+                personal_rpg=_required_capability(
+                    application,
+                    PERSONAL_RPG_SERVICE_DATA_KEY,
+                    PersonalRpgService,
+                ),
+                outbound=primitives.outbound,
+            ),
+            TownTelegramCommandHandler(
+                towns=_required_capability(
+                    application,
+                    TOWN_SERVICE_DATA_KEY,
+                    TownService,
+                ),
+                outbound=primitives.outbound,
+            ),
             AccountTelegramCommandHandler(
                 accounts=_required_capability(
                     application,
@@ -377,11 +417,16 @@ def _compose_ingress(
             ),
         ),
     )
-    owned_commands = {
+    known_commands = {
         definition.filter_namespace
         for definition in HANDLER_CATALOG
         if definition.kind is HandlerKind.COMMAND
     } | {"clear", "fogmoebot", *durable_commands.commands}
+    unknown_commands = TelegramUnknownCommandPrimaryRoute(
+        bot_username=bot_username,
+        known_commands=known_commands,
+        outbound=primitives.outbound,
+    )
     cooldown = TelegramCommandCooldownGuard(
         gate=ReplayAwareCooldownGate(
             cooldown_seconds=1.0,
@@ -390,7 +435,6 @@ def _compose_ingress(
         ),
         outbound=primitives.outbound,
         bot_username=bot_username,
-        commands=owned_commands,
     )
     return IngressRouter(
         runtime=primitives.execution,
@@ -399,10 +443,15 @@ def _compose_ingress(
             reset_route,
             assistant_route,
             durable_commands,
+            unknown_commands,
             TelegramCatalogPrimaryRoute(
                 dispatcher=catalog_dispatcher,
                 excluded=assistant_route,
-                additional_excluded=(reset_route, durable_commands),
+                additional_excluded=(
+                    reset_route,
+                    durable_commands,
+                    unknown_commands,
+                ),
             ),
         ),
         observers=(moderation.observer,),
@@ -500,9 +549,8 @@ def _compose_services(
         source=BinanceBtcPatternSource(bulkhead=btc_bulkhead),
         notifications=TelegramMonitorNotificationSink(application.bot),
     )
-    handler_bulkheads = _required_blocking_bulkheads(application)
     blocking = BlockingBulkheadLifecycle(
-        (*assistant.blocking_bulkheads, *handler_bulkheads, btc_bulkhead)
+        (*assistant.blocking_bulkheads, btc_bulkhead)
     )
     bindings = (
         ServiceBinding("telegram-listener", listener, shutdown_phase=0),
@@ -522,29 +570,6 @@ def _compose_services(
         ServiceBinding(
             "user-profile-dreaming",
             assistant.dreaming,
-            shutdown_phase=20,
-        ),
-        ServiceBinding(
-            "rps",
-            _required_capability(application, RPS_SERVICE_DATA_KEY, RpsService),
-            shutdown_phase=20,
-        ),
-        ServiceBinding(
-            "crypto-prediction",
-            _required_capability(
-                application,
-                CRYPTO_SERVICE_DATA_KEY,
-                CryptoService,
-            ),
-            shutdown_phase=20,
-        ),
-        ServiceBinding(
-            "games",
-            _required_capability(
-                application,
-                GAMES_RUNTIME_DATA_KEY,
-                GamesRuntime,
-            ),
             shutdown_phase=20,
         ),
         ServiceBinding(
@@ -590,17 +615,6 @@ def _compose_services(
         ),
     )
     return _ServiceAssembly(bindings, btc_monitor)
-
-
-def _required_blocking_bulkheads(
-    application: TelegramApplication,
-) -> tuple[AsyncBlockingBulkhead, ...]:
-    value = application.bot_data.get(HANDLER_BLOCKING_BULKHEADS_DATA_KEY)
-    if not isinstance(value, tuple) or not value:
-        raise RuntimeError("Handler blocking bulkheads are not configured")
-    if not all(isinstance(item, AsyncBlockingBulkhead) for item in value):
-        raise RuntimeError("Handler blocking bulkhead configuration is invalid")
-    return value
 
 
 def compose_bot_runtime(

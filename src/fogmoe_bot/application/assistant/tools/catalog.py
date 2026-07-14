@@ -163,12 +163,6 @@ class GenerateVoiceArgs(ToolArguments):
     text: str = Field(min_length=1, max_length=500, description="Text to synthesize")
 
 
-class KindnessGiftArgs(ToolArguments):
-    """@brief 善意赠币参数 / Kindness-gift arguments."""
-
-    amount: int | None = Field(default=None, ge=1, le=10, description="Coins to gift")
-
-
 class SearchMemoryArgs(ToolArguments):
     """@brief 搜索历史 Memory 参数 / Search-memory arguments."""
 
@@ -665,12 +659,6 @@ DEFAULT_TOOL_CATALOG = ToolCatalog(
             mutation_classifier=_always("media.generate_voice"),
         ),
         define_tool(
-            name="kindness_gift",
-            description="Gift a bounded amount of coins to the current user",
-            arguments_model=KindnessGiftArgs,
-            mutation_classifier=_always("account.kindness_gift"),
-        ),
-        define_tool(
             name="search_memory",
             description=(
                 "Search completed conversation memory in the current authenticated personal "
@@ -715,7 +703,6 @@ __all__ = [
     "GetHelpTextArgs",
     "GoogleSearchArgs",
     "InvalidToolArguments",
-    "KindnessGiftArgs",
     "ListAvailableStickersArgs",
     "RecurrenceUnit",
     "ScheduleAIMessageArgs",

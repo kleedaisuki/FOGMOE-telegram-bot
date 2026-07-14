@@ -36,9 +36,6 @@ from fogmoe_bot.domain.conversation.errors import (
     IdempotencyConflictError,
 )
 from fogmoe_bot.infrastructure.database import connection as db_connection
-from fogmoe_bot.infrastructure.database.assistant_billing import (
-    AssistantBillingTransactions,
-)
 
 from .common import (
     _INFERENCE_ACTIVITY_COLUMNS,
@@ -79,18 +76,6 @@ def _validate_activity_for_turn(
 
 class PostgresTurnRepository:
     """@brief 拥有 Turn acceptance、历史读取与取消生命周期 / Own Turn acceptance, history reads, and cancellation."""
-
-    def __init__(
-        self,
-        billing: AssistantBillingTransactions,
-    ) -> None:
-        """@brief 注入同事务 Assistant 计费原语 / Inject the same-transaction Assistant billing primitive.
-
-        @param billing reserve/settle/release 事务端口 / Reserve/settle/release transaction port.
-        """
-
-        self._billing = billing
-        """@brief 推理终结与取消共享的计费状态机 / Billing state machine shared by inference finalization and cancellation."""
 
     async def create_and_accept_turn(
         self,
@@ -138,9 +123,9 @@ class PostgresTurnRepository:
         @param accepted_at 接受时间 / Acceptance time.
         @return 原子 acceptance 回执 / Atomic acceptance receipt.
         @note 本方法不 commit、不 rollback、也不打开嵌套事务；仅供 infrastructure
-        组合 billing 等同库 UoW。/ This method neither commits, rolls back, nor opens a
-        nested transaction; it is an infrastructure-only primitive for composing same-database
-        units of work such as billing.
+        组合直接 Conversation UoW。/ This method neither commits, rolls back, nor opens a
+        nested transaction; it is an infrastructure-only primitive for composing direct
+        Conversation units of work.
         """
 
         if (
@@ -529,11 +514,6 @@ class PostgresTurnRepository:
                 cancelled,
                 expected_version=expected_version,
                 connection=connection,
-            )
-            await self._billing.release(
-                connection,
-                turn_id=turn_id,
-                released_at=timestamp,
             )
             return cancelled
 

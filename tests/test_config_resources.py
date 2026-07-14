@@ -36,8 +36,11 @@ def test_help_text_uses_telegram_legacy_markdown_delimiters() -> None:
     assert "*指令列表：*" in resources.help_text
     assert "*群组相关：*" in resources.help_text
     assert "*聊天相关：*" in resources.help_text
-    assert "*数据相关：*" in resources.help_text
-    assert "*娱乐相关：*" in resources.help_text
+    assert "*账户、银行与权益（仅私聊）：*" in resources.help_text
+    assert "*个人冒险（仅私聊）：*" in resources.help_text
+    assert "*群组小镇（仅群聊或超级群）：*" in resources.help_text
+    assert "*可验证随机活动（私聊、群聊或超级群）：*" in resources.help_text
+    assert "*其他娱乐与工具：*" in resources.help_text
 
 
 def test_system_prompt_defines_persona_and_runtime_contract() -> None:

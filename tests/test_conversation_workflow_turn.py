@@ -36,7 +36,6 @@ from conversation_workflow_testkit import (
     NOW,
     TURN_UUID,
     _activity_draft,
-    _Billing,
     _initial_turn,
     _message_draft,
     _message_result,
@@ -53,7 +52,7 @@ def test_accept_turn_commits_state_and_user_message_in_one_transaction(
     connection = object()
     transaction = _TransactionContext(connection)
     captured: dict[str, object] = {}
-    repository = PostgresTurnRepository(_Billing())
+    repository = PostgresTurnRepository()
     draft = _message_draft(role=MessageRole.USER)
     activity_draft = _activity_draft()
     initial_turn = _initial_turn()
@@ -148,7 +147,7 @@ def test_create_and_accept_failure_rolls_back_without_persisting_turn_state(
 
     connection = object()
     transaction = _TransactionContext(connection)
-    repository = PostgresTurnRepository(_Billing())
+    repository = PostgresTurnRepository()
     persisted = False
 
     async def fake_insert(
@@ -219,7 +218,7 @@ def test_connection_bound_acceptance_uses_caller_transaction_without_nesting(
     """@brief connection-bound primitive 不打开嵌套事务 / The connection-bound primitive does not open a nested transaction."""
 
     connection = object()
-    repository = PostgresTurnRepository(_Billing())
+    repository = PostgresTurnRepository()
 
     async def fake_insert(
         turn: ConversationTurn,
@@ -293,7 +292,7 @@ def test_inference_activity_insert_binds_traceparent_after_timestamps(
 ) -> None:
     """@brief 活动 INSERT 的 traceparent 参数必须位于全部时间戳之后 / Activity INSERT binds traceparent after every timestamp."""
 
-    repository = PostgresTurnRepository(_Billing())
+    repository = PostgresTurnRepository()
     draft = _activity_draft()
     captured: dict[str, tuple[object, ...]] = {}
 
@@ -390,7 +389,7 @@ def test_history_reader_uses_turn_sequence_cutoff_and_bounded_ascending_window(
         ]
 
     monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
-    repository = PostgresTurnRepository(_Billing())
+    repository = PostgresTurnRepository()
     messages = asyncio.run(
         repository.read_conversation_messages(
             ConversationId("telegram:chat:-100:user:42:thread:9"),
@@ -431,7 +430,7 @@ def test_accept_uow_late_replay_returns_descendant_turn(
     """@brief acceptance 晚到重放可返回已推进的规范回合 / Late acceptance replay may return the canonical descendant turn."""
 
     connection = object()
-    repository = PostgresTurnRepository(_Billing())
+    repository = PostgresTurnRepository()
     user_message = _message_draft(role=MessageRole.USER)
     activity_draft = _activity_draft()
 
@@ -532,7 +531,7 @@ def test_accept_uow_rejects_non_idempotent_version_conflict(
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    repository = PostgresTurnRepository(_Billing())
+    repository = PostgresTurnRepository()
     monkeypatch.setattr(
         repository,
         "_insert_or_load_turn",
@@ -556,8 +555,7 @@ def test_cancel_turn_rechecks_outbox_after_acquiring_turn_lock(
     """@brief cancel 两阶段重查捕获等待 turn 锁期间出现的 outbox / Two-pass cancellation catches an outbox appearing while waiting for the turn lock."""
 
     connection = object()
-    billing = _Billing()
-    repository = PostgresTurnRepository(billing=billing)  # type: ignore[arg-type]
+    repository = PostgresTurnRepository()
     captured: dict[str, object] = {"lock_calls": 0, "sql": []}
 
     async def fake_lock_inference(
@@ -648,6 +646,3 @@ def test_cancel_turn_rechecks_outbox_after_acquiring_turn_lock(
     assert cancelled.state.value == "cancelled"
     assert captured["outbox_connection"] is connection
     assert captured["turn_connection"] is connection
-    assert billing.released == [
-        (connection, TurnId(TURN_UUID), NOW + timedelta(seconds=1))
-    ]

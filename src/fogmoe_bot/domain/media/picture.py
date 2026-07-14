@@ -3,14 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from enum import StrEnum
-
-from .identifiers import ArtifactId, UserId
-
-
-class PictureReceiptConflict(RuntimeError):
-    """图片请求幂等键被复用为不同语义 / A picture-request idempotency key changed semantics."""
 
 
 class PictureRating(StrEnum):
@@ -18,16 +11,6 @@ class PictureRating(StrEnum):
 
     SAFE = "safe"
     NSFW = "nsfw"
-
-
-class HdOfferState(StrEnum):
-    """高清图片报价状态 / HD-picture offer state."""
-
-    PREVIEW_PENDING = "preview_pending"
-    AVAILABLE = "available"
-    CHARGED = "charged"
-    DELIVERED = "delivered"
-    REFUNDED = "refunded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,15 +40,3 @@ class PictureCandidate:
         """返回优先预览 URL / Return the preferred preview URL."""
 
         return self.sample_url or self.file_url or ""
-
-
-@dataclass(frozen=True, slots=True)
-class HdOffer:
-    """可跨重启恢复的高清图片报价 / Restart-resilient HD-picture offer."""
-
-    offer_id: ArtifactId
-    picture: PictureCandidate
-    requester_id: UserId
-    expires_at: datetime
-    state: HdOfferState = HdOfferState.PREVIEW_PENDING
-    charged_user_id: UserId | None = None

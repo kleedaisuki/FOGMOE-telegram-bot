@@ -94,10 +94,10 @@ async def omikuji_command(update: Update, context: TelegramContext) -> None:
             "您需要先注册个人信息才能使用御神签功能。\n请使用 /me 命令完成注册后再来抽签吧！"
         )
         return
-    if result.code is OmikujiCode.INSUFFICIENT_COINS:
+    if result.code is OmikujiCode.INSUFFICIENT_FREE_TOKENS:
         await message.reply_text(
-            "您没有足够的金币进行祈愿抽签。每次抽签需要1枚金币作为供奉。\n"
-            "试试使用 /lottery 命令获取免费金币吧！"
+            "您的免费金币（Free）不足，无法进行祈愿抽签。每次抽签需要 1 枚 Free 金币作为供奉。\n"
+            "可使用 /request_tokens <数量> <用途> 申请免费金币。"
         )
         return
     if result.fortune is None:
