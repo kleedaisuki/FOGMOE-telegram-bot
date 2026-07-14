@@ -101,6 +101,35 @@ def test_database_span_stack_finishes_success_and_error() -> None:
     assert telemetry.current_context is None
 
 
+def test_database_spans_drop_fast_successes_but_keep_errors() -> None:
+    """@brief 数据库埋点丢弃快速成功 SQL，保留错误 / Database instrumentation drops fast successes but retains errors."""
+
+    class Connection:
+        """@brief 提供 SQLAlchemy connection.info 形状 / Provide the SQLAlchemy connection.info shape."""
+
+        def __init__(self) -> None:
+            """@brief 初始化事件字典 / Initialize event state."""
+
+            self.info: dict[str, object] = {}
+
+    telemetry = Telemetry(TelemetryBuffer(4))
+    connection = Connection()
+    previous = db._TELEMETRY
+    db._TELEMETRY = telemetry
+    try:
+        db._start_database_span(connection, "SELECT 1", False)
+        db._finish_database_span(connection, None)
+        assert telemetry.snapshot().accepted_by_signal["span"] == 0
+
+        db._start_database_span(connection, "SELECT 1", False)
+        db._finish_database_span(connection, OSError("unavailable"))
+    finally:
+        db._TELEMETRY = previous
+
+    signals = telemetry.snapshot().accepted_by_signal
+    assert signals["span"] == 1
+
+
 def test_database_span_completion_never_breaks_successful_sql_when_telemetry_fails(
     monkeypatch,
     caplog,

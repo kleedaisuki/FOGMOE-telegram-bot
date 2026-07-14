@@ -267,6 +267,7 @@ class Telemetry:
         kind: SpanKind = SpanKind.INTERNAL,
         parent: TraceContext | None = None,
         attributes: Mapping[str, object] | None = None,
+        minimum_success_duration_ns: int = 0,
     ) -> SpanScope:
         """@brief 创建同步上下文管理的操作 span / Create a synchronously context-managed operation span.
 
@@ -274,12 +275,21 @@ class Telemetry:
         @param kind 操作边界类型 / Operation-boundary kind.
         @param parent durable 或当前父上下文 / Durable or current parent context.
         @param attributes 初始属性 / Initial attributes.
+        @param minimum_success_duration_ns 成功 span 的最小持久化时长（纳秒） /
+            Minimum persisted duration for successful spans in nanoseconds.
         @return 未进入的 span scope / Unentered span scope.
+
+        @note 错误状态 span 始终保留；该阈值只抑制成功的高频 span，适用于数据库
+            client instrumentation（数据库客户端埋点）等低价值热路径。/
+            Error-status spans are always retained. This threshold only suppresses
+            successful high-frequency spans, such as database client instrumentation.
         """
 
         normalized = name.strip()
         if not normalized or len(normalized) > 255:
             raise ValueError("Span name must contain 1..255 characters")
+        if minimum_success_duration_ns < 0:
+            raise ValueError("minimum_success_duration_ns cannot be negative")
         inherited = parent if parent is not None else self.current_context
         context = (
             inherited.child() if inherited is not None else TraceContext.new_root()
@@ -292,6 +302,7 @@ class Telemetry:
             kind=kind,
             attributes=attributes,
             clock=self._clock,
+            minimum_success_duration_ns=minimum_success_duration_ns,
         )
 
     def log(
@@ -423,8 +434,21 @@ class SpanScope:
         kind: SpanKind,
         attributes: Mapping[str, object] | None,
         clock: TelemetryClock,
+        minimum_success_duration_ns: int,
     ) -> None:
-        """@brief 初始化 scope / Initialize the scope."""
+        """@brief 初始化 scope / Initialize the scope.
+
+        @param telemetry 完成后接收信号的记录器 / Recorder accepting the completed signal.
+        @param context 当前 span 的 trace context / Trace context for this span.
+        @param parent_span_id 父 span identifier / Parent span identifier.
+        @param name 稳定 span 名称 / Stable span name.
+        @param kind OTel span kind / OTel span kind.
+        @param attributes 初始属性 / Initial attributes.
+        @param clock 墙钟与单调时钟 / Wall and monotonic clock.
+        @param minimum_success_duration_ns 成功 span 的最小持久化时长（纳秒） /
+            Minimum persisted duration for successful spans in nanoseconds.
+        @return None / None.
+        """
 
         from fogmoe_bot.domain.observability.trace import SpanId
 
@@ -436,6 +460,7 @@ class SpanScope:
         self._name = name
         self._kind = kind
         self._clock = clock
+        self._minimum_success_duration_ns = minimum_success_duration_ns
         self._attributes: dict[str, object] = {
             **_CURRENT_ATTRIBUTES.get(),
             **dict(attributes or {}),
@@ -530,26 +555,30 @@ class SpanScope:
                 self._attributes["error.type"] = (
                     exc_type.__name__ if exc_type else "unknown"
                 )
-            signal = SpanSignal(
-                started_at=started_at,
-                ended_at=_span_end_timestamp(started_at, duration_ns),
-                duration_ns=duration_ns,
-                trace_id=self.context.trace_id,
-                span_id=self.context.span_id,
-                parent_span_id=self._parent_span_id,
-                name=self._name,
-                kind=self._kind,
-                status=self._status,
-                status_message=self._status_message,
-                attributes=freeze_attributes(self._attributes),
-            )
+            if (
+                self._status is not SpanStatus.OK
+                or duration_ns >= self._minimum_success_duration_ns
+            ):
+                signal = SpanSignal(
+                    started_at=started_at,
+                    ended_at=_span_end_timestamp(started_at, duration_ns),
+                    duration_ns=duration_ns,
+                    trace_id=self.context.trace_id,
+                    span_id=self.context.span_id,
+                    parent_span_id=self._parent_span_id,
+                    name=self._name,
+                    kind=self._kind,
+                    status=self._status,
+                    status_message=self._status_message,
+                    attributes=freeze_attributes(self._attributes),
+                )
         finally:
             _CURRENT_TRACE.reset(token)
             _CURRENT_ATTRIBUTES.reset(attributes_token)
             self._token = None
             self._attributes_token = None
-        assert signal is not None
-        self._telemetry._finish_span(signal)
+        if signal is not None:
+            self._telemetry._finish_span(signal)
         return False
 
 

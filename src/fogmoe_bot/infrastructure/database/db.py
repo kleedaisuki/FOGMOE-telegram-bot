@@ -24,6 +24,8 @@ _LOGGER = logging.getLogger(__name__)
 """@brief 数据库埋点自身故障的后备日志 / Fallback logger for database-instrumentation failures."""
 _INSTRUMENTED_ENGINE_ID: int | None = None
 """@brief 已安装事件 listener 的 sync engine identity / Identity of the instrumented synchronous engine."""
+_DATABASE_SUCCESS_SPAN_MINIMUM_DURATION_NS = 50_000_000
+"""@brief 成功数据库 span 的最低持久化时长（50 ms） / Minimum persisted successful database-span duration (50 ms)."""
 
 _SQL_TARGET = re.compile(
     r"\b(?:FROM|INTO|UPDATE)\s+([A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*)?)",
@@ -239,6 +241,7 @@ def _start_database_span(
                 **({"db.collection.name": target} if target is not None else {}),
                 "db.query.summary": summary,
             },
+            minimum_success_duration_ns=_DATABASE_SUCCESS_SPAN_MINIMUM_DURATION_NS,
         )
         scope.__enter__()
         entered = True

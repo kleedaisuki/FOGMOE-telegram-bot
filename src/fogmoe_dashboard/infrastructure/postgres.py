@@ -135,22 +135,17 @@ class PostgresDashboardRepository:
     ) -> Sequence[SpanStats]:
         """@brief 查询操作 RED 聚合 / Query operation RED aggregates."""
 
-        rows = await self._fetch(_SPANS_SQL, window.start, window.end, name, limit)
-        return tuple(
-            SpanStats(
-                name=str(row["span_name"]),
-                kind=str(row["span_kind"]),
-                calls=int(row["calls"]),
-                rate_per_second=float(row["rate_per_second"]),
-                errors=int(row["errors"]),
-                p50_ms=float(row["p50_ms"]),
-                p95_ms=float(row["p95_ms"]),
-                p99_ms=float(row["p99_ms"]),
-                average_ms=float(row["average_ms"]),
-                maximum_ms=float(row["maximum_ms"]),
+        if name is None:
+            rows = await self._fetch(_SPANS_SQL, window.start, window.end, limit)
+        else:
+            rows = await self._fetch(
+                _SPANS_BY_NAME_SQL,
+                window.start,
+                window.end,
+                name,
+                limit,
             )
-            for row in rows
-        )
+        return tuple(_span_stats(row) for row in rows)
 
     async def errors(
         self,
@@ -534,6 +529,27 @@ def _metric_stats(row: Mapping[str, Any]) -> MetricStats:
     )
 
 
+def _span_stats(row: Mapping[str, Any]) -> SpanStats:
+    """@brief 映射 span RED 聚合行 / Map a span RED aggregation row.
+
+    @param row PostgreSQL 聚合结果 / PostgreSQL aggregation result.
+    @return 强类型 span RED 摘要 / Strongly typed span RED summary.
+    """
+
+    return SpanStats(
+        name=str(row["span_name"]),
+        kind=str(row["span_kind"]),
+        calls=int(row["calls"]),
+        rate_per_second=float(row["rate_per_second"]),
+        errors=int(row["errors"]),
+        p50_ms=float(row["p50_ms"]),
+        p95_ms=float(row["p95_ms"]),
+        p99_ms=float(row["p99_ms"]),
+        average_ms=float(row["average_ms"]),
+        maximum_ms=float(row["maximum_ms"]),
+    )
+
+
 def _datetime(value: object) -> datetime:
     """@brief 校验 UTC datetime / Validate a UTC datetime."""
 
@@ -700,12 +716,33 @@ SELECT span_name, span_kind, count(*) AS calls,
        max(duration_ns / 1e6) AS maximum_ms
 FROM observability.spans
 WHERE started_at >= $1 AND started_at < $2
-  AND ($3::TEXT IS NULL OR span_name = $3)
+  AND coalesce(attributes ->> 'db.system.name', '') <> 'postgresql'
+GROUP BY span_name, span_kind
+ORDER BY p95_ms DESC, calls DESC
+LIMIT $3
+"""
+"""@brief 非数据库业务 Span RED 分组 SQL / Non-database business Span RED grouping SQL."""
+
+_SPANS_BY_NAME_SQL = """
+SELECT span_name, span_kind, count(*) AS calls,
+       count(*) / greatest(
+         EXTRACT(EPOCH FROM ($2::TIMESTAMPTZ - $1::TIMESTAMPTZ)), 0.001
+       ) AS rate_per_second,
+       count(*) FILTER (WHERE status_code = 'error') AS errors,
+       percentile_cont(0.50) WITHIN GROUP (ORDER BY duration_ns / 1e6) AS p50_ms,
+       percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ns / 1e6) AS p95_ms,
+       percentile_cont(0.99) WITHIN GROUP (ORDER BY duration_ns / 1e6) AS p99_ms,
+       avg(duration_ns / 1e6) AS average_ms,
+       max(duration_ns / 1e6) AS maximum_ms
+FROM observability.spans
+WHERE started_at >= $1 AND started_at < $2
+  AND span_name = $3
+  AND coalesce(attributes ->> 'db.system.name', '') <> 'postgresql'
 GROUP BY span_name, span_kind
 ORDER BY p95_ms DESC, calls DESC
 LIMIT $4
 """
-"""@brief Span RED 分组 SQL / Span RED grouping SQL."""
+"""@brief 指定非数据库业务 Span RED 分组 SQL / Named non-database business Span RED grouping SQL."""
 
 _RETRIEVAL_OPERATIONS_SQL = """
 SELECT span_name, span_kind, count(*) AS calls,
