@@ -12,6 +12,7 @@ from fogmoe_bot.application.assistant.durable_inference import (
 from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
 from fogmoe_bot.application.assistant.tool_runtime import AgentRuntime
 from fogmoe_bot.application.assistant.tools.catalog import DEFAULT_TOOL_CATALOG
+from fogmoe_bot.application.banking.service import BankService
 from fogmoe_bot.application.context_window.cache import ContextWindowCache
 from fogmoe_bot.application.context_window.projection import ContextWindowProjector
 from fogmoe_bot.application.context_window.worker import CompactionWorker
@@ -46,6 +47,12 @@ from fogmoe_bot.infrastructure.assistant.sticker_catalog import (
 )
 from fogmoe_bot.infrastructure.assistant.tool_operations.dispatcher import (
     AssistantToolOperationDispatcher,
+)
+from fogmoe_bot.infrastructure.assistant.tool_operations.asset_actions import (
+    AssistantAssetActionProposalOperation,
+)
+from fogmoe_bot.infrastructure.assistant.tool_operations.banking import (
+    AssistantBankToolOperation,
 )
 from fogmoe_bot.infrastructure.blocking import AsyncBlockingBulkhead
 from fogmoe_bot.infrastructure.context_window.summary import (
@@ -113,6 +120,8 @@ def build_durable_assistant(
     settings: BotSettings,
     resources: BotResources,
     context_window: PostgresContextWindowStore | None = None,
+    bank: BankService | None = None,
+    asset_actions: AssistantAssetActionProposalOperation | None = None,
     telemetry: Telemetry,
 ) -> DurableAssistantComposition:
     """@brief 装配 durable Assistant 及其外部 adapters / Compose the durable Assistant and its external adapters.
@@ -121,6 +130,8 @@ def build_durable_assistant(
         Immutable projection validated by the Bot configuration boundary.
     @param resources 组合根加载的只读资源 / Read-only resources loaded by the composition root.
     @param context_window 可替换 Context Window store / Replaceable Context Window store.
+    @param bank 已由外层组合根构造的银行服务 / Bank service constructed by the outer composition root.
+    @param asset_actions 可选的需确认资产动作提议器 / Optional proposal operation for confirmation-gated asset actions.
     @param telemetry 进程 typed telemetry / Process typed telemetry.
     @return 推理、后台 worker 与需关停资源 / Inference, background workers, and resources requiring shutdown.
     @note 本函数是外层 composition，不读取文件或环境；secret 仅在第三方 SDK 边界揭示。/
@@ -237,6 +248,8 @@ def build_durable_assistant(
         outbox=PostgresOutboxRepository(),
         memory=working_memory,
         groups=PostgresGroupMessageProjection(),
+        banking=AssistantBankToolOperation(bank=bank) if bank is not None else None,
+        asset_actions=asset_actions,
     )
     store = PostgresAssistantToolStore(operations=operations)
     completion = LiteLLMAssistantCompletion(

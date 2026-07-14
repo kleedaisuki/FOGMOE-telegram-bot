@@ -29,6 +29,7 @@ from telegram.ext import (
 )
 
 from . import (
+    asset_confirmation_handlers,
     economy_handlers,
     moderation_handlers,
     verification_handlers,
@@ -339,6 +340,12 @@ HANDLER_CATALOG = HandlerCatalog(
             "task",
             r"^task_",
             economy_handlers.task_callback,
+        ),
+        _callback(
+            "asset-actions.confirmation",
+            "asset_confirm",
+            r"^asset_confirm:",
+            asset_confirmation_handlers.asset_action_confirmation_callback,
         ),
         _command(
             "verification.command", "verify", verification_handlers.verify_command

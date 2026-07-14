@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fogmoe_bot.application.admin.models import (
     AdminCode,
     AdminStats,
@@ -9,6 +11,12 @@ from fogmoe_bot.application.admin.models import (
     RequestAnnouncement,
 )
 from fogmoe_bot.application.admin.service import AdminService
+from fogmoe_bot.application.banking.models import (
+    BankCode,
+    ListPendingTokenRequests,
+    PendingTokenRequestsResult,
+)
+from fogmoe_bot.application.banking.service import BankService
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCapability,
     StandaloneOutboundCommand,
@@ -44,25 +52,28 @@ class AdminTelegramCommandHandler:
         self,
         *,
         service: AdminService,
+        bank: BankService,
         outbound: StandaloneOutboundCapability,
     ) -> None:
         """@brief 注入 AdminService 与共享 outbox / Inject AdminService and the shared outbox.
 
         @param service 唯一授权与用例边界 / Sole authorization and use-case boundary.
+        @param bank 银行只读审批队列能力 / Bank read capability for the approval queue.
         @param outbound standalone outbox 能力 / Standalone-outbox capability.
         """
 
         self._service = service
+        self._bank = bank
         self._outbound = outbound
 
     @property
     def commands(self) -> frozenset[str]:
         """@brief 返回 Admin 命令所有权 / Return Admin command ownership.
 
-        @return admin_announce、stats 与 logs / admin_announce, stats, and logs.
+        @return admin、admin_announce、stats 与 logs / admin, admin_announce, stats, and logs.
         """
 
-        return frozenset({"admin_announce", "stats", "logs"})
+        return frozenset({"admin", "admin_announce", "stats", "logs"})
 
     async def handle(
         self,
@@ -76,7 +87,9 @@ class AdminTelegramCommandHandler:
         @return None / None.
         """
 
-        if command.command == "stats":
+        if command.command == "admin":
+            text = await self._dashboard(command)
+        elif command.command == "stats":
             text = await self._statistics(command)
         elif command.command == "logs":
             text = await self._logs(command)
@@ -85,6 +98,37 @@ class AdminTelegramCommandHandler:
         else:
             raise ValueError("Admin handler received an unowned command")
         await _reply(self._outbound, update, command, text)
+
+    async def _dashboard(self, command: ParsedTelegramCommand) -> str:
+        """@brief 并行汇总私聊管理员控制台 / Concurrently assemble the private administrator dashboard.
+
+        @param command 已解析 `/admin` 命令 / Parsed `/admin` command.
+        @return 有界、可操作的控制台文本 / Bounded, actionable dashboard text.
+        @note 两个读取分别使用自己的短查询；不持有跨服务事务或长生命周期锁。/
+            The two reads use independent short queries; no cross-service transaction or
+            long-lived lock is held.
+        """
+
+        if command.chat_type != "private":
+            return "管理控制台仅限私聊使用喵，请私聊 Bot 后再试。"
+        statistics, pending = await asyncio.gather(
+            self._service.statistics(actor_id=command.user_id, group_limit=1),
+            self._bank.list_pending_token_requests(
+                ListPendingTokenRequests(
+                    administrator_id=command.user_id,
+                    limit=5,
+                )
+            ),
+        )
+        if statistics.code is AdminCode.PERMISSION_DENIED:
+            return _PERMISSION_DENIED_TEXT
+        if pending.code is BankCode.FORBIDDEN:
+            return _PERMISSION_DENIED_TEXT
+        if statistics.code is not AdminCode.SUCCESS or statistics.stats is None:
+            return "管理统计暂时不可用，请稍后重试。"
+        if pending.code is not BankCode.SUCCESS:
+            return "银行审批队列暂时不可用，请稍后重试。"
+        return _dashboard_text(statistics.stats, pending)
 
     async def _statistics(self, command: ParsedTelegramCommand) -> str:
         """@brief 读取并渲染统计 / Read and render statistics.
@@ -246,6 +290,49 @@ def _stats_text(stats: AdminStats) -> str:
         f"📈 图表群组: {_ids(stats.charts.group_ids)}"
     )
     return _clean(text)[:4000]
+
+
+def _dashboard_text(
+    stats: AdminStats,
+    pending: PendingTokenRequestsResult,
+) -> str:
+    """@brief 渲染管理员的紧凑工作台 / Render a compact administrator workbench.
+
+    @param stats 已授权的全局统计快照 / Authorized global-statistics snapshot.
+    @param pending 已授权的待审批申请快照 / Authorized pending-request snapshot.
+    @return Telegram 安全的控制台文本 / Telegram-safe dashboard text.
+    @raise ValueError 请求结果不成功时抛出 / Raised when the request result is not successful.
+    """
+
+    if pending.code is not BankCode.SUCCESS:
+        raise ValueError("Administrator dashboard requires successful pending requests")
+    request_lines = (
+        [
+            (
+                f"• {request.request_id}\n"
+                f"  用户 {request.requester_id}｜{request.requested_amount.value} 枚\n"
+                f"  {request.purpose[:120]}"
+            )
+            for request in pending.requests
+        ]
+        or ["当前没有待审核申请。"]
+    )
+    return _clean(
+        "🛡️ 管理控制台\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"注册用户：{stats.user_count}\n"
+        f"待审 Free 代币申请：{len(pending.requests)}（本页最多 5 条）\n\n"
+        "待审队列：\n"
+        + "\n".join(request_lines)
+        + "\n\n"
+        "下一步：\n"
+        "• 完整队列：/bank_pending [1–20]\n"
+        "• 审核：/bank_review <申请ID> approve|reject [说明]\n"
+        "• 直接发行：/bank_issue <用户ID> <数量> <审计用途>\n"
+        "• 活动奖池：/bank_fund_activity <数量> <审计用途>\n"
+        "• 公告：/admin_announce <正文>\n"
+        "• 详细统计：/stats [1–50]｜诊断：/logs [1–200]"
+    )[:4000]
 
 
 def _ids(values: tuple[int, ...]) -> str:

@@ -14,6 +14,8 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
 )
 
 from .diary import execute_diary
+from .asset_actions import AssistantAssetActionProposalOperation
+from .banking import AssistantBankToolOperation
 from .external import ExternalReadTools, GeneratedMediaTools, StickerCatalogReader
 from .group import GroupContextReader, fetch_group_context
 from .memory import search_memory
@@ -35,6 +37,8 @@ class AssistantToolOperationDispatcher:
         outbox: StandaloneOutboxWriter,
         memory: WorkingMemoryReader,
         groups: GroupContextReader,
+        banking: AssistantBankToolOperation | None = None,
+        asset_actions: AssistantAssetActionProposalOperation | None = None,
     ) -> None:
         """注入全部显式 adapter；工具 metadata 仍仅由 ToolCatalog 拥有。"""
 
@@ -45,10 +49,14 @@ class AssistantToolOperationDispatcher:
         self._outbox = outbox
         self._memory = memory
         self._groups = groups
+        self._banking = banking
+        self._asset_actions = asset_actions
 
     def transaction_mode(self, request: ToolEffectRequest) -> ToolTransactionMode:
         """按 catalog 提供的 mutation/effect classification 选择事务模式。"""
 
+        if request.tool_name == "bank_request_tokens":
+            return ToolTransactionMode.OUTSIDE_TRANSACTION
         if request.mutating and not request.effect_kind.startswith("media."):
             return ToolTransactionMode.ATOMIC_MUTATION
         return ToolTransactionMode.OUTSIDE_TRANSACTION
@@ -92,6 +100,29 @@ class AssistantToolOperationDispatcher:
                 return await execute_schedule(request, connection=connection)
             case "generate_image" | "generate_voice":
                 return await self._generated_media.generate(request)
+            case "bank_request_tokens" | "bank_get_overview" | "bank_list_pending_token_requests":
+                if self._banking is None:
+                    return {
+                        "status": "rejected",
+                        "reason": "bank_tool_not_configured",
+                        "message": "银行工具服务尚未配置，因此没有查询或创建任何申请。",
+                    }
+                return await self._banking.execute(request)
+            case (
+                "bank_review_token_request"
+                | "bank_issue_tokens"
+                | "bank_fund_activity_pot"
+            ):
+                if self._asset_actions is None:
+                    return {
+                        "status": "rejected",
+                        "reason": "asset_confirmation_not_configured",
+                        "message": "账户资产确认服务尚未配置，因此没有执行任何操作。",
+                    }
+                return await self._asset_actions.execute(
+                    request,
+                    connection=connection,
+                )
             case _:
                 return {
                     "error": f"Tool operation is not configured: {request.tool_name}"
@@ -105,6 +136,20 @@ class AssistantToolOperationDispatcher:
         connection: AsyncConnection,
     ) -> None:
         """在 receipt finalize transaction 中持久化 downstream intent。"""
+
+        if request.tool_name in {
+            "bank_review_token_request",
+            "bank_issue_tokens",
+            "bank_fund_activity_pot",
+        }:
+            if self._asset_actions is not None:
+                await self._asset_actions.finalize(
+                    request,
+                    result,
+                    connection=connection,
+                    outbox=self._outbox,
+                )
+            return
 
         await finalize_downstream_effect(
             request,

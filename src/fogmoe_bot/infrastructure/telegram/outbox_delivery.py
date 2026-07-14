@@ -43,10 +43,13 @@ from fogmoe_bot.application.conversation.outbox_worker import (
     PermanentDeliveryError,
     RetryableDeliveryError,
 )
+from fogmoe_bot.application.asset_actions.callbacks import AssetActionCallbackData
+from fogmoe_bot.domain.asset_actions.confirmation import AssetActionDecision
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.outbox import (
     EDIT_TELEGRAM_MESSAGE,
     SEND_TELEGRAM_ARTIFACT,
+    SEND_TELEGRAM_ASSET_CONFIRMATION,
     SEND_TELEGRAM_MESSAGE,
     SEND_TELEGRAM_PHOTO,
     SEND_TELEGRAM_STICKER,
@@ -109,6 +112,16 @@ _PHOTO_KEYS = frozenset(
     }
 )
 """@brief photo outbox 允许的持久化字段 / Persisted fields allowed for photo delivery."""
+
+_ASSET_CONFIRMATION_KEYS = frozenset(
+    {
+        "chat_id",
+        "text",
+        "approve_callback_data",
+        "cancel_callback_data",
+    }
+)
+"""@brief 资产确认卡片允许字段 / Fields allowed for an asset-confirmation card."""
 
 _STICKER_PACK_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 """@brief Telegram sticker pack 安全名称语法 / Safe Telegram sticker-pack name grammar."""
@@ -212,6 +225,22 @@ class SendPhotoPayload:
     button_callback_data: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class SendAssetConfirmationPayload:
+    """@brief 已校验 Telegram 资产确认卡片载荷 / Validated Telegram asset-confirmation-card payload.
+
+    @param chat_id owner 的私聊 ID / Owner's private-chat identifier.
+    @param text 用户核对的确认正文 / Confirmation body for user review.
+    @param approve_callback_data 确认执行 callback / Approve-execution callback.
+    @param cancel_callback_data 取消 callback / Cancel callback.
+    """
+
+    chat_id: int
+    text: str
+    approve_callback_data: str
+    cancel_callback_data: str
+
+
 class TelegramOutboxDeliveryAdapter:
     """@brief 将类型化 outbox 消息投递到 Telegram / Deliver typed outbox messages to Telegram."""
 
@@ -243,6 +272,8 @@ class TelegramOutboxDeliveryAdapter:
         try:
             if message.kind == SEND_TELEGRAM_MESSAGE:
                 return await self._deliver_message(message.payload)
+            if message.kind == SEND_TELEGRAM_ASSET_CONFIRMATION:
+                return await self._deliver_asset_confirmation(message.payload)
             if message.kind == EDIT_TELEGRAM_MESSAGE:
                 return await self._deliver_edit(message.payload)
             if message.kind == SEND_TELEGRAM_STICKER:
@@ -326,6 +357,34 @@ class TelegramOutboxDeliveryAdapter:
                 category=DeliveryErrorCategory.PROVIDER,
             )
         return DeliveryReceipt(str(edited.message_id))
+
+    async def _deliver_asset_confirmation(
+        self,
+        payload: JsonObject,
+    ) -> DeliveryReceipt:
+        """@brief 投递 owner 绑定的资产确认卡片 / Deliver an owner-bound asset confirmation card."""
+
+        parsed = parse_send_asset_confirmation_payload(payload)
+        sent = await self._bot.send_message(
+            chat_id=parsed.chat_id,
+            text=parsed.text,
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "确认执行",
+                            callback_data=parsed.approve_callback_data,
+                        ),
+                        InlineKeyboardButton(
+                            "取消",
+                            callback_data=parsed.cancel_callback_data,
+                        ),
+                    ]
+                ]
+            ),
+            disable_web_page_preview=True,
+        )
+        return DeliveryReceipt(str(sent.message_id))
 
     async def _deliver_sticker(self, payload: JsonObject) -> DeliveryReceipt:
         """@brief 解析 pack/emoji 并投递贴纸 / Resolve pack/emoji and deliver a sticker."""
@@ -468,6 +527,47 @@ def parse_edit_message_payload(payload: JsonObject) -> EditMessagePayload:
             payload,
             "disable_web_page_preview",
         ),
+    )
+
+
+def parse_send_asset_confirmation_payload(
+    payload: JsonObject,
+) -> SendAssetConfirmationPayload:
+    """@brief 严格解析资产确认卡片载荷 / Strictly parse an asset-confirmation-card payload.
+
+    @param payload 持久化 JSON 对象 / Persisted JSON object.
+    @return 类型化确认卡片载荷 / Typed confirmation-card payload.
+    @raise OutboundPayloadError 字段、私聊 ID 或 callback 非法时抛出 / Raised for invalid fields, private-chat ID, or callbacks.
+    """
+
+    _validate_keys(
+        payload,
+        allowed=_ASSET_CONFIRMATION_KEYS,
+        required=_ASSET_CONFIRMATION_KEYS,
+    )
+    chat_id = payload["chat_id"]
+    if isinstance(chat_id, bool) or not isinstance(chat_id, int) or chat_id <= 0:
+        raise _payload_error("asset confirmation chat_id must be a positive private-chat ID")
+    approve_callback_data = _callback_data(payload, "approve_callback_data")
+    cancel_callback_data = _callback_data(payload, "cancel_callback_data")
+    try:
+        approve = AssetActionCallbackData.decode(approve_callback_data)
+        cancel = AssetActionCallbackData.decode(cancel_callback_data)
+    except ValueError as error:
+        raise _payload_error("asset confirmation callback data is invalid") from error
+    if (
+        approve.confirmation_id != cancel.confirmation_id
+        or approve.decision is not AssetActionDecision.APPROVE
+        or cancel.decision is not AssetActionDecision.CANCEL
+    ):
+        raise _payload_error(
+            "asset confirmation callbacks must be opposite decisions for one confirmation"
+        )
+    return SendAssetConfirmationPayload(
+        chat_id=chat_id,
+        text=_text(payload),
+        approve_callback_data=approve_callback_data,
+        cancel_callback_data=cancel_callback_data,
     )
 
 
@@ -682,6 +782,24 @@ def _text(payload: JsonObject) -> str:
     return value
 
 
+def _callback_data(payload: JsonObject, key: str) -> str:
+    """@brief 读取 Telegram 长度受限 callback_data / Read Telegram length-bounded callback_data.
+
+    @param payload 持久化 payload / Persisted payload.
+    @param key callback 字段名 / Callback field name.
+    @return 1–64 UTF-8 bytes 的 callback / Callback of 1–64 UTF-8 bytes.
+    @raise OutboundPayloadError callback_data 非法时抛出 / Raised for invalid callback data.
+    """
+
+    value = payload.get(key)
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value.encode("utf-8")) <= 64
+    ):
+        raise _payload_error(f"{key} must be 1..64 UTF-8 bytes")
+    return value
+
+
 def _parse_mode(payload: JsonObject) -> str | None:
     """@brief 读取可选 parse_mode / Read an optional parse_mode.
 
@@ -784,12 +902,14 @@ def _retry_after_delay(error: RetryAfter) -> timedelta:
 __all__ = [
     "EditMessagePayload",
     "SendArtifactPayload",
+    "SendAssetConfirmationPayload",
     "SendMessagePayload",
     "SendPhotoPayload",
     "SendStickerPayload",
     "TelegramOutboxDeliveryAdapter",
     "parse_edit_message_payload",
     "parse_send_artifact_payload",
+    "parse_send_asset_confirmation_payload",
     "parse_send_message_payload",
     "parse_send_photo_payload",
     "parse_send_sticker_payload",

@@ -84,13 +84,21 @@ class BankTelegramCommandHandler:
         """
 
         if command.chat_type != "private":
-            text = _PRIVATE_ONLY_TEXT
-        elif command.command == "bank":
+            await enqueue_command_reply(
+                self._outbound,
+                update,
+                command,
+                _PRIVATE_ONLY_TEXT,
+            )
+            return
+        if command.command == "bank":
             text = await self._overview_text(command)
         elif command.command in {"request_tokens", "recharge"}:
-            text = await self._request_text(update, command)
+            result = await self._request_tokens(update, command)
+            text = result if isinstance(result, str) else _request_result_text(result)
         elif command.command == "bank_review":
-            text = await self._review_text(update, command)
+            result = await self._review_token_request(update, command)
+            text = result if isinstance(result, str) else _review_result_text(result)
         elif command.command == "bank_issue":
             text = await self._issue_text(update, command)
         elif command.command == "bank_fund_activity":
@@ -113,23 +121,23 @@ class BankTelegramCommandHandler:
             return "请先使用 /me 注册账户，再查看银行钱包喵。"
         return _overview_text(overview)
 
-    async def _request_text(
+    async def _request_tokens(
         self,
         update: InboundUpdate,
         command: ParsedTelegramCommand,
-    ) -> str:
-        """@brief 创建免费代币申请 / Create a free-token request.
+    ) -> TokenRequestResult | str:
+        """@brief 创建免费代币申请并返回规范结果 / Create a free-token request and return its canonical result.
 
         @param update durable 来源 Update / Durable source Update.
         @param command 已解析申请命令 / Parsed request command.
-        @return 用户可见文本 / User-facing text.
+        @return 领域结果或用户可见参数错误 / Domain result or user-visible argument error.
         """
 
         parsed = _request_arguments(command.argument_text)
         if isinstance(parsed, str):
             return parsed
         amount, purpose = parsed
-        result = await self._bank.request_tokens(
+        return await self._bank.request_tokens(
             RequestTokens(
                 user_id=command.user_id,
                 amount=amount,
@@ -141,25 +149,24 @@ class BankTelegramCommandHandler:
                 request_id=uuid4(),
             )
         )
-        return _request_result_text(result)
 
-    async def _review_text(
+    async def _review_token_request(
         self,
         update: InboundUpdate,
         command: ParsedTelegramCommand,
-    ) -> str:
-        """@brief 审核一笔待处理代币申请 / Review one pending token request.
+    ) -> TokenRequestResult | str:
+        """@brief 审核一笔待处理代币申请并返回规范结果 / Review one pending token request and return its canonical result.
 
         @param update durable 来源 Update / Durable source Update.
         @param command 已解析审核命令 / Parsed review command.
-        @return 用户可见文本 / User-facing text.
+        @return 领域结果或用户可见参数错误 / Domain result or user-visible argument error.
         """
 
         parsed = _review_arguments(command.argument_text)
         if isinstance(parsed, str):
             return parsed
         request_id, decision, note = parsed
-        result = await self._bank.review_token_request(
+        return await self._bank.review_token_request(
             ReviewTokenRequest(
                 request_id=request_id,
                 reviewer_id=command.user_id,
@@ -171,7 +178,6 @@ class BankTelegramCommandHandler:
                 note=note,
             )
         )
-        return _review_result_text(result)
 
     async def _issue_text(
         self,
@@ -471,6 +477,8 @@ def _request_result_text(result: TokenRequestResult) -> str:
 
     if result.code is BankCode.NOT_REGISTERED:
         return "请先使用 /me 注册账户，再申请代币。"
+    if result.code is BankCode.FORBIDDEN:
+        return "银行管理员不能审核自己的申请；请使用 /bank_issue <用户ID> <数量> <审计用途>。"
     if result.code is not BankCode.SUCCESS or result.request is None:
         return "代币申请暂未创建，请稍后重试。"
     request = result.request

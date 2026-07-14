@@ -8,7 +8,7 @@
 *账户、银行与权益（仅私聊）：*
 /me - 注册或查看个人信息
 /bank - 查看 Free 免费金币与 Paid legacy 历史余额
-/request\_tokens <数量> <用途> - 申请免费金币，等待银行审核
+/request\_tokens <数量> <用途> - 申请免费金币；会可靠提醒银行管理员，等待审核
 /recharge <数量> <用途> - 与 /request\_tokens 相同；仅为申请简写，不是充值
 /billing - 查看有效权益与订阅
 /billing\_order <报价ID> [续费订阅ID] - 创建待付款权益/订阅订单
