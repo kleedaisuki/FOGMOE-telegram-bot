@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from fogmoe_bot.application.observability import telemetry as telemetry_module
 from fogmoe_bot.application.observability.telemetry import (
     Telemetry,
     TelemetryBuffer,
@@ -91,6 +93,100 @@ def test_nested_spans_emit_parented_immutable_signals_and_restore_context() -> N
     assert spans[0].parent_span_id == root.context.span_id
     assert spans[0].trace_id == spans[1].trace_id
     assert all(span.duration_ns >= 0 for span in spans)
+
+
+def test_span_projects_end_time_from_monotonic_duration_when_wall_clock_rewinds() -> (
+    None
+):
+    """@brief 墙钟回拨时 span 仍使用单调耗时结束 / A span still ends from its monotonic duration when the wall clock rewinds."""
+
+    class Clock:
+        """@brief 模拟 span 中途墙钟回拨 / Simulate a wall-clock rewind during a span."""
+
+        def __init__(self) -> None:
+            """@brief 初始化确定性时间序列 / Initialize the deterministic time sequence."""
+
+            self.wall_reads = 0
+            self._started_at = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+            self._monotonic_values = iter((7_000_000_000, 7_250_000_000))
+
+        def now(self) -> datetime:
+            """@brief 首次返回起点，后续模拟回拨 / Return the start first, then simulate a rewind.
+
+            @return 时区感知 UTC 时刻 / Timezone-aware UTC instant.
+            """
+
+            self.wall_reads += 1
+            if self.wall_reads == 1:
+                return self._started_at
+            return self._started_at - timedelta(minutes=5)
+
+        def monotonic_ns(self) -> int:
+            """@brief 返回单调时间序列 / Return the monotonic time sequence.
+
+            @return 单调纳秒值 / Monotonic nanoseconds.
+            """
+
+            return next(self._monotonic_values)
+
+    buffer = TelemetryBuffer(4)
+    clock = Clock()
+    telemetry = Telemetry(buffer, clock=clock)
+
+    with telemetry.span("database.query"):
+        pass
+
+    signal = buffer.drain(1)[0]
+    assert isinstance(signal, SpanSignal)
+    assert signal.duration_ns == 250_000_000
+    assert signal.ended_at == signal.started_at + timedelta(milliseconds=250)
+    assert signal.ended_at >= signal.started_at
+    assert clock.wall_reads == 1
+
+
+def test_span_restores_context_when_signal_construction_fails(monkeypatch) -> None:
+    """@brief span 信号构造失败仍恢复上下文 / Span context is restored even when signal construction fails."""
+
+    def fail_freeze(_: object) -> None:
+        """@brief 模拟 span 结束时的信号构造故障 / Simulate signal-construction failure at span completion.
+
+        @param _ 待冻结属性 / Attributes to freeze.
+        @return 永不返回 / Never returns.
+        """
+
+        raise RuntimeError("signal construction failed")
+
+    telemetry = Telemetry(TelemetryBuffer(4))
+    scope = telemetry.span("operation")
+    scope.__enter__()
+    monkeypatch.setattr(telemetry_module, "freeze_attributes", fail_freeze)
+
+    with pytest.raises(RuntimeError, match="signal construction failed"):
+        scope.__exit__(None, None, None)
+
+    assert telemetry.current_context is None
+
+
+def test_span_entry_restores_context_when_attribute_setup_fails(monkeypatch) -> None:
+    """@brief span 进入期属性失败也恢复 trace 上下文 / Span entry restores trace context when attribute setup fails."""
+
+    def fail_freeze(_: object) -> None:
+        """@brief 模拟进入期属性冻结失败 / Simulate entry-time attribute freezing failure.
+
+        @param _ 待冻结属性 / Attributes to freeze.
+        @return 永不返回 / Never returns.
+        """
+
+        raise RuntimeError("attribute setup failed")
+
+    telemetry = Telemetry(TelemetryBuffer(4))
+    scope = telemetry.span("operation")
+    monkeypatch.setattr(telemetry_module, "freeze_attributes", fail_freeze)
+
+    with pytest.raises(RuntimeError, match="attribute setup failed"):
+        scope.__enter__()
+
+    assert telemetry.current_context is None
 
 
 def test_nested_spans_inherit_business_correlation_attributes() -> None:

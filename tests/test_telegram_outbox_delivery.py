@@ -324,6 +324,7 @@ def test_send_message_returns_external_message_id() -> None:
     preview_options = bot.send_calls[0]["link_preview_options"]
     assert isinstance(reply_parameters, ReplyParameters)
     assert reply_parameters.message_id == 5
+    assert reply_parameters.allow_sending_without_reply is True
     assert isinstance(preview_options, LinkPreviewOptions)
     assert preview_options.is_disabled is True
 
@@ -480,6 +481,7 @@ def test_photo_delivery_preserves_reply_thread_spoiler_and_optional_keyboard() -
     assert call["message_thread_id"] == 7
     assert isinstance(call["reply_parameters"], ReplyParameters)
     assert call["reply_parameters"].message_id == 99
+    assert call["reply_parameters"].allow_sending_without_reply is True
     assert isinstance(call["reply_markup"], InlineKeyboardMarkup)
     assert (
         call["reply_markup"].inline_keyboard[0][0].callback_data == "music_page:example"

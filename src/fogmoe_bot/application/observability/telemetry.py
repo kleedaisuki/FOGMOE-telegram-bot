@@ -9,7 +9,7 @@ import time
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType, TracebackType
 from typing import Literal, Protocol, Self
 
@@ -46,6 +46,69 @@ _CURRENT_ATTRIBUTES: ContextVar[Attributes] = ContextVar(
 Only correlates spans, logs, and errors. Metrics must receive explicit low-cardinality
 attributes so identities such as ``turn_id`` never become metric labels.
 """
+
+
+class TelemetryClock(Protocol):
+    """@brief 同时提供墙钟和单调时钟的遥测时间端口 / Telemetry time port providing both wall and monotonic clocks.
+
+    Span 的绝对时间使用 ``now`` 的 UTC 墙钟锚点，耗时和结束时间坐标使用
+    ``monotonic_ns`` 的差值。这样 NTP 或宿主机校时回拨不会让一个已完成 span
+    变成非法的负时间区间。
+    Absolute span time uses the UTC wall-clock anchor from ``now``; duration and the
+    end-time coordinate use differences from ``monotonic_ns``. Therefore an NTP or
+    host-clock backward adjustment cannot turn a completed span into an invalid
+    negative interval.
+    """
+
+    def now(self) -> datetime:
+        """@brief 读取时区感知 UTC 墙钟 / Read the timezone-aware UTC wall clock.
+
+        @return 当前 UTC 时刻 / Current UTC instant.
+        """
+
+        ...
+
+    def monotonic_ns(self) -> int:
+        """@brief 读取单调纳秒时钟 / Read the monotonic nanosecond clock.
+
+        @return 无定义原点的单调纳秒值 / Monotonic nanoseconds with an undefined origin.
+        """
+
+        ...
+
+
+class SystemTelemetryClock:
+    """@brief 基于 CPython 系统时钟的遥测时钟 / Telemetry clock backed by CPython system clocks."""
+
+    def now(self) -> datetime:
+        """@brief 返回当前 UTC 墙钟 / Return the current UTC wall-clock time.
+
+        @return 当前 UTC 时刻 / Current UTC instant.
+        """
+
+        return datetime.now(UTC)
+
+    def monotonic_ns(self) -> int:
+        """@brief 返回高分辨率单调纳秒值 / Return high-resolution monotonic nanoseconds.
+
+        @return 无定义原点的单调纳秒值 / Monotonic nanoseconds with an undefined origin.
+        """
+
+        return time.perf_counter_ns()
+
+
+def _span_end_timestamp(started_at: datetime, duration_ns: int) -> datetime:
+    """@brief 用单调耗时投影 span 结束墙钟 / Project a span end wall time from its monotonic duration.
+
+    @param started_at span 开始时的 UTC 墙钟锚点 / UTC wall-clock anchor at span start.
+    @param duration_ns 单调时钟计算出的非负耗时 / Non-negative duration from the monotonic clock.
+    @return 不早于 ``started_at`` 的结束时刻 / End time no earlier than ``started_at``.
+    @note ``datetime`` 只有微秒精度；不足一微秒的余数仅保留在 ``duration_ns``。
+        ``datetime`` has microsecond precision; sub-microsecond remainder remains in
+        ``duration_ns``.
+    """
+
+    return started_at + timedelta(microseconds=duration_ns // 1_000)
 
 
 def _signal_counts() -> dict[str, int]:
@@ -164,13 +227,20 @@ class TelemetryBuffer:
 class Telemetry:
     """@brief 应用唯一的信号记录器 / The application's sole signal recorder."""
 
-    def __init__(self, buffer: TelemetryBuffer) -> None:
+    def __init__(
+        self,
+        buffer: TelemetryBuffer,
+        *,
+        clock: TelemetryClock | None = None,
+    ) -> None:
         """@brief 注入有界缓冲 / Inject the bounded buffer.
 
         @param buffer 进程共享缓冲 / Process-shared buffer.
+        @param clock 可替换的遥测时间端口 / Replaceable telemetry time port.
         """
 
         self._buffer = buffer
+        self._clock = clock or SystemTelemetryClock()
 
     @property
     def current_context(self) -> TraceContext | None:
@@ -221,6 +291,7 @@ class Telemetry:
             name=normalized,
             kind=kind,
             attributes=attributes,
+            clock=self._clock,
         )
 
     def log(
@@ -244,7 +315,7 @@ class Telemetry:
         """
 
         active = context if context is not None else self.current_context
-        observed_at = datetime.now(UTC)
+        observed_at = self._clock.now()
         return self._buffer.offer(
             LogSignal(
                 occurred_at=occurred_at.astimezone(UTC),
@@ -315,7 +386,7 @@ class Telemetry:
         context = self.current_context
         return self._buffer.offer(
             MetricSignal(
-                observed_at=datetime.now(UTC),
+                observed_at=self._clock.now(),
                 name=normalized,
                 kind=kind,
                 value=float(value),
@@ -351,6 +422,7 @@ class SpanScope:
         name: str,
         kind: SpanKind,
         attributes: Mapping[str, object] | None,
+        clock: TelemetryClock,
     ) -> None:
         """@brief 初始化 scope / Initialize the scope."""
 
@@ -363,6 +435,7 @@ class SpanScope:
         self._parent_span_id: SpanId | None = parent_span_id
         self._name = name
         self._kind = kind
+        self._clock = clock
         self._attributes: dict[str, object] = {
             **_CURRENT_ATTRIBUTES.get(),
             **dict(attributes or {}),
@@ -382,12 +455,18 @@ class SpanScope:
 
         if self._token is not None:
             raise RuntimeError("SpanScope cannot be entered twice")
-        self._started_at = datetime.now(UTC)
-        self._started_ns = time.perf_counter_ns()
-        self._token = _CURRENT_TRACE.set(self.context)
-        self._attributes_token = _CURRENT_ATTRIBUTES.set(
-            freeze_attributes({**_CURRENT_ATTRIBUTES.get(), **self._attributes})
-        )
+        self._started_at = self._clock.now()
+        self._started_ns = self._clock.monotonic_ns()
+        trace_token = _CURRENT_TRACE.set(self.context)
+        try:
+            attributes_token = _CURRENT_ATTRIBUTES.set(
+                freeze_attributes({**_CURRENT_ATTRIBUTES.get(), **self._attributes})
+            )
+        except Exception:
+            _CURRENT_TRACE.reset(trace_token)
+            raise
+        self._token = trace_token
+        self._attributes_token = attributes_token
         return self
 
     def set_attribute(self, key: str, value: AttributeValue) -> None:
@@ -439,23 +518,22 @@ class SpanScope:
             or started_ns is None
         ):
             raise RuntimeError("SpanScope was not entered")
-        ended_ns = time.perf_counter_ns()
-        ended_at = datetime.now(UTC)
-        if exc is not None:
-            self._status = SpanStatus.ERROR
-            self._status_message = (str(exc).strip() or exc.__class__.__name__)[:2000]
-            self._attributes["error.type"] = (
-                exc_type.__name__ if exc_type else "unknown"
-            )
-        _CURRENT_TRACE.reset(token)
-        _CURRENT_ATTRIBUTES.reset(attributes_token)
-        self._token = None
-        self._attributes_token = None
-        self._telemetry._finish_span(
-            SpanSignal(
+        signal: SpanSignal | None = None
+        try:
+            ended_ns = self._clock.monotonic_ns()
+            duration_ns = max(0, ended_ns - started_ns)
+            if exc is not None:
+                self._status = SpanStatus.ERROR
+                self._status_message = (str(exc).strip() or exc.__class__.__name__)[
+                    :2000
+                ]
+                self._attributes["error.type"] = (
+                    exc_type.__name__ if exc_type else "unknown"
+                )
+            signal = SpanSignal(
                 started_at=started_at,
-                ended_at=ended_at,
-                duration_ns=max(0, ended_ns - started_ns),
+                ended_at=_span_end_timestamp(started_at, duration_ns),
+                duration_ns=duration_ns,
                 trace_id=self.context.trace_id,
                 span_id=self.context.span_id,
                 parent_span_id=self._parent_span_id,
@@ -465,7 +543,13 @@ class SpanScope:
                 status_message=self._status_message,
                 attributes=freeze_attributes(self._attributes),
             )
-        )
+        finally:
+            _CURRENT_TRACE.reset(token)
+            _CURRENT_ATTRIBUTES.reset(attributes_token)
+            self._token = None
+            self._attributes_token = None
+        assert signal is not None
+        self._telemetry._finish_span(signal)
         return False
 
 
@@ -579,8 +663,10 @@ class TelemetryRuntime:
 __all__ = [
     "BufferSnapshot",
     "SpanScope",
+    "SystemTelemetryClock",
     "Telemetry",
     "TelemetryBuffer",
+    "TelemetryClock",
     "TelemetryRuntime",
     "TelemetrySink",
 ]

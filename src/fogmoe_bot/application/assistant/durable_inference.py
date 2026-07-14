@@ -17,8 +17,6 @@ from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import Protocol, cast
 
-from pydantic import ValidationError
-
 from fogmoe_bot.application.conversation.inference_worker import (
     InferenceError,
     InferenceErrorCategory,
@@ -283,11 +281,8 @@ class DurableAssistantInferenceAdapter:
         """
 
         try:
-            return DurableAssistantInferenceCommand.model_validate(
-                request,
-                strict=True,
-            )
-        except ValidationError as error:
+            return DurableAssistantInferenceCommand.from_json(request)
+        except (TypeError, ValueError) as error:
             raise PermanentInferenceError(
                 f"Invalid durable Assistant request: {error}",
                 category=InferenceErrorCategory.INVALID_REQUEST,

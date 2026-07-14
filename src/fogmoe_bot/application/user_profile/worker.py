@@ -100,15 +100,7 @@ class DreamingWorker:
         @return None / None.
         """
 
-        recovered = await self._store.recover_expired_dream_leases(
-            now=self._clock.now()
-        )
-        if recovered:
-            self._telemetry.counter(
-                MetricName.LEASE_RECOVERIES,
-                float(recovered),
-                attributes={"pipeline.stage": "user_profile.dreaming"},
-            )
+        await self._recover_expired_leases()
         async with asyncio.TaskGroup() as task_group:
             task_group.create_task(
                 self._run_coordinator(stop_event),
@@ -124,7 +116,13 @@ class DreamingWorker:
         """@brief 唯一负责 source discovery 与 job formation / Sole owner of source discovery and job formation."""
 
         while not stop_event.is_set():
-            did_work = await self._coordinate_once()
+            try:
+                did_work = await self._coordinate_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Dreaming coordinator pass failed; will retry")
+                did_work = False
             if not did_work:
                 await _wait_or_stop(stop_event, self._poll_interval)
 
@@ -165,16 +163,58 @@ class DreamingWorker:
         """@brief 只消费 durable Dream jobs / Consume only durable Dream jobs."""
 
         while not stop_event.is_set():
-            claims = await self._store.claim_dreams(
-                now=self._clock.now(),
-                limit=1,
-                lease_for=self._lease_for,
-            )
+            try:
+                claims = await self._store.claim_dreams(
+                    now=self._clock.now(),
+                    limit=1,
+                    lease_for=self._lease_for,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Dreaming claim pass failed; will retry")
+                await _wait_or_stop(stop_event, self._poll_interval)
+                continue
             if not claims:
                 await _wait_or_stop(stop_event, self._poll_interval)
                 continue
             for claim in claims:
-                await self._process(claim)
+                try:
+                    await self._process(claim)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Dreaming claim could not be finalized: dream_id=%s",
+                        claim.dream_id,
+                    )
+
+    async def _recover_expired_leases(self) -> None:
+        """@brief 尝试回收启动前遗留的 Dream 租约 / Attempt to recover Dream leases stranded before startup.
+
+        @return None / None.
+        @note Dream 的模型调用有小于租约的 timeout，但没有 lease heartbeat；为了避免
+            恢复循环抢走仍在收尾的 claim，只在启动、领取新任务之前执行。/ Dream model
+            calls have a timeout below the lease but no lease heartbeat; to avoid a recovery loop
+            stealing a claim still finalizing, this runs only before the worker claims new work.
+        """
+
+        try:
+            recovered = await self._store.recover_expired_dream_leases(
+                now=self._clock.now()
+            )
+            if recovered:
+                self._telemetry.counter(
+                    MetricName.LEASE_RECOVERIES,
+                    float(recovered),
+                    attributes={"pipeline.stage": "user_profile.dreaming"},
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Dreaming startup lease recovery failed; a later process startup will retry"
+            )
 
     async def _process(self, claim: DreamClaim) -> None:
         """@brief 在 transaction 外调用模型并 fenced 提交 / Call the model outside transactions and commit with fencing.

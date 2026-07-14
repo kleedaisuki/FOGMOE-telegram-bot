@@ -9,7 +9,13 @@ from fogmoe_bot.application.assistant.agent_loop import AgentResponse
 from fogmoe_bot.application.assistant.durable_inference import (
     TRANSLATION_SYSTEM_PROMPT,
     DurableAssistantInferenceAdapter,
+)
+from fogmoe_bot.application.assistant.inference_command import (
     DurableAssistantInferenceCommand,
+    DurableAssistantScope,
+    DurableAssistantUser,
+    DurableProfileClaim,
+    DurableUserProfile,
 )
 from fogmoe_bot.application.assistant.errors import AssistantInferenceUnavailableError
 from fogmoe_bot.application.context_window.projection import (
@@ -45,6 +51,10 @@ from fogmoe_bot.domain.conversation.message import (
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
 from fogmoe_bot.domain.context_window.compaction import CompactionId
 from fogmoe_bot.domain.context_window.budget import TokenCount
+from fogmoe_bot.domain.user_profile.models import (
+    ProfileClaimKind,
+    ProfileConfidence,
+)
 
 
 NOW = datetime(2026, 7, 11, 10, tzinfo=timezone.utc)
@@ -90,6 +100,56 @@ def _request(turn_id: TurnId, **overrides: object) -> JsonObject:
     }
     request.update(overrides)  # type: ignore[arg-type]
     return request
+
+
+def _private_command_with_profile(
+    turn_id: TurnId,
+) -> DurableAssistantInferenceCommand:
+    """@brief 构造携带 Profile 时间与元组的私聊命令 / Build a private command carrying Profile datetimes and tuples.
+
+    @param turn_id 当前 Turn / Current Turn.
+    @return 将经过 JSONB 持久化的严格命令 / Strict command that will pass through JSONB persistence.
+    """
+
+    profile = DurableUserProfile(
+        revision=3,
+        observed_through_event_id=71,
+        prompt_version=2,
+        route_key="profile:test",
+        created_at=NOW,
+        updated_at=NOW + timedelta(minutes=1),
+        claims=(
+            DurableProfileClaim(
+                key="preference.drink",
+                kind=ProfileClaimKind.PREFERENCE,
+                statement="Klee prefers tea.",
+                confidence=ProfileConfidence.EXPLICIT,
+                evidence_event_ids=(70, 71),
+                observed_at=NOW + timedelta(seconds=30),
+            ),
+        ),
+    )
+    return DurableAssistantInferenceCommand(
+        schema_version=2,
+        conversation_id="assistant-user:7",
+        turn_id=str(turn_id),
+        delivery_stream_id="telegram:bot:1:chat:7:thread:0",
+        chat_id=7,
+        reply_to_message_id=None,
+        message_thread_id=None,
+        user=DurableAssistantUser(
+            user_id=7,
+            username="klee",
+            display_name="Klee",
+            coins=0,
+            plan="free",
+            permission=0,
+            profile=profile,
+            personal_info="",
+            diary_exists=False,
+        ),
+        scope=DurableAssistantScope(is_group=False),
+    )
 
 
 def _message(
@@ -256,6 +316,32 @@ def _adapter(
         ),
         inference=inference,
     )
+
+
+def test_persisted_json_strictly_restores_profile_datetimes_and_tuples() -> None:
+    """@brief JSONB Profile 载荷在严格模式下恢复时间和元组 / Strict JSONB parsing restores Profile datetimes and tuples.
+
+    acceptance 使用 ``model_dump(mode=\"json\")``，因此 JSONB 中的时间为 ISO 8601
+    字符串、元组为数组。适配器必须在 JSON 验证通道中重建命令，同时保留对非 JSON
+    Python 强制转换的拒绝。/ Acceptance uses ``model_dump(mode=\"json\")``, so JSONB
+    stores times as ISO 8601 strings and tuples as arrays. The adapter must rebuild the command
+    through Pydantic's JSON-validation channel while retaining rejection of non-JSON Python
+    coercions.
+    """
+
+    command = _private_command_with_profile(TurnId.new())
+    persisted = command.to_json()
+    stored_profile = persisted["user"]["profile"]
+    assert isinstance(stored_profile, dict)
+    assert isinstance(stored_profile["created_at"], str)
+    assert isinstance(stored_profile["claims"], list)
+
+    parsed = DurableAssistantInferenceAdapter._parse_request(persisted)
+
+    assert parsed == command
+    assert parsed.user.profile is not None
+    assert parsed.user.profile.claims[0].evidence_event_ids == (70, 71)
+    assert parsed.user.profile.claims[0].observed_at == NOW + timedelta(seconds=30)
 
 
 def test_adapter_reads_cutoff_history_and_returns_ordered_durable_outbox_intents() -> (

@@ -99,17 +99,10 @@ class RetrievalWorker:
         @return None / None.
         """
 
-        await self._store.ensure_space(self._space)
-        recovered = await self._store.recover_expired_vector_leases(
-            space=self._space,
-            now=self._clock.now(),
-        )
-        if recovered:
-            self._telemetry.counter(
-                MetricName.LEASE_RECOVERIES,
-                float(recovered),
-                attributes={"pipeline.stage": "retrieval"},
-            )
+        initialized = await self._initialize(stop_event)
+        if not initialized:
+            return
+        await self._recover_expired_leases()
         async with asyncio.TaskGroup() as task_group:
             task_group.create_task(
                 self._run_projector(stop_event),
@@ -121,6 +114,30 @@ class RetrievalWorker:
                     name=f"retrieval-vector:{ordinal}",
                 )
 
+    async def _initialize(self, stop_event: asyncio.Event) -> bool:
+        """@brief 重试建立 embedding 空间，直至可运行或收到停止 / Retry embedding-space initialization until runnable or stopped.
+
+        @param stop_event 顶层停止信号 / Top-level stop signal.
+        @return 空间已就绪时为 True，停止先到时为 False / True when the space is ready; False when stop arrives first.
+        @note ``ensure_space`` 触及数据库与 telemetry hook；临时失败必须不影响其余
+            BotRuntime 服务。/ ``ensure_space`` touches the database and telemetry hooks, so
+            transient failures must not affect other BotRuntime services.
+        """
+
+        while not stop_event.is_set():
+            try:
+                await self._store.ensure_space(self._space)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Retrieval embedding-space initialization failed; will retry"
+                )
+                await _wait_or_stop(stop_event, self._poll_interval)
+                continue
+            return True
+        return False
+
     async def _run_projector(self, stop_event: asyncio.Event) -> None:
         """@brief 运行唯一 source projection producer / Run the sole source-projection producer.
 
@@ -129,7 +146,13 @@ class RetrievalWorker:
         """
 
         while not stop_event.is_set():
-            did_work = await self._project_sources()
+            try:
+                did_work = await self._project_sources()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Retrieval source-projection pass failed; will retry")
+                did_work = False
             if not did_work:
                 await _wait_or_stop(stop_event, self._poll_interval)
 
@@ -206,9 +229,45 @@ class RetrievalWorker:
         """
 
         while not stop_event.is_set():
-            did_work = await self._process_vector_batch()
+            try:
+                did_work = await self._process_vector_batch()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Retrieval vector-consumer pass failed; will retry")
+                did_work = False
             if not did_work:
                 await _wait_or_stop(stop_event, self._poll_interval)
+
+    async def _recover_expired_leases(self) -> None:
+        """@brief 尝试回收启动前遗留的 embedding 租约 / Attempt to recover embedding leases stranded before startup.
+
+        @return None / None.
+        @note 当前 retrieval 协议没有 lease heartbeat，运行期回收可能抢走仍在执行的
+            长 embedding 请求。因此仅在 worker 启动、尚未领取新 claim 前执行；进程
+            崩溃后的恢复由下一次启动负责。/ The current retrieval protocol has no lease
+            heartbeat, so runtime recovery could steal a long-running active embedding request.
+            It therefore runs only before this worker claims new work at startup; the next startup
+            recovers a process-crash lease.
+        """
+
+        try:
+            recovered = await self._store.recover_expired_vector_leases(
+                space=self._space,
+                now=self._clock.now(),
+            )
+            if recovered:
+                self._telemetry.counter(
+                    MetricName.LEASE_RECOVERIES,
+                    float(recovered),
+                    attributes={"pipeline.stage": "retrieval"},
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Retrieval startup lease recovery failed; a later process startup will retry"
+            )
 
     async def _process_vector_batch(self) -> bool:
         """@brief 领取并处理一个 vector batch / Claim and process one vector batch.

@@ -91,3 +91,25 @@ def test_readers_reject_non_integer_schema_versions(
 
     with pytest.raises(error_type, match="schema_version"):
         reader(invalid_config)
+
+
+@pytest.mark.parametrize(
+    "settings_type",
+    (
+        bot_config.InferenceRuntimeSettings,
+        bot_config.OutboxRuntimeSettings,
+        bot_config.CompactionRuntimeSettings,
+        bot_config.DreamingRuntimeSettings,
+    ),
+)
+def test_runtime_settings_require_lease_strictly_longer_than_attempt(
+    settings_type: Callable[..., object],
+) -> None:
+    """@brief 配置层提前拒绝与 worker 不变量冲突的相等 timeout/lease / Configuration rejects equal timeout and lease before violating worker invariants.
+
+    @param settings_type 待构造的 runtime 设置类型 / Runtime settings type to construct.
+    @return None / None.
+    """
+
+    with pytest.raises(ValueError, match="lease_seconds must be >"):
+        settings_type(lease_seconds=60, attempt_timeout_seconds=60)

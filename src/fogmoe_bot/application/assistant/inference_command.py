@@ -8,6 +8,7 @@ provider, Telegram SDK, or persistence implementation.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Literal, Self, cast
 from uuid import UUID
@@ -261,9 +262,7 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
             expected_conversation_id = TelegramConversationAddress(
                 chat_type="group" if self.scope.is_group else "private",
                 chat_id=(
-                    self.scope.group_id
-                    if self.scope.is_group
-                    else self.user.user_id
+                    self.scope.group_id if self.scope.is_group else self.user.user_id
                 ),
                 user_id=self.user.user_id,
                 message_thread_id=self.scope.message_thread_id,
@@ -299,6 +298,29 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
         """
 
         return cast(JsonObject, self.model_dump(mode="json"))
+
+    @classmethod
+    def from_json(cls, payload: JsonObject) -> Self:
+        """@brief 从持久化 JSON 重建严格命令 / Restore a strict command from persisted JSON.
+
+        @param payload JSONB 解码后的对象 / Object decoded from JSONB.
+        @return 已冻结且严格校验的命令 / Frozen command validated strictly.
+        @raise TypeError 载荷不含 JSON 可表示值时抛出 / Raised when payload contains a value that JSON cannot represent.
+        @raise ValueError JSON 非法或不符合命令契约时抛出 / Raised when JSON is invalid or violates the command contract.
+        @note 必须经 JSON 通道验证，而非把已解码字典当作 Python 对象验证：JSON 中的
+            ISO 8601 时间字符串和数组分别是 ``datetime``、``tuple`` 的规范持久化
+            表示。/ Validation deliberately goes through the JSON channel rather than
+            treating the decoded dictionary as Python input: ISO 8601 strings and arrays are
+            the canonical persisted representations of ``datetime`` and ``tuple``.
+        """
+
+        encoded = json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return cls.model_validate_json(encoded, strict=True)
 
 
 __all__ = [

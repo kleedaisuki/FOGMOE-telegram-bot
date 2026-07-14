@@ -299,7 +299,10 @@ class TelegramOutboxDeliveryAdapter:
             protect_content=parsed.protect_content,
             message_thread_id=parsed.message_thread_id,
             reply_parameters=(
-                ReplyParameters(message_id=parsed.reply_to_message_id)
+                ReplyParameters(
+                    message_id=parsed.reply_to_message_id,
+                    allow_sending_without_reply=True,
+                )
                 if parsed.reply_to_message_id is not None
                 else None
             ),
@@ -369,7 +372,10 @@ class TelegramOutboxDeliveryAdapter:
             has_spoiler=parsed.has_spoiler,
             message_thread_id=parsed.message_thread_id,
             reply_parameters=(
-                ReplyParameters(message_id=parsed.reply_to_message_id)
+                ReplyParameters(
+                    message_id=parsed.reply_to_message_id,
+                    allow_sending_without_reply=True,
+                )
                 if parsed.reply_to_message_id is not None
                 else None
             ),

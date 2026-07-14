@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -345,6 +346,33 @@ class _Store:
         return 0
 
 
+class _NoClaimStore(_Store):
+    """@brief 永不领取 Dream 的 store 替身 / Store double that never claims a Dream.
+
+    该替身让 coordinator 的下一轮负责停止测试，避免 consumer 在断言前完成工作。
+    This double lets the coordinator's next pass stop the test, rather than letting a
+    consumer complete work before the assertion.
+    """
+
+    async def claim_dreams(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        lease_for: timedelta,
+    ) -> tuple[DreamClaim, ...]:
+        """@brief 始终返回空 claim 批次 / Always return an empty claim batch.
+
+        @param now 当前时间 / Current time.
+        @param limit claim 上限 / Claim limit.
+        @param lease_for claim 租约 / Claim lease.
+        @return 空 claim 批次 / Empty claim batch.
+        """
+
+        assert now == NOW and limit == 1 and lease_for == timedelta(seconds=30)
+        return ()
+
+
 class _Model:
     """@brief 固定返回 UPSERT 的 Dreaming model fake / Dreaming-model fake returning a fixed UPSERT."""
 
@@ -366,6 +394,138 @@ class _Model:
             "test:model",
             1,
         )
+
+
+class _FailOnceCoordinatorSource:
+    """@brief 首轮 coordinator 读取失败的 source 替身 / Source double whose first coordinator read fails."""
+
+    def __init__(self, stop_event: asyncio.Event) -> None:
+        """@brief 保存停止信号与调用次数 / Store the stop signal and invocation count."""
+
+        self._stop_event = stop_event
+        self.calls = 0
+
+    async def read_unprojected(self, *, limit: int) -> tuple[ProfileEvidence, ...]:
+        """@brief 注入一次临时数据库轮询失败 / Inject one transient database-poll failure.
+
+        @param limit 读取上限 / Read limit.
+        @return 空 evidence 批次 / Empty evidence batch.
+        """
+
+        assert limit == 4
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporary profile-source database failure")
+        self._stop_event.set()
+        return ()
+
+
+class _OneEvidenceThenStopSource:
+    """@brief 首轮返回 evidence、第二轮停止的 source 替身 / Source double returning evidence once then stopping."""
+
+    def __init__(self, stop_event: asyncio.Event) -> None:
+        """@brief 保存停止信号与调用次数 / Store the stop signal and invocation count."""
+
+        self._stop_event = stop_event
+        self.calls = 0
+
+    async def read_unprojected(self, *, limit: int) -> tuple[ProfileEvidence, ...]:
+        """@brief 首轮返回 evidence，后续请求停止 / Return evidence once, then request stop.
+
+        @param limit 读取上限 / Read limit.
+        @return 第一轮 evidence，之后为空 / Evidence on the first pass, then empty.
+        """
+
+        assert limit == 4
+        self.calls += 1
+        if self.calls == 1:
+            return (_evidence(0),)
+        self._stop_event.set()
+        return ()
+
+
+class _BlockingCoordinatorSource:
+    """@brief 阻塞直至取消的 coordinator source 替身 / Coordinator-source double that blocks until cancellation."""
+
+    def __init__(self) -> None:
+        """@brief 初始化开始同步点 / Initialize the start synchronization point."""
+
+        self.started = asyncio.Event()
+
+    async def read_unprojected(self, *, limit: int) -> tuple[ProfileEvidence, ...]:
+        """@brief 等待外部取消 / Wait for external cancellation.
+
+        @param limit 读取上限 / Read limit.
+        @return 永不返回 / Never returns.
+        """
+
+        assert limit == 4
+        self.started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("blocking coordinator source unexpectedly resumed")
+
+
+class _FailOnceProfileTelemetry(Telemetry):
+    """@brief 第一次 counter 失败的 telemetry 替身 / Telemetry double whose first counter fails."""
+
+    def __init__(self) -> None:
+        """@brief 初始化基础缓冲与失败开关 / Initialize the base buffer and failure switch."""
+
+        super().__init__(TelemetryBuffer(64))
+        self._fail_next_counter = True
+
+    def counter(
+        self,
+        name: str,
+        value: float = 1.0,
+        *,
+        unit: str = "{event}",
+        attributes: Mapping[str, object] | None = None,
+    ) -> bool:
+        """@brief 模拟一次 telemetry 发射失败 / Simulate one telemetry-emission failure.
+
+        @param name metric 名称 / Metric name.
+        @param value metric 值 / Metric value.
+        @param unit metric 单位 / Metric unit.
+        @param attributes metric 属性 / Metric attributes.
+        @return 缓冲接收结果 / Buffer acceptance result.
+        """
+
+        if self._fail_next_counter:
+            self._fail_next_counter = False
+            raise ValueError("Span duration cannot be negative")
+        return super().counter(name, value, unit=unit, attributes=attributes)
+
+
+def _resilient_worker(
+    *,
+    source: object,
+    store: _Store,
+    telemetry: Telemetry,
+) -> DreamingWorker:
+    """@brief 构造只验证故障隔离的 Dreaming worker / Build a Dreaming worker used only for fault-isolation checks.
+
+    @param source 测试 evidence source / Test evidence source.
+    @param store 测试 Profile store / Test Profile store.
+    @param telemetry 测试 telemetry recorder / Test telemetry recorder.
+    @return 配置好的 Dreaming worker / Configured Dreaming worker.
+    """
+
+    return DreamingWorker(
+        source=source,  # type: ignore[arg-type]
+        store=store,
+        model=_Model(),
+        telemetry=telemetry,
+        worker_count=1,
+        batch_size=2,
+        source_batch_size=4,
+        max_events_per_dream=8,
+        poll_interval=0.001,
+        refresh_after=timedelta(hours=6),
+        attempt_timeout=timedelta(seconds=20),
+        lease_for=timedelta(seconds=30),
+        clock=_Clock(),
+    )
 
 
 def test_worker_has_one_source_owner_and_model_consumers_only_claim_jobs() -> None:
@@ -400,5 +560,72 @@ def test_worker_has_one_source_owner_and_model_consumers_only_claim_jobs() -> No
         assert all(name.startswith("dreaming-model:") for name in store.claim_tasks)
         assert store.document is not None
         assert store.document.claims[0].statement == "偏好茶"
+
+    asyncio.run(scenario())
+
+
+def test_transient_coordinator_poll_failure_does_not_escape_dreaming_task_group() -> (
+    None
+):
+    """@brief 单次 coordinator 轮询错误不会终止 Dreaming TaskGroup / One coordinator-poll error does not terminate the Dreaming TaskGroup."""
+
+    async def scenario() -> None:
+        """@brief 验证第二轮仍会运行并干净停止 / Verify the next pass runs and stops cleanly."""
+
+        stop_event = asyncio.Event()
+        source = _FailOnceCoordinatorSource(stop_event)
+        worker = _resilient_worker(
+            source=source,
+            store=_Store(stop_event),
+            telemetry=Telemetry(TelemetryBuffer(64)),
+        )
+
+        await asyncio.wait_for(worker.run(stop_event), timeout=1)
+
+        assert source.calls >= 2
+
+    asyncio.run(scenario())
+
+
+def test_telemetry_failure_does_not_escape_dreaming_task_group() -> None:
+    """@brief 单次 telemetry 错误不会终止 Dreaming TaskGroup / One telemetry error does not terminate the Dreaming TaskGroup."""
+
+    async def scenario() -> None:
+        """@brief 在下一轮停止，验证首轮错误已被隔离 / Stop on the next pass, proving the first fault was isolated."""
+
+        stop_event = asyncio.Event()
+        source = _OneEvidenceThenStopSource(stop_event)
+        worker = _resilient_worker(
+            source=source,
+            store=_NoClaimStore(stop_event),
+            telemetry=_FailOnceProfileTelemetry(),
+        )
+
+        await asyncio.wait_for(worker.run(stop_event), timeout=1)
+
+        assert source.calls >= 2
+
+    asyncio.run(scenario())
+
+
+def test_dreaming_poll_cancellation_still_propagates() -> None:
+    """@brief Dreaming 轮询取消不得被故障隔离吞掉 / Dreaming-poll cancellation must not be swallowed by fault isolation."""
+
+    async def scenario() -> None:
+        """@brief 取消阻塞的 coordinator 并验证 CancelledError / Cancel a blocked coordinator and verify CancelledError."""
+
+        stop_event = asyncio.Event()
+        source = _BlockingCoordinatorSource()
+        worker = _resilient_worker(
+            source=source,
+            store=_Store(stop_event),
+            telemetry=Telemetry(TelemetryBuffer(64)),
+        )
+        task = asyncio.create_task(worker.run(stop_event))
+        await asyncio.wait_for(source.started.wait(), timeout=1)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
     asyncio.run(scenario())

@@ -52,25 +52,75 @@ def test_0058_fails_closed_then_drops_only_retired_structures() -> None:
     assert "irreversible" in sections["down"]
 
 
-def test_schema_snapshot_has_0058_head_without_retired_structures() -> None:
-    """@brief DDL 快照不再声明已删除的 Assistant/Kindness 结构 / DDL snapshot no longer declares retired Assistant/Kindness structures.
+def test_schema_snapshot_has_0060_head_without_retired_structures() -> None:
+    """@brief DDL 快照停在 0060 且不声明退役结构 / DDL snapshot ends at 0060 and declares no retired structures.
 
     @return None / None.
     """
 
-    snapshot = (
-        _PROJECT_ROOT / "src/fogmoe_dbctl/schema.sql"
-    ).read_text(encoding="utf-8")
+    snapshot = (_PROJECT_ROOT / "src/fogmoe_dbctl/schema.sql").read_text(
+        encoding="utf-8"
+    )
 
-    assert "-- Alembic head: 0058_retire_assistant_legacy_billing" in snapshot
+    assert "-- Alembic head: 0060_retire_asset_action_confirmations" in snapshot
     for retired_structure in (
         "assistant.billing_reservations",
         "assistant_billing_reservations_retired_tr",
         "bank.forbid_legacy_assistant_billing_mutation",
         "economy.kindness_gifts",
         "idx_kindness_recipient_created",
+        "assistant.asset_action_confirmations",
     ):
         assert retired_structure not in snapshot
+
+
+def test_0059_is_retained_then_0060_safely_retires_it() -> None:
+    """@brief 已部署 revision 可解析，前向迁移在表为空时才退役 / A deployed revision resolves and a forward migration retires it only when empty.
+
+    @return None / None.
+    """
+
+    migration_path = (
+        _PROJECT_ROOT
+        / "src/fogmoe_dbctl/migrations/sql/postgresql/0059_asset_action_confirmations.sql"
+    )
+    version_path = (
+        _PROJECT_ROOT
+        / "src/fogmoe_dbctl/migrations/versions/0059_asset_action_confirmations.py"
+    )
+    retirement_path = (
+        _PROJECT_ROOT
+        / "src/fogmoe_dbctl/migrations/sql/postgresql/0060_retire_asset_action_confirmations.sql"
+    )
+    retirement_version_path = (
+        _PROJECT_ROOT
+        / "src/fogmoe_dbctl/migrations/versions/0060_retire_asset_action_confirmations.py"
+    )
+
+    version = version_path.read_text(encoding="utf-8")
+    upgrade = runner._sections(
+        migration_path.read_text(encoding="utf-8"), migration_path
+    )["up"]
+    retirement_sections = runner._sections(
+        retirement_path.read_text(encoding="utf-8"), retirement_path
+    )
+    retirement_version = retirement_version_path.read_text(encoding="utf-8")
+
+    assert 'revision = "0059_asset_action_confirmations"' in version
+    assert 'down_revision = "0058_retire_assistant_legacy_billing"' in version
+    assert "CREATE TABLE assistant.asset_action_confirmations" in upgrade
+    for marker in (
+        "SET LOCAL lock_timeout = '5s'",
+        "SET LOCAL statement_timeout = '30s'",
+        "LOCK TABLE assistant.asset_action_confirmations IN ACCESS EXCLUSIVE MODE",
+        "FROM assistant.asset_action_confirmations",
+        "requires manual audit and archival",
+        "DROP TABLE assistant.asset_action_confirmations",
+    ):
+        assert marker in retirement_sections["up"]
+    assert 'revision = "0060_retire_asset_action_confirmations"' in retirement_version
+    assert 'down_revision = "0059_asset_action_confirmations"' in retirement_version
+    assert "irreversible" in retirement_sections["down"]
 
 
 def test_runtime_has_no_legacy_assistant_billing_or_kindness_implementation() -> None:
@@ -99,7 +149,9 @@ def test_runtime_has_no_legacy_assistant_billing_or_kindness_implementation() ->
         source_root / "application/assistant/tools/catalog.py",
         source_root / "infrastructure/assistant/tool_operations/dispatcher.py",
     )
-    source_text = "\n".join(path.read_text(encoding="utf-8") for path in runtime_sources)
+    source_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in runtime_sources
+    )
     for retired_symbol in (
         "coin_cost",
         "AssistantBilling",

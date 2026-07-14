@@ -165,10 +165,7 @@ def test_retry_converges_on_one_occurrence_identity_and_durable_command() -> Non
         assert first[0].conversation_id.value == "assistant-user:42"
         assert first[1].content["content_kind"] == "scheduled_prompt"
         assert "Send the reminder" in str(first[1].content["text"])
-        command = DurableAssistantInferenceCommand.model_validate(
-            first[2].request,
-            strict=True,
-        )
+        command = DurableAssistantInferenceCommand.from_json(first[2].request)
         assert command.typed_turn_id == first[0].turn_id
         assert command.user == _profile()
         assert command.chat_id == 42

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 from collections.abc import Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -16,9 +17,11 @@ from fogmoe_bot.domain.observability.signals import SpanKind
 _ENGINE: AsyncEngine | None = None
 _ENGINE_OWNER_LOOP: asyncio.AbstractEventLoop | None = None
 _TELEMETRY: Telemetry | None = None
+"""@brief 数据库 client span recorder / Database-client span recorder."""
 _DATABASE_SETTINGS: BotDatabaseSettings | None = None
 """@brief 由组合根注入的数据库设置 / Database settings injected by the composition root."""
-"""@brief 数据库 client span recorder / Database-client span recorder."""
+_LOGGER = logging.getLogger(__name__)
+"""@brief 数据库埋点自身故障的后备日志 / Fallback logger for database-instrumentation failures."""
 _INSTRUMENTED_ENGINE_ID: int | None = None
 """@brief 已安装事件 listener 的 sync engine identity / Identity of the instrumented synchronous engine."""
 
@@ -164,26 +167,7 @@ def _instrument_engine(engine: AsyncEngine) -> None:
         """@brief 在 driver 调用前启动无 SQL 文本 span / Start a statement-free span before the driver call."""
 
         del cursor, parameters, context
-        telemetry = _configured_telemetry()
-        if telemetry is None:
-            return
-        operation = _sql_operation(statement)
-        target = _sql_target(statement)
-        summary = f"{operation} {target}" if target is not None else operation
-        scope = telemetry.span(
-            summary,
-            kind=SpanKind.CLIENT,
-            attributes={
-                "db.system.name": "postgresql",
-                "db.operation.name": operation,
-                "db.operation.batch": executemany,
-                **({"db.collection.name": target} if target is not None else {}),
-                "db.query.summary": summary,
-            },
-        )
-        scope.__enter__()
-        spans = connection.info.setdefault("fogmoe.observability.spans", [])
-        spans.append(scope)
+        _start_database_span(connection, statement, executemany)
 
     @event.listens_for(sync_engine, "after_cursor_execute")
     def after_cursor_execute(
@@ -219,8 +203,68 @@ def _configured_telemetry() -> Telemetry | None:
     return _TELEMETRY
 
 
+def _start_database_span(
+    connection: Any,
+    statement: str,
+    executemany: bool,
+) -> None:
+    """@brief 尽力启动数据库 client span / Best-effort start a database client span.
+
+    @param connection SQLAlchemy 同步连接 / SQLAlchemy synchronous connection.
+    @param statement 即将执行的 SQL / SQL about to execute.
+    @param executemany 是否为批量调用 / Whether this is an executemany call.
+    @return None / None.
+    @note 埋点发生在驱动调用前，因此其失败必须被完全隔离；若 span 已经进入，
+        会在本函数中结束以恢复 ContextVar。/ Instrumentation runs before the driver call,
+        so its failure must be fully isolated; an entered span is completed here to restore its
+        ContextVar state.
+    """
+
+    telemetry = _configured_telemetry()
+    if telemetry is None:
+        return
+    scope: SpanScope | None = None
+    entered = False
+    try:
+        operation = _sql_operation(statement)
+        target = _sql_target(statement)
+        summary = f"{operation} {target}" if target is not None else operation
+        scope = telemetry.span(
+            summary,
+            kind=SpanKind.CLIENT,
+            attributes={
+                "db.system.name": "postgresql",
+                "db.operation.name": operation,
+                "db.operation.batch": executemany,
+                **({"db.collection.name": target} if target is not None else {}),
+                "db.query.summary": summary,
+            },
+        )
+        scope.__enter__()
+        entered = True
+        spans = connection.info.setdefault("fogmoe.observability.spans", [])
+        if not isinstance(spans, list):
+            raise TypeError("Database telemetry span stack must be a list")
+        spans.append(scope)
+    except Exception as error:
+        if entered and scope is not None:
+            try:
+                scope.__exit__(type(error), error, error.__traceback__)
+            except Exception:
+                pass
+        _report_database_telemetry_failure("Database telemetry span start failed")
+
+
 def _finish_database_span(connection: Any, error: BaseException | None) -> None:
-    """@brief 从连接栈弹出并结束最近 span / Pop and finish the most recent span from a connection stack."""
+    """@brief 从连接栈弹出并尽力结束最近 span / Pop and best-effort finish the most recent span from a connection stack.
+
+    @param connection SQLAlchemy 同步连接 / SQLAlchemy synchronous connection.
+    @param error 原始数据库执行错误或 None / Original database execution error or None.
+    @return None / None.
+    @note 遥测是旁路能力，绝不能把已成功的 SQL 变成失败；埋点异常仅写入后备日志。
+        Telemetry is a side capability and must never turn successful SQL into a
+        failure; instrumentation errors are recorded only through the fallback log.
+    """
 
     raw_spans = connection.info.get("fogmoe.observability.spans")
     if not isinstance(raw_spans, list) or not raw_spans:
@@ -228,10 +272,30 @@ def _finish_database_span(connection: Any, error: BaseException | None) -> None:
     scope = raw_spans.pop()
     if not isinstance(scope, SpanScope):
         return
-    if error is None:
-        scope.__exit__(None, None, None)
+    try:
+        if error is None:
+            scope.__exit__(None, None, None)
+            return
+        scope.__exit__(type(error), error, error.__traceback__)
+    except Exception:
+        _report_database_telemetry_failure("Database telemetry span completion failed")
+
+
+def _report_database_telemetry_failure(message: str) -> None:
+    """@brief 隔离数据库遥测的后备日志故障 / Isolate fallback-log failures for database telemetry.
+
+    @param message 稳定、无敏感数据的故障摘要 / Stable non-sensitive failure summary.
+    @return None / None.
+    @note 项目的日志 handler 也可能发射 telemetry；因此后备日志必须再隔离一次，
+        以避免遥测递归重新影响业务 SQL。/ The project's log handler may itself emit
+        telemetry, so fallback logging is isolated once more to prevent recursive telemetry from
+        affecting business SQL again.
+    """
+
+    try:
+        _LOGGER.exception(message)
+    except Exception:
         return
-    scope.__exit__(type(error), error, error.__traceback__)
 
 
 def _sql_operation(statement: str) -> str:

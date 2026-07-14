@@ -411,14 +411,14 @@ class InferenceRuntimeSettings(_FrozenSettings):
 
     @model_validator(mode="after")
     def _validate_lease(self) -> InferenceRuntimeSettings:
-        """@brief 确保 lease 覆盖一次尝试 / Ensure the lease covers one attempt.
+        """@brief 确保 lease 严格长于一次尝试 / Ensure the lease strictly outlives one attempt.
 
         @return 已验证的推理设置 / Validated inference settings.
         @raise ValueError lease 过短时抛出 / Raised when the lease is too short.
         """
 
-        if self.lease_seconds < self.attempt_timeout_seconds:
-            raise ValueError("lease_seconds must be >= attempt_timeout_seconds")
+        if self.lease_seconds <= self.attempt_timeout_seconds:
+            raise ValueError("lease_seconds must be > attempt_timeout_seconds")
         return self
 
 
@@ -432,14 +432,14 @@ class OutboxRuntimeSettings(_FrozenSettings):
 
     @model_validator(mode="after")
     def _validate_lease(self) -> OutboxRuntimeSettings:
-        """@brief 确保 lease 覆盖投递尝试 / Ensure the lease covers delivery attempts.
+        """@brief 确保 lease 严格长于投递尝试 / Ensure the lease strictly outlives delivery attempts.
 
         @return 已验证的 outbox 设置 / Validated outbox settings.
         @raise ValueError lease 过短时抛出 / Raised when the lease is too short.
         """
 
-        if self.lease_seconds < self.attempt_timeout_seconds:
-            raise ValueError("lease_seconds must be >= attempt_timeout_seconds")
+        if self.lease_seconds <= self.attempt_timeout_seconds:
+            raise ValueError("lease_seconds must be > attempt_timeout_seconds")
         return self
 
 
@@ -454,14 +454,14 @@ class CompactionRuntimeSettings(_FrozenSettings):
 
     @model_validator(mode="after")
     def _validate_lease(self) -> CompactionRuntimeSettings:
-        """@brief 确保压缩 lease 覆盖尝试 / Ensure compaction lease covers attempts.
+        """@brief 确保压缩 lease 严格长于尝试 / Ensure compaction lease strictly outlives attempts.
 
         @return 已验证的压缩设置 / Validated compaction settings.
         @raise ValueError lease 过短时抛出 / Raised when the lease is too short.
         """
 
-        if self.lease_seconds < self.attempt_timeout_seconds:
-            raise ValueError("lease_seconds must be >= attempt_timeout_seconds")
+        if self.lease_seconds <= self.attempt_timeout_seconds:
+            raise ValueError("lease_seconds must be > attempt_timeout_seconds")
         return self
 
 
@@ -482,14 +482,14 @@ class DreamingRuntimeSettings(_FrozenSettings):
 
     @model_validator(mode="after")
     def _validate_lease(self) -> DreamingRuntimeSettings:
-        """@brief 确保 profile lease 覆盖尝试 / Ensure profile lease covers attempts.
+        """@brief 确保 profile lease 严格长于尝试 / Ensure profile lease strictly outlives attempts.
 
         @return 已验证的 dreaming 设置 / Validated dreaming settings.
         @raise ValueError lease 过短时抛出 / Raised when the lease is too short.
         """
 
-        if self.lease_seconds < self.attempt_timeout_seconds:
-            raise ValueError("lease_seconds must be >= attempt_timeout_seconds")
+        if self.lease_seconds <= self.attempt_timeout_seconds:
+            raise ValueError("lease_seconds must be > attempt_timeout_seconds")
         return self
 
 

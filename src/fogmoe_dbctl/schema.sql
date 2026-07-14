@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0058_retire_assistant_legacy_billing
--- Alembic head: 0058_retire_assistant_legacy_billing
+-- Source migrations: 0001_initial through 0060_retire_asset_action_confirmations
+-- Alembic head: 0060_retire_asset_action_confirmations
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and user-plan backfill) and the
