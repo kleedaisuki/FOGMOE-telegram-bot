@@ -274,9 +274,11 @@ def test_personal_memory_profile_and_regeneration_commands_are_distinct() -> Non
         assert len(profiles.clears) == 1
         assert len(profiles.regenerations) == 1
         assert not outbound.commands
-        assert "User Profile" in str(
-            profiles.clears[0].confirmation.payload["text"]
-        )
+        confirmation = str(memories.commands[0].confirmation.payload["text"])
+        assert "个人记忆已经清空" in confirmation
+        assert "当前对话和 User Profile 还在" in confirmation
+        assert "your personal memories have been cleared" in confirmation
+        assert "current conversation and User Profile are still here" in confirmation
 
     asyncio.run(scenario())
 
@@ -307,9 +309,15 @@ def test_group_reset_requires_group_admin_and_freezes_the_decision() -> None:
         denied, denied_memories, _, denied_outbound, _ = _handler(allowed=False)
         await denied.handle(update, parsed)
         assert not denied_memories.commands
-        assert "Only the group owner" in str(
-            denied_outbound.commands[0].payload["text"]
-        )
+        denial = str(denied_outbound.commands[0].payload["text"])
+        assert "只有本群的 owner 或管理员" in denial
+        assert "Only this group's owner or an administrator" in denial
+
+        group_confirmation = str(memories.commands[0].confirmation.payload["text"])
+        assert "共享记忆已经清空" in group_confirmation
+        assert "个人记忆和 User Profile 都没有动到" in group_confirmation
+        assert "shared memories have been cleared" in group_confirmation
+        assert "personal memories and User Profiles are untouched" in group_confirmation
 
     asyncio.run(scenario())
 
@@ -334,5 +342,11 @@ def test_group_scope_and_argument_errors_never_mutate_state() -> None:
         assert not profiles.clears and not profiles.regenerations
         assert source.calls == 0
         assert len(outbound.commands) == 2
+        assert "只能在群组或超级群组里施放" in str(outbound.commands[0].payload["text"])
+        assert "only works in a group or supergroup" in str(
+            outbound.commands[0].payload["text"]
+        )
+        assert "不用带参数啦" in str(outbound.commands[1].payload["text"])
+        assert "takes no arguments" in str(outbound.commands[1].payload["text"])
 
     asyncio.run(scenario())

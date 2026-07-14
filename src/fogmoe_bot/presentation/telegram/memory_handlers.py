@@ -31,8 +31,12 @@ _COMMANDS = frozenset({"resetmem", "resetprofile", "regen", "resetgroup"})
 
 _SUCCESS_TEXT = {
     "resetmem": (
-        "个人记忆已清空。当前对话上下文与 User Profile 不受影响。\n"
-        "Personal memory has been cleared; context and User Profile are unchanged."
+        "好啦，你的个人记忆已经清空，收进雾里啦。\n"
+        "之后我不会再从那些旧记忆里找线索；当前对话和 User Profile 还在，"
+        "才、才没有把你全忘掉呢。\n"
+        "Alright, your personal memories have been cleared and tucked into the mist.\n"
+        "I won't look through those old memories anymore; your current conversation and "
+        "User Profile are still here—I didn't forget everything about you, okay?"
     ),
     "resetprofile": (
         "User Profile 已清除。之后只会根据本次操作后的新私聊重新形成画像；"
@@ -44,26 +48,31 @@ _SUCCESS_TEXT = {
         "A background User Profile refresh has been requested."
     ),
     "resetgroup": (
-        "当前群聊的共享记忆已清空。成员的个人记忆与 User Profile 不受影响。\n"
-        "This group's shared memory has been cleared."
+        "这个群的共享记忆已经清空，悄悄散进雾里了。\n"
+        "大家各自的个人记忆和 User Profile 都没有动到，别担心，"
+        "我不会把谁弄丢的。\n"
+        "This group's shared memories have been cleared and quietly drifted into the mist.\n"
+        "Everyone's personal memories and User Profiles are untouched; don't worry, "
+        "I won't lose anyone."
     ),
 }
 """@brief 各状态变更的稳定确认文本 / Stable confirmation text for each state transition."""
 
 _GROUP_ONLY_TEXT = (
-    "此命令只能在群组或超级群组中使用。\n"
-    "This command can only be used in a group or supergroup."
+    "唔，这个小法术只能在群组或超级群组里施放哦。\n"
+    "This little spell only works in a group or supergroup."
 )
 """@brief `/resetgroup` 私聊反馈 / Private-chat feedback for `/resetgroup`."""
 
 _GROUP_ADMIN_ONLY_TEXT = (
-    "只有群组 owner 或管理员才能清空群聊记忆。\n"
-    "Only the group owner or an administrator can clear group memory."
+    "不行哦，只有本群的 owner 或管理员才能把共享记忆收进雾里。\n"
+    "Only this group's owner or an administrator may tuck its shared memories into the mist."
 )
 """@brief 群管理员授权拒绝反馈 / Group-administrator authorization denial."""
 
 _NO_ARGUMENTS_TEXT = (
-    "该命令不接受参数。\nThis command does not accept arguments."
+    "这个指令不用带参数啦，直接发送就好。\n"
+    "This command takes no arguments; just send it on its own."
 )
 """@brief 非空参数反馈 / Feedback for unexpected arguments."""
 

@@ -129,7 +129,9 @@ def test_operation_persists_reset_and_confirmation_without_direct_delivery() -> 
         assert first.confirmation.payload["chat_id"] == 42
         assert first.confirmation.payload["reply_to_message_id"] == 7
         text = str(first.confirmation.payload["text"])
-        assert "context has been cleared" in text
-        assert "Memory and User Profile are unchanged" in text
+        assert "当前上下文已清空" in text
+        assert "个人/群聊记忆和 User Profile 都还在" in text
+        assert "The current context is cleared" in text
+        assert "personal/group memories and User Profile remain" in text
 
     asyncio.run(scenario())

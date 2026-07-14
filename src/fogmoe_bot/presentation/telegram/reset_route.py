@@ -27,9 +27,13 @@ from .delivery import delivery_stream_for_chat
 
 
 _RESET_CONFIRMATION_TEXT = (
-    "当前对话上下文已清空，下一条消息将开始新对话；个人/群聊记忆与 User Profile "
-    "不受影响。\nThe current context has been cleared; your next message starts a new "
-    "conversation. Memory and User Profile are unchanged."
+    "好啦，这段对话已经翻到新的一页了。\n"
+    "当前上下文已清空，你的下一条消息会开启新的对话；个人/群聊记忆和 User Profile "
+    "都还在，别担心，我才不会随随便便把重要的事忘掉呢。\n"
+    "Alright, this conversation has turned to a new page.\n"
+    "The current context is cleared, and your next message starts a new conversation; "
+    "your personal/group memories and User Profile remain—I wouldn't casually forget "
+    "what matters, okay?"
 )
 """@brief reset 成功确认文本 / Successful-reset confirmation text."""
 
