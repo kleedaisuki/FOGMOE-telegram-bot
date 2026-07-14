@@ -219,92 +219,6 @@ class UserDiaryArgs(ToolArguments):
     line_numbers: bool = Field(default=False, description="Include line numbers")
 
 
-class BankRequestTokensArgs(ToolArguments):
-    """@brief 创建待银行审核的免费代币申请 / Create a free-token request awaiting bank review."""
-
-    amount: int = Field(
-        ge=1,
-        le=1_000_000,
-        description="Positive number of free tokens to request",
-    )
-    purpose: str = Field(
-        min_length=1,
-        max_length=500,
-        description="Auditable purpose shown to the owner and bank administrator",
-    )
-
-
-class BankGetOverviewArgs(ToolArguments):
-    """@brief 查询当前认证用户的钱包 / Query the authenticated user's own wallet."""
-
-
-class BankListPendingTokenRequestsArgs(ToolArguments):
-    """@brief 查询管理员待审的代币申请 / Query token requests pending administrator review."""
-
-    limit: int = Field(
-        default=20,
-        ge=1,
-        le=20,
-        description="Maximum number of pending token requests to return",
-    )
-
-
-class BankReviewTokenRequestArgs(ToolArguments):
-    """@brief 创建需管理员确认的代币申请审核 / Create an administrator-confirmed token-request review."""
-
-    request_id: str = Field(
-        min_length=36,
-        max_length=36,
-        pattern=(
-            r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-        ),
-        description="Exact UUID of the pending token request",
-    )
-    decision: Literal["approve", "reject"] = Field(
-        description="Approve to issue free tokens, or reject without issuance",
-    )
-    note: str | None = Field(
-        default=None,
-        max_length=500,
-        description="Optional auditable review note",
-    )
-
-
-class BankIssueTokensArgs(ToolArguments):
-    """@brief 创建需管理员确认的直接发行 / Create administrator-confirmed direct issuance."""
-
-    recipient_id: int = Field(
-        ge=1,
-        description="Registered Telegram user ID receiving free tokens",
-    )
-    amount: int = Field(
-        ge=1,
-        le=1_000_000,
-        description="Positive number of free tokens to issue",
-    )
-    purpose: str = Field(
-        min_length=1,
-        max_length=500,
-        description="Auditable issuance purpose shown in the confirmation",
-    )
-
-
-class BankFundActivityPotArgs(ToolArguments):
-    """@brief 创建需管理员确认的活动奖池注资 / Create administrator-confirmed activity-pot funding."""
-
-    amount: int = Field(
-        ge=1,
-        le=1_000_000,
-        description="Positive number of free tokens to fund the activity pot",
-    )
-    purpose: str = Field(
-        min_length=1,
-        max_length=500,
-        description="Auditable funding purpose shown in the confirmation",
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class ToolValidationIssue:
     """@brief 单个参数校验问题 / One argument-validation issue.
@@ -769,63 +683,6 @@ DEFAULT_TOOL_CATALOG = ToolCatalog(
             arguments_model=UserDiaryArgs,
             mutation_classifier=_diary_effect,
         ),
-        define_tool(
-            name="bank_request_tokens",
-            description=(
-                "Create a free-token application for the authenticated user in a private "
-                "chat. This creates only a pending bank-review request and never changes a "
-                "wallet balance directly. Never invent an owner or actor ID."
-            ),
-            arguments_model=BankRequestTokensArgs,
-            mutation_classifier=_always("bank.request_tokens"),
-        ),
-        define_tool(
-            name="bank_get_overview",
-            description=(
-                "Read only the authenticated user's own bank-wallet overview in a private "
-                "chat. Do not accept or invent a user ID."
-            ),
-            arguments_model=BankGetOverviewArgs,
-        ),
-        define_tool(
-            name="bank_list_pending_token_requests",
-            description=(
-                "List pending free-token applications in a private chat. The bank service "
-                "will verify that the authenticated user is the configured administrator; "
-                "do not accept or invent an administrator ID."
-            ),
-            arguments_model=BankListPendingTokenRequestsArgs,
-        ),
-        define_tool(
-            name="bank_review_token_request",
-            description=(
-                "Propose an administrator review of one pending token request in a private "
-                "chat. The authenticated user must explicitly confirm; the bank rechecks "
-                "administrator authorization when executing."
-            ),
-            arguments_model=BankReviewTokenRequestArgs,
-            mutation_classifier=_always("asset.propose.bank.review_token_request"),
-        ),
-        define_tool(
-            name="bank_issue_tokens",
-            description=(
-                "Propose direct free-token issuance in a private chat. The authenticated "
-                "administrator must explicitly confirm; do not accept an actor or administrator "
-                "ID as an argument."
-            ),
-            arguments_model=BankIssueTokensArgs,
-            mutation_classifier=_always("asset.propose.bank.issue_tokens"),
-        ),
-        define_tool(
-            name="bank_fund_activity_pot",
-            description=(
-                "Propose funding the probability-activity prize pot in a private chat. The "
-                "authenticated administrator must explicitly confirm; do not claim completion "
-                "before the confirmation result."
-            ),
-            arguments_model=BankFundActivityPotArgs,
-            mutation_classifier=_always("asset.propose.bank.fund_activity_pot"),
-        ),
     )
 )
 """@brief 默认 durable-safe 工具目录 / Default durable-safe tool catalog."""
@@ -833,12 +690,6 @@ DEFAULT_TOOL_CATALOG = ToolCatalog(
 
 __all__ = [
     "DEFAULT_TOOL_CATALOG",
-    "BankFundActivityPotArgs",
-    "BankGetOverviewArgs",
-    "BankIssueTokensArgs",
-    "BankListPendingTokenRequestsArgs",
-    "BankRequestTokensArgs",
-    "BankReviewTokenRequestArgs",
     "DiaryAction",
     "DuplicateToolNameError",
     "EffectKind",

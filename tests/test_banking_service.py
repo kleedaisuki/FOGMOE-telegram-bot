@@ -37,8 +37,6 @@ class _Operations:
         """@brief 已收到的活动奖池注资命令 / Received activity-pot funding commands."""
         self.pending_commands: list[ListPendingTokenRequests] = []
         """@brief 已收到的待审批查询命令 / Received pending-request query commands."""
-        self.read_overview_users: list[int] = []
-        """@brief 纯读取钱包概览的用户 / Users queried through the pure-read overview port."""
 
     async def request_tokens(self, command: RequestTokens) -> TokenRequestResult:
         """@brief 记录请求命令 / Record a request command.
@@ -115,23 +113,9 @@ class _Operations:
             WalletBalance(TokenBucket.PAID, 2),
         )
 
-    async def read_overview(self, user_id: int) -> BankOverview | None:
-        """@brief 记录纯读取钱包概览 / Record a pure-read wallet overview.
-
-        @param user_id 用户标识 / User identity.
-        @return 固定钱包概览 / Fixed wallet overview.
-        """
-
-        self.read_overview_users.append(user_id)
-        return BankOverview(
-            user_id,
-            WalletBalance(TokenBucket.FREE, 5),
-            WalletBalance(TokenBucket.PAID, 2),
-        )
-
 
 def test_bank_service_leaves_user_request_open_but_gates_admin_actions() -> None:
-    """@brief 普通用户可申请，只有管理员可审核和发行 / Ordinary users may request while only admin reviews and issues."""
+    """@brief 所有用户可申请，只有管理员可审核和发行 / Users may request while only admin reviews and issues."""
 
     async def scenario() -> None:
         """@brief 执行授权场景 / Execute authorization scenario.
@@ -151,16 +135,6 @@ def test_bank_service_leaves_user_request_open_but_gates_admin_actions() -> None
             request_id=uuid4(),
         )
         request_result = await service.request_tokens(request)
-        administrator_request = await service.request_tokens(
-            RequestTokens(
-                user_id=1,
-                amount=TokenAmount(12),
-                purpose="管理员不应创建无解申请",
-                requested_at=now,
-                idempotency_key="test:bank:request:administrator",
-                request_id=uuid4(),
-            )
-        )
         forbidden_review = await service.review_token_request(
             ReviewTokenRequest(
                 request_id=request.request_id,
@@ -218,7 +192,6 @@ def test_bank_service_leaves_user_request_open_but_gates_admin_actions() -> None
         )
 
         assert request_result.code is BankCode.SUCCESS
-        assert administrator_request.code is BankCode.FORBIDDEN
         assert len(operations.request_commands) == 1
         assert allowed_review.code is BankCode.SUCCESS
         assert len(operations.review_commands) == 1
@@ -231,7 +204,5 @@ def test_bank_service_leaves_user_request_open_but_gates_admin_actions() -> None
         assert allowed_pending.code is BankCode.SUCCESS
         assert operations.pending_commands == [ListPendingTokenRequests(1, limit=5)]
         assert (await service.overview(42)).total == 7  # type: ignore[union-attr]
-        assert (await service.read_overview(42)).total == 7  # type: ignore[union-attr]
-        assert operations.read_overview_users == [42]
 
     asyncio.run(scenario())

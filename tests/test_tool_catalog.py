@@ -158,42 +158,6 @@ def test_send_sticker_is_a_bounded_mutation_without_file_id_escape_hatch() -> No
         ),
         InvalidToolArguments,
     )
-
-
-def test_bank_tool_catalog_separates_reads_pending_requests_and_asset_confirmations() -> None:
-    """@brief 银行目录区分只读、待审申请和真正资产确认 / Bank catalog separates reads, pending applications, and real asset confirmations."""
-
-    overview = DEFAULT_TOOL_CATALOG.validate("bank_get_overview", {})
-    pending = DEFAULT_TOOL_CATALOG.validate(
-        "bank_list_pending_token_requests", {"limit": 3}
-    )
-    request = DEFAULT_TOOL_CATALOG.validate(
-        "bank_request_tokens", {"amount": 12, "purpose": "活动测试"}
-    )
-    review = DEFAULT_TOOL_CATALOG.validate(
-        "bank_review_token_request",
-        {
-            "request_id": "00000000-0000-0000-0000-000000000001",
-            "decision": "approve",
-        },
-    )
-
-    assert isinstance(overview, ValidatedToolInvocation) and not overview.mutating
-    assert isinstance(pending, ValidatedToolInvocation) and not pending.mutating
-    assert isinstance(request, ValidatedToolInvocation) and request.mutating
-    assert request.effect_kind == "bank.request_tokens"
-    assert isinstance(review, ValidatedToolInvocation) and review.mutating
-    assert review.effect_kind == "asset.propose.bank.review_token_request"
-    assert isinstance(
-        DEFAULT_TOOL_CATALOG.validate("bank_get_overview", {"user_id": 7}),
-        InvalidToolArguments,
-    )
-    assert isinstance(
-        DEFAULT_TOOL_CATALOG.validate(
-            "bank_list_pending_token_requests", {"administrator_id": 7}
-        ),
-        InvalidToolArguments,
-    )
     assert isinstance(
         DEFAULT_TOOL_CATALOG.validate(
             "send_sticker",

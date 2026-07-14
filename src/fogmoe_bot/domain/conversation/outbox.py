@@ -57,11 +57,6 @@ SEND_TELEGRAM_STICKER = OutboundKind("telegram.send_sticker")
 SEND_TELEGRAM_PHOTO = OutboundKind("telegram.send_photo")
 """@brief Telegram 远程图片投递动作 / Telegram remote-photo delivery action."""
 
-SEND_TELEGRAM_ASSET_CONFIRMATION = OutboundKind(
-    "telegram.send_asset_confirmation"
-)
-"""@brief Telegram 资产动作确认卡片投递 / Telegram account-asset confirmation-card delivery."""
-
 
 class OutboundStatus(StrEnum):
     """@brief 出站消息投递状态 / Outbound-message delivery status."""

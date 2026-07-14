@@ -488,11 +488,8 @@ Actor/virtual actor 的生产经验支持“对象封装状态、同一实体顺
 flowchart LR
     U[Telegram 用户] --> B[/bank 或 /request_tokens]
     B --> R[bank.token_requests]
-    R --> N[(durable outbox)]
-    N --> A[管理员私聊：显式审核指引]
-    A --> R
+    R --> A[管理员审核]
     A --> F[Free 钱包账本分录]
-    A --> U2[申请人私聊：审核终态回执]
 
     U --> O[/billing_order]
     O --> W[awaiting_payment 订单]

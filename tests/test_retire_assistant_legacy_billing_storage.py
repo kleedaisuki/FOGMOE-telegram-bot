@@ -52,8 +52,8 @@ def test_0058_fails_closed_then_drops_only_retired_structures() -> None:
     assert "irreversible" in sections["down"]
 
 
-def test_schema_snapshot_preserves_retirement_after_later_migrations() -> None:
-    """@brief 后续迁移后 DDL 快照仍不声明已删除的 Assistant/Kindness 结构 / DDL snapshot still omits retired Assistant/Kindness structures after later migrations.
+def test_schema_snapshot_has_0058_head_without_retired_structures() -> None:
+    """@brief DDL 快照不再声明已删除的 Assistant/Kindness 结构 / DDL snapshot no longer declares retired Assistant/Kindness structures.
 
     @return None / None.
     """
@@ -62,7 +62,7 @@ def test_schema_snapshot_preserves_retirement_after_later_migrations() -> None:
         _PROJECT_ROOT / "src/fogmoe_dbctl/schema.sql"
     ).read_text(encoding="utf-8")
 
-    assert "-- Alembic head: 0059_asset_action_confirmations" in snapshot
+    assert "-- Alembic head: 0058_retire_assistant_legacy_billing" in snapshot
     for retired_structure in (
         "assistant.billing_reservations",
         "assistant_billing_reservations_retired_tr",

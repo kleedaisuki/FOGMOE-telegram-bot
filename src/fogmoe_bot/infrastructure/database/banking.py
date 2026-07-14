@@ -40,32 +40,10 @@ from fogmoe_bot.domain.banking.money import (
 )
 from fogmoe_bot.domain.banking.requests import TokenRequest, TokenRequestStatus
 from fogmoe_bot.infrastructure.database import connection as db_connection
-from fogmoe_bot.infrastructure.database.bank_notifications import (
-    BankTokenRequestNotificationWriter,
-)
 
 
 class PostgresBankOperations(BankOperations):
     """@brief 以不可变双重记账实现银行原子操作 / Implement atomic bank operations with an immutable double-entry ledger."""
-
-    def __init__(
-        self,
-        *,
-        notifications: BankTokenRequestNotificationWriter,
-    ) -> None:
-        """@brief 注入银行状态变更同事务通知写入器 / Inject the notification writer sharing each banking-state transaction.
-
-        @param notifications 与调用方数据库 connection 绑定的通知 outbox 写入器 /
-            Notification-outbox writer bound to the caller's database connection.
-        @return None / None.
-        @note 通知意图必须和 ``token_requests``、账本分录及幂等回执一起提交；这里不
-            接受事务外的 Telegram sender。/ Notification intents must commit with
-            ``token_requests``, ledger entries, and idempotency receipts; this constructor does
-            not accept a transaction-external Telegram sender.
-        """
-
-        self._notifications = notifications
-        """@brief 同事务银行申请通知端口 / Same-transaction bank-request notification port."""
 
     async def request_tokens(self, command: RequestTokens) -> TokenRequestResult:
         """@brief 创建或幂等重放免费代币申请 / Create or idempotently replay a free-token request.
@@ -86,12 +64,7 @@ class PostgresBankOperations(BankOperations):
                 connection,
             )
             if replay is not None:
-                result = _result_from_mapping(replay, replayed=True)
-                await self._enqueue_created_request_notification(
-                    result,
-                    connection=connection,
-                )
-                return result
+                return _result_from_mapping(replay, replayed=True)
 
             request = command.aggregate()
             await db_connection.execute(
@@ -119,10 +92,6 @@ class PostgresBankOperations(BankOperations):
                 _result_mapping(result),
                 connection,
             )
-            await self._enqueue_created_request_notification(
-                result,
-                connection=connection,
-            )
             return result
 
     async def review_token_request(
@@ -144,12 +113,7 @@ class PostgresBankOperations(BankOperations):
                 connection,
             )
             if replay is not None:
-                result = _result_from_mapping(replay, replayed=True)
-                await self._enqueue_reviewed_request_notification(
-                    result,
-                    connection=connection,
-                )
-                return result
+                return _result_from_mapping(replay, replayed=True)
 
             request = await _lock_token_request(command.request_id, connection)
             if request is None:
@@ -202,66 +166,7 @@ class PostgresBankOperations(BankOperations):
                 _result_mapping(result),
                 connection,
             )
-            await self._enqueue_reviewed_request_notification(
-                result,
-                connection=connection,
-            )
             return result
-
-    async def _enqueue_created_request_notification(
-        self,
-        result: TokenRequestResult,
-        *,
-        connection: AsyncConnection,
-    ) -> None:
-        """@brief 为成功的待审核申请写入管理员提醒 / Persist the administrator reminder for a successful pending request.
-
-        @param result 当前银行操作的规范结果 / Canonical result of the current banking operation.
-        @param connection 当前银行短事务连接 / Current short banking-transaction connection.
-        @return None / None.
-        @note 幂等重放也重申该 outbox 意图；确定性 outbox key 会把它收敛到同一行。
-            / An idempotent replay also reasserts the outbox intent; its deterministic key
-            converges it onto the same row.
-        """
-
-        request = result.request
-        if (
-            result.code is BankCode.SUCCESS
-            and request is not None
-            and request.status is TokenRequestStatus.PENDING
-        ):
-            await self._notifications.enqueue_request_created(
-                request,
-                connection=connection,
-            )
-
-    async def _enqueue_reviewed_request_notification(
-        self,
-        result: TokenRequestResult,
-        *,
-        connection: AsyncConnection,
-    ) -> None:
-        """@brief 为成功审核的申请写入申请人回执 / Persist the requester receipt for a successful review.
-
-        @param result 当前银行操作的规范结果 / Canonical result of the current banking operation.
-        @param connection 当前银行短事务连接 / Current short banking-transaction connection.
-        @return None / None.
-        @note 非成功、非审核终态和并发输家的 ``NOT_PENDING`` 结果不会生成跨聊天通知。
-            / Non-success, nonterminal, and concurrent-loser ``NOT_PENDING`` results never
-            create cross-chat notifications.
-        """
-
-        request = result.request
-        if (
-            result.code is BankCode.SUCCESS
-            and request is not None
-            and request.status
-            in {TokenRequestStatus.APPROVED, TokenRequestStatus.REJECTED}
-        ):
-            await self._notifications.enqueue_request_reviewed(
-                request,
-                connection=connection,
-            )
 
     async def issue_tokens(self, command: IssueTokens) -> TokenRequestResult:
         """@brief 由管理员直接发行免费金币 / Directly issue free tokens as an administrator.
@@ -413,22 +318,6 @@ class PostgresBankOperations(BankOperations):
                 return None
             await ensure_bank_user_wallets(user_id, connection)
             return await load_bank_overview(user_id, connection)
-
-    async def read_overview(self, user_id: int) -> BankOverview | None:
-        """@brief 只读查询已初始化的用户双钱包 / Read initialized user wallets without lazy creation.
-
-        @param user_id 用户标识 / User identity.
-        @return 已初始化的钱包概览；身份或钱包缺失时为 None /
-            Initialized wallet overview, or None when the identity or wallets are absent.
-        @note 此路径绝不调用 ``ensure_bank_user_wallets``，使 Agent 的查询工具不包含隐藏
-            账户变更。/ This path never calls ``ensure_bank_user_wallets``, so the Agent query
-            tool contains no hidden account mutation.
-        """
-
-        async with db_connection.transaction() as connection:
-            if not await _identity_exists(user_id, connection):
-                return None
-            return await read_initialized_bank_overview(user_id, connection)
 
 
 async def _identity_exists(user_id: int, connection: AsyncConnection) -> bool:
@@ -821,26 +710,6 @@ async def load_bank_overview(
     @raise RuntimeError 钱包投影缺失时抛出 / Raised when a wallet projection is missing.
     """
 
-    overview = await read_initialized_bank_overview(user_id, connection)
-    if overview is None:
-        raise RuntimeError("Bank user wallet projection is missing")
-    return overview
-
-
-async def read_initialized_bank_overview(
-    user_id: int,
-    connection: AsyncConnection,
-) -> BankOverview | None:
-    """@brief 只读加载已存在的双钱包投影 / Read an existing dual-wallet projection only.
-
-    @param user_id 用户标识 / User identity.
-    @param connection 当前事务连接 / Current transactional connection.
-    @return 双钱包概览；任一钱包缺失时为 None / Dual-wallet overview, or None when either wallet is missing.
-    @note 与 ``load_bank_overview`` 的区别是本函数不把缺失投影提升为错误，且不创建任何行。/
-        Unlike ``load_bank_overview``, this function does not turn a missing projection into an
-        error and creates no rows.
-    """
-
     row = await db_connection.fetch_one(
         "SELECT "
         "(SELECT balance FROM bank.account_balances WHERE account_key = %s), "
@@ -849,7 +718,7 @@ async def read_initialized_bank_overview(
         connection=connection,
     )
     if row is None or row[0] is None or row[1] is None:
-        return None
+        raise RuntimeError("Bank user wallet projection is missing")
     return BankOverview(
         user_id=user_id,
         free=WalletBalance(TokenBucket.FREE, cast(int, row[0])),
@@ -1117,5 +986,4 @@ __all__ = [
     "lock_bank_account_balances",
     "load_bank_overview",
     "post_bank_transfer",
-    "read_initialized_bank_overview",
 ]

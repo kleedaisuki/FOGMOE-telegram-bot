@@ -79,16 +79,3 @@ class BankOperations(Protocol):
         """
 
         ...
-
-    async def read_overview(self, user_id: int) -> BankOverview | None:
-        """@brief 只读查询已初始化的钱包概览 / Read an initialized wallet overview without creating it.
-
-        @param user_id 用户标识 / User identity.
-        @return 已存在的钱包概览；身份或钱包未初始化时为 None /
-            Existing wallet overview, or None when the identity or wallet is not initialized.
-        @note 此端口不能隐式创建账户、钱包或余额投影，供无确认的 Agent 查询使用。/
-            This port must not implicitly create an account, wallet, or balance projection; it is
-            used by Agent reads that need no confirmation.
-        """
-
-        ...

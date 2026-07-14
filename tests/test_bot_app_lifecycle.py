@@ -17,10 +17,6 @@ from fogmoe_bot.application.runtime import (
     KeyedMailboxRuntime,
     ServiceBinding,
 )
-from fogmoe_bot.application.asset_actions import (
-    ASSET_ACTION_CONFIRMATION_SERVICE_DATA_KEY,
-    AssetActionConfirmationService,
-)
 from fogmoe_bot.presentation.telegram import bot_app
 from fogmoe_bot.presentation.telegram.handler_catalog import install_error_policy
 from fogmoe_bot.presentation.telegram.handler_composition import (
@@ -109,7 +105,6 @@ def test_composition_has_one_listener_and_complete_phased_runtime(
         "user-profile-dreaming",
         "verification",
         "admin-announcements",
-        "asset-action-recovery",
         "btc-monitor",
         "assistant-blocking-calls",
         "embedding-http-client",
@@ -119,10 +114,6 @@ def test_composition_has_one_listener_and_complete_phased_runtime(
     )
     assert application.bot_data[BOT_RUNTIME_DATA_KEY] is runtime
     assert application.bot_data[EXECUTION_RUNTIME_DATA_KEY] is runtime.execution_runtime
-    assert isinstance(
-        application.bot_data[ASSET_ACTION_CONFIRMATION_SERVICE_DATA_KEY],
-        AssetActionConfirmationService,
-    )
     with pytest.raises(RuntimeError, match="more than once"):
         bot_app.compose_bot_runtime(
             application,

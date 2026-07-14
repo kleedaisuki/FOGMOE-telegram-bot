@@ -18,12 +18,6 @@ from fogmoe_bot.application.accounts.operations import (
     ACCOUNT_SERVICE_DATA_KEY,
     AccountService,
 )
-from fogmoe_bot.application.asset_actions import (
-    ASSET_ACTION_CONFIRMATION_SERVICE_DATA_KEY,
-    AssetActionConfirmationService,
-    AssetActionRecoveryWorker,
-)
-from fogmoe_bot.application.asset_actions.banking import BankAssetActionExecutor
 from fogmoe_bot.application.banking.service import BANK_SERVICE_DATA_KEY, BankService
 from fogmoe_bot.application.billing.service import (
     BILLING_SERVICE_DATA_KEY,
@@ -96,9 +90,6 @@ from fogmoe_bot.infrastructure.admin.announcements import (
 from fogmoe_bot.infrastructure.admin.log_reader import AsyncBoundedLogSource
 from fogmoe_bot.infrastructure.admin.stats import PostgresAdminStatsProjection
 from fogmoe_bot.infrastructure.assistant.composition import build_durable_assistant
-from fogmoe_bot.infrastructure.assistant.tool_operations.asset_actions import (
-    AssistantAssetActionProposalOperation,
-)
 from fogmoe_bot.infrastructure.crypto.binance_monitor import BinanceBtcPatternSource
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.standalone_outbound import (
@@ -106,9 +97,6 @@ from fogmoe_bot.infrastructure.database.standalone_outbound import (
 )
 from fogmoe_bot.infrastructure.database.assistant_turn_acceptance import (
     PostgresAssistantTurnAcceptanceUoW,
-)
-from fogmoe_bot.infrastructure.database.asset_actions import (
-    PostgresAssetActionConfirmationStore,
 )
 from fogmoe_bot.infrastructure.database.conversation_reset import (
     PostgresConversationResetUoW,
@@ -425,11 +413,6 @@ def _compose_ingress(
             ),
             AdminTelegramCommandHandler(
                 service=primitives.admin_service,
-                bank=_required_capability(
-                    application,
-                    BANK_SERVICE_DATA_KEY,
-                    BankService,
-                ),
                 outbound=primitives.outbound,
             ),
         ),
@@ -515,32 +498,9 @@ def _compose_services(
         lease_for=timedelta(seconds=runtime.inbox.lease_seconds),
         telemetry=observability.telemetry,
     )
-    bank = _required_capability(
-        application,
-        BANK_SERVICE_DATA_KEY,
-        BankService,
-    )
-    if ASSET_ACTION_CONFIRMATION_SERVICE_DATA_KEY in application.bot_data:
-        raise RuntimeError("Asset-action confirmation service was composed more than once")
-    asset_confirmation_store = PostgresAssetActionConfirmationStore(
-        outbox=primitives.outbox_repository,
-    )
-    asset_confirmation = AssetActionConfirmationService(
-        store=asset_confirmation_store,
-        executor=BankAssetActionExecutor(bank=bank),
-    )
-    application.bot_data[ASSET_ACTION_CONFIRMATION_SERVICE_DATA_KEY] = (
-        asset_confirmation
-    )
-    asset_action_proposals = AssistantAssetActionProposalOperation(
-        store=asset_confirmation_store,
-        administrator_id=bank.administrator_id,
-    )
     assistant = build_durable_assistant(
         settings=settings,
         resources=resources,
-        bank=bank,
-        asset_actions=asset_action_proposals,
         telemetry=observability.telemetry,
     )
     inference = InferenceWorker(
@@ -624,11 +584,6 @@ def _compose_services(
         ServiceBinding(
             "admin-announcements",
             primitives.admin_runtime,
-            shutdown_phase=20,
-        ),
-        ServiceBinding(
-            "asset-action-recovery",
-            AssetActionRecoveryWorker(service=asset_confirmation),
             shutdown_phase=20,
         ),
         ServiceBinding("btc-monitor", btc_monitor, shutdown_phase=20),

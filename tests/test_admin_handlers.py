@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import cast
 from uuid import uuid4
 
 from fogmoe_bot.application.admin.models import (
@@ -15,14 +14,6 @@ from fogmoe_bot.application.admin.models import (
     RequestAnnouncement,
 )
 from fogmoe_bot.application.admin.service import AdminService
-from fogmoe_bot.application.banking.models import (
-    BankCode,
-    ListPendingTokenRequests,
-    PendingTokenRequestsResult,
-    RequestTokens,
-)
-from fogmoe_bot.application.banking.ports import BankOperations
-from fogmoe_bot.application.banking.service import BankService
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
@@ -31,8 +22,6 @@ from fogmoe_bot.domain.admin import (
     AnnouncementRecipientClaim,
     AnnouncementRecipientKind,
 )
-from fogmoe_bot.domain.banking.money import TokenAmount
-from fogmoe_bot.domain.banking.requests import TokenRequest
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     UpdateId,
@@ -123,34 +112,6 @@ class RecordingOutbound:
         self.commands.append(command)
 
 
-class StaticBankOperations:
-    """@brief 仅记录管理员待审读取的银行端口替身 / Bank-port double recording only administrator pending reads."""
-
-    def __init__(self, requests: tuple[TokenRequest, ...] = ()) -> None:
-        """@brief 注入固定待审请求 / Inject fixed pending requests.
-
-        @param requests 固定待审申请 / Fixed pending token requests.
-        """
-
-        self.requests = requests
-        """@brief 将被返回的待审申请 / Pending requests to return."""
-        self.pending_commands: list[ListPendingTokenRequests] = []
-        """@brief 已调用的待审读取 / Recorded pending-read commands."""
-
-    async def list_pending_token_requests(
-        self,
-        command: ListPendingTokenRequests,
-    ) -> PendingTokenRequestsResult:
-        """@brief 记录并返回固定队列 / Record and return the fixed queue.
-
-        @param command 管理员队列读取 / Administrator queue read.
-        @return 成功待审请求结果 / Successful pending-request result.
-        """
-
-        self.pending_commands.append(command)
-        return PendingTokenRequestsResult(BankCode.SUCCESS, self.requests)
-
-
 def _service(announcements: RecordingAnnouncements) -> AdminService:
     """@brief 构造 AdminService / Build AdminService.
 
@@ -163,19 +124,6 @@ def _service(announcements: RecordingAnnouncements) -> AdminService:
         stats=StaticStats(),
         logs=StaticLogs(),
         announcements=announcements,  # type: ignore[arg-type]
-    )
-
-
-def _bank(operations: StaticBankOperations | None = None) -> BankService:
-    """@brief 构造仅供控制台测试的银行服务 / Build a bank service for dashboard tests.
-
-    @param operations 可选的待审读取替身 / Optional pending-read double.
-    @return 使用管理员 42 的银行服务 / Bank service using administrator 42.
-    """
-
-    return BankService(
-        cast(BankOperations, operations or StaticBankOperations()),
-        administrator_id=42,
     )
 
 
@@ -199,7 +147,6 @@ def _command(
     *,
     user_id: int = 42,
     argument_text: str = "",
-    chat_type: str = "private",
 ) -> ParsedTelegramCommand:
     """@brief 构造 parsed command / Build a parsed command.
 
@@ -219,7 +166,6 @@ def _command(
         username="klee",
         argument_text=argument_text,
         arguments=tuple(argument_text.split()),
-        chat_type=chat_type,
     )
 
 
@@ -230,7 +176,6 @@ def test_announcement_update_replay_reuses_intent_and_response_identity() -> Non
     outbound = RecordingOutbound()
     handler = AdminTelegramCommandHandler(
         service=_service(announcements),
-        bank=_bank(),
         outbound=outbound,
     )
     update = _update(17)
@@ -255,7 +200,6 @@ def test_permission_denial_is_rendered_without_calling_projection() -> None:
     outbound = RecordingOutbound()
     handler = AdminTelegramCommandHandler(
         service=_service(RecordingAnnouncements()),
-        bank=_bank(),
         outbound=outbound,
     )
 
@@ -265,72 +209,6 @@ def test_permission_denial_is_rendered_without_calling_projection() -> None:
     text = str(outbound.commands[0].payload["text"])
     assert "没有权限" in text
     assert "internal" not in text.casefold()
-
-
-def test_private_admin_dashboard_combines_pending_queue_and_next_steps() -> None:
-    """@brief `/admin` 并行汇总银行队列并给出可操作的下一步 / `/admin` combines the bank queue and actionable next steps."""
-
-    async def scenario() -> None:
-        """@brief 执行管理员工作台场景 / Exercise the administrator-dashboard scenario.
-
-        @return None / None.
-        """
-
-        request = RequestTokens(
-            user_id=7,
-            amount=TokenAmount(12),
-            purpose="修复群组灯塔",
-            requested_at=NOW,
-            idempotency_key="test:admin-dashboard:request",
-            request_id=uuid4(),
-        ).aggregate()
-        operations = StaticBankOperations((request,))
-        outbound = RecordingOutbound()
-        handler = AdminTelegramCommandHandler(
-            service=_service(RecordingAnnouncements()),
-            bank=_bank(operations),
-            outbound=outbound,
-        )
-
-        await handler.handle(_update(23), _command("admin"))
-
-        assert operations.pending_commands == [ListPendingTokenRequests(42, limit=5)]
-        text = str(outbound.commands[0].payload["text"])
-        assert "管理控制台" in text
-        assert str(request.request_id) in text
-        assert "用户 7｜12 枚" in text
-        assert "/bank_review" in text
-        assert "/admin_announce" in text
-
-    asyncio.run(scenario())
-
-
-def test_admin_dashboard_is_private_and_does_not_read_in_group() -> None:
-    """@brief 群聊 `/admin` 被拒绝前不读取管理员或银行数据 / Group `/admin` is rejected before any administrative or bank read."""
-
-    async def scenario() -> None:
-        """@brief 执行群聊拒绝场景 / Exercise the group-chat rejection scenario.
-
-        @return None / None.
-        """
-
-        operations = StaticBankOperations()
-        outbound = RecordingOutbound()
-        handler = AdminTelegramCommandHandler(
-            service=_service(RecordingAnnouncements()),
-            bank=_bank(operations),
-            outbound=outbound,
-        )
-
-        await handler.handle(
-            _update(24),
-            _command("admin", chat_type="supergroup"),
-        )
-
-        assert operations.pending_commands == []
-        assert "仅限私聊" in str(outbound.commands[0].payload["text"])
-
-    asyncio.run(scenario())
 
 
 def test_completion_factory_reports_terminal_delivery_counts() -> None:

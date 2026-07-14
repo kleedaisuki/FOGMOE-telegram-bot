@@ -99,7 +99,6 @@ def test_catalog_explicitly_declares_stable_primary_handlers() -> None:
         "monitor.stop",
         "economy.task",
         "economy.task-callback",
-        "asset-actions.confirmation",
         "verification.command",
         "verification.new-member",
         "verification.callback",
@@ -122,7 +121,7 @@ def test_catalog_explicitly_declares_stable_primary_handlers() -> None:
     ]
     assert Counter(definition.kind for definition in HANDLER_CATALOG) == {
         HandlerKind.COMMAND: 15,
-        HandlerKind.CALLBACK: 7,
+        HandlerKind.CALLBACK: 6,
         HandlerKind.MESSAGE: 2,
         HandlerKind.CHAT_MEMBER: 1,
     }
@@ -159,7 +158,6 @@ def test_callback_patterns_preserve_existing_callback_data_protocols() -> None:
 
     assert patterns == {
         "task": r"^task_",
-        "asset_confirm": r"^asset_confirm:",
         "verify": r"^verify:",
         "spam_help": r"^spam_help$",
         "omikuji": r"^(?:omikuji:|omikuji_)",

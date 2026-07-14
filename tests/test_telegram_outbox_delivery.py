@@ -34,7 +34,6 @@ from fogmoe_bot.domain.conversation.identity import (
 from fogmoe_bot.domain.conversation.outbox import (
     EDIT_TELEGRAM_MESSAGE,
     SEND_TELEGRAM_ARTIFACT,
-    SEND_TELEGRAM_ASSET_CONFIRMATION,
     SEND_TELEGRAM_MESSAGE,
     SEND_TELEGRAM_PHOTO,
     SEND_TELEGRAM_STICKER,
@@ -47,7 +46,6 @@ from fogmoe_bot.domain.media.artifact import ArtifactKind
 from fogmoe_bot.infrastructure.media.file_artifact_store import FileArtifactStore
 from fogmoe_bot.infrastructure.telegram.outbox_delivery import (
     TelegramOutboxDeliveryAdapter,
-    parse_send_asset_confirmation_payload,
     parse_send_message_payload,
     parse_send_photo_payload,
     parse_send_sticker_payload,
@@ -146,14 +144,12 @@ class _Bot:
         *,
         chat_id: int | str,
         text: str,
-        parse_mode: str | None = None,
-        disable_notification: bool | None = None,
-        protect_content: bool | None = None,
-        message_thread_id: int | None = None,
-        reply_parameters: ReplyParameters | None = None,
-        link_preview_options: LinkPreviewOptions | None = None,
-        reply_markup: InlineKeyboardMarkup | None = None,
-        disable_web_page_preview: bool | None = None,
+        parse_mode: str | None,
+        disable_notification: bool | None,
+        protect_content: bool | None,
+        message_thread_id: int | None,
+        reply_parameters: ReplyParameters | None,
+        link_preview_options: LinkPreviewOptions | None,
     ) -> _TelegramMessage:
         """@brief 记录 send_message / Record send_message.
 
@@ -171,8 +167,6 @@ class _Bot:
                 "message_thread_id": message_thread_id,
                 "reply_parameters": reply_parameters,
                 "link_preview_options": link_preview_options,
-                "reply_markup": reply_markup,
-                "disable_web_page_preview": disable_web_page_preview,
             }
         )
         return _TelegramMessage(42)
@@ -349,39 +343,6 @@ def test_edit_message_returns_existing_external_id() -> None:
 
     assert receipt.external_message_id == "77"
     assert bot.edit_calls[0]["message_id"] == 77
-
-
-def test_asset_confirmation_delivery_requires_one_opposite_callback_pair() -> None:
-    """@brief 资产确认卡只接受同一 ID 的批准/取消 callback / Asset confirmation cards accept only an approve/cancel pair for one ID."""
-
-    confirmation_id = "00000000-0000-0000-0000-000000000123"
-    payload = {
-        "chat_id": 7,
-        "text": "请确认。",
-        "approve_callback_data": f"asset_confirm:a:{confirmation_id}",
-        "cancel_callback_data": f"asset_confirm:c:{confirmation_id}",
-    }
-    bot = _Bot()
-
-    receipt = asyncio.run(
-        _adapter(bot).deliver(
-            _message(payload, kind=SEND_TELEGRAM_ASSET_CONFIRMATION)
-        )
-    )
-
-    assert receipt.external_message_id == "42"
-    markup = bot.send_calls[0]["reply_markup"]
-    assert isinstance(markup, InlineKeyboardMarkup)
-    assert markup.inline_keyboard[0][0].callback_data == payload["approve_callback_data"]
-    with pytest.raises(OutboundPayloadError, match="opposite decisions"):
-        parse_send_asset_confirmation_payload(
-            {
-                **payload,
-                "cancel_callback_data": f"asset_confirm:a:{confirmation_id}",
-            }
-        )
-    with pytest.raises(OutboundPayloadError, match="positive private-chat"):
-        parse_send_asset_confirmation_payload({**payload, "chat_id": -7})
 
 
 def test_artifact_delivery_claims_and_completes_only_through_outbox(

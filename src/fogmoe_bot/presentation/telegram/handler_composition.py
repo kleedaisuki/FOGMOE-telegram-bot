@@ -58,9 +58,6 @@ from fogmoe_bot.infrastructure.database.account_operations import (
     PostgresAccountOperations,
 )
 from fogmoe_bot.infrastructure.database.banking import PostgresBankOperations
-from fogmoe_bot.infrastructure.database.bank_notifications import (
-    PostgresBankTokenRequestNotificationWriter,
-)
 from fogmoe_bot.infrastructure.database.billing import PostgresBillingOperations
 from fogmoe_bot.infrastructure.database.chance import PostgresChanceRoundOperations
 from fogmoe_bot.infrastructure.database.crypto_operations.chart import (
@@ -92,9 +89,6 @@ from fogmoe_bot.infrastructure.database.media.music import (
 )
 from fogmoe_bot.infrastructure.database.personal_rpg import (
     PostgresPersonalRpgOperations,
-)
-from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
-    PostgresOutboxRepository,
 )
 from fogmoe_bot.infrastructure.database.repositories.verification_repository import (
     PostgresVerificationRepository,
@@ -203,12 +197,7 @@ def create_bank_service(identity: IdentitySettings) -> BankService:
     """
 
     return BankService(
-        PostgresBankOperations(
-            notifications=PostgresBankTokenRequestNotificationWriter(
-                outbox=PostgresOutboxRepository(),
-                administrator_id=identity.administrator.user_id,
-            )
-        ),
+        PostgresBankOperations(),
         administrator_id=identity.administrator.user_id,
     )
 
