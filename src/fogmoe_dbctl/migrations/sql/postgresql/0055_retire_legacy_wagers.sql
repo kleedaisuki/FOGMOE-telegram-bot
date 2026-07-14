@@ -17,6 +17,7 @@ LOCK TABLE
   economy.shop_pity,
   economy.stake_reward_pool,
   economy.stake_pool_postings,
+  assistant.billing_reservations,
   game.game_sessions,
   game.game_receipts,
   game.rps_sessions,
@@ -170,30 +171,96 @@ BEGIN
       USING ERRCODE = '23514';
   END IF;
 
-  -- The old staking-pool aggregate has no per-user ownership and supports
-  -- decimal units whereas Bank is integral.  A nonzero net pool therefore
-  -- cannot be assigned safely: stop for an explicit operator decision rather
-  -- than erase an unallocated obligation.
+  -- Every remaining pool contribution must be attributable through either a
+  -- terminal Assistant billing reservation or the legacy eager-charge aggregate
+  -- below.  An unowned 0022 opening balance is an operator-only exception: it
+  -- must be explicitly removed through dbctl before this migration runs, never
+  -- silently discarded as part of the general retirement path.
   IF EXISTS (
     SELECT 1
-    FROM (
-      SELECT posting.pool_id, COALESCE(SUM(posting.delta), 0) AS net_amount
-      FROM economy.stake_pool_postings AS posting
-      GROUP BY posting.pool_id
-    ) AS pool
-    WHERE pool.net_amount <> 0
-  ) OR EXISTS (
+    FROM economy.stake_pool_postings AS posting
+    WHERE posting.pool_id <> 1
+      OR posting.delta <= 0
+      OR posting.idempotency_key NOT LIKE 'assistant-acceptance:pool:1:tx:%'
+        AND posting.idempotency_key NOT LIKE 'assistant-billing:settle:%'
+  ) THEN
+    RAISE EXCEPTION
+      'cannot retire legacy stake pool: an unallocated or unexpected posting requires manual disposition'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF EXISTS (
     SELECT 1
     FROM economy.stake_reward_pool AS pool
     WHERE pool.balance <> 0
+  ) THEN
+    RAISE EXCEPTION
+      'cannot retire legacy stake pool: a nonzero cached pool balance requires manual disposition'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM economy.stake_pool_postings AS posting
+    WHERE posting.idempotency_key LIKE 'assistant-billing:settle:%'
+      AND posting.idempotency_key !~
+        '^assistant-billing:settle:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  ) OR EXISTS (
+    SELECT 1
+    FROM economy.stake_pool_postings AS posting
+    LEFT JOIN assistant.billing_reservations AS reservation
+      ON reservation.turn_id =
+        CASE
+          WHEN posting.idempotency_key ~
+            '^assistant-billing:settle:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          THEN substring(posting.idempotency_key FROM 26)::UUID
+          ELSE NULL
+        END
+    WHERE posting.idempotency_key LIKE 'assistant-billing:settle:%'
+      AND (
+        reservation.turn_id IS NULL
+        OR reservation.status <> 'settled'
+        OR reservation.legacy_eager
+        OR reservation.pool_contribution <> posting.delta
+      )
+  ) OR EXISTS (
+    SELECT 1
+    FROM assistant.billing_reservations AS reservation
+    WHERE reservation.status = 'settled'
+      AND NOT reservation.legacy_eager
       AND NOT EXISTS (
         SELECT 1
         FROM economy.stake_pool_postings AS posting
-        WHERE posting.pool_id = pool.id
+        WHERE posting.idempotency_key =
+          'assistant-billing:settle:' || reservation.turn_id::TEXT
+          AND posting.pool_id = 1
+          AND posting.delta = reservation.pool_contribution
       )
   ) THEN
     RAISE EXCEPTION
-      'cannot retire legacy stake pool: an unallocated nonzero pool balance requires explicit disposition'
+      'cannot retire legacy stake pool: a native Assistant settlement does not match its pool posting'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF (
+    SELECT count(*)
+    FROM economy.stake_pool_postings AS posting
+    WHERE posting.idempotency_key LIKE 'assistant-acceptance:pool:1:tx:%'
+  ) <> (
+    SELECT count(*)
+    FROM assistant.billing_reservations AS reservation
+    WHERE reservation.status = 'settled' AND reservation.legacy_eager
+  ) OR (
+    SELECT COALESCE(sum(posting.delta), 0)
+    FROM economy.stake_pool_postings AS posting
+    WHERE posting.idempotency_key LIKE 'assistant-acceptance:pool:1:tx:%'
+  ) <> (
+    SELECT COALESCE(sum(reservation.pool_contribution), 0)
+    FROM assistant.billing_reservations AS reservation
+    WHERE reservation.status = 'settled' AND reservation.legacy_eager
+  ) THEN
+    RAISE EXCEPTION
+      'cannot retire legacy stake pool: eager Assistant settlements do not reconcile to pool postings'
       USING ERRCODE = '23514';
   END IF;
 
@@ -329,6 +396,32 @@ CROSS JOIN LATERAL (
 ) AS player(user_id, slot_name)
 WHERE session.status = 'choosing';
 
+-- Each settled Assistant turn funded the retired reward pool with a known
+-- fraction of its integer token charge.  Return twice that original charge to
+-- its recorded owner; this avoids inventing a rounding rule for the old
+-- decimal pool contribution.  Any unowned opening balance has already been
+-- removed by an explicit operator action before this general migration runs.
+INSERT INTO legacy_wager_refunds (
+  idempotency_key, user_id, amount, metadata
+)
+SELECT
+  'migration:0055:assistant-double-refund:' || reservation.turn_id::TEXT,
+  reservation.user_id,
+  reservation.cost::BIGINT * 2,
+  jsonb_build_object(
+    'migration', '0055_retire_legacy_wagers',
+    'legacy_refund', TRUE,
+    'legacy_source', 'assistant.billing_reservations',
+    'assistant_pool_double_refund', TRUE,
+    'assistant_turn_id', reservation.turn_id::TEXT,
+    'user_id', reservation.user_id,
+    'original_cost', reservation.cost,
+    'refund_multiplier', 2,
+    'refund_amount', reservation.cost::BIGINT * 2
+  )
+FROM assistant.billing_reservations AS reservation
+WHERE reservation.status = 'settled';
+
 DO $$
 BEGIN
   IF EXISTS (
@@ -433,8 +526,8 @@ DROP TABLE economy.stake_reward_pool;
 
 -- Old RPG progress is intentionally not migrated into ``personal_rpg``.  The
 -- two products have incompatible state, privacy scope, and audit semantics.
-DROP TABLE game.migration_0027_character_repairs;
-DROP TABLE game.migration_0027_inventory_repairs;
+DROP TABLE IF EXISTS game.migration_0027_character_repairs;
+DROP TABLE IF EXISTS game.migration_0027_inventory_repairs;
 DROP TABLE game.rpg_battle_cooldowns;
 DROP TABLE game.rpg_player_equipment_stats;
 DROP TABLE game.rpg_player_equipment;

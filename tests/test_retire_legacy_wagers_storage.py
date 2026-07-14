@@ -32,6 +32,7 @@ def test_0055_refunds_every_attributable_held_principal_through_bank() -> None:
         "migration:0055:stake-principal:",
         "migration:0055:gamble-refund:",
         "migration:0055:rps-principal:",
+        "migration:0055:assistant-double-refund:",
         "legacy_wager_refunds",
         "LOCK TABLE",
         "IN SHARE ROW EXCLUSIVE MODE",
@@ -42,6 +43,8 @@ def test_0055_refunds_every_attributable_held_principal_through_bank() -> None:
         "'user_id', stake.user_id",
         "'user_id', (bet.value ->> 'user_id')::BIGINT",
         "'user_id', player.user_id",
+        "'assistant_pool_double_refund', TRUE",
+        "'refund_multiplier', 2",
     ):
         assert marker in migration
 
@@ -50,9 +53,8 @@ def test_0055_refunds_every_attributable_held_principal_through_bank() -> None:
     assert any("SET CONSTRAINTS ALL IMMEDIATE" in statement for statement in statements)
 
 
-def test_0055_refuses_unallocated_stake_pool_and_drops_only_retired_storage() -> None:
-    """@brief 0055 遇到不可归属奖励池时失败，成功后仅删除旧结构 /
-    0055 fails for an unallocated reward pool and, on success, removes only retired storage.
+def test_0055_requires_manual_disposition_for_unowned_pool_balance() -> None:
+    """@brief 0055 要求人工处置无主池余额 / 0055 requires manual disposition for an unowned pool balance.
 
     @return None / None.
     """
@@ -62,10 +64,15 @@ def test_0055_refuses_unallocated_stake_pool_and_drops_only_retired_storage() ->
         / "src/fogmoe_dbctl/migrations/sql/postgresql/0055_retire_legacy_wagers.sql"
     ).read_text(encoding="utf-8")
 
-    assert "cannot retire legacy stake pool" in migration
-    assert "requires explicit disposition" in migration
+    assert "operator-only exception" in migration
+    assert "unallocated or unexpected posting requires manual disposition" in migration
+    assert "nonzero cached pool balance requires manual disposition" in migration
+    assert "native Assistant settlement does not match its pool posting" in migration
+    assert "eager Assistant settlements do not reconcile to pool postings" in migration
     assert "cannot retire Bank staking_pool account" in migration
     assert "DROP TABLE economy.stake_pool_postings" in migration
+    assert "DROP TABLE IF EXISTS game.migration_0027_character_repairs" in migration
+    assert "DROP TABLE IF EXISTS game.migration_0027_inventory_repairs" in migration
     assert "DROP TABLE game.rps_sessions" in migration
     assert "DROP TABLE game.game_sessions" in migration
     assert "DROP TABLE game.rpg_characters" in migration
