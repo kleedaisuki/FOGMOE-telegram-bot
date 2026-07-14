@@ -215,7 +215,7 @@ class PostgresCommunityOperations(CommunityOperations):
                 entries=tuple(
                     LeaderboardEntry(
                         name=cast(str, row[0]),
-                        coins=cast(int, row[1]),
+                        coins=int(row[1]),
                     )
                     for row in rows
                 ),

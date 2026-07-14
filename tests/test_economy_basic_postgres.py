@@ -142,6 +142,7 @@ def test_real_postgres_lottery_and_gift_replay_without_double_credit(
                 idempotency_key=leaderboard_key,
             )
             leaderboard = await community.leaderboard(leaderboard_command)
+            assert all(isinstance(entry.coins, int) for entry in leaderboard.entries)
             async with db_connection.transaction() as connection:
                 await db_connection.execute(
                     "UPDATE identity.users SET coins = coins + 100 WHERE id = %s",
