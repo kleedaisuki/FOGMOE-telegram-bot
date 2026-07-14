@@ -78,6 +78,9 @@ def test_system_prompt_defines_persona_and_runtime_contract() -> None:
     assert 'parse_mode="Markdown"' in resources.system_prompt
     assert "not CommonMark" in resources.system_prompt
     assert "Formatting entities must never nest" in resources.system_prompt
+    assert "Markdown is optional" in resources.system_prompt
+    assert "delimiter audit" in resources.system_prompt
+    assert "Never emit an unmatched delimiter" in resources.system_prompt
 
 
 def test_system_prompt_requires_the_typed_sticker_tool() -> None:

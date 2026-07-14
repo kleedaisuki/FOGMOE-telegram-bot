@@ -124,13 +124,20 @@ def _sticker(file_id: str, emoji: str) -> Sticker:
 class _Bot:
     """@brief 可注入异常的 PTB Bot 替身 / PTB Bot double with injectable errors."""
 
-    def __init__(self, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        error: Exception | None = None,
+        *,
+        send_errors: tuple[Exception, ...] = (),
+    ) -> None:
         """@brief 创建 Bot 替身 / Create the Bot double.
 
         @param error 调用时抛出的异常 / Exception raised by calls.
+        @param send_errors 仅 send_message 按顺序抛出的异常 / Exceptions raised by send_message in order.
         """
 
         self.error = error
+        self._send_errors = list(send_errors)
         self.send_calls: list[dict[str, object]] = []
         self.edit_calls: list[dict[str, object]] = []
         self.artifact_calls: list[tuple[str, int | str]] = []
@@ -156,7 +163,6 @@ class _Bot:
         @return Telegram 消息替身 / Telegram message double.
         """
 
-        self._raise_if_configured()
         self.send_calls.append(
             {
                 "chat_id": chat_id,
@@ -169,6 +175,7 @@ class _Bot:
                 "link_preview_options": link_preview_options,
             }
         )
+        self._raise_send_error_if_configured()
         return _TelegramMessage(42)
 
     async def edit_message_text(
@@ -287,6 +294,16 @@ class _Bot:
         if self.error is not None:
             raise self.error
 
+    def _raise_send_error_if_configured(self) -> None:
+        """@brief 按顺序抛出 send_message 专属异常 / Raise the next send_message-specific exception.
+
+        @return None / None.
+        """
+
+        if self._send_errors:
+            raise self._send_errors.pop(0)
+        self._raise_if_configured()
+
 
 def _adapter(bot: _Bot) -> TelegramOutboxDeliveryAdapter:
     """@brief 将测试 Bot 注入强类型 adapter / Inject a test Bot into the typed adapter.
@@ -327,6 +344,35 @@ def test_send_message_returns_external_message_id() -> None:
     assert reply_parameters.allow_sending_without_reply is True
     assert isinstance(preview_options, LinkPreviewOptions)
     assert preview_options.is_disabled is True
+
+
+def test_message_entity_parse_error_falls_back_to_plain_text() -> None:
+    """@brief Markdown 实体解析失败时以同一文本降级纯文本 / An entity parse failure retries the same text as plain text."""
+
+    bot = _Bot(
+        send_errors=(
+            BadRequest("Can't parse entities: can't find end of the entity"),
+        )
+    )
+
+    receipt = asyncio.run(
+        _adapter(bot).deliver(
+            _message(
+                {
+                    "chat_id": -100,
+                    "text": "未闭合的 `格式符",
+                    "parse_mode": "Markdown",
+                    "reply_to_message_id": 5,
+                    "disable_web_page_preview": True,
+                }
+            )
+        )
+    )
+
+    assert receipt.external_message_id == "42"
+    assert [call["parse_mode"] for call in bot.send_calls] == ["Markdown", None]
+    assert bot.send_calls[0]["text"] == bot.send_calls[1]["text"]
+    assert bot.send_calls[1]["reply_parameters"] == bot.send_calls[0]["reply_parameters"]
 
 
 def test_edit_message_returns_existing_external_id() -> None:

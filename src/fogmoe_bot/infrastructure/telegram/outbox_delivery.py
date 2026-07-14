@@ -22,6 +22,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     LinkPreviewOptions,
+    Message,
     ReplyParameters,
     Sticker,
 )
@@ -118,6 +119,18 @@ _MAX_STICKER_PACK_LENGTH = 64
 
 _MAX_STICKER_EMOJI_LENGTH = 32
 """@brief sticker emoji 序列字符上限 / Sticker-emoji sequence character limit."""
+
+
+def _is_message_entity_parse_error(error: BadRequest) -> bool:
+    """@brief 判断 BadRequest 是否为文本格式实体解析失败 / Decide whether a BadRequest is a text-entity parse failure.
+
+    @param error Telegram 返回的请求错误 / Request error returned by Telegram.
+    @return 仅在 Telegram 确认没有投递且格式实体无法解析时返回 True / True only when Telegram confirms non-delivery due to malformed text entities.
+    @note ``BadRequest`` 表示请求未被接受，因此随后以纯文本重试不会造成重复投递。/
+        A ``BadRequest`` means the request was not accepted, so a subsequent plain-text retry cannot duplicate delivery.
+    """
+
+    return "can't parse entities" in str(error).casefold()
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,27 +301,58 @@ class TelegramOutboxDeliveryAdapter:
             ) from error
 
     async def _deliver_message(self, payload: JsonObject) -> DeliveryReceipt:
-        """@brief 投递已校验文本消息 / Deliver a validated text message."""
+        """@brief 投递文本消息，格式错误时降级纯文本 / Deliver text and fall back to plain text on formatting errors.
+
+        @param payload 已持久化且待校验的发送载荷 / Persisted send payload awaiting validation.
+        @return Telegram 外部消息 ID / Telegram external message ID.
+        @note 只对 Telegram 明确拒绝的 entity parse error 降级；其他 BadRequest 仍保留为永久失败，
+            避免掩盖无效 chat、权限或请求参数错误。/ Only an explicitly rejected entity parse error
+            falls back; other BadRequests remain permanent failures so invalid chats, permissions,
+            and request parameters are not hidden.
+        """
 
         parsed = parse_send_message_payload(payload)
-        sent = await self._bot.send_message(
-            chat_id=parsed.chat_id,
-            text=parsed.text,
-            parse_mode=parsed.parse_mode,
-            disable_notification=parsed.disable_notification,
-            protect_content=parsed.protect_content,
-            message_thread_id=parsed.message_thread_id,
+        try:
+            sent = await self._send_text_message(
+                parsed,
+                parse_mode=parsed.parse_mode,
+            )
+        except BadRequest as error:
+            if parsed.parse_mode is None or not _is_message_entity_parse_error(error):
+                raise
+            sent = await self._send_text_message(parsed, parse_mode=None)
+        return DeliveryReceipt(str(sent.message_id))
+
+    async def _send_text_message(
+        self,
+        payload: SendMessagePayload,
+        *,
+        parse_mode: str | None,
+    ) -> Message:
+        """@brief 以指定解析模式调用 Telegram send_message / Call Telegram send_message with an explicit parse mode.
+
+        @param payload 已校验的文本发送载荷 / Validated text-send payload.
+        @param parse_mode 本次尝试的 Telegram 解析模式；None 表示纯文本 / Parse mode for this attempt; None means plain text.
+        @return Telegram 创建的消息 / Message created by Telegram.
+        """
+
+        return await self._bot.send_message(
+            chat_id=payload.chat_id,
+            text=payload.text,
+            parse_mode=parse_mode,
+            disable_notification=payload.disable_notification,
+            protect_content=payload.protect_content,
+            message_thread_id=payload.message_thread_id,
             reply_parameters=(
                 ReplyParameters(
-                    message_id=parsed.reply_to_message_id,
+                    message_id=payload.reply_to_message_id,
                     allow_sending_without_reply=True,
                 )
-                if parsed.reply_to_message_id is not None
+                if payload.reply_to_message_id is not None
                 else None
             ),
-            link_preview_options=_link_preview_options(parsed.disable_web_page_preview),
+            link_preview_options=_link_preview_options(payload.disable_web_page_preview),
         )
-        return DeliveryReceipt(str(sent.message_id))
 
     async def _deliver_edit(self, payload: JsonObject) -> DeliveryReceipt:
         """@brief 投递已校验消息编辑 / Deliver a validated message edit."""
