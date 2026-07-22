@@ -13,22 +13,24 @@ commands/access_sql.py    纯 PostgreSQL ACL 收敛与 guard SQL 渲染
 commands/migration_execution.py Alembic 与 psql 副作用边界
 commands/export_csv.py    通过受配置约束的连接原子导出表为 CSV
 postgres.py               PostgreSQL DSN、标识符与连接原语
-config.py                 项目路径、schema 拓扑与 config.json 解析
+config.py                 dbctl 窄配置投影、路径与模型校验
 migrations/               Alembic 适配层与版本化 SQL
 ```
 
 依赖方向保持单向：`cli -> migrate -> (access_policy, access_sql, migration_execution) -> postgres/config`。
 策略对象与 SQL 渲染不读取配置、不连接数据库；
 只有 execution 边界可启动 Alembic 或 `psql`。迁移适配层可以依赖共享 PostgreSQL
-原语；任何控制面模块都不得依赖 `fogmoe_bot`。
+原语；配置投影只可依赖中立的 `fogmoe_config.jsonc` 语法解码边界。任何控制面模块都不得
+依赖 `fogmoe_bot`。
 
 ## 配置边界
 
 `fogmoe-dbctl` 只从仓库根目录的 `config.json`（JSONC）读取它所需的字段：
 `database.endpoint`、`database.application`、`database.maintenance`、
 `database.reporting`、`database.bootstrap` 与 `identity.administrator`。它拥有自己的窄配置
-解析器，不调用 bot 或 Dashboard 的配置服务；三个程序只共享用户填写的同一个配置文件，
-而不共享运行时配置对象。
+投影、Pydantic 模型与公开错误，不调用 bot 或 Dashboard 的配置服务；三个程序只共享
+`fogmoe_config.jsonc` 的严格 JSONC 语法解码器和用户填写的同一个文件，不共享语义配置模型
+或运行时配置对象。
 
 `application`、`maintenance`、`reporting` 是三个不可复用的受管登录身份；它们与
 `bootstrap.system_user` 也不得复用。配置模型会在执行任何命令前强制四个角色名两两不同，

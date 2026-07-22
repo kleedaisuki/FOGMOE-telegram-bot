@@ -7,10 +7,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-import json
-from math import isfinite
 from pathlib import Path
-from typing import Annotated, Final, Literal, Never, Self, cast
+from typing import Annotated, Final, Self
 
 from pydantic import (
     BaseModel,
@@ -21,182 +19,10 @@ from pydantic import (
     model_validator,
 )
 
+from fogmoe_config.jsonc import JsoncDecodeError, JSONValue, load_jsonc
 
-type JSONValue = (
-    None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
-)
-"""@brief JSONC 可表示的递归值 / Recursive value representable by JSONC."""
 #: @brief 当前支持的根配置契约版本 / Root configuration contract version supported by this package.
 SCHEMA_VERSION: Final[int] = 1
-
-
-class JsoncDecodeError(ValueError):
-    """@brief JSONC 文档无效 / JSONC document is invalid."""
-
-
-def _load_jsonc(path: Path) -> dict[str, JSONValue]:
-    """@brief 读取 dbctl 本地 JSONC 文档 / Read the dbctl-local JSONC document.
-
-    @param path 配置文件路径 / Configuration-file path.
-    @return 严格 JSON 顶层对象 / Strict JSON top-level object.
-    @raise JsoncDecodeError 文件无法读取或格式无效时抛出 /
-        Raised when the file cannot be read or its format is invalid.
-    """
-
-    try:
-        source = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
-        raise JsoncDecodeError(f"cannot read JSONC file {path}: {error}") from error
-    try:
-        return _parse_jsonc(source)
-    except JsoncDecodeError as error:
-        raise JsoncDecodeError(f"invalid JSONC file {path}: {error}") from error
-
-
-def _parse_jsonc(source: str) -> dict[str, JSONValue]:
-    """@brief 解析 dbctl 的严格 JSONC / Parse dbctl's strict JSONC.
-
-    @param source 已解码 JSONC 文本 / Decoded JSONC text.
-    @return 严格 JSON 顶层对象 / Strict JSON top-level object.
-    @raise JsoncDecodeError 注释或 JSON 语法无效时抛出 /
-        Raised for invalid comments or JSON syntax.
-    @note 仅允许 ``//``、``/* ... */`` 和标准 JSON；不接受 JSON5 扩展。/
-        Only ``//`` and ``/* ... */`` comments plus standard JSON are accepted;
-        other JSON5 extensions are rejected.
-    """
-
-    try:
-        value = cast(
-            JSONValue,
-            json.loads(
-                _strip_jsonc_comments(source),
-                object_pairs_hook=_object_without_duplicate_keys,
-                parse_constant=_reject_non_json_number,
-                parse_float=_parse_finite_json_float,
-            ),
-        )
-    except JsoncDecodeError:
-        raise
-    except json.JSONDecodeError as error:
-        raise JsoncDecodeError(
-            f"invalid JSON at line {error.lineno}, column {error.colno}: {error.msg}"
-        ) from error
-    if not isinstance(value, dict):
-        raise JsoncDecodeError("the top-level JSONC value must be an object")
-    return value
-
-
-def _strip_jsonc_comments(source: str) -> str:
-    """@brief 用本地状态机替换 JSONC 注释 / Replace JSONC comments with a local state machine.
-
-    @param source 原始 JSONC 文本 / Raw JSONC text.
-    @return 位置不变的严格 JSON 文本 / Strict JSON text with unchanged positions.
-    @raise JsoncDecodeError 块注释未闭合时抛出 / Raised when a block comment is unterminated.
-    """
-
-    characters = list(source)
-    state: Literal["normal", "string", "escape", "line", "block"] = "normal"
-    block_start: int | None = None
-    index = 0
-    while index < len(characters):
-        character = characters[index]
-        following = characters[index + 1] if index + 1 < len(characters) else ""
-        if state == "string":
-            state = (
-                "escape"
-                if character == "\\"
-                else "normal"
-                if character == '"'
-                else "string"
-            )
-        elif state == "escape":
-            state = "string"
-        elif state == "line":
-            if character in "\r\n":
-                state = "normal"
-            else:
-                characters[index] = " "
-        elif state == "block":
-            if character == "*" and following == "/":
-                characters[index] = " "
-                characters[index + 1] = " "
-                state = "normal"
-                index += 1
-            elif character not in "\r\n":
-                characters[index] = " "
-        elif character == '"':
-            state = "string"
-        elif character == "/" and following == "/":
-            characters[index] = " "
-            characters[index + 1] = " "
-            state = "line"
-            index += 1
-        elif character == "/" and following == "*":
-            characters[index] = " "
-            characters[index + 1] = " "
-            block_start = index
-            state = "block"
-            index += 1
-        index += 1
-    if state == "block":
-        assert block_start is not None
-        line = source.count("\n", 0, block_start) + 1
-        column = block_start - source.rfind("\n", 0, block_start)
-        raise JsoncDecodeError(
-            f"unterminated block comment at line {line}, column {column}"
-        )
-    return "".join(characters)
-
-
-def _object_without_duplicate_keys(
-    pairs: list[tuple[str, JSONValue]],
-) -> dict[str, JSONValue]:
-    """@brief 构造无重复键对象 / Build an object without duplicate keys.
-
-    @param pairs JSON 成员对 / JSON member pairs.
-    @return 键唯一对象 / Object with unique keys.
-    @raise JsoncDecodeError 存在重复键时抛出 / Raised when a duplicate key exists.
-    """
-
-    result: dict[str, JSONValue] = {}
-    for key, value in pairs:
-        if key in result:
-            raise JsoncDecodeError(f"duplicate object key {key!r}")
-        result[key] = value
-    return result
-
-
-def _reject_non_json_number(token: str) -> Never:
-    """@brief 拒绝非 JSON 数值常量 / Reject non-JSON numeric constants.
-
-    @param token 非标准 token / Non-standard token.
-    @raise JsoncDecodeError 始终抛出 / Always raised.
-    """
-
-    raise JsoncDecodeError(
-        f"non-standard JSON numeric constant {token!r} is not allowed"
-    )
-
-
-def _parse_finite_json_float(token: str) -> float:
-    """@brief 解析且限制有限 JSON 浮点数 / Parse and require a finite JSON float.
-
-    @param token JSON 数字 token / JSON numeric token.
-    @return 有限浮点数 / Finite floating-point value.
-    @raise JsoncDecodeError 指数溢出为无穷大时抛出 /
-        Raised when an exponent overflows to infinity.
-    @note ``json.loads`` 会把合法词法形式 ``1e999`` 转成 ``inf``；dbctl 的端口、
-        超时等配置不能接受该非有限结果。/
-        ``json.loads`` turns lexically valid ``1e999`` into ``inf``; dbctl values
-        such as ports and timeouts must not accept that non-finite result.
-    """
-
-    value = float(token)
-    if not isfinite(value):
-        raise JsoncDecodeError(
-            f"non-finite JSON numeric value {token!r} is not allowed"
-        )
-    return value
 
 
 #: @brief 正整数数据库配置 / Positive database configuration integer.
@@ -343,7 +169,7 @@ def read_dbctl_settings(path: Path | None = None) -> DbctlSettings:
 
     source_path = path or default_config_path()
     try:
-        document = _load_jsonc(source_path)
+        document = load_jsonc(source_path)
         return DbctlSettings.model_validate(_dbctl_payload(document))
     except JsoncDecodeError as error:
         raise ConfigurationError(str(error)) from error

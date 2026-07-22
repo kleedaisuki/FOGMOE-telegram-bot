@@ -7,11 +7,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from enum import Enum, auto
-import json
-from math import isfinite
 from pathlib import Path
-from typing import Annotated, Final, Literal, Never, TypeAlias, cast
+from typing import Annotated, Final, Literal, TypeAlias, cast
 from urllib.parse import quote_plus
 
 from pydantic import (
@@ -26,213 +23,12 @@ from pydantic import (
 )
 
 from fogmoe_bot.domain.temporal import TimeZoneId
+from fogmoe_config.jsonc import JsoncDecodeError, JSONValue, load_jsonc
 
-
-type JSONValue = (
-    None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
-)
-"""@brief JSONC 可表示的递归值 / Recursive value representable by JSONC."""
 #: @brief 当前支持的根配置契约版本 / Root configuration contract version supported by this package.
 SCHEMA_VERSION: Final[int] = 1
 #: @brief Compose 强制终止前允许的最大运行时排空秒数 / Maximum runtime drain seconds before Compose escalation.
 MAX_SHUTDOWN_GRACE_SECONDS: Final[int] = 190
-
-
-class JsoncDecodeError(ValueError):
-    """@brief JSONC 文档无效 / JSONC document is invalid."""
-
-
-class _JsoncScanState(Enum):
-    """@brief JSONC 注释扫描状态 / JSONC comment-scanning states."""
-
-    NORMAL = auto()
-    """@brief 常规 JSON 语法位置 / Ordinary JSON syntax position."""
-
-    STRING = auto()
-    """@brief 双引号字符串内部 / Inside a double-quoted string."""
-
-    ESCAPE = auto()
-    """@brief 字符串转义字符之后 / Immediately after a string escape."""
-
-    LINE_COMMENT = auto()
-    """@brief 行注释内部 / Inside a line comment."""
-
-    BLOCK_COMMENT = auto()
-    """@brief 块注释内部 / Inside a block comment."""
-
-
-def _load_jsonc(path: Path) -> dict[str, JSONValue]:
-    """@brief 读取 Bot 本地 JSONC 文档 / Read the Bot-local JSONC document.
-
-    @param path 配置文件路径 / Configuration-file path.
-    @return 严格 JSON 顶层对象 / Strict JSON top-level object.
-    @raise JsoncDecodeError 文件无法读取或格式无效时抛出 /
-        Raised when the file cannot be read or its format is invalid.
-    """
-
-    try:
-        source = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
-        raise JsoncDecodeError(f"cannot read JSONC file {path}: {error}") from error
-    try:
-        return _parse_jsonc(source)
-    except JsoncDecodeError as error:
-        raise JsoncDecodeError(f"invalid JSONC file {path}: {error}") from error
-
-
-def _parse_jsonc(source: str) -> dict[str, JSONValue]:
-    """@brief 解析严格 JSON 加注释 / Parse strict JSON plus comments.
-
-    @param source 已解码的 JSONC 文本 / Decoded JSONC text.
-    @return 严格 JSON 顶层对象 / Strict JSON top-level object.
-    @raise JsoncDecodeError 注释或 JSON 语法无效时抛出 /
-        Raised for invalid comments or JSON syntax.
-    @note 仅允许 ``//`` 和 ``/* ... */`` 注释，不接受 JSON5 其他扩展。/
-        Only ``//`` and ``/* ... */`` comments are accepted; other JSON5 extensions are rejected.
-    """
-
-    try:
-        value = cast(
-            JSONValue,
-            json.loads(
-                _strip_jsonc_comments(source),
-                object_pairs_hook=_json_object_without_duplicate_keys,
-                parse_constant=_reject_non_json_number,
-                parse_float=_parse_finite_json_float,
-            ),
-        )
-    except JsoncDecodeError:
-        raise
-    except json.JSONDecodeError as error:
-        raise JsoncDecodeError(
-            f"invalid JSON at line {error.lineno}, column {error.colno}: {error.msg}"
-        ) from error
-    if not isinstance(value, dict):
-        raise JsoncDecodeError("the top-level JSONC value must be an object")
-    return value
-
-
-def _strip_jsonc_comments(source: str) -> str:
-    """@brief 用状态机替换 JSONC 注释 / Replace JSONC comments with whitespace using a state machine.
-
-    @param source 原始 JSONC 文本 / Raw JSONC text.
-    @return 与原文位置对齐的严格 JSON 文本 / Strict JSON text aligned with the source positions.
-    @raise JsoncDecodeError 块注释未闭合时抛出 / Raised when a block comment is unterminated.
-    """
-
-    characters = list(source)
-    state = _JsoncScanState.NORMAL
-    block_start: int | None = None
-    index = 0
-    while index < len(characters):
-        character = characters[index]
-        following = characters[index + 1] if index + 1 < len(characters) else ""
-        if state is _JsoncScanState.STRING:
-            if character == "\\":
-                state = _JsoncScanState.ESCAPE
-            elif character == '"':
-                state = _JsoncScanState.NORMAL
-            index += 1
-            continue
-        if state is _JsoncScanState.ESCAPE:
-            state = _JsoncScanState.STRING
-            index += 1
-            continue
-        if state is _JsoncScanState.LINE_COMMENT:
-            if character in "\r\n":
-                state = _JsoncScanState.NORMAL
-            else:
-                characters[index] = " "
-            index += 1
-            continue
-        if state is _JsoncScanState.BLOCK_COMMENT:
-            if character == "*" and following == "/":
-                characters[index] = " "
-                characters[index + 1] = " "
-                state = _JsoncScanState.NORMAL
-                index += 2
-                continue
-            if character not in "\r\n":
-                characters[index] = " "
-            index += 1
-            continue
-        if character == '"':
-            state = _JsoncScanState.STRING
-            index += 1
-            continue
-        if character == "/" and following == "/":
-            characters[index] = " "
-            characters[index + 1] = " "
-            state = _JsoncScanState.LINE_COMMENT
-            index += 2
-            continue
-        if character == "/" and following == "*":
-            characters[index] = " "
-            characters[index + 1] = " "
-            block_start = index
-            state = _JsoncScanState.BLOCK_COMMENT
-            index += 2
-            continue
-        index += 1
-    if state is _JsoncScanState.BLOCK_COMMENT:
-        assert block_start is not None
-        line = source.count("\n", 0, block_start) + 1
-        column = block_start - source.rfind("\n", 0, block_start)
-        raise JsoncDecodeError(
-            f"unterminated block comment at line {line}, column {column}"
-        )
-    return "".join(characters)
-
-
-def _json_object_without_duplicate_keys(
-    pairs: list[tuple[str, JSONValue]],
-) -> dict[str, JSONValue]:
-    """@brief 构造无重复键的 JSON 对象 / Build a JSON object without duplicate keys.
-
-    @param pairs JSON 解码器给出的成员对 / Member pairs emitted by the JSON decoder.
-    @return 键唯一对象 / Object with unique keys.
-    @raise JsoncDecodeError 存在重复键时抛出 / Raised when a duplicate key exists.
-    """
-
-    result: dict[str, JSONValue] = {}
-    for key, value in pairs:
-        if key in result:
-            raise JsoncDecodeError(f"duplicate object key {key!r}")
-        result[key] = value
-    return result
-
-
-def _reject_non_json_number(token: str) -> Never:
-    """@brief 拒绝 NaN 和 Infinity / Reject NaN and Infinity.
-
-    @param token 非标准数值 token / Non-standard numeric token.
-    @raise JsoncDecodeError 始终抛出 / Always raised.
-    """
-
-    raise JsoncDecodeError(
-        f"non-standard JSON numeric constant {token!r} is not allowed"
-    )
-
-
-def _parse_finite_json_float(token: str) -> float:
-    """@brief 解析且限制有限 JSON 浮点数 / Parse and require a finite JSON float.
-
-    @param token JSON 数字 token / JSON numeric token.
-    @return 有限浮点数 / Finite floating-point value.
-    @raise JsoncDecodeError 指数溢出为无穷大时抛出 /
-        Raised when an exponent overflows to infinity.
-    @note ``json.loads`` 会把合法词法形式 ``1e999`` 转成 ``inf``；配置中的
-        超时、容量等数值不能接受该非有限结果。/
-        ``json.loads`` turns lexically valid ``1e999`` into ``inf``; configuration
-        values such as timeouts and capacities must not accept that non-finite result.
-    """
-
-    value = float(token)
-    if not isfinite(value):
-        raise JsoncDecodeError(
-            f"non-finite JSON numeric value {token!r} is not allowed"
-        )
-    return value
 
 
 #: @brief AI provider 的受限名称 / Closed set of AI provider names.
@@ -418,41 +214,90 @@ class SchedulingRuntimeSettings(_FrozenSettings):
         return self
 
 
-class InboxRuntimeSettings(_FrozenSettings):
+class _AdaptivePollingSettings(_FrozenSettings):
+    """@brief 自适应空闲轮询配置基类 / Base settings for adaptive idle polling."""
+
+    poll_interval_seconds: PositiveFloat
+    max_poll_interval_seconds: PositiveFloat
+
+    @model_validator(mode="after")
+    def _validate_polling_bounds(self) -> _AdaptivePollingSettings:
+        """@brief 确保退避上限不小于基础间隔 / Ensure the backoff cap is not below the base interval.
+
+        @return 已验证设置 / Validated settings.
+        @raise ValueError 上限小于基础间隔时抛出 / Raised when the cap is below the base interval.
+        """
+
+        if self.max_poll_interval_seconds < self.poll_interval_seconds:
+            raise ValueError(
+                "max_poll_interval_seconds must be >= poll_interval_seconds"
+            )
+        return self
+
+
+def _validate_provider_attempt_lease(
+    *,
+    provider_timeout_seconds: int,
+    attempt_timeout_seconds: int,
+    lease_seconds: int,
+) -> None:
+    """@brief 校验外部调用、完整尝试与 fencing lease 的嵌套截止时间 / Validate nested provider, attempt, and fencing-lease deadlines.
+
+    @param provider_timeout_seconds 单个 provider 调用上限 / Single-provider call limit.
+    @param attempt_timeout_seconds 包含 fallback 的完整尝试上限 / Whole-attempt limit including fallback.
+    @param lease_seconds durable claim lease / Durable claim lease.
+    @return None / None.
+    @raise ValueError 未满足 ``provider < attempt < lease`` 时抛出 /
+        Raised unless ``provider < attempt < lease``.
+    """
+
+    if lease_seconds <= attempt_timeout_seconds:
+        raise ValueError("lease_seconds must be > attempt_timeout_seconds")
+    if attempt_timeout_seconds <= provider_timeout_seconds:
+        raise ValueError("attempt_timeout_seconds must be > provider_timeout_seconds")
+
+
+class InboxRuntimeSettings(_AdaptivePollingSettings):
     """@brief Durable inbox worker 设置 / Durable inbox worker settings."""
 
     worker_count: PositiveInt = 16
     poll_interval_seconds: PositiveFloat = 0.1
+    max_poll_interval_seconds: PositiveFloat = 0.5
     lease_seconds: PositiveInt = 60
 
 
-class InferenceRuntimeSettings(_FrozenSettings):
+class InferenceRuntimeSettings(_AdaptivePollingSettings):
     """@brief 推理 worker 设置 / Inference worker settings."""
 
     worker_count: PositiveInt = 8
     poll_interval_seconds: PositiveFloat = 0.25
+    max_poll_interval_seconds: PositiveFloat = 0.5
     provider_timeout_seconds: PositiveInt = 90
     lease_seconds: PositiveInt = 180
     attempt_timeout_seconds: PositiveInt = 120
 
     @model_validator(mode="after")
     def _validate_lease(self) -> InferenceRuntimeSettings:
-        """@brief 确保 lease 严格长于一次尝试 / Ensure the lease strictly outlives one attempt.
+        """@brief 确保 provider、attempt 与 lease 严格嵌套 / Strictly nest provider, attempt, and lease deadlines.
 
         @return 已验证的推理设置 / Validated inference settings.
-        @raise ValueError lease 过短时抛出 / Raised when the lease is too short.
+        @raise ValueError deadline 顺序无效时抛出 / Raised for an invalid deadline order.
         """
 
-        if self.lease_seconds <= self.attempt_timeout_seconds:
-            raise ValueError("lease_seconds must be > attempt_timeout_seconds")
+        _validate_provider_attempt_lease(
+            provider_timeout_seconds=self.provider_timeout_seconds,
+            attempt_timeout_seconds=self.attempt_timeout_seconds,
+            lease_seconds=self.lease_seconds,
+        )
         return self
 
 
-class OutboxRuntimeSettings(_FrozenSettings):
+class OutboxRuntimeSettings(_AdaptivePollingSettings):
     """@brief Durable outbox worker 设置 / Durable outbox worker settings."""
 
     worker_count: PositiveInt = 16
     poll_interval_seconds: PositiveFloat = 0.1
+    max_poll_interval_seconds: PositiveFloat = 0.5
     lease_seconds: PositiveInt = 60
     attempt_timeout_seconds: PositiveInt = 25
 
@@ -469,29 +314,33 @@ class OutboxRuntimeSettings(_FrozenSettings):
         return self
 
 
-class CompactionRuntimeSettings(_FrozenSettings):
+class CompactionRuntimeSettings(_AdaptivePollingSettings):
     """@brief 上下文压缩 worker 设置 / Context-compaction worker settings."""
 
     worker_count: PositiveInt = 2
     poll_interval_seconds: PositiveFloat = 0.5
+    max_poll_interval_seconds: PositiveFloat = 5.0
     provider_timeout_seconds: PositiveInt = 30
     attempt_timeout_seconds: PositiveInt = 120
     lease_seconds: PositiveInt = 180
 
     @model_validator(mode="after")
     def _validate_lease(self) -> CompactionRuntimeSettings:
-        """@brief 确保压缩 lease 严格长于尝试 / Ensure compaction lease strictly outlives attempts.
+        """@brief 确保压缩 provider、attempt 与 lease 严格嵌套 / Strictly nest compaction provider, attempt, and lease deadlines.
 
         @return 已验证的压缩设置 / Validated compaction settings.
-        @raise ValueError lease 过短时抛出 / Raised when the lease is too short.
+        @raise ValueError deadline 顺序无效时抛出 / Raised for an invalid deadline order.
         """
 
-        if self.lease_seconds <= self.attempt_timeout_seconds:
-            raise ValueError("lease_seconds must be > attempt_timeout_seconds")
+        _validate_provider_attempt_lease(
+            provider_timeout_seconds=self.provider_timeout_seconds,
+            attempt_timeout_seconds=self.attempt_timeout_seconds,
+            lease_seconds=self.lease_seconds,
+        )
         return self
 
 
-class DreamingRuntimeSettings(_FrozenSettings):
+class DreamingRuntimeSettings(_AdaptivePollingSettings):
     """@brief 用户画像整合 worker 设置 / User-profile consolidation worker settings."""
 
     worker_count: PositiveInt = 2
@@ -500,6 +349,7 @@ class DreamingRuntimeSettings(_FrozenSettings):
     max_events_per_job: PositiveInt = 64
     max_evidence_characters: PositiveInt = 60_000
     poll_interval_seconds: PositiveFloat = 1.0
+    max_poll_interval_seconds: PositiveFloat = 5.0
     refresh_seconds: PositiveInt = 21_600
     provider_timeout_seconds: PositiveInt = 60
     attempt_timeout_seconds: PositiveInt = 90
@@ -508,23 +358,28 @@ class DreamingRuntimeSettings(_FrozenSettings):
 
     @model_validator(mode="after")
     def _validate_lease(self) -> DreamingRuntimeSettings:
-        """@brief 确保 profile lease 严格长于尝试 / Ensure profile lease strictly outlives attempts.
+        """@brief 确保 provider、attempt 与 lease 的截止顺序 / Order provider, attempt, and lease deadlines.
 
         @return 已验证的 dreaming 设置 / Validated dreaming settings.
-        @raise ValueError lease 过短时抛出 / Raised when the lease is too short.
+        @raise ValueError 任一 deadline 不严格先于其外层边界时抛出 /
+            Raised when a deadline does not strictly precede its enclosing boundary.
         """
 
-        if self.lease_seconds <= self.attempt_timeout_seconds:
-            raise ValueError("lease_seconds must be > attempt_timeout_seconds")
+        _validate_provider_attempt_lease(
+            provider_timeout_seconds=self.provider_timeout_seconds,
+            attempt_timeout_seconds=self.attempt_timeout_seconds,
+            lease_seconds=self.lease_seconds,
+        )
         return self
 
 
-class RetrievalWorkerSettings(_FrozenSettings):
+class RetrievalWorkerSettings(_AdaptivePollingSettings):
     """@brief 语义检索 worker 设置 / Semantic-retrieval worker settings."""
 
     worker_count: PositiveInt = 2
     batch_size: PositiveInt = 16
     poll_interval_seconds: PositiveFloat = 0.5
+    max_poll_interval_seconds: PositiveFloat = 2.0
     lease_seconds: PositiveInt = 120
 
 
@@ -825,6 +680,18 @@ class RetrievalSettings(_FrozenSettings):
         default_factory=RetrievalEmbeddingSettings
     )
 
+    @model_validator(mode="after")
+    def _validate_embedding_timeout_before_lease(self) -> RetrievalSettings:
+        """@brief 确保 provider deadline 先于 vector lease / Ensure the provider deadline precedes the vector lease.
+
+        @return 已验证的 retrieval 设置 / Validated retrieval settings.
+        @raise ValueError embedding timeout 不严格短于 lease 时抛出 / Raised when the embedding timeout is not strictly shorter than the lease.
+        """
+
+        if self.embedding.timeout_seconds >= self.worker.lease_seconds:
+            raise ValueError("embedding.timeout_seconds must be < worker.lease_seconds")
+        return self
+
 
 class HistoryCacheSettings(_FrozenSettings):
     """@brief 会话历史缓存设置 / Conversation-history cache settings."""
@@ -1068,7 +935,7 @@ def read_bot_settings(path: Path | None = None) -> BotSettings:
 
     source_path = path or default_config_path()
     try:
-        document = _load_jsonc(source_path)
+        document = load_jsonc(source_path)
         payload = _bot_payload(document)
         return BotSettings.model_validate(payload)
     except JsoncDecodeError as error:

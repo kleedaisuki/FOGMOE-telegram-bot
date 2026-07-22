@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 
 from fogmoe_bot import config as bot_config
+from fogmoe_config.jsonc import load_jsonc
 from fogmoe_dashboard import config as dashboard_config
 from fogmoe_dbctl import config as dbctl_config
-
 
 #: @brief 版本控制的用户配置模板 / Version-controlled operator configuration template.
 EXAMPLE_CONFIG_PATH = Path(__file__).resolve().parents[1] / "example.config.json"
@@ -50,7 +50,7 @@ def test_example_config_explicitly_declares_every_owned_default() -> None:
         a model default still fails the contract test.
     """
 
-    document = bot_config._load_jsonc(EXAMPLE_CONFIG_PATH)
+    document = load_jsonc(EXAMPLE_CONFIG_PATH)
 
     assert bot_config._bot_payload(document) == bot_config.BotSettings().model_dump(
         mode="json"
@@ -94,6 +94,30 @@ def test_readers_reject_non_integer_schema_versions(
         reader(invalid_config)
 
 
+@pytest.mark.parametrize("reader,error_type", READERS)
+def test_readers_map_jsonc_errors_to_their_boundary_error(
+    reader: Callable[[Path | None], object],
+    error_type: type[ValueError],
+    tmp_path: Path,
+) -> None:
+    """@brief 每个 reader 将共享解码错误映射为自己的边界错误 / Each reader maps shared decoding errors to its boundary error.
+
+    @param reader 待验证的公开配置 reader / Public configuration reader under test.
+    @param error_type reader 的公开异常类型 / Public exception type exposed by the reader.
+    @param tmp_path pytest 提供的隔离临时目录 / Isolated temporary directory supplied by pytest.
+    @return None / None.
+    """
+
+    invalid_config = tmp_path / "config.json"
+    invalid_config.write_text(
+        '{"schema_version": 1, "schema_version": 1}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(error_type, match="duplicate object key 'schema_version'"):
+        reader(invalid_config)
+
+
 @pytest.mark.parametrize(
     "settings_type",
     (
@@ -114,6 +138,91 @@ def test_runtime_settings_require_lease_strictly_longer_than_attempt(
 
     with pytest.raises(ValueError, match="lease_seconds must be >"):
         settings_type(lease_seconds=60, attempt_timeout_seconds=60)
+
+
+@pytest.mark.parametrize(
+    ("settings_type", "expected_maximum"),
+    (
+        (bot_config.InboxRuntimeSettings, 0.5),
+        (bot_config.InferenceRuntimeSettings, 0.5),
+        (bot_config.OutboxRuntimeSettings, 0.5),
+        (bot_config.CompactionRuntimeSettings, 5.0),
+        (bot_config.DreamingRuntimeSettings, 5.0),
+        (bot_config.RetrievalWorkerSettings, 2.0),
+    ),
+)
+def test_adaptive_polling_settings_bound_idle_database_traffic(
+    settings_type: Callable[..., object],
+    expected_maximum: float,
+) -> None:
+    """@brief 六个高频 worker 显式约束空闲轮询上限 / Six high-frequency workers explicitly bound their idle-polling caps.
+
+    @param settings_type 待验证设置类型 / Settings type under test.
+    @param expected_maximum 生产默认上限 / Production default cap.
+    @return None / None.
+    """
+
+    settings = settings_type()
+    assert getattr(settings, "max_poll_interval_seconds") == expected_maximum
+    with pytest.raises(ValueError, match="must be >= poll_interval_seconds"):
+        settings_type(
+            poll_interval_seconds=1.0,
+            max_poll_interval_seconds=0.5,
+        )
+
+
+def test_retrieval_embedding_timeout_must_precede_vector_lease() -> None:
+    """@brief 后台 embedding HTTP deadline 必须严格短于 fencing lease / The background embedding HTTP deadline must be strictly shorter than its fencing lease.
+
+    @return None / None.
+    """
+
+    settings = bot_config.RetrievalSettings()
+    assert settings.embedding.timeout_seconds < settings.worker.lease_seconds
+
+    with pytest.raises(
+        ValueError,
+        match=r"embedding\.timeout_seconds must be < worker\.lease_seconds",
+    ):
+        bot_config.RetrievalSettings(
+            worker=bot_config.RetrievalWorkerSettings(lease_seconds=30),
+            embedding=bot_config.RetrievalEmbeddingSettings(timeout_seconds=30.0),
+        )
+
+
+@pytest.mark.parametrize(
+    "settings_type",
+    (
+        bot_config.InferenceRuntimeSettings,
+        bot_config.CompactionRuntimeSettings,
+        bot_config.DreamingRuntimeSettings,
+    ),
+)
+def test_provider_timeout_must_precede_attempt_and_lease(
+    settings_type: Callable[..., object],
+) -> None:
+    """@brief Provider deadline 必须严格早于 attempt 与 lease / The provider deadline must precede the attempt and lease.
+
+    @param settings_type 拥有三层 deadline 的运行时配置 / Runtime settings owning all three deadlines.
+    @return None / None.
+    """
+
+    settings = settings_type()
+    assert (
+        getattr(settings, "provider_timeout_seconds")
+        < getattr(settings, "attempt_timeout_seconds")
+        < getattr(settings, "lease_seconds")
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="attempt_timeout_seconds must be > provider_timeout_seconds",
+    ):
+        settings_type(
+            provider_timeout_seconds=90,
+            attempt_timeout_seconds=90,
+            lease_seconds=120,
+        )
 
 
 def test_working_memory_resilience_defaults_and_positive_bounds() -> None:

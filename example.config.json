@@ -90,6 +90,8 @@
       "worker_count": 16,
       // 轮询待处理入站消息的间隔秒数。
       "poll_interval_seconds": 0.1,
+      // 连续空轮或领取异常时的指数退避上限秒数。
+      "max_poll_interval_seconds": 0.5,
       // 入站处理租约秒数。
       "lease_seconds": 60
     },
@@ -99,6 +101,8 @@
       "worker_count": 8,
       // 轮询待推理作业的间隔秒数。
       "poll_interval_seconds": 0.25,
+      // 连续空轮或领取异常时的指数退避上限秒数。
+      "max_poll_interval_seconds": 0.5,
       // 单个 provider 调用的超时秒数。
       "provider_timeout_seconds": 90,
       // 推理作业租约秒数。
@@ -112,6 +116,8 @@
       "worker_count": 16,
       // 轮询待发送消息的间隔秒数。
       "poll_interval_seconds": 0.1,
+      // 连续空轮或领取异常时的指数退避上限秒数。
+      "max_poll_interval_seconds": 0.5,
       // 出站投递租约秒数。
       "lease_seconds": 60,
       // 单次 Telegram 投递尝试总超时秒数。
@@ -123,6 +129,8 @@
       "worker_count": 2,
       // 轮询待压缩作业的间隔秒数。
       "poll_interval_seconds": 0.5,
+      // 连续空轮或领取异常时的指数退避上限秒数。
+      "max_poll_interval_seconds": 5.0,
       // 单个摘要 provider 调用的超时秒数。
       "provider_timeout_seconds": 30,
       // 包含 fallback 的压缩尝试总超时秒数。
@@ -144,6 +152,8 @@
       "max_evidence_characters": 60000,
       // 轮询待处理 dreaming 作业的间隔秒数。
       "poll_interval_seconds": 1.0,
+      // 连续空轮或领取异常时的指数退避上限秒数。
+      "max_poll_interval_seconds": 5.0,
       // 同一用户画像重新计算前的最短秒数。
       "refresh_seconds": 21600,
       // 单个 dreaming provider 调用的超时秒数。
@@ -383,6 +393,8 @@
         "batch_size": 16,
         // 轮询待处理检索作业的间隔秒数。
         "poll_interval_seconds": 0.5,
+        // 连续空轮或领取异常时的指数退避上限秒数。
+        "max_poll_interval_seconds": 2.0,
         // 检索作业租约秒数。
         "lease_seconds": 120
       },
@@ -398,7 +410,7 @@
         "space_id": "qwen3-embedding-8b.1024.episodic-v1",
         // 向量维度；当前 schema 仅允许 1024。
         "dimensions": 1024,
-        // embedding HTTP 请求超时秒数。
+        // embedding HTTP 总请求超时秒数；必须严格短于 worker lease。
         "timeout_seconds": 30.0,
         // 将当前问题改写为检索意图时使用的指令。
         "query_instruction": "Retrieve prior conversation evidence relevant to the user's current question, including events, decisions, preferences, corrections, and temporal context."

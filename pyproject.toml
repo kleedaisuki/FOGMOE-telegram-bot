@@ -42,13 +42,18 @@ dev = [
 [tool.mypy]
 python_version = "3.14"
 strict = true
-packages = ["fogmoe_bot", "fogmoe_dashboard", "fogmoe_dbctl"]
+packages = ["fogmoe_bot", "fogmoe_config", "fogmoe_dashboard", "fogmoe_dbctl"]
 exclude = ["^tests/"]
 warn_unreachable = true
 show_error_codes = true
 
 [tool.pyright]
-include = ["src/fogmoe_bot", "src/fogmoe_dashboard", "src/fogmoe_dbctl"]
+include = [
+    "src/fogmoe_bot",
+    "src/fogmoe_config",
+    "src/fogmoe_dashboard",
+    "src/fogmoe_dbctl",
+]
 pythonVersion = "3.14"
 venvPath = "."
 venv = ".venv"
@@ -65,6 +70,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 fogmoe_dbctl = ["migrations/sql/postgresql/*.sql", "py.typed"]
 fogmoe_bot = ["py.typed"]
+fogmoe_config = ["py.typed"]
 fogmoe_dashboard = ["py.typed"]
 
 [tool.pytest.ini_options]
