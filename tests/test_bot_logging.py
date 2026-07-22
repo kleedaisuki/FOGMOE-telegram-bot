@@ -34,6 +34,44 @@ def test_configure_logging_uses_timestamped_file_and_queue_consumer(tmp_path):
     assert "queued log record" in log_path.read_text(encoding="utf-8")
 
 
+def test_configure_logging_suppresses_httpx_request_lines(tmp_path) -> None:
+    """@brief httpx INFO 请求行不得写入 Bot token URL / httpx INFO request lines must not write a Bot-token URL.
+
+    @param tmp_path pytest 临时日志目录 / Pytest temporary log directory.
+    @return None / None.
+    """
+
+    root_logger = logging.getLogger()
+    original_handlers = list(root_logger.handlers)
+    original_level = root_logger.level
+    httpx_logger = logging.getLogger("httpx")
+    original_httpx_level = httpx_logger.level
+    settings = LoggingSettings(level="INFO", queue_capacity=10)
+    token = "123456789:fake-token-must-never-reach-a-log-sink"
+
+    try:
+        log_path = bot_logging.configure_logging(
+            settings,
+            tmp_path,
+            make_telemetry(),
+        )
+        httpx_logger.info(
+            "HTTP Request: POST https://api.telegram.org/bot%s/getUpdates",
+            token,
+        )
+        bot_logging.shutdown_logging()
+    finally:
+        root_logger.handlers.clear()
+        for handler in original_handlers:
+            root_logger.addHandler(handler)
+        root_logger.setLevel(original_level)
+        httpx_logger.setLevel(original_httpx_level)
+
+    contents = log_path.read_text(encoding="utf-8")
+    assert token not in contents
+    assert contents == ""
+
+
 def test_shutdown_sentinel_waits_for_queue_capacity() -> None:
     """关停哨兵使用阻塞 put，不会在有界队列已满时被丢弃。"""
 

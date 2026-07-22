@@ -291,6 +291,36 @@ def test_queue_handler_captures_producer_context_before_cross_thread_delivery() 
     assert prepared.fogmoe_trace_context == span.context
 
 
+def test_queue_handler_redacts_telegram_bot_token_before_file_delivery() -> None:
+    """@brief 队列边界必须在文件 sink 前脱敏 Telegram Bot token / Queue boundary redacts a Telegram Bot token before file-sink delivery.
+
+    @return None / None.
+    """
+
+    import queue
+
+    buffer = TelemetryBuffer(8)
+    telemetry = Telemetry(buffer)
+    records: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=1)
+    handler = ContextQueueHandler(records, telemetry)
+    token = "123456789:fake-token-must-never-reach-a-log-sink"
+    handler.emit(
+        logging.LogRecord(
+            "httpx",
+            logging.INFO,
+            __file__,
+            1,
+            "HTTP Request: POST https://api.telegram.org/bot%s/getUpdates",
+            (token,),
+            None,
+        )
+    )
+
+    prepared = records.get_nowait()
+    assert token not in prepared.getMessage()
+    assert "https://api.telegram.org/bot[REDACTED]/getUpdates" in prepared.getMessage()
+
+
 def test_queue_handler_captures_producer_correlation_before_cross_thread_delivery() -> (
     None
 ):

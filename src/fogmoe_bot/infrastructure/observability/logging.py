@@ -29,10 +29,15 @@ _ATEXIT_REGISTERED = False
 """@brief 是否已注册退出清理 / Whether exit cleanup is registered."""
 
 _SECRET_PATTERNS = (
+    re.compile(r"(?i)(https?://[^/\s]+/bot)[0-9]{5,}:[A-Za-z0-9_-]+"),
+    re.compile(r"(?i)(/bot)[0-9]{5,}:[A-Za-z0-9_-]+"),
     re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+"),
     re.compile(r"(?i)((?:api[_-]?key|token|password|secret)\s*[:=]\s*)[^\s,;]+"),
 )
 """@brief 日志输出前的凭据模式 / Credential patterns applied before log output."""
+
+_EXTERNAL_HTTP_LOGGERS = ("httpx", "httpcore")
+"""@brief 只保留告警及以上级别的第三方 HTTP logger / Third-party HTTP loggers retained only at warning or higher."""
 
 type _ExceptionInfo = tuple[type[BaseException], BaseException, TracebackType | None]
 """@brief 已验证的 logging exception tuple / Validated logging exception tuple."""
@@ -66,6 +71,10 @@ class ContextQueueHandler(QueueHandler):
             record.exc_info
         )
         prepared = cast(logging.LogRecord, super().prepare(record))
+        prepared_message = _redact(prepared.getMessage())
+        prepared.msg = prepared_message
+        prepared.message = prepared_message
+        prepared.args = None
         prepared.fogmoe_trace_context = self._telemetry.current_context
         prepared.fogmoe_telemetry_attributes = self._telemetry.current_attributes
         prepared.fogmoe_exception_type = exception_type
@@ -249,6 +258,21 @@ def _resolve_log_level(value: str, *, fallback: int = logging.INFO) -> int:
     return getattr(logging, (value or "").upper(), fallback)
 
 
+def _configure_external_http_loggers() -> None:
+    """@brief 压低会在 URL 中写入凭据的第三方 HTTP 请求日志 / Reduce third-party HTTP request logs that can place credentials in URLs.
+
+    @return None / None.
+    @note HTTP client 的 ``INFO``/``DEBUG`` 请求行不是业务可观测性，且 Telegram
+        Bot API 把 bot token 置于路径中。保留 ``WARNING`` 及以上，并由队列边界继续
+        执行脱敏。/ HTTP client ``INFO``/``DEBUG`` request lines are not business
+        observability and Telegram Bot API puts the bot token in its path. Warnings and
+        above remain available and are still redacted at the queue boundary.
+    """
+
+    for logger_name in _EXTERNAL_HTTP_LOGGERS:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
 def _new_log_file_path(log_directory: Path) -> Path:
     """@brief 创建当前进程日志路径 / Build the current process log path.
 
@@ -314,6 +338,7 @@ def configure_logging(
     root_logger.handlers.clear()
     root_logger.setLevel(log_level)
     root_logger.addHandler(queue_handler)
+    _configure_external_http_loggers()
 
     listener = DrainingQueueListener(
         log_queue,
