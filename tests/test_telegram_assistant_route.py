@@ -469,6 +469,8 @@ def test_request_contains_strict_adapter_metadata_and_normalized_user_content() 
         "disable_web_page_preview",
         "task_kind",
         "translation_input",
+        "allow_tools",
+        "allowed_tools",
     }
     assert command.inference_request["task_kind"] == "assistant"
     assert command.inference_request["translation_input"] is None
@@ -499,9 +501,8 @@ def test_request_contains_strict_adapter_metadata_and_normalized_user_content() 
     }
     model_message = command.user_content["model_message"]
     assert isinstance(model_message, dict)
-    assert (
-        'user="Klee Spark" username="@klee" user_id="42" thread_id="9"'
-        in str(model_message["content"])
+    assert 'user="Klee Spark" username="@klee" user_id="42" thread_id="9"' in str(
+        model_message["content"]
     )
     assert command.user_content["reply"] == {
         "message_id": 6,

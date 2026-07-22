@@ -16,6 +16,7 @@ from fogmoe_bot.application.assistant.tool_runtime import (
 )
 from fogmoe_bot.application.assistant.temporal_memory import TemporalMemoryReader
 from fogmoe_bot.application.timekeeping.service import TimeService
+from fogmoe_bot.application.scheduling.service import SchedulingService
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -99,6 +100,7 @@ def test_diary_and_schedule_share_atomic_receipt_transactions(
             temporal_memory=cast(TemporalMemoryReader, external),
             groups=PostgresGroupMessageProjection(),
             time=TimeService(default_time_zone=UTC_TIME_ZONE),
+            scheduling=SchedulingService(),
         )
         context = ToolExecutionContext(
             turn_id=turn_id,
@@ -143,9 +145,10 @@ def test_diary_and_schedule_share_atomic_receipt_transactions(
             effect_kind="schedule.create",
             arguments={
                 "action": "create",
-                "timestamp_utc": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
-                "recurrence_unit": "none",
-                "recurrence_interval": 1,
+                "cadence": {
+                    "kind": "one_shot",
+                    "first_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+                },
                 "trigger_reason": "contract test",
                 "instruction": "say hello",
             },
@@ -188,8 +191,8 @@ def test_diary_and_schedule_share_atomic_receipt_transactions(
             )
             assert diary_row is not None and diary_row[0] == "durable note"
             schedule_row = await db_connection.fetch_one(
-                "SELECT status, trigger_reason, prompt FROM assistant.ai_schedules "
-                "WHERE user_id = %s",
+                "SELECT status, trigger_reason, instruction "
+                "FROM scheduling.assistant_schedules WHERE creator_user_id = %s",
                 (user_id,),
             )
             assert schedule_row is not None
@@ -222,7 +225,8 @@ def test_diary_and_schedule_share_atomic_receipt_transactions(
                     connection=connection,
                 )
                 await db_connection.execute(
-                    "DELETE FROM assistant.ai_schedules WHERE user_id = %s",
+                    "DELETE FROM scheduling.assistant_schedules "
+                    "WHERE creator_user_id = %s",
                     (user_id,),
                     connection=connection,
                 )

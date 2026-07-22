@@ -113,7 +113,12 @@ def test_default_catalog_excludes_stateful_sandbox_and_classifies_action_tools()
         "schedule_ai_message",
         {
             "action": "create",
-            "timestamp_utc": "2030-01-01T00:00:00Z",
+            "cadence": {
+                "kind": "calendar_daily",
+                "first_at": "2030-01-01T09:00:00",
+                "every_days": 1,
+            },
+            "timezone": "Asia/Shanghai",
             "trigger_reason": "test",
             "instruction": "hello",
         },
@@ -123,6 +128,38 @@ def test_default_catalog_excludes_stateful_sandbox_and_classifies_action_tools()
     assert isinstance(schedule_create, ValidatedToolInvocation)
     assert schedule_create.mutating is True
     assert schedule_create.effect_kind == "schedule.create"
+    schedule_update = DEFAULT_TOOL_CATALOG.validate(
+        "schedule_ai_message",
+        {
+            "action": "update",
+            "schedule_id": 7,
+            "cadence": {
+                "kind": "fixed_interval",
+                "first_at": "2030-01-01T00:00:00Z",
+                "every_seconds": 3600,
+            },
+            "trigger_reason": "updated test",
+            "instruction": "hello later",
+        },
+    )
+    assert isinstance(schedule_update, ValidatedToolInvocation)
+    assert schedule_update.effect_kind == "schedule.update"
+    assert isinstance(
+        DEFAULT_TOOL_CATALOG.validate(
+            "schedule_ai_message",
+            {
+                "action": "create",
+                "cadence": {
+                    "kind": "calendar_weekly",
+                    "first_at": "2030-01-01T09:00:00",
+                    "weekdays": [1, 1],
+                },
+                "trigger_reason": "duplicate weekday",
+                "instruction": "must fail",
+            },
+        ),
+        InvalidToolArguments,
+    )
     media = DEFAULT_TOOL_CATALOG.validate("generate_image", {"prompt": "Klee"})
     assert isinstance(media, ValidatedToolInvocation)
     assert media.mutating is True

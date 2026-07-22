@@ -25,6 +25,7 @@ from fogmoe_bot.application.retrieval import (
     SemanticRecall,
 )
 from fogmoe_bot.application.timekeeping.service import TimeService
+from fogmoe_bot.application.scheduling.service import SchedulingService
 from fogmoe_bot.application.user_profile.worker import DreamingWorker
 from fogmoe_bot.config import AssistantSettings, BotSettings, reveal_secret
 from fogmoe_bot.domain.assistant.routing.circuit import ProviderCircuit
@@ -249,6 +250,7 @@ def build_durable_assistant(
         time=TimeService(
             default_time_zone=TimeZoneId(assistant_settings.time.default_timezone)
         ),
+        scheduling=SchedulingService(),
     )
     store = PostgresAssistantToolStore(operations=operations)
     completion = LiteLLMAssistantCompletion(

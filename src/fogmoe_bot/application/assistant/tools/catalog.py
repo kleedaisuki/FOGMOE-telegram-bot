@@ -14,7 +14,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Literal, NewType
+from typing import Annotated, Literal, NewType
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -41,11 +41,11 @@ type FrozenSchemaValue = (
 type FrozenSchemaObject = Mapping[str, FrozenSchemaValue]
 """@brief 深度不可变 schema 对象 / Deeply immutable schema object."""
 
-type ScheduleAction = Literal["create", "list", "cancel"]
+type ScheduleAction = Literal["create", "update", "list", "cancel"]
 """@brief 定时消息动作 / Scheduled-message action."""
 
-type RecurrenceUnit = Literal["none", "minute", "hour", "day"]
-"""@brief 定时消息重复单位 / Scheduled-message recurrence unit."""
+type ScheduleMisfirePolicy = Literal["fire_once", "skip"]
+"""@brief 定时消息过期策略 / Scheduled-message misfire policy."""
 
 type DiaryAction = Literal["read", "append", "overwrite", "patch"]
 """@brief 用户日记动作 / User-diary action."""
@@ -255,29 +255,177 @@ class SearchMemoryByTimeArgs(ToolArguments):
         return self
 
 
+class OneShotScheduleArgs(ToolArguments):
+    """@brief 单次发生规则 / One-shot occurrence rule."""
+
+    kind: Literal["one_shot"]
+    first_at: str = Field(
+        min_length=1,
+        max_length=64,
+        description="ISO 8601 first occurrence; naive values use the schedule time zone",
+    )
+
+
+class FixedIntervalScheduleArgs(ToolArguments):
+    """@brief 固定 elapsed-time 间隔规则 / Fixed elapsed-time interval rule."""
+
+    kind: Literal["fixed_interval"]
+    first_at: str = Field(
+        min_length=1,
+        max_length=64,
+        description="ISO 8601 first occurrence; naive values use the schedule time zone",
+    )
+    every_seconds: int = Field(
+        ge=1,
+        le=31_536_000,
+        description="Elapsed seconds between occurrences; not a local calendar period",
+    )
+
+
+class CalendarDailyScheduleArgs(ToolArguments):
+    """@brief 本地日历日规则 / Local-calendar daily rule."""
+
+    kind: Literal["calendar_daily"]
+    first_at: str = Field(
+        min_length=1,
+        max_length=64,
+        description="First occurrence; its local wall time becomes the recurring time",
+    )
+    every_days: int = Field(default=1, ge=1, le=365)
+
+
+class CalendarWeeklyScheduleArgs(ToolArguments):
+    """@brief 本地日历周规则 / Local-calendar weekly rule."""
+
+    kind: Literal["calendar_weekly"]
+    first_at: str = Field(
+        min_length=1,
+        max_length=64,
+        description="First occurrence; its local wall time becomes the recurring time",
+    )
+    weekdays: list[int] = Field(
+        min_length=1,
+        max_length=7,
+        description="Unique ISO weekdays, Monday=1 through Sunday=7",
+    )
+    every_weeks: int = Field(default=1, ge=1, le=52)
+
+    @model_validator(mode="after")
+    def _validate_weekdays(self) -> CalendarWeeklyScheduleArgs:
+        """@brief 校验 ISO weekday 集合 / Validate the ISO-weekday set.
+
+        @return 已验证规则 / Validated rule.
+        @raise ValueError weekday 越界或重复时抛出 / Raised for out-of-range or duplicate weekdays.
+        """
+
+        if any(isinstance(day, bool) or day < 1 or day > 7 for day in self.weekdays):
+            raise ValueError("weekdays must contain ISO values from 1 through 7")
+        if len(set(self.weekdays)) != len(self.weekdays):
+            raise ValueError("weekdays must not contain duplicates")
+        return self
+
+
+type ScheduleCadenceArgs = Annotated[
+    OneShotScheduleArgs
+    | FixedIntervalScheduleArgs
+    | CalendarDailyScheduleArgs
+    | CalendarWeeklyScheduleArgs,
+    Field(discriminator="kind"),
+]
+"""@brief 显式 cadence 联合 / Explicit cadence union."""
+
+
 class ScheduleAIMessageArgs(ToolArguments):
-    """@brief 定时 Assistant 消息参数 / Scheduled-Assistant-message arguments."""
+    """@brief 定时 Assistant 回合参数 / Scheduled-Assistant-turn arguments."""
 
     action: ScheduleAction = Field(
-        default="create", description="create | list | cancel"
-    )
-    timestamp_utc: str | None = Field(
-        default=None, max_length=64, description="UTC ISO8601 time"
-    )
-    recurrence_unit: RecurrenceUnit = Field(
-        default="none", description="Recurrence unit"
-    )
-    recurrence_interval: int = Field(default=1, ge=1, le=100000, description="Interval")
-    trigger_reason: str | None = Field(
-        default=None, max_length=200, description="Trigger reason"
-    )
-    context: str | None = Field(
-        default=None, max_length=1000, description="Background context"
-    )
-    instruction: str | None = Field(
-        default=None, max_length=2000, description="Instruction"
+        default="create", description="create | update | list | cancel"
     )
     schedule_id: int | None = Field(default=None, ge=1, description="Schedule ID")
+    cadence: ScheduleCadenceArgs | None = Field(
+        default=None,
+        description="Required complete occurrence rule for create and update",
+    )
+    timezone: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="IANA time zone; omit to use the Assistant default",
+    )
+    trigger_reason: str | None = Field(
+        default=None, min_length=1, max_length=200, description="Trigger reason"
+    )
+    context: str | None = Field(
+        default=None, min_length=1, max_length=1000, description="Background context"
+    )
+    instruction: str | None = Field(
+        default=None, min_length=1, max_length=2000, description="Instruction"
+    )
+    misfire_policy: ScheduleMisfirePolicy = Field(
+        default="fire_once",
+        description="fire_once coalesces missed occurrences; skip requires a grace window",
+    )
+    misfire_grace_seconds: int | None = Field(default=None, ge=1, le=604_800)
+    limit: int = Field(default=32, ge=1, le=128, description="List result limit")
+
+    @model_validator(mode="after")
+    def _validate_action_shape(self) -> ScheduleAIMessageArgs:
+        """@brief 强制每种 action 的完整且互斥形状 / Require a complete, exclusive shape for each action.
+
+        @return 已验证参数 / Validated arguments.
+        @raise ValueError action 所需字段缺失或带入无关字段时抛出 /
+            Raised when required fields are missing or irrelevant fields are supplied.
+        """
+
+        definition_fields = {
+            "cadence",
+            "timezone",
+            "trigger_reason",
+            "context",
+            "instruction",
+            "misfire_policy",
+            "misfire_grace_seconds",
+        }
+        if self.action in {"create", "update"}:
+            if (
+                self.cadence is None
+                or self.trigger_reason is None
+                or self.instruction is None
+            ):
+                raise ValueError(
+                    "create/update requires cadence, trigger_reason, and instruction"
+                )
+            if self.action == "create" and self.schedule_id is not None:
+                raise ValueError("create must not include schedule_id")
+            if self.action == "update" and self.schedule_id is None:
+                raise ValueError("update requires schedule_id")
+            if self.misfire_policy == "skip" and self.misfire_grace_seconds is None:
+                raise ValueError("skip misfire policy requires misfire_grace_seconds")
+            if (
+                self.misfire_policy == "fire_once"
+                and self.misfire_grace_seconds is not None
+            ):
+                raise ValueError(
+                    "misfire_grace_seconds is only meaningful with skip policy"
+                )
+            if "limit" in self.model_fields_set:
+                raise ValueError("create/update must not include limit")
+            return self
+
+        if self.action == "cancel":
+            if self.schedule_id is None:
+                raise ValueError("cancel requires schedule_id")
+        elif self.schedule_id is not None:
+            raise ValueError("list must not include schedule_id")
+        supplied_definition_fields = definition_fields & self.model_fields_set
+        if supplied_definition_fields:
+            names = ", ".join(sorted(supplied_definition_fields))
+            raise ValueError(
+                f"{self.action} must not include definition fields: {names}"
+            )
+        if self.action == "cancel" and "limit" in self.model_fields_set:
+            raise ValueError("cancel must not include limit")
+        return self
 
 
 class UserDiaryArgs(ToolArguments):
@@ -770,7 +918,12 @@ DEFAULT_TOOL_CATALOG = ToolCatalog(
         ),
         define_tool(
             name="schedule_ai_message",
-            description="Create, list, or cancel a durable Assistant schedule",
+            description=(
+                "Create, fully update, list, or cancel durable Assistant turns in the current "
+                "conversation. Call get_current_time before resolving relative dates. Choose "
+                "fixed_interval for elapsed duration and calendar_daily/calendar_weekly for a "
+                "stable local wall-clock time"
+            ),
             arguments_model=ScheduleAIMessageArgs,
             mutation_classifier=_schedule_effect,
         ),
@@ -802,9 +955,14 @@ __all__ = [
     "GoogleSearchArgs",
     "InvalidToolArguments",
     "ListAvailableStickersArgs",
-    "RecurrenceUnit",
+    "CalendarDailyScheduleArgs",
+    "CalendarWeeklyScheduleArgs",
+    "FixedIntervalScheduleArgs",
+    "OneShotScheduleArgs",
+    "ScheduleCadenceArgs",
     "ScheduleAIMessageArgs",
     "ScheduleAction",
+    "ScheduleMisfirePolicy",
     "SearchMemoryArgs",
     "SearchMemoryByTimeArgs",
     "SendStickerArgs",

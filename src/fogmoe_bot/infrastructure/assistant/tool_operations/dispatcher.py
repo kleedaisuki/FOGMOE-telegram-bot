@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from fogmoe_bot.application.assistant.tool_runtime import ToolEffectRequest
 from fogmoe_bot.application.assistant.temporal_memory import TemporalMemoryReader
 from fogmoe_bot.application.memory.ports import WorkingMemoryReader
+from fogmoe_bot.application.scheduling.service import SchedulingService
 from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.domain.conversation.payloads import JsonValue
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_STICKER
@@ -41,6 +42,7 @@ class AssistantToolOperationDispatcher:
         temporal_memory: TemporalMemoryReader,
         groups: GroupContextReader,
         time: TimeService,
+        scheduling: SchedulingService,
     ) -> None:
         """注入全部显式 adapter；工具 metadata 仍仅由 ToolCatalog 拥有。"""
 
@@ -53,6 +55,7 @@ class AssistantToolOperationDispatcher:
         self._temporal_memory = temporal_memory
         self._groups = groups
         self._time = time
+        self._scheduling = scheduling
 
     def transaction_mode(self, request: ToolEffectRequest) -> ToolTransactionMode:
         """按 catalog 提供的 mutation/effect classification 选择事务模式。"""
@@ -105,7 +108,12 @@ class AssistantToolOperationDispatcher:
             case "user_diary":
                 return await execute_diary(request, connection=connection)
             case "schedule_ai_message":
-                return await execute_schedule(request, connection=connection)
+                return await execute_schedule(
+                    request,
+                    connection=connection,
+                    scheduling=self._scheduling,
+                    time=self._time,
+                )
             case "generate_image" | "generate_voice":
                 return await self._generated_media.generate(request)
             case _:

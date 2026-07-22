@@ -14,6 +14,7 @@ from fogmoe_bot.application.assistant.temporal_memory import TemporalMemoryReade
 from fogmoe_bot.application.memory.ports import WorkingMemoryQuery
 from fogmoe_bot.application.chat.group_messages import GroupMessage, GroupMessageKind
 from fogmoe_bot.application.timekeeping.service import TimeService
+from fogmoe_bot.application.scheduling.service import SchedulingService
 from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -149,6 +150,7 @@ def test_group_context_tool_reads_only_the_canonical_projection() -> None:
             temporal_memory=cast(TemporalMemoryReader, unused),
             groups=groups,
             time=TimeService(default_time_zone=UTC_TIME_ZONE),
+            scheduling=SchedulingService(),
         )
         result = await operations.execute(
             _request(is_group=True, message_thread_id=23), connection=None
@@ -236,6 +238,7 @@ def test_group_context_tool_keeps_a_recent_suffix_inside_its_hard_budget() -> No
             temporal_memory=cast(TemporalMemoryReader, unused),
             groups=groups,
             time=TimeService(default_time_zone=UTC_TIME_ZONE),
+            scheduling=SchedulingService(),
         )
 
         result = await operations.execute(
