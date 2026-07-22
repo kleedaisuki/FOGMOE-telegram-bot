@@ -10,21 +10,26 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Protocol
 
-from fogmoe_bot.application.runtime import Jitter, SystemUtcClock, UtcClock
+from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.application.runtime import (
+    AdaptivePollingPolicy,
+    Jitter,
+    LeaseRecoveryCadence,
+    SystemUtcClock,
+    UtcClock,
+)
 from fogmoe_bot.domain.conversation.inbox import (
     InboundClaim,
     InboundUpdate,
 )
+from fogmoe_bot.domain.observability.conventions import EventName, MetricName, Outcome
+from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
 
 from .router import (
     AmbiguousPrimaryRouteError,
     DispatchDeferred,
     RouteOutcome,
 )
-from fogmoe_bot.application.observability.telemetry import Telemetry
-from fogmoe_bot.domain.observability.conventions import EventName, MetricName, Outcome
-from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
-
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +254,7 @@ class InboxWorker:
         repository: InboxPersistence,
         router: InboxRoute,
         worker_count: int,
-        poll_interval: float,
+        polling_policy: AdaptivePollingPolicy,
         lease_for: timedelta,
         retry_policy: FullJitterRetryPolicy | None = None,
         clock: UtcClock | None = None,
@@ -260,7 +265,7 @@ class InboxWorker:
         @param repository inbox 持久化端口 / Inbox persistence port.
         @param router 显式 route pipeline / Explicit route pipeline.
         @param worker_count 已领取但未终结 Update 的上限 / Maximum claimed-but-unfinalized Updates.
-        @param poll_interval 空闲轮询秒数 / Idle polling interval in seconds.
+        @param polling_policy 自适应空闲轮询策略 / Adaptive idle-polling policy.
         @param lease_for 每个 claim 的租约时长 / Lease duration per claim.
         @param retry_policy 错误退避策略 / Failure-backoff policy.
         @param clock 可替换 UTC 时钟 / Replaceable UTC clock.
@@ -270,14 +275,12 @@ class InboxWorker:
 
         if worker_count < 1:
             raise ValueError("worker_count must be at least one")
-        if poll_interval <= 0:
-            raise ValueError("poll_interval must be positive")
         if lease_for <= timedelta():
             raise ValueError("lease_for must be positive")
         self._repository = repository
         self._router = router
         self._worker_count = worker_count
-        self._poll_interval = poll_interval
+        self._polling_policy = polling_policy
         self._lease_for = lease_for
         self._retry_policy = retry_policy or FullJitterRetryPolicy()
         self._clock = clock or SystemUtcClock()
@@ -370,28 +373,15 @@ class InboxWorker:
         @return None / None.
         """
 
+        polling = self._polling_policy.start()
+        recovery = LeaseRecoveryCadence.for_lease(self._lease_for)
         while not stop_event.is_set():
+            if recovery.take_due():
+                await self._recover_expired_leases(self._clock.now())
             tokens = self._take_available(capacity)
             if tokens:
                 now = self._clock.now()
                 try:
-                    recovered = await self._repository.recover_expired_inbound_leases(
-                        now=now
-                    )
-                    if recovered:
-                        self._telemetry.counter(
-                            MetricName.LEASE_RECOVERIES,
-                            float(recovered),
-                            attributes={"pipeline.stage": "inbox"},
-                        )
-                        logger.warning(
-                            "Recovered expired inbox leases: count=%s",
-                            recovered,
-                            extra={
-                                "event_name": EventName.INBOX_LEASE_RECOVERED,
-                                "telemetry_attributes": {"pipeline.stage": "inbox"},
-                            },
-                        )
                     claims = tuple(
                         await self._repository.claim_inbound(
                             now=now,
@@ -405,17 +395,44 @@ class InboxWorker:
                         )
                 except Exception:
                     self._return_capacity(capacity, tokens)
-                    logger.exception(
-                        "Inbox producer failed to recover or claim Updates"
-                    )
+                    logger.exception("Inbox producer failed to claim Updates")
+                    await polling.wait(stop_event)
+                    continue
                 else:
                     for claim in claims:
                         await work_queue.put(_ClaimWork(claim))
                     self._return_capacity(capacity, tokens[len(claims) :])
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=self._poll_interval)
-            except TimeoutError:
-                continue
+                    if claims:
+                        polling.reset()
+                        continue
+            await polling.wait(stop_event)
+
+    async def _recover_expired_leases(self, now: datetime) -> None:
+        """@brief 低频回收到期 inbox leases / Recover expired inbox leases at a low cadence.
+
+        @param now 当前 UTC 时刻 / Current UTC instant.
+        @return None；恢复查询失败不会阻断正常 claim / None; a failed recovery query does not block normal claims.
+        """
+
+        try:
+            recovered = await self._repository.recover_expired_inbound_leases(now=now)
+            if not recovered:
+                return
+            self._telemetry.counter(
+                MetricName.LEASE_RECOVERIES,
+                float(recovered),
+                attributes={"pipeline.stage": "inbox"},
+            )
+            logger.warning(
+                "Recovered expired inbox leases: count=%s",
+                recovered,
+                extra={
+                    "event_name": EventName.INBOX_LEASE_RECOVERED,
+                    "telemetry_attributes": {"pipeline.stage": "inbox"},
+                },
+            )
+        except Exception:
+            logger.exception("Inbox lease recovery failed; claim polling continues")
 
     async def _consume(
         self,

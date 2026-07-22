@@ -6,10 +6,18 @@ import asyncio
 import logging
 import math
 import random
+import time
+from collections.abc import Callable
 from datetime import timedelta
 
 from fogmoe_bot.application.observability.telemetry import Telemetry
-from fogmoe_bot.application.runtime import Jitter, SystemUtcClock, UtcClock
+from fogmoe_bot.application.runtime import (
+    AdaptivePollingPolicy,
+    Jitter,
+    LeaseRecoveryCadence,
+    SystemUtcClock,
+    UtcClock,
+)
 from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind
 from fogmoe_bot.domain.user_profile.models import apply_profile_patch
@@ -22,7 +30,6 @@ from .ports import (
     RetryableDreamingError,
     StaleDreamClaimError,
 )
-
 
 logger = logging.getLogger(__name__)
 """@brief Dreaming worker logger / Dreaming-worker logger."""
@@ -38,21 +45,27 @@ class DreamingWorker:
         store: ProfileStore,
         model: DreamingModel,
         telemetry: Telemetry,
+        polling_policy: AdaptivePollingPolicy,
         worker_count: int = 2,
         batch_size: int = 8,
         source_batch_size: int = 32,
         max_events_per_dream: int = 64,
         max_evidence_chars: int = 60_000,
-        poll_interval: float = 1.0,
         refresh_after: timedelta = timedelta(hours=6),
         attempt_timeout: timedelta = timedelta(seconds=90),
         lease_for: timedelta = timedelta(seconds=120),
         max_attempts: int = 5,
         clock: UtcClock | None = None,
         jitter: Jitter = random.uniform,
+        recovery_monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         """@brief 创建 Dreaming worker / Create a Dreaming worker.
 
+        @param polling_policy coordinator 与每个 consumer 共享策略、独立状态的轮询配置 /
+            Polling configuration shared as a policy but instantiated independently by the
+            coordinator and every consumer.
+        @param recovery_monotonic lease recovery cadence 的可替换单调时钟 /
+            Replaceable monotonic clock for the lease-recovery cadence.
         @raise ValueError 任一容量或时间预算非法 / Invalid capacity or time budget.
         """
 
@@ -68,8 +81,6 @@ class DreamingWorker:
             raise ValueError(
                 "Dreaming max_evidence_chars must be between 4096 and 1000000"
             )
-        if poll_interval <= 0.0 or not math.isfinite(poll_interval):
-            raise ValueError("Dreaming poll_interval must be finite and positive")
         if refresh_after <= timedelta():
             raise ValueError("Dreaming refresh_after must be positive")
         if attempt_timeout <= timedelta() or lease_for <= attempt_timeout:
@@ -85,13 +96,14 @@ class DreamingWorker:
         self._source_batch_size = source_batch_size
         self._max_events_per_dream = max_events_per_dream
         self._max_evidence_chars = max_evidence_chars
-        self._poll_interval = poll_interval
+        self._polling_policy = polling_policy
         self._refresh_after = refresh_after
         self._attempt_timeout = attempt_timeout
         self._lease_for = lease_for
         self._max_attempts = max_attempts
         self._clock = clock or SystemUtcClock()
         self._jitter = jitter
+        self._recovery_monotonic = recovery_monotonic
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """@brief 运行至停止并排空已领取 claim / Run until stopped and drain claimed work.
@@ -100,8 +112,15 @@ class DreamingWorker:
         @return None / None.
         """
 
-        await self._recover_expired_leases()
+        recovery = LeaseRecoveryCadence.for_lease(
+            self._lease_for,
+            monotonic=self._recovery_monotonic,
+        )
         async with asyncio.TaskGroup() as task_group:
+            task_group.create_task(
+                self._recover_leases(stop_event, recovery=recovery),
+                name="dreaming-recovery",
+            )
             task_group.create_task(
                 self._run_coordinator(stop_event),
                 name="dreaming-coordinator",
@@ -112,9 +131,17 @@ class DreamingWorker:
                     name=f"dreaming-model:{ordinal}",
                 )
 
-    async def _run_coordinator(self, stop_event: asyncio.Event) -> None:
-        """@brief 唯一负责 source discovery 与 job formation / Sole owner of source discovery and job formation."""
+    async def _run_coordinator(
+        self,
+        stop_event: asyncio.Event,
+    ) -> None:
+        """@brief 唯一负责 source discovery 与 job formation / Sole owner of source discovery and job formation.
 
+        @param stop_event 顶层结构化停止信号 / Top-level structured stop signal.
+        @return None / None.
+        """
+
+        polling = self._polling_policy.start()
         while not stop_event.is_set():
             try:
                 did_work = await self._coordinate_once()
@@ -123,8 +150,36 @@ class DreamingWorker:
             except Exception:
                 logger.exception("Dreaming coordinator pass failed; will retry")
                 did_work = False
-            if not did_work:
-                await _wait_or_stop(stop_event, self._poll_interval)
+            if did_work:
+                polling.reset()
+                continue
+            await polling.wait(stop_event)
+
+    async def _recover_leases(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        recovery: LeaseRecoveryCadence,
+    ) -> None:
+        """@brief 以单一 owner 独立回收过期 Dream leases / Recover expired Dream leases independently under one owner.
+
+        @param stop_event 顶层结构化停止信号 / Top-level structured stop signal.
+        @param recovery 与 lease 生命周期对齐的恢复节奏 / Recovery cadence aligned with the lease lifecycle.
+        @return None；恢复故障不会取消 coordinator 或 consumers /
+            None; recovery failures do not cancel the coordinator or consumers.
+        @note 首次循环立即恢复；后续等待直接竞争 stop event，不受业务轮询退避影响。/
+            The first loop recovers immediately; later waits race the stop event and are
+            independent of business-polling backoff.
+        """
+
+        while not stop_event.is_set():
+            if recovery.take_due():
+                await self._recover_expired_leases()
+            try:
+                async with asyncio.timeout(recovery.interval_seconds):
+                    await stop_event.wait()
+            except TimeoutError:
+                continue
 
     async def _coordinate_once(self) -> bool:
         """@brief 投影一批证据并调度到期 Profile / Project evidence and schedule due Profiles once.
@@ -162,6 +217,7 @@ class DreamingWorker:
     async def _run_consumer(self, stop_event: asyncio.Event) -> None:
         """@brief 只消费 durable Dream jobs / Consume only durable Dream jobs."""
 
+        polling = self._polling_policy.start()
         while not stop_event.is_set():
             try:
                 claims = await self._store.claim_dreams(
@@ -173,11 +229,12 @@ class DreamingWorker:
                 raise
             except Exception:
                 logger.exception("Dreaming claim pass failed; will retry")
-                await _wait_or_stop(stop_event, self._poll_interval)
+                await polling.wait(stop_event)
                 continue
             if not claims:
-                await _wait_or_stop(stop_event, self._poll_interval)
+                await polling.wait(stop_event)
                 continue
+            polling.reset()
             for claim in claims:
                 try:
                     await self._process(claim)
@@ -190,13 +247,18 @@ class DreamingWorker:
                     )
 
     async def _recover_expired_leases(self) -> None:
-        """@brief 尝试回收启动前遗留的 Dream 租约 / Attempt to recover Dream leases stranded before startup.
+        """@brief 尝试回收已过期 Dream 租约 / Attempt to recover expired Dream leases.
 
         @return None / None.
-        @note Dream 的模型调用有小于租约的 timeout，但没有 lease heartbeat；为了避免
-            恢复循环抢走仍在收尾的 claim，只在启动、领取新任务之前执行。/ Dream model
-            calls have a timeout below the lease but no lease heartbeat; to avoid a recovery loop
-            stealing a claim still finalizing, this runs only before the worker claims new work.
+        @note 存储层只回收 ``lease_expires_at <= now`` 的 claim；回收会清除
+            token，之后的 reclaim 会安装新 token，fencing 才会拒绝旧 owner。
+            lease 时间到期本身不会使 token 失效。attempt timeout 严格小于 lease，
+            所以不晚于半租约的扫描不会抢走仍在有效租约内的 claim。/
+            The store recovers only claims whose ``lease_expires_at <= now``. Recovery clears the
+            token, and a later reclaim installs a new token; only then does fencing reject the old
+            owner. Passage of the lease deadline alone does not invalidate a token. The attempt
+            timeout is strictly shorter than the lease, so a cadence no later than half the lease
+            cannot steal a claim whose lease remains valid.
         """
 
         try:
@@ -212,9 +274,7 @@ class DreamingWorker:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception(
-                "Dreaming startup lease recovery failed; a later process startup will retry"
-            )
+            logger.exception("Dreaming lease recovery failed; a later pass will retry")
 
     async def _process(self, claim: DreamClaim) -> None:
         """@brief 在 transaction 外调用模型并 fenced 提交 / Call the model outside transactions and commit with fencing.
@@ -316,20 +376,6 @@ class DreamingWorker:
             outcome,
             detail,
         )
-
-
-async def _wait_or_stop(stop_event: asyncio.Event, seconds: float) -> None:
-    """@brief 等待轮询间隔或提前停止 / Wait for the poll interval or stop early.
-
-    @param stop_event 停止信号 / Stop signal.
-    @param seconds 等待秒数 / Wait seconds.
-    @return None / None.
-    """
-
-    try:
-        await asyncio.wait_for(stop_event.wait(), timeout=seconds)
-    except TimeoutError:
-        return
 
 
 __all__ = ["DreamingWorker"]

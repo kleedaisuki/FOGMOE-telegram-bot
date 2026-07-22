@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
 
+from fogmoe_bot.application.observability.telemetry import Telemetry, TelemetryBuffer
 from fogmoe_bot.application.retrieval import (
     EpisodicPassageRenderer,
     EpisodicTurn,
@@ -16,8 +17,7 @@ from fogmoe_bot.application.retrieval import (
     RetrievalWorker,
     RetryableEmbeddingError,
 )
-from fogmoe_bot.application.runtime import UtcClock
-from fogmoe_bot.application.observability.telemetry import Telemetry, TelemetryBuffer
+from fogmoe_bot.application.runtime import AdaptivePollingPolicy, UtcClock
 from fogmoe_bot.domain.observability.signals import MetricSignal, SpanSignal
 from fogmoe_bot.domain.retrieval import (
     EmbeddingSpace,
@@ -26,7 +26,6 @@ from fogmoe_bot.domain.retrieval import (
     RetrievalPassage,
     RetrievalScope,
 )
-
 
 NOW = datetime(2034, 1, 1, tzinfo=UTC)
 """@brief 确定性 worker 时间 / Deterministic worker instant."""
@@ -39,6 +38,44 @@ class _Clock(UtcClock):
         """@brief 返回固定时间 / Return the fixed instant."""
 
         return NOW
+
+
+class _RecoveryClock(UtcClock):
+    """@brief 同步推进 UTC 与单调时间的测试时钟 / Test clock advancing UTC and monotonic time together."""
+
+    def __init__(self) -> None:
+        """@brief 从固定时刻与零单调秒开始 / Start at the fixed instant and zero monotonic seconds."""
+
+        self.current = NOW
+        self.monotonic_seconds = 0.0
+
+    def now(self) -> datetime:
+        """@brief 返回当前 UTC 时刻 / Return the current UTC instant.
+
+        @return 当前测试时刻 / Current test instant.
+        """
+
+        return self.current
+
+    def monotonic(self) -> float:
+        """@brief 返回当前单调秒数 / Return current monotonic seconds.
+
+        @return 当前单调秒数 / Current monotonic seconds.
+        """
+
+        return self.monotonic_seconds
+
+    def advance(self, duration: timedelta) -> None:
+        """@brief 同步推进两个时间轴 / Advance both time axes together.
+
+        @param duration 正时间增量 / Positive duration.
+        @return None / None.
+        """
+
+        if duration <= timedelta():
+            raise ValueError("Test-clock advance must be positive")
+        self.current += duration
+        self.monotonic_seconds += duration.total_seconds()
 
 
 class _Source:
@@ -90,7 +127,7 @@ class _Store:
     async def project_turn(
         self,
         turn: EpisodicTurn,
-        passages: tuple[RetrievalPassage, ...],
+        passages: Sequence[RetrievalPassage],
         *,
         space: EmbeddingSpace,
         projected_at: datetime,
@@ -226,7 +263,7 @@ class _Embeddings:
 
     async def embed_documents(
         self,
-        texts: tuple[str, ...],
+        texts: Sequence[str],
         *,
         space: EmbeddingSpace,
     ) -> tuple[EmbeddingVector, ...]:
@@ -339,6 +376,116 @@ class _BlockingSource:
         raise AssertionError("blocking source unexpectedly resumed")
 
 
+class _RecoveryCadenceSource:
+    """@brief 在恢复 deadline 前后推进测试时钟 / Advance the test clock around a recovery deadline."""
+
+    def __init__(
+        self,
+        *,
+        clock: _RecoveryClock,
+        stop_event: asyncio.Event,
+    ) -> None:
+        """@brief 保存时钟与停止信号 / Store the clock and stop signal.
+
+        @param clock 可推进测试时钟 / Advanceable test clock.
+        @param stop_event worker 停止信号 / Worker stop signal.
+        """
+
+        self._clock = clock
+        self._stop_event = stop_event
+        self.calls = 0
+
+    async def read_unprojected(
+        self,
+        *,
+        format_version: int,
+        limit: int,
+    ) -> tuple[EpisodicTurn, ...]:
+        """@brief 先停在 deadline 前，再跨过 deadline / Stop just before and then cross the deadline.
+
+        @param format_version passage 格式版本 / Passage format version.
+        @param limit 读取上限 / Read limit.
+        @return 始终为空的来源批次 / Always-empty source batch.
+        """
+
+        assert format_version == 1 and limit == 4
+        self.calls += 1
+        if self.calls == 1:
+            self._clock.advance(timedelta(seconds=4, milliseconds=999))
+        elif self.calls == 2:
+            self._clock.advance(timedelta(milliseconds=1))
+        else:
+            self._stop_event.set()
+        return ()
+
+
+class _RecoveryCadenceStore(_Store):
+    """@brief 记录周期恢复并模拟未过期活动 lease / Record periodic recovery with an unexpired active lease."""
+
+    def __init__(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        fail_first: bool,
+    ) -> None:
+        """@brief 初始化记录与首次故障开关 / Initialize records and first-failure switch.
+
+        @param stop_event worker 停止信号 / Worker stop signal.
+        @param fail_first 首次恢复是否失败 / Whether the first recovery fails.
+        """
+
+        super().__init__(stop_event)
+        self.recovery_times: list[datetime] = []
+        self.claim_polls = 0
+        self._fail_first = fail_first
+        self.active_lease_expires_at = NOW + timedelta(seconds=30)
+        self.stole_active_lease = False
+
+    async def claim_vectors(
+        self,
+        *,
+        space: EmbeddingSpace,
+        now: datetime,
+        limit: int,
+        lease_for: timedelta,
+    ) -> tuple[PassageVectorClaim, ...]:
+        """@brief 保持 vector consumer 空闲但可运行 / Keep vector consumers idle but operational.
+
+        @param space 当前 embedding 空间 / Active embedding space.
+        @param now 当前 UTC 时刻 / Current UTC instant.
+        @param limit 领取上限 / Claim limit.
+        @param lease_for claim lease / Claim lease.
+        @return 空 claim 批次 / Empty claim batch.
+        """
+
+        assert space == self.space and limit == 4
+        assert lease_for == timedelta(seconds=30)
+        self.claim_polls += 1
+        return ()
+
+    async def recover_expired_vector_leases(
+        self,
+        *,
+        space: EmbeddingSpace,
+        now: datetime,
+    ) -> int:
+        """@brief 记录恢复，并拒绝把未过期 lease 当作可恢复 / Record recovery without treating an unexpired lease as recoverable.
+
+        @param space 当前 embedding 空间 / Active embedding space.
+        @param now 恢复判定时刻 / Recovery decision instant.
+        @return 本测试始终没有过期 row / No expired row in this test.
+        """
+
+        assert space == self.space
+        self.recovery_times.append(now)
+        if self._fail_first and len(self.recovery_times) == 1:
+            raise RuntimeError("temporary vector lease-recovery failure")
+        if now >= self.active_lease_expires_at:
+            self.stole_active_lease = True
+            return 1
+        return 0
+
+
 class _FailOnceTelemetry(Telemetry):
     """@brief 首次 gauge 抛出 telemetry 错误的 recorder / Telemetry recorder whose first gauge raises an error."""
 
@@ -402,7 +549,7 @@ def _worker(
         telemetry=Telemetry(telemetry_buffer),
         worker_count=4,
         batch_size=4,
-        poll_interval=0.01,
+        polling_policy=AdaptivePollingPolicy(0.01, 0.02, jitter_ratio=0.0),
         lease_for=timedelta(seconds=30),
         clock=_Clock(),
     )
@@ -439,7 +586,7 @@ def _resilient_worker(
         telemetry=telemetry,
         worker_count=1,
         batch_size=4,
-        poll_interval=0.001,
+        polling_policy=AdaptivePollingPolicy(0.001, 0.004, jitter_ratio=0.0),
         lease_for=timedelta(seconds=30),
         clock=_Clock(),
     )
@@ -585,5 +732,60 @@ def test_retrieval_poll_cancellation_still_propagates() -> None:
 
         with pytest.raises(asyncio.CancelledError):
             await task
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("fail_first", [False, True], ids=["steady", "retry"])
+def test_runtime_lease_recovery_uses_cadence_without_early_steal(
+    fail_first: bool,
+) -> None:
+    """@brief Retrieval 运行期按 cadence 恢复且异常不阻断 projection/claim / Retrieval recovers on cadence without early stealing, and faults do not block projection or claims.
+
+    @param fail_first 首次恢复是否注入故障 / Whether to inject a first recovery failure.
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 跨过五秒 cadence 并验证两个故障边界 / Cross the five-second cadence and verify both fault boundaries.
+
+        @return None / None.
+        """
+
+        stop_event = asyncio.Event()
+        clock = _RecoveryClock()
+        source = _RecoveryCadenceSource(clock=clock, stop_event=stop_event)
+        store = _RecoveryCadenceStore(stop_event, fail_first=fail_first)
+        worker = RetrievalWorker(
+            source=source,
+            store=store,
+            embeddings=_Embeddings(fail=False),
+            space=EmbeddingSpace(
+                "test.worker.v1",
+                "test/model",
+                2,
+                "Retrieve relevant evidence.",
+                1,
+            ),
+            renderer=EpisodicPassageRenderer(),
+            telemetry=Telemetry(TelemetryBuffer(64)),
+            worker_count=1,
+            batch_size=4,
+            polling_policy=AdaptivePollingPolicy(
+                0.001,
+                0.004,
+                jitter_ratio=0.0,
+            ),
+            lease_for=timedelta(seconds=30),
+            clock=clock,
+            recovery_monotonic=clock.monotonic,
+        )
+
+        await asyncio.wait_for(worker.run(stop_event), timeout=1)
+
+        assert store.recovery_times == [NOW, NOW + timedelta(seconds=5)]
+        assert not store.stole_active_lease
+        assert source.calls == 3
+        assert store.claim_polls > 0
 
     asyncio.run(scenario())

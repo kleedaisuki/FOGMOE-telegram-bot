@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 
+from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.application.retrieval.episodic import EpisodicPassageRenderer
 from fogmoe_bot.application.retrieval.ports import (
     EmbeddingContractError,
@@ -20,12 +21,15 @@ from fogmoe_bot.application.retrieval.ports import (
     RetryableEmbeddingError,
     StaleVectorClaimError,
 )
-from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
-from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.application.runtime import (
+    AdaptivePollingPolicy,
+    LeaseRecoveryCadence,
+    SystemUtcClock,
+    UtcClock,
+)
 from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
 from fogmoe_bot.domain.retrieval import EmbeddingSpace, EmbeddingVector
-
 
 logger = logging.getLogger(__name__)
 """@brief Retrieval worker logger / Retrieval-worker logger."""
@@ -55,14 +59,16 @@ class RetrievalWorker:
         telemetry: Telemetry,
         worker_count: int = 2,
         batch_size: int = 16,
-        poll_interval: float = 0.5,
+        polling_policy: AdaptivePollingPolicy,
         lease_for: timedelta = timedelta(minutes=2),
         max_attempts: int = 5,
         clock: UtcClock | None = None,
         jitter: Jitter = random.uniform,
+        recovery_monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         """@brief 创建 retrieval worker / Create the retrieval worker.
 
+        @param recovery_monotonic lease recovery cadence 的可替换单调时钟 / Replaceable monotonic clock for the lease-recovery cadence.
         @raise ValueError worker 配置非法 / Invalid worker configuration.
         """
 
@@ -70,8 +76,6 @@ class RetrievalWorker:
             raise ValueError("Retrieval worker_count must be positive")
         if not 1 <= batch_size <= 128:
             raise ValueError("Retrieval batch_size must be between 1 and 128")
-        if poll_interval <= 0.0 or not math.isfinite(poll_interval):
-            raise ValueError("Retrieval poll_interval must be finite and positive")
         if lease_for <= timedelta():
             raise ValueError("Retrieval lease_for must be positive")
         if max_attempts < 1:
@@ -86,11 +90,12 @@ class RetrievalWorker:
         self._telemetry = telemetry
         self._worker_count = worker_count
         self._batch_size = batch_size
-        self._poll_interval = poll_interval
+        self._polling_policy = polling_policy
         self._lease_for = lease_for
         self._max_attempts = max_attempts
         self._clock = clock or SystemUtcClock()
         self._jitter = jitter
+        self._recovery_monotonic = recovery_monotonic
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """@brief 运行到停止并排空已领取 batch / Run until stopped and drain claimed batches.
@@ -102,10 +107,15 @@ class RetrievalWorker:
         initialized = await self._initialize(stop_event)
         if not initialized:
             return
-        await self._recover_expired_leases()
+        recovery = LeaseRecoveryCadence.for_lease(
+            self._lease_for,
+            monotonic=self._recovery_monotonic,
+        )
+        if recovery.take_due():
+            await self._recover_expired_leases()
         async with asyncio.TaskGroup() as task_group:
             task_group.create_task(
-                self._run_projector(stop_event),
+                self._run_projector(stop_event, recovery=recovery),
                 name="retrieval-projection",
             )
             for ordinal in range(self._worker_count):
@@ -124,6 +134,7 @@ class RetrievalWorker:
             transient failures must not affect other BotRuntime services.
         """
 
+        polling = self._polling_policy.start()
         while not stop_event.is_set():
             try:
                 await self._store.ensure_space(self._space)
@@ -133,19 +144,28 @@ class RetrievalWorker:
                 logger.exception(
                     "Retrieval embedding-space initialization failed; will retry"
                 )
-                await _wait_or_stop(stop_event, self._poll_interval)
+                await polling.wait(stop_event)
                 continue
             return True
         return False
 
-    async def _run_projector(self, stop_event: asyncio.Event) -> None:
+    async def _run_projector(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        recovery: LeaseRecoveryCadence,
+    ) -> None:
         """@brief 运行唯一 source projection producer / Run the sole source-projection producer.
 
         @param stop_event 停止信号 / Stop signal.
+        @param recovery 此 worker 唯一的 lease recovery cadence / Sole lease-recovery cadence for this worker.
         @return None / None.
         """
 
+        polling = self._polling_policy.start()
         while not stop_event.is_set():
+            if recovery.take_due():
+                await self._recover_expired_leases()
             try:
                 did_work = await self._project_sources()
             except asyncio.CancelledError:
@@ -153,8 +173,10 @@ class RetrievalWorker:
             except Exception:
                 logger.exception("Retrieval source-projection pass failed; will retry")
                 did_work = False
-            if not did_work:
-                await _wait_or_stop(stop_event, self._poll_interval)
+            if did_work:
+                polling.reset()
+                continue
+            await polling.wait(stop_event)
 
     async def _project_sources(self) -> bool:
         """@brief 投影一个来源批次 / Project one source batch.
@@ -228,6 +250,7 @@ class RetrievalWorker:
         @return None / None.
         """
 
+        polling = self._polling_policy.start()
         while not stop_event.is_set():
             try:
                 did_work = await self._process_vector_batch()
@@ -236,19 +259,25 @@ class RetrievalWorker:
             except Exception:
                 logger.exception("Retrieval vector-consumer pass failed; will retry")
                 did_work = False
-            if not did_work:
-                await _wait_or_stop(stop_event, self._poll_interval)
+            if did_work:
+                polling.reset()
+                continue
+            await polling.wait(stop_event)
 
     async def _recover_expired_leases(self) -> None:
-        """@brief 尝试回收启动前遗留的 embedding 租约 / Attempt to recover embedding leases stranded before startup.
+        """@brief 回收当前空间已经过期的 embedding 租约 / Recover expired embedding leases in the active space.
 
         @return None / None.
-        @note 当前 retrieval 协议没有 lease heartbeat，运行期回收可能抢走仍在执行的
-            长 embedding 请求。因此仅在 worker 启动、尚未领取新 claim 前执行；进程
-            崩溃后的恢复由下一次启动负责。/ The current retrieval protocol has no lease
-            heartbeat, so runtime recovery could steal a long-running active embedding request.
-            It therefore runs only before this worker claims new work at startup; the next startup
-            recovers a process-crash lease.
+        @note production composition 的 embedding HTTP total timeout 严格短于 lease；
+            storage 只回收 ``lease_expires_at <= now`` 的 processing row。回收清除
+            token，之后的 reclaim 安装新 token，fencing 才会拒绝旧 owner；
+            lease 时间到期本身不会使 token 失效。因此周期扫描不会抢走仍在
+            有效 lease 内的请求。/ Production composition keeps the embedding HTTP
+            total timeout strictly below the lease. Storage recovers only processing rows with
+            ``lease_expires_at <= now``. Recovery clears the token and a later reclaim installs a
+            new token; only then does fencing reject the old owner. Passage of the lease deadline
+            alone does not invalidate a token, so periodic scans do not steal requests whose
+            leases remain valid.
         """
 
         try:
@@ -266,7 +295,7 @@ class RetrievalWorker:
             raise
         except Exception:
             logger.exception(
-                "Retrieval startup lease recovery failed; a later process startup will retry"
+                "Retrieval lease recovery failed; projection and vector claims continue"
             )
 
     async def _process_vector_batch(self) -> bool:
@@ -437,18 +466,6 @@ class RetrievalWorker:
         if not math.isfinite(sampled) or not 0.0 <= sampled <= cap:
             raise ValueError("Retrieval jitter returned an invalid sample")
         return failed_at + timedelta(seconds=max(sampled, 0.001))
-
-
-async def _wait_or_stop(stop_event: asyncio.Event, timeout: float) -> None:
-    """@brief 等待 poll 周期或停止信号 / Wait for a poll interval or stop signal.
-
-    @return None / None.
-    """
-
-    try:
-        await asyncio.wait_for(stop_event.wait(), timeout=timeout)
-    except TimeoutError:
-        return
 
 
 __all__ = ["RetrievalWorker"]

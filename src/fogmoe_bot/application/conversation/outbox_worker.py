@@ -22,16 +22,21 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
-from fogmoe_bot.application.runtime import Jitter, SystemUtcClock, UtcClock
-from fogmoe_bot.domain.temporal import ensure_utc
+from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.application.runtime import (
+    AdaptivePollingPolicy,
+    Jitter,
+    LeaseRecoveryCadence,
+    SystemUtcClock,
+    UtcClock,
+)
 from fogmoe_bot.domain.conversation.outbox import (
     OutboundClaim,
     OutboundMessage,
 )
-from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.domain.observability.conventions import EventName, MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
-
+from fogmoe_bot.domain.temporal import ensure_utc
 
 logger = logging.getLogger(__name__)
 
@@ -397,7 +402,7 @@ class OutboxWorker:
         repository: OutboxPersistence,
         delivery: OutboundDelivery,
         worker_count: int,
-        poll_interval: float,
+        polling_policy: AdaptivePollingPolicy,
         lease_for: timedelta,
         attempt_timeout: timedelta,
         retry_policy: FullJitterDeliveryRetryPolicy | None = None,
@@ -409,7 +414,7 @@ class OutboxWorker:
         @param repository outbox 持久化端口 / Outbox persistence port.
         @param delivery 外部投递端口 / External-delivery port.
         @param worker_count 已领取未终结消息上限 / Maximum claimed-but-unfinalized messages.
-        @param poll_interval 空闲轮询秒数 / Idle polling interval in seconds.
+        @param polling_policy 自适应空闲轮询策略 / Adaptive idle-polling policy.
         @param lease_for 每次 claim 的租约 / Lease duration for each claim.
         @param attempt_timeout 单次外部调用上限 / External-call timeout per attempt.
         @param retry_policy 失败策略 / Failure policy.
@@ -421,8 +426,6 @@ class OutboxWorker:
 
         if worker_count < 1:
             raise ValueError("worker_count must be at least one")
-        if poll_interval <= 0:
-            raise ValueError("poll_interval must be positive")
         if lease_for <= timedelta():
             raise ValueError("lease_for must be positive")
         if attempt_timeout <= timedelta():
@@ -432,7 +435,7 @@ class OutboxWorker:
         self._repository = repository
         self._delivery = delivery
         self._worker_count = worker_count
-        self._poll_interval = poll_interval
+        self._polling_policy = polling_policy
         self._lease_for = lease_for
         self._attempt_timeout = attempt_timeout
         self._retry_policy = retry_policy or FullJitterDeliveryRetryPolicy()
@@ -548,28 +551,15 @@ class OutboxWorker:
         @return None / None.
         """
 
+        polling = self._polling_policy.start()
+        recovery = LeaseRecoveryCadence.for_lease(self._lease_for)
         while not stop_event.is_set():
+            if recovery.take_due():
+                await self._recover_expired_leases(self._clock.now())
             tokens = self._take_available(capacity)
             if tokens:
                 now = self._clock.now()
                 try:
-                    recovered = await self._repository.recover_expired_outbound_leases(
-                        now=now
-                    )
-                    if recovered:
-                        self._telemetry.counter(
-                            MetricName.LEASE_RECOVERIES,
-                            float(recovered),
-                            attributes={"pipeline.stage": "outbox"},
-                        )
-                        logger.warning(
-                            "Recovered expired outbox leases: count=%s",
-                            recovered,
-                            extra={
-                                "event_name": EventName.OUTBOX_LEASE_RECOVERED,
-                                "telemetry_attributes": {"pipeline.stage": "outbox"},
-                            },
-                        )
                     claims = tuple(
                         await self._repository.claim_outbound(
                             now=now,
@@ -583,20 +573,44 @@ class OutboxWorker:
                         )
                 except Exception:
                     self._return_capacity(capacity, tokens)
-                    logger.exception(
-                        "Outbox producer failed to recover or claim messages"
-                    )
+                    logger.exception("Outbox producer failed to claim messages")
+                    await polling.wait(stop_event)
+                    continue
                 else:
                     for claim in claims:
                         await work_queue.put(_ClaimWork(claim))
                     self._return_capacity(capacity, tokens[len(claims) :])
-            try:
-                await asyncio.wait_for(
-                    stop_event.wait(),
-                    timeout=self._poll_interval,
-                )
-            except TimeoutError:
-                continue
+                    if claims:
+                        polling.reset()
+                        continue
+            await polling.wait(stop_event)
+
+    async def _recover_expired_leases(self, now: datetime) -> None:
+        """@brief 低频回收到期 outbox leases / Recover expired outbox leases at a low cadence.
+
+        @param now 当前 UTC 时刻 / Current UTC instant.
+        @return None；恢复查询失败不会阻断正常 claim / None; a failed recovery query does not block normal claims.
+        """
+
+        try:
+            recovered = await self._repository.recover_expired_outbound_leases(now=now)
+            if not recovered:
+                return
+            self._telemetry.counter(
+                MetricName.LEASE_RECOVERIES,
+                float(recovered),
+                attributes={"pipeline.stage": "outbox"},
+            )
+            logger.warning(
+                "Recovered expired outbox leases: count=%s",
+                recovered,
+                extra={
+                    "event_name": EventName.OUTBOX_LEASE_RECOVERED,
+                    "telemetry_attributes": {"pipeline.stage": "outbox"},
+                },
+            )
+        except Exception:
+            logger.exception("Outbox lease recovery failed; claim polling continues")
 
     async def _consume(
         self,

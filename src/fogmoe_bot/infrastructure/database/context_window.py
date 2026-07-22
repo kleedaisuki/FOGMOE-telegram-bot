@@ -11,7 +11,17 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.application.context_window.projection import ContextWindowBounds
-from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.domain.context_window.budget import TokenCount
+from fogmoe_bot.domain.context_window.compaction import (
+    Compaction,
+    CompactionEnqueueResult,
+    CompactionId,
+    CompactionIdempotencyConflictError,
+    CompactionPlan,
+    CompactionStatus,
+    CompactionSummary,
+    StaleCompactionClaimError,
+)
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     ConversationMessageId,
@@ -20,25 +30,14 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnId,
     UpdateId,
 )
-from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.message import (
     ConversationMessage,
     MessageDraft,
     MessageRole,
 )
-from fogmoe_bot.domain.context_window.budget import TokenCount
-from fogmoe_bot.domain.context_window.compaction import (
-    CompactionEnqueueResult,
-    CompactionIdempotencyConflictError,
-    Compaction,
-    CompactionPlan,
-    CompactionId,
-    CompactionStatus,
-    CompactionSummary,
-    StaleCompactionClaimError,
-)
-from fogmoe_bot.infrastructure.database import connection as db_connection
-
+from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.domain.temporal import ensure_utc
+from fogmoe_bot.infrastructure.database import db
 
 _COMPACTION_COLUMNS = (
     "compaction_id, conversation_id, owner_user_id, epoch_floor_sequence, "
@@ -75,7 +74,7 @@ class PostgresContextWindowStore:
         A reset must be strictly earlier than the Turn's first sequence; later resets cannot alter an accepted Turn.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "WITH turn_bounds AS ("
             "SELECT MIN(sequence) AS first_sequence, MAX(sequence) AS last_sequence "
             "FROM conversation.conversation_messages "
@@ -117,7 +116,7 @@ class PostgresContextWindowStore:
 
         if epoch_floor_sequence < 0 or before_sequence <= epoch_floor_sequence:
             raise ValueError("Compaction projection bounds are invalid")
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             _COMPACTION_SELECT + " WHERE status = 'completed' "
             "AND conversation_id = %s AND epoch_floor_sequence = %s "
             "AND through_sequence < %s "
@@ -136,7 +135,7 @@ class PostgresContextWindowStore:
 
         if epoch_floor_sequence < 0:
             raise ValueError("Compaction epoch floor cannot be negative")
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             _COMPACTION_SELECT + " WHERE conversation_id = %s "
             "AND epoch_floor_sequence = %s "
             "AND status IN ('pending', 'processing', 'retry_wait') LIMIT 1",
@@ -161,7 +160,7 @@ class PostgresContextWindowStore:
             raise ValueError("Message page sequence bounds are invalid")
         if not 1 <= limit <= 1024:
             raise ValueError("Message page limit must be between 1 and 1024")
-        rows = await db_connection.fetch_all(
+        rows = await db.fetch_all(
             "SELECT message_id, conversation_id, sequence, turn_id, source_update_id, "
             "role, content, idempotency_key, created_at "
             "FROM conversation.conversation_messages "
@@ -183,14 +182,14 @@ class PostgresContextWindowStore:
         """
 
         floor = draft.epoch_floor_sequence
-        async with db_connection.transaction() as connection:
-            await db_connection.fetch_one(
+        async with db.transaction() as connection:
+            await db.fetch_one(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                 (f"conversation-compaction:{draft.conversation_id}:{floor}",),
                 connection=connection,
             )
             await self._validate_draft_source(draft, connection=connection)
-            active_row = await db_connection.fetch_one(
+            active_row = await db.fetch_one(
                 _COMPACTION_SELECT + " WHERE conversation_id = %s "
                 "AND epoch_floor_sequence = %s "
                 "AND status IN ('pending', 'processing', 'retry_wait') "
@@ -204,7 +203,7 @@ class PostgresContextWindowStore:
                     _validate_same_draft(active.draft, draft)
                 return CompactionEnqueueResult(active, False)
 
-            row = await db_connection.fetch_one(
+            row = await db.fetch_one(
                 "INSERT INTO context_window.compactions ("
                 "compaction_id, conversation_id, owner_user_id, epoch_floor_sequence, "
                 "from_sequence, through_sequence, anchor_turn_id, predecessor_compaction_id, "
@@ -242,7 +241,7 @@ class PostgresContextWindowStore:
             )
             if row is not None:
                 return CompactionEnqueueResult(_map_compaction(row), True)
-            existing_row = await db_connection.fetch_one(
+            existing_row = await db.fetch_one(
                 _COMPACTION_SELECT
                 + " WHERE compaction_id = CAST(%s AS UUID) FOR UPDATE",
                 (str(draft.compaction_id),),
@@ -272,7 +271,7 @@ class PostgresContextWindowStore:
         floor = draft.epoch_floor_sequence
         start = draft.from_sequence
         end = draft.through_sequence
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "WITH turn_bounds AS ("
             "SELECT MIN(sequence) AS first_sequence, MAX(sequence) AS last_sequence "
             "FROM conversation.conversation_messages "
@@ -300,7 +299,7 @@ class PostgresContextWindowStore:
             raise CompactionIdempotencyConflictError(
                 "Compaction anchor Turn or reset epoch changed semantics"
             )
-        count_row = await db_connection.fetch_one(
+        count_row = await db.fetch_one(
             "SELECT COUNT(*) FROM conversation.conversation_messages "
             "WHERE conversation_id = %s AND sequence BETWEEN %s AND %s",
             (str(draft.conversation_id), start, end),
@@ -316,7 +315,7 @@ class PostgresContextWindowStore:
                     "First compaction segment must begin at the reset epoch floor"
                 )
             return
-        predecessor_row = await db_connection.fetch_one(
+        predecessor_row = await db.fetch_one(
             _COMPACTION_SELECT
             + " WHERE compaction_id = CAST(%s AS UUID) AND status = 'completed' "
             "FOR UPDATE",
@@ -356,22 +355,8 @@ class PostgresContextWindowStore:
             raise ValueError("Compaction lease_for must be positive")
         lease_expires_at = timestamp + lease_for
         claims: list[Compaction] = []
-        async with db_connection.transaction() as connection:
-            await db_connection.execute(
-                "UPDATE context_window.compactions SET "
-                "status = 'retry_wait', version = version + 1, "
-                "next_attempt_at = %s, claim_token = NULL, lease_expires_at = NULL, "
-                "updated_at = %s, last_error = COALESCE("
-                "last_error, 'recovered expired compaction lease') "
-                "WHERE status = 'processing' AND lease_expires_at <= %s",
-                (
-                    timestamp + timedelta(microseconds=1),
-                    timestamp,
-                    timestamp,
-                ),
-                connection=connection,
-            )
-            candidates = await db_connection.fetch_all(
+        async with db.transaction() as connection:
+            candidates = await db.fetch_all(
                 "SELECT compaction_id FROM context_window.compactions "
                 "WHERE status IN ('pending', 'retry_wait') "
                 "AND next_attempt_at <= %s "
@@ -382,7 +367,7 @@ class PostgresContextWindowStore:
             )
             for candidate in candidates:
                 token = LeaseToken.new()
-                row = await db_connection.fetch_one(
+                row = await db.fetch_one(
                     "UPDATE context_window.compactions "
                     "SET status = 'processing', version = version + 1, "
                     "attempt_count = attempt_count + 1, next_attempt_at = NULL, "
@@ -419,7 +404,7 @@ class PostgresContextWindowStore:
 
         token = _claim_token(claim)
         timestamp = ensure_utc(completed_at)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             current = await self._load_for_update(
                 claim.compaction_id,
                 connection=connection,
@@ -442,7 +427,7 @@ class PostgresContextWindowStore:
                 raise StaleCompactionClaimError(
                     f"Stale compaction completion for {claim.compaction_id}"
                 )
-            row = await db_connection.fetch_one(
+            row = await db.fetch_one(
                 "UPDATE context_window.compactions SET "
                 "status = 'completed', version = version + 1, claim_token = NULL, "
                 "lease_expires_at = NULL, completion_token = CAST(%s AS UUID), "
@@ -483,7 +468,7 @@ class PostgresContextWindowStore:
         retry_time = ensure_utc(retry_at)
         if retry_time <= failure_time:
             raise ValueError("Compaction retry_at must follow failed_at")
-        rowcount = await db_connection.execute(
+        rowcount = await db.execute(
             "UPDATE context_window.compactions SET "
             "status = 'retry_wait', version = version + 1, next_attempt_at = %s, "
             "claim_token = NULL, lease_expires_at = NULL, updated_at = %s, "
@@ -510,7 +495,7 @@ class PostgresContextWindowStore:
 
         token = _claim_token(claim)
         timestamp = ensure_utc(failed_at)
-        rowcount = await db_connection.execute(
+        rowcount = await db.execute(
             "UPDATE context_window.compactions SET "
             "status = 'failed_final', version = version + 1, claim_token = NULL, "
             "lease_expires_at = NULL, updated_at = %s, completed_at = %s, "
@@ -531,7 +516,7 @@ class PostgresContextWindowStore:
 
         timestamp = ensure_utc(now)
         retry_at = timestamp + timedelta(microseconds=1)
-        return await db_connection.execute(
+        return await db.execute(
             "UPDATE context_window.compactions SET "
             "status = 'retry_wait', version = version + 1, next_attempt_at = %s, "
             "claim_token = NULL, lease_expires_at = NULL, updated_at = %s, "
@@ -548,7 +533,7 @@ class PostgresContextWindowStore:
     ) -> Compaction | None:
         """@brief 锁定一个 Segment / Lock one segment for mutation."""
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             _COMPACTION_SELECT + " WHERE compaction_id = CAST(%s AS UUID) FOR UPDATE",
             (str(compaction_id),),
             connection=connection,

@@ -1,9 +1,9 @@
 """@brief Durable inbox worker 测试 / Tests for the durable inbox worker."""
 
 import asyncio
+import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-import logging
 
 import pytest
 from observability_testkit import make_telemetry
@@ -19,6 +19,7 @@ from fogmoe_bot.application.conversation.router import (
     Ignored,
 )
 from fogmoe_bot.application.runtime import (
+    AdaptivePollingPolicy,
     AggregateKey,
     RuntimeState,
     RuntimeUnavailable,
@@ -33,7 +34,6 @@ from fogmoe_bot.domain.conversation.inbox import (
     InboundStatus,
     InboundUpdate,
 )
-
 
 NOW = datetime(2026, 7, 11, 10, tzinfo=timezone.utc)
 """@brief 测试基准时间 / Test reference time."""
@@ -83,10 +83,16 @@ class _Clock:
 class _Repository:
     """@brief 记录 inbox 状态调用的 repository 替身 / Repository double recording inbox state calls."""
 
-    def __init__(self, claims: tuple[InboundClaim, ...] = ()) -> None:
+    def __init__(
+        self,
+        claims: tuple[InboundClaim, ...] = (),
+        *,
+        recovery_failures: int = 0,
+    ) -> None:
         """@brief 创建 repository 替身 / Create the repository double.
 
         @param claims 首轮可领取 claims / Claims available in the first poll.
+        @param recovery_failures 前几次恢复查询注入的故障数 / Number of initial recovery-query failures.
         """
 
         self.claims = list(claims)
@@ -95,6 +101,7 @@ class _Repository:
         self.retried: list[tuple[InboundClaim, datetime, datetime, str]] = []
         self.failed: list[tuple[InboundClaim, datetime, str]] = []
         self.recover_calls = 0
+        self.recovery_failures = recovery_failures
 
     async def claim_inbound(
         self,
@@ -177,6 +184,9 @@ class _Repository:
 
         del now
         self.recover_calls += 1
+        if self.recovery_failures:
+            self.recovery_failures -= 1
+            raise OSError("temporary inbox lease-recovery failure")
         return 0
 
 
@@ -242,6 +252,8 @@ def _worker(
     *,
     max_attempts: int = 3,
     worker_count: int = 1,
+    lease_for: timedelta = timedelta(minutes=1),
+    polling_policy: AdaptivePollingPolicy | None = None,
 ) -> InboxWorker:
     """@brief 构造确定性测试 worker / Build a deterministic test worker.
 
@@ -249,6 +261,8 @@ def _worker(
     @param router router 替身 / Router double.
     @param max_attempts 最大尝试数 / Maximum attempts.
     @param worker_count worker 数 / Worker count.
+    @param lease_for claim lease / Claim lease.
+    @param polling_policy 可选轮询策略 / Optional polling policy.
     @return inbox worker / Inbox worker.
     """
 
@@ -256,8 +270,9 @@ def _worker(
         repository=repository,
         router=router,
         worker_count=worker_count,
-        poll_interval=0.01,
-        lease_for=timedelta(minutes=1),
+        polling_policy=polling_policy
+        or AdaptivePollingPolicy(0.01, 0.02, jitter_ratio=0.0),
+        lease_for=lease_for,
         retry_policy=FullJitterRetryPolicy(
             max_attempts=max_attempts,
             initial_delay=timedelta(seconds=4),
@@ -432,7 +447,44 @@ def test_run_never_claims_more_than_worker_capacity() -> None:
             await asyncio.sleep(0)
         await asyncio.sleep(0.03)
         assert repository.claim_limits == [2]
+        assert repository.recover_calls == 1
         assert sorted(router.started) == [1, 2]
+
+        stop_event.set()
+        router.release.set()
+        await asyncio.wait_for(task, timeout=1)
+
+    asyncio.run(scenario())
+
+
+def test_lease_recovery_survives_failure_and_saturated_capacity() -> None:
+    """@brief 恢复故障不阻断 claim，容量饱和也不暂停 cadence / Recovery failure does not block claims, and saturated capacity does not pause the cadence."""
+
+    async def scenario() -> None:
+        """@brief 阻塞唯一 consumer 并等待第二次恢复 / Block the sole consumer and await a second recovery pass."""
+
+        repository = _Repository((_claim(),), recovery_failures=1)
+        router = _Router(Ignored())
+        router.release = asyncio.Event()
+        worker = _worker(
+            repository,
+            router,
+            lease_for=timedelta(milliseconds=100),
+            polling_policy=AdaptivePollingPolicy(
+                0.001,
+                0.002,
+                jitter_ratio=0.0,
+            ),
+        )
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(worker.run(stop_event))
+
+        async with asyncio.timeout(1):
+            while not router.started or repository.recover_calls < 2:
+                await asyncio.sleep(0.001)
+
+        assert repository.claim_limits == [1]
+        assert repository.recover_calls >= 2
 
         stop_event.set()
         router.release.set()

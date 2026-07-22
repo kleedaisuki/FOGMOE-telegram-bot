@@ -14,6 +14,7 @@ from fogmoe_bot.application.conversation.outbox_worker import (
     PermanentDeliveryError,
     RetryableDeliveryError,
 )
+from fogmoe_bot.application.runtime import AdaptivePollingPolicy
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
@@ -29,7 +30,6 @@ from fogmoe_bot.domain.conversation.outbox import (
     OutboundMessage,
     OutboundStatus,
 )
-
 
 NOW = datetime(2026, 7, 11, 10, tzinfo=timezone.utc)
 """@brief 测试基准时间 / Test reference time."""
@@ -88,7 +88,12 @@ class _Clock:
 class _Repository:
     """@brief 记录 outbox 状态调用的 repository 替身 / Repository double recording outbox state calls."""
 
-    def __init__(self, claims: tuple[OutboundClaim, ...] = ()) -> None:
+    def __init__(
+        self,
+        claims: tuple[OutboundClaim, ...] = (),
+        *,
+        recovery_failures: int = 0,
+    ) -> None:
         """@brief 创建 repository 替身 / Create the repository double.
 
         @param claims 首轮可领取 claims / Claims available in the first poll.
@@ -100,6 +105,7 @@ class _Repository:
         self.retried: list[tuple[OutboundClaim, datetime, datetime, str]] = []
         self.failed: list[tuple[OutboundClaim, datetime, str]] = []
         self.recover_calls = 0
+        self.recovery_failures = recovery_failures
 
     async def claim_outbound(
         self,
@@ -184,6 +190,9 @@ class _Repository:
 
         del now
         self.recover_calls += 1
+        if self.recovery_failures:
+            self.recovery_failures -= 1
+            raise OSError("temporary outbox lease-recovery failure")
         return 0
 
 
@@ -220,12 +229,18 @@ def _worker(
     delivery: _Delivery,
     *,
     worker_count: int = 1,
+    lease_for: timedelta = timedelta(minutes=1),
+    attempt_timeout: timedelta = timedelta(seconds=30),
+    polling_policy: AdaptivePollingPolicy | None = None,
 ) -> OutboxWorker:
     """@brief 构造确定性 outbox worker / Build a deterministic outbox worker.
 
     @param repository repository 替身 / Repository double.
     @param delivery 投递替身 / Delivery double.
     @param worker_count worker 数 / Worker count.
+    @param lease_for claim lease / Claim lease.
+    @param attempt_timeout 外部投递尝试上限 / External-delivery attempt limit.
+    @param polling_policy 可选轮询策略 / Optional polling policy.
     @return outbox worker / Outbox worker.
     """
 
@@ -233,9 +248,10 @@ def _worker(
         repository=repository,
         delivery=delivery,
         worker_count=worker_count,
-        poll_interval=0.01,
-        lease_for=timedelta(minutes=1),
-        attempt_timeout=timedelta(seconds=30),
+        polling_policy=polling_policy
+        or AdaptivePollingPolicy(0.01, 0.02, jitter_ratio=0.0),
+        lease_for=lease_for,
+        attempt_timeout=attempt_timeout,
         retry_policy=FullJitterDeliveryRetryPolicy(
             initial_delay=timedelta(seconds=4),
             max_delay=timedelta(seconds=30),
@@ -347,6 +363,43 @@ def test_run_never_claims_above_worker_capacity() -> None:
     asyncio.run(scenario())
 
 
+def test_lease_recovery_survives_failure_and_saturated_capacity() -> None:
+    """@brief 恢复故障不阻断投递 claim，容量饱和也不暂停 cadence / Recovery failure does not block delivery claims, and saturated capacity does not pause the cadence."""
+
+    async def scenario() -> None:
+        """@brief 阻塞唯一投递 consumer 并等待第二次恢复 / Block the sole delivery consumer and await a second recovery pass."""
+
+        repository = _Repository((_claim(),), recovery_failures=1)
+        delivery = _Delivery(DeliveryReceipt("ok"))
+        delivery.release = asyncio.Event()
+        worker = _worker(
+            repository,
+            delivery,
+            lease_for=timedelta(milliseconds=100),
+            attempt_timeout=timedelta(milliseconds=90),
+            polling_policy=AdaptivePollingPolicy(
+                0.001,
+                0.002,
+                jitter_ratio=0.0,
+            ),
+        )
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(worker.run(stop_event))
+
+        async with asyncio.timeout(1):
+            while not delivery.started or repository.recover_calls < 2:
+                await asyncio.sleep(0.001)
+
+        assert repository.claim_limits == [1]
+        assert repository.recover_calls >= 2
+
+        stop_event.set()
+        delivery.release.set()
+        await asyncio.wait_for(task, timeout=1)
+
+    asyncio.run(scenario())
+
+
 def test_cancellation_leaves_processing_claim_for_lease_recovery() -> None:
     """@brief 取消不伪造失败终态而留给租约回收 / Cancellation leaves processing state for lease recovery."""
 
@@ -386,7 +439,7 @@ def test_attempt_timeout_is_persisted_as_ambiguous_retry() -> None:
             repository=repository,
             delivery=delivery,
             worker_count=1,
-            poll_interval=0.01,
+            polling_policy=AdaptivePollingPolicy(0.01, 0.02, jitter_ratio=0.0),
             lease_for=timedelta(seconds=1),
             attempt_timeout=timedelta(milliseconds=1),
             retry_policy=FullJitterDeliveryRetryPolicy(

@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+import time
 from uuid import UUID
 
 import pytest
 
 from fogmoe_bot.application.assistant.completion import AssistantCompletion
 from fogmoe_bot.application.observability.telemetry import Telemetry, TelemetryBuffer
-from fogmoe_bot.application.runtime import UtcClock
+from fogmoe_bot.application.runtime import AdaptivePollingPolicy, UtcClock
 from fogmoe_bot.application.user_profile.ports import DreamClaim, DreamResult
 from fogmoe_bot.application.user_profile.worker import DreamingWorker
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
@@ -28,12 +29,11 @@ from fogmoe_bot.domain.user_profile.models import (
     UpsertProfileClaim,
     apply_profile_patch,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.user_profile.source import (
     PostgresProfileEvidenceSource,
 )
 from fogmoe_bot.infrastructure.user_profile.dreaming_model import ProviderDreamingModel
-
 
 NOW = datetime(2035, 1, 2, 3, 4, tzinfo=UTC)
 """@brief 固定测试时间 / Fixed test time."""
@@ -226,7 +226,7 @@ def test_evidence_discovery_accepts_only_real_telegram_turns(
             calls.append((sql, params))
             return ()
 
-        monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
+        monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
         assert await PostgresProfileEvidenceSource().read_unprojected(limit=8) == ()
         assert len(calls) == 1
         sql, params = calls[0]
@@ -465,6 +465,83 @@ class _BlockingCoordinatorSource:
         raise AssertionError("blocking coordinator source unexpectedly resumed")
 
 
+class _IdleRecoverySource:
+    """@brief 保持 coordinator 空闲以隔离 recovery cadence / Keep the coordinator idle to isolate recovery cadence."""
+
+    def __init__(self) -> None:
+        """@brief 初始化业务轮询计数 / Initialize the business-poll count."""
+
+        self.calls = 0
+
+    async def read_unprojected(self, *, limit: int) -> tuple[ProfileEvidence, ...]:
+        """@brief 返回空 evidence，使 coordinator 进入长退避 / Return no evidence so the coordinator enters a long backoff.
+
+        @param limit 读取上限 / Read limit.
+        @return 始终为空的 evidence 批次 / Always-empty evidence batch.
+        """
+
+        assert limit == 4
+        self.calls += 1
+        return ()
+
+
+class _LeaseRecoveryStore(_Store):
+    """@brief 记录运行期 lease recovery 时刻的 store / Store recording runtime lease-recovery instants."""
+
+    def __init__(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        fail_first: bool = False,
+    ) -> None:
+        """@brief 初始化记录与可选首次故障 / Initialize recording and an optional first-pass fault."""
+
+        super().__init__(stop_event)
+        self.recovery_times: list[float] = []
+        self.recovery_tasks: list[str] = []
+        self._fail_first = fail_first
+
+    async def enqueue_eligible(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        max_events_per_dream: int,
+        max_evidence_chars: int,
+    ) -> int:
+        """@brief 保持 coordinator 空闲 / Keep the coordinator idle."""
+
+        assert now == NOW and limit == 2 and max_events_per_dream == 8
+        assert max_evidence_chars == 60_000
+        return 0
+
+    async def claim_dreams(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        lease_for: timedelta,
+    ) -> tuple[DreamClaim, ...]:
+        """@brief 不提供 job，使测试仅观察 recovery / Offer no jobs so the test observes only recovery."""
+
+        assert now == NOW and limit == 1
+        assert lease_for == timedelta(milliseconds=200)
+        return ()
+
+    async def recover_expired_dream_leases(self, *, now: datetime) -> int:
+        """@brief 用真实 monotonic 时间记录单 owner 回收 / Record single-owner recovery using real monotonic time."""
+
+        assert now == NOW
+        self.recovery_times.append(time.monotonic())
+        task = asyncio.current_task()
+        self.recovery_tasks.append(task.get_name() if task is not None else "")
+        if len(self.recovery_times) == 2:
+            self.stop_event.set()
+        if self._fail_first and len(self.recovery_times) == 1:
+            raise RuntimeError("temporary Dream lease-recovery failure")
+        return 0
+
+
 class _FailOnceProfileTelemetry(Telemetry):
     """@brief 第一次 counter 失败的 telemetry 替身 / Telemetry double whose first counter fails."""
 
@@ -520,7 +597,7 @@ def _resilient_worker(
         batch_size=2,
         source_batch_size=4,
         max_events_per_dream=8,
-        poll_interval=0.001,
+        polling_policy=AdaptivePollingPolicy(0.001, 0.004, jitter_ratio=0.0),
         refresh_after=timedelta(hours=6),
         attempt_timeout=timedelta(seconds=20),
         lease_for=timedelta(seconds=30),
@@ -546,7 +623,7 @@ def test_worker_has_one_source_owner_and_model_consumers_only_claim_jobs() -> No
             batch_size=2,
             source_batch_size=4,
             max_events_per_dream=8,
-            poll_interval=0.001,
+            polling_policy=AdaptivePollingPolicy(0.001, 0.004, jitter_ratio=0.0),
             refresh_after=timedelta(hours=6),
             attempt_timeout=timedelta(seconds=20),
             lease_for=timedelta(seconds=30),
@@ -604,6 +681,51 @@ def test_telemetry_failure_does_not_escape_dreaming_task_group() -> None:
         await asyncio.wait_for(worker.run(stop_event), timeout=1)
 
         assert source.calls >= 2
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("fail_first", [False, True], ids=["steady", "retry"])
+def test_dreaming_recovery_cadence_is_independent_of_business_polling(
+    fail_first: bool,
+) -> None:
+    """@brief Dreaming 的单 owner recovery 不受长业务退避影响 / Dreaming's single-owner recovery is independent of long business backoff.
+
+    @param fail_first 首次恢复是否注入故障 / Whether the first recovery attempt fails.
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 用真实 monotonic 时间观察立即恢复与 100ms cadence / Observe immediate recovery and a 100 ms cadence using real monotonic time."""
+
+        stop_event = asyncio.Event()
+        source = _IdleRecoverySource()
+        store = _LeaseRecoveryStore(stop_event, fail_first=fail_first)
+        worker = DreamingWorker(
+            source=source,
+            store=store,
+            model=_Model(),
+            telemetry=Telemetry(TelemetryBuffer(64)),
+            worker_count=1,
+            batch_size=2,
+            source_batch_size=4,
+            max_events_per_dream=8,
+            polling_policy=AdaptivePollingPolicy(2.0, 2.0, jitter_ratio=0.0),
+            refresh_after=timedelta(hours=6),
+            attempt_timeout=timedelta(milliseconds=50),
+            lease_for=timedelta(milliseconds=200),
+            clock=_Clock(),
+        )
+
+        started = time.monotonic()
+        await asyncio.wait_for(worker.run(stop_event), timeout=1)
+
+        assert source.calls >= 1
+        assert len(store.recovery_times) == 2
+        assert store.recovery_times[0] - started < 0.5
+        recovery_gap = store.recovery_times[1] - store.recovery_times[0]
+        assert 0.075 <= recovery_gap < 0.5
+        assert set(store.recovery_tasks) == {"dreaming-recovery"}
 
     asyncio.run(scenario())
 

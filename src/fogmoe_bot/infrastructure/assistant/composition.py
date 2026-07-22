@@ -24,9 +24,13 @@ from fogmoe_bot.application.retrieval import (
     RetrievalWorker,
     SemanticRecall,
 )
-from fogmoe_bot.application.runtime import FailureCircuit, FailureCircuitPolicy
-from fogmoe_bot.application.timekeeping.service import TimeService
+from fogmoe_bot.application.runtime import (
+    AdaptivePollingPolicy,
+    FailureCircuit,
+    FailureCircuitPolicy,
+)
 from fogmoe_bot.application.scheduling.service import SchedulingService
+from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.application.user_profile.worker import DreamingWorker
 from fogmoe_bot.config import AssistantSettings, BotSettings, reveal_secret
 from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
@@ -176,7 +180,10 @@ def build_durable_assistant(
         telemetry=telemetry,
         worker_count=retrieval_worker.worker_count,
         batch_size=retrieval_worker.batch_size,
-        poll_interval=retrieval_worker.poll_interval_seconds,
+        polling_policy=AdaptivePollingPolicy(
+            retrieval_worker.poll_interval_seconds,
+            retrieval_worker.max_poll_interval_seconds,
+        ),
         lease_for=timedelta(seconds=retrieval_worker.lease_seconds),
     )
     budget = _context_window_budget(assistant_settings)
@@ -319,7 +326,10 @@ def build_durable_assistant(
             budget=budget,
         ),
         worker_count=compaction_runtime.worker_count,
-        poll_interval=compaction_runtime.poll_interval_seconds,
+        polling_policy=AdaptivePollingPolicy(
+            compaction_runtime.poll_interval_seconds,
+            compaction_runtime.max_poll_interval_seconds,
+        ),
         attempt_timeout=timedelta(seconds=compaction_runtime.attempt_timeout_seconds),
         lease_for=timedelta(seconds=compaction_runtime.lease_seconds),
     )
@@ -336,12 +346,15 @@ def build_durable_assistant(
             telemetry=telemetry,
         ),
         telemetry=telemetry,
+        polling_policy=AdaptivePollingPolicy(
+            dreaming_runtime.poll_interval_seconds,
+            dreaming_runtime.max_poll_interval_seconds,
+        ),
         worker_count=dreaming_runtime.worker_count,
         batch_size=dreaming_runtime.batch_size,
         source_batch_size=dreaming_runtime.source_batch_size,
         max_events_per_dream=dreaming_runtime.max_events_per_job,
         max_evidence_chars=dreaming_runtime.max_evidence_characters,
-        poll_interval=dreaming_runtime.poll_interval_seconds,
         refresh_after=timedelta(seconds=dreaming_runtime.refresh_seconds),
         attempt_timeout=timedelta(seconds=dreaming_runtime.attempt_timeout_seconds),
         lease_for=timedelta(seconds=dreaming_runtime.lease_seconds),

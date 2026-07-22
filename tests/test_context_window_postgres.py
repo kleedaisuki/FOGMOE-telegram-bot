@@ -3,29 +3,28 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from postgres_test_support import configure_bot_database
 
-from fogmoe_bot.domain.conversation.identity import (
-    ConversationId,
-    TurnId,
-)
 from fogmoe_bot.domain.context_window.budget import TokenCount
 from fogmoe_bot.domain.context_window.compaction import (
     CompactionPlan,
     CompactionSummary,
     StaleCompactionClaimError,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.domain.conversation.identity import (
+    ConversationId,
+    TurnId,
+)
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.context_window import (
     PostgresContextWindowStore,
 )
-from postgres_test_support import configure_bot_database
 
 
 def _postgres_url() -> str:
@@ -54,15 +53,15 @@ async def _insert_fixture(
     @return None / None.
     """
 
-    async with db_connection.transaction() as connection:
-        await db_connection.execute(
+    async with db.transaction() as connection:
+        await db.execute(
             "INSERT INTO identity.users "
             "(id, tg_uid, provider, name) "
             "VALUES (%s, %s, 'telegram', %s)",
             (user_id, user_id, f"retention_{source_suffix}"),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO conversation.conversation_turns ("
             "turn_id, conversation_id, state, created_at, updated_at, completed_at, "
             "source_kind, source_key) VALUES ("
@@ -93,7 +92,7 @@ async def _insert_fixture(
             ),
             start=1,
         ):
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO conversation.conversation_messages ("
                 "message_id, conversation_id, sequence, turn_id, role, content, "
                 "idempotency_key, created_at) VALUES ("
@@ -118,23 +117,23 @@ async def _cleanup(user_id: int, conversation_id: ConversationId) -> None:
     @return None / None.
     """
 
-    async with db_connection.transaction() as connection:
-        await db_connection.execute(
+    async with db.transaction() as connection:
+        await db.execute(
             "DELETE FROM context_window.compactions WHERE owner_user_id = %s",
             (user_id,),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "DELETE FROM conversation.conversation_messages WHERE conversation_id = %s",
             (str(conversation_id),),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "DELETE FROM conversation.conversation_turns WHERE conversation_id = %s",
             (str(conversation_id),),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "DELETE FROM identity.users WHERE id = %s",
             (user_id,),
             connection=connection,
@@ -144,7 +143,7 @@ async def _cleanup(user_id: int, conversation_id: ConversationId) -> None:
 def test_real_postgres_enqueue_and_fencing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """@brief Compaction completion 只改变 checkpoint 且旧 lease 被 fencing / Completion changes only the checkpoint and fences stale leases.
+    """@brief Compaction completion 只改变 checkpoint，recovery/reclaim 后旧 owner 被 fencing / Completion changes only the checkpoint and recovery/reclaim fences the old owner.
 
     @param monkeypatch 临时绑定隔离 DSN / Temporarily bind the isolated DSN.
     """
@@ -222,14 +221,20 @@ def test_real_postgres_enqueue_and_fencing(
             stale_claim = claimed[0]
             assert (
                 await repository.claim_compactions(
-                    now=now + timedelta(seconds=9),
+                    now=now + timedelta(seconds=10),
                     limit=1,
                     lease_for=timedelta(seconds=5),
                 )
                 == ()
             )
+            assert (
+                await repository.recover_expired_compaction_leases(
+                    now=now + timedelta(seconds=10)
+                )
+                == 1
+            )
             reclaimed = await repository.claim_compactions(
-                now=now + timedelta(seconds=10),
+                now=now + timedelta(seconds=10, microseconds=1),
                 limit=1,
                 lease_for=timedelta(seconds=5),
             )

@@ -3,21 +3,26 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import logging
 import signal
 import time
+from dataclasses import dataclass
 from datetime import timedelta
 
 import telegram.error
 from telegram import Update
 from telegram.ext import ApplicationBuilder
 
-from fogmoe_bot.config import BotSettings, reveal_secret
 from fogmoe_bot.application.accounts.operations import (
     ACCOUNT_SERVICE_DATA_KEY,
     AccountService,
 )
+from fogmoe_bot.application.admin.models import (
+    ADMIN_RUNTIME_DATA_KEY,
+    ADMIN_SERVICE_DATA_KEY,
+)
+from fogmoe_bot.application.admin.runtime import AdminRuntime
+from fogmoe_bot.application.admin.service import AdminService
 from fogmoe_bot.application.banking.service import BANK_SERVICE_DATA_KEY, BankService
 from fogmoe_bot.application.billing.service import (
     BILLING_SERVICE_DATA_KEY,
@@ -27,12 +32,6 @@ from fogmoe_bot.application.chance.workflow import (
     CHANCE_WORKFLOW_DATA_KEY,
     ChanceWorkflow,
 )
-from fogmoe_bot.application.admin.models import (
-    ADMIN_RUNTIME_DATA_KEY,
-    ADMIN_SERVICE_DATA_KEY,
-)
-from fogmoe_bot.application.admin.runtime import AdminRuntime
-from fogmoe_bot.application.admin.service import AdminService
 from fogmoe_bot.application.conversation.assistant_ingress import (
     AssistantIngressCoordinator,
 )
@@ -58,6 +57,7 @@ from fogmoe_bot.application.moderation.verification_worker import (
     VERIFICATION_WORKER_DATA_KEY,
     VerificationTimeoutWorker,
 )
+from fogmoe_bot.application.observability.runtime_metrics import RuntimeMetricsService
 from fogmoe_bot.application.personal_rpg.service import (
     PERSONAL_RPG_SERVICE_DATA_KEY,
     PersonalRpgService,
@@ -65,6 +65,7 @@ from fogmoe_bot.application.personal_rpg.service import (
 from fogmoe_bot.application.runtime import (
     BOT_RUNTIME_DATA_KEY,
     EXECUTION_RUNTIME_DATA_KEY,
+    AdaptivePollingPolicy,
     BotRuntime,
     KeyedMailboxRuntime,
     ReplayAwareCooldownGate,
@@ -74,35 +75,26 @@ from fogmoe_bot.application.runtime import (
 from fogmoe_bot.application.scheduling.worker import ScheduleWorker
 from fogmoe_bot.application.telegram import DurableGroupAdministratorAuthorization
 from fogmoe_bot.application.town.service import TOWN_SERVICE_DATA_KEY, TownService
-from fogmoe_bot.application.observability.runtime_metrics import RuntimeMetricsService
+from fogmoe_bot.config import BotSettings, reveal_secret
 from fogmoe_bot.domain.accounts.plan import AccountPlanPolicy
-from fogmoe_bot.infrastructure.blocking import (
-    AsyncBlockingBulkhead,
-    BlockingBulkheadLifecycle,
-)
 from fogmoe_bot.infrastructure.admin.announcements import (
     PostgresAdminAnnouncementOperations,
 )
 from fogmoe_bot.infrastructure.admin.log_reader import AsyncBoundedLogSource
 from fogmoe_bot.infrastructure.admin.stats import PostgresAdminStatsProjection
 from fogmoe_bot.infrastructure.assistant.composition import build_durable_assistant
+from fogmoe_bot.infrastructure.blocking import (
+    AsyncBlockingBulkhead,
+    BlockingBulkheadLifecycle,
+)
 from fogmoe_bot.infrastructure.crypto.binance_monitor import BinanceBtcPatternSource
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.account_plan import PostgresAccountPlanResolver
-from fogmoe_bot.infrastructure.database.standalone_outbound import (
-    PostgresStandaloneOutboundCapability,
-)
 from fogmoe_bot.infrastructure.database.assistant_turn_acceptance import (
     PostgresAssistantTurnAcceptanceUoW,
 )
 from fogmoe_bot.infrastructure.database.conversation_reset import (
     PostgresConversationResetUoW,
-)
-from fogmoe_bot.infrastructure.database.memory_management import (
-    PostgresMemoryForgetUoW,
-)
-from fogmoe_bot.infrastructure.database.telegram_authorization import (
-    PostgresGroupAdministratorDecisionStore,
 )
 from fogmoe_bot.infrastructure.database.conversation_workflow.inbox import (
     PostgresInboxRepository,
@@ -116,23 +108,32 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
 from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
     PostgresTurnRepository,
 )
+from fogmoe_bot.infrastructure.database.memory_management import (
+    PostgresMemoryForgetUoW,
+)
 from fogmoe_bot.infrastructure.database.scheduled_assistant_profile import (
     PostgresScheduledAssistantProfileReader,
 )
-from fogmoe_bot.infrastructure.scheduling.postgres import (
-    PostgresScheduleQueue,
-    PostgresScheduledOccurrenceAcceptance,
+from fogmoe_bot.infrastructure.database.standalone_outbound import (
+    PostgresStandaloneOutboundCapability,
+)
+from fogmoe_bot.infrastructure.database.telegram_authorization import (
+    PostgresGroupAdministratorDecisionStore,
 )
 from fogmoe_bot.infrastructure.database.user_profile.management import (
     PostgresUserProfileManagementUoW,
 )
-from fogmoe_bot.infrastructure.observability.logging import current_log_file_path
 from fogmoe_bot.infrastructure.observability.composition import ObservabilityAssembly
-from fogmoe_bot.infrastructure.telegram.monitor_notification import (
-    TelegramMonitorNotificationSink,
+from fogmoe_bot.infrastructure.observability.logging import current_log_file_path
+from fogmoe_bot.infrastructure.scheduling.postgres import (
+    PostgresScheduledOccurrenceAcceptance,
+    PostgresScheduleQueue,
 )
 from fogmoe_bot.infrastructure.telegram.group_authorization import (
     TelegramGroupAdministratorSource,
+)
+from fogmoe_bot.infrastructure.telegram.monitor_notification import (
+    TelegramMonitorNotificationSink,
 )
 from fogmoe_bot.infrastructure.telegram.outbox_delivery import (
     TelegramOutboxDeliveryAdapter,
@@ -145,9 +146,13 @@ from .admin_handlers import (
     TelegramAnnouncementOutboundFactory,
 )
 from .assistant_primary_route import TelegramAssistantPrimaryRoute
-from .basic_handlers import StaticTelegramCommandHandler
 from .bank_handlers import BankTelegramCommandHandler
+from .basic_handlers import StaticTelegramCommandHandler
 from .billing_handlers import BillingTelegramCommandHandler
+from .catalog_route import (
+    TelegramCatalogDispatcher,
+    TelegramCatalogPrimaryRoute,
+)
 from .chance_handlers import ChanceTelegramCommandHandler
 from .command_cooldown_guard import TelegramCommandCooldownGuard
 from .command_route import TelegramDurableCommandPrimaryRoute
@@ -158,28 +163,23 @@ from .handler_catalog import (
     TelegramApplication,
     install_error_policy,
 )
-from .memory_handlers import MemoryManagementTelegramCommandHandler
-from .personal_rpg_handlers import PersonalRpgTelegramCommandHandler
 from .handler_composition import assemble_handler_capabilities
-from .catalog_route import (
-    TelegramCatalogDispatcher,
-    TelegramCatalogPrimaryRoute,
-)
 from .listener import PollingBackoff, TelegramBotUpdateSource, TelegramPollingListener
+from .memory_handlers import MemoryManagementTelegramCommandHandler
 from .moderation_composition import (
     MODERATION_CAPABILITY_DATA_KEY,
     TelegramModerationCapability,
 )
+from .personal_rpg_handlers import PersonalRpgTelegramCommandHandler
 from .reset_route import TelegramConversationResetPrimaryRoute
 from .runtime_settings import (
     TELEGRAM_SETTINGS_DATA_KEY,
     TelegramRuntimeSettings,
     resolve_administrator_contact_name,
 )
-from .translation_handlers import TranslationTelegramCommandHandler
 from .town_handlers import TownTelegramCommandHandler
+from .translation_handlers import TranslationTelegramCommandHandler
 from .unknown_command_route import TelegramUnknownCommandPrimaryRoute
-
 
 logger = logging.getLogger(__name__)
 
@@ -500,7 +500,10 @@ def _compose_services(
         repository=primitives.inbox,
         router=ingress,
         worker_count=runtime.inbox.worker_count,
-        poll_interval=runtime.inbox.poll_interval_seconds,
+        polling_policy=AdaptivePollingPolicy(
+            runtime.inbox.poll_interval_seconds,
+            runtime.inbox.max_poll_interval_seconds,
+        ),
         lease_for=timedelta(seconds=runtime.inbox.lease_seconds),
         telemetry=observability.telemetry,
     )
@@ -513,7 +516,10 @@ def _compose_services(
         repository=primitives.inference,
         inference=assistant.inference,
         worker_count=runtime.inference.worker_count,
-        poll_interval=runtime.inference.poll_interval_seconds,
+        polling_policy=AdaptivePollingPolicy(
+            runtime.inference.poll_interval_seconds,
+            runtime.inference.max_poll_interval_seconds,
+        ),
         runtime_limits=primitives.inference_limits,
         telemetry=observability.telemetry,
     )
@@ -524,7 +530,10 @@ def _compose_services(
             artifacts=assistant.artifacts,
         ),
         worker_count=runtime.outbox.worker_count,
-        poll_interval=runtime.outbox.poll_interval_seconds,
+        polling_policy=AdaptivePollingPolicy(
+            runtime.outbox.poll_interval_seconds,
+            runtime.outbox.max_poll_interval_seconds,
+        ),
         lease_for=timedelta(seconds=runtime.outbox.lease_seconds),
         attempt_timeout=timedelta(seconds=runtime.outbox.attempt_timeout_seconds),
         telemetry=observability.telemetry,

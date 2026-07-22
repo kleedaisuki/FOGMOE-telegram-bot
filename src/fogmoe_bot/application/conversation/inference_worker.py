@@ -20,14 +20,20 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
-from fogmoe_bot.application.runtime import Jitter, SystemUtcClock, UtcClock
-from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.application.runtime import (
+    AdaptivePollingPolicy,
+    Jitter,
+    LeaseRecoveryCadence,
+    SystemUtcClock,
+    UtcClock,
+)
+from fogmoe_bot.domain.conversation.errors import StaleClaimError
 from fogmoe_bot.domain.conversation.identity import (
     ConversationMessageId,
     DeliveryStreamId,
     OutboundMessageId,
 )
-from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.inference import InferenceActivityClaim
 from fogmoe_bot.domain.conversation.message import (
     MessageDraft,
@@ -37,12 +43,11 @@ from fogmoe_bot.domain.conversation.outbox import (
     OutboundDraft,
     OutboundKind,
 )
-from fogmoe_bot.domain.conversation.errors import StaleClaimError
+from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.workflow_results import InferenceCompletionResult
-from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.domain.observability.conventions import EventName, MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
-
+from fogmoe_bot.domain.temporal import ensure_utc
 
 logger = logging.getLogger(__name__)
 
@@ -508,7 +513,7 @@ class InferenceWorker:
         repository: InferencePersistence,
         inference: InferencePort,
         worker_count: int,
-        poll_interval: float,
+        polling_policy: AdaptivePollingPolicy,
         runtime_limits: InferenceRuntimeLimits,
         retry_policy: FullJitterInferenceRetryPolicy | None = None,
         clock: UtcClock | None = None,
@@ -519,7 +524,7 @@ class InferenceWorker:
         @param repository 活动持久化端口 / Activity persistence port.
         @param inference 外部推理端口 / External inference port.
         @param worker_count 已领取未终结活动上限 / Maximum claimed-but-unfinalized activities.
-        @param poll_interval 空闲轮询秒数 / Idle polling interval in seconds.
+        @param polling_policy 自适应空闲轮询策略 / Adaptive idle-polling policy.
         @param runtime_limits provider、attempt 与 lease 的统一预算 / Shared provider, attempt, and lease budgets.
         @param retry_policy 失败策略 / Failure policy.
         @param clock 可替换 UTC 时钟 / Replaceable UTC clock.
@@ -530,12 +535,10 @@ class InferenceWorker:
 
         if worker_count < 1:
             raise ValueError("worker_count must be at least one")
-        if poll_interval <= 0:
-            raise ValueError("poll_interval must be positive")
         self._repository = repository
         self._inference = inference
         self._worker_count = worker_count
-        self._poll_interval = poll_interval
+        self._polling_policy = polling_policy
         self._lease_for = runtime_limits.lease_for
         self._attempt_timeout = runtime_limits.attempt_timeout
         self._retry_policy = retry_policy or FullJitterInferenceRetryPolicy()
@@ -672,28 +675,15 @@ class InferenceWorker:
         @return None / None.
         """
 
+        polling = self._polling_policy.start()
+        recovery = LeaseRecoveryCadence.for_lease(self._lease_for)
         while not stop_event.is_set():
+            if recovery.take_due():
+                await self._recover_expired_leases(self._clock.now())
             tokens = self._take_available(capacity)
             if tokens:
                 now = self._clock.now()
                 try:
-                    recovered = await self._repository.recover_expired_inference_leases(
-                        now=now
-                    )
-                    if recovered:
-                        self._telemetry.counter(
-                            MetricName.LEASE_RECOVERIES,
-                            float(recovered),
-                            attributes={"pipeline.stage": "inference"},
-                        )
-                        logger.warning(
-                            "Recovered expired inference leases: count=%s",
-                            recovered,
-                            extra={
-                                "event_name": EventName.INFERENCE_LEASE_RECOVERED,
-                                "telemetry_attributes": {"pipeline.stage": "inference"},
-                            },
-                        )
                     claims = tuple(
                         await self._repository.claim_inference_activities(
                             now=now,
@@ -707,20 +697,44 @@ class InferenceWorker:
                         )
                 except Exception:
                     self._return_capacity(capacity, tokens)
-                    logger.exception(
-                        "Inference producer failed to recover or claim activities"
-                    )
+                    logger.exception("Inference producer failed to claim activities")
+                    await polling.wait(stop_event)
+                    continue
                 else:
                     for claim in claims:
                         await work_queue.put(_ClaimWork(claim))
                     self._return_capacity(capacity, tokens[len(claims) :])
-            try:
-                await asyncio.wait_for(
-                    stop_event.wait(),
-                    timeout=self._poll_interval,
-                )
-            except TimeoutError:
-                continue
+                    if claims:
+                        polling.reset()
+                        continue
+            await polling.wait(stop_event)
+
+    async def _recover_expired_leases(self, now: datetime) -> None:
+        """@brief 低频回收到期 inference leases / Recover expired inference leases at a low cadence.
+
+        @param now 当前 UTC 时刻 / Current UTC instant.
+        @return None；恢复查询失败不会阻断正常 claim / None; a failed recovery query does not block normal claims.
+        """
+
+        try:
+            recovered = await self._repository.recover_expired_inference_leases(now=now)
+            if not recovered:
+                return
+            self._telemetry.counter(
+                MetricName.LEASE_RECOVERIES,
+                float(recovered),
+                attributes={"pipeline.stage": "inference"},
+            )
+            logger.warning(
+                "Recovered expired inference leases: count=%s",
+                recovered,
+                extra={
+                    "event_name": EventName.INFERENCE_LEASE_RECOVERED,
+                    "telemetry_attributes": {"pipeline.stage": "inference"},
+                },
+            )
+        except Exception:
+            logger.exception("Inference lease recovery failed; claim polling continues")
 
     async def _consume(
         self,

@@ -4,17 +4,15 @@ import asyncio
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from fogmoe_bot.application.context_window.worker import (
     CompactionSourceError,
     CompactionWorker,
     FullJitterCompactionRetryPolicy,
     RetryableCompactionError,
 )
-from fogmoe_bot.domain.conversation.identity import (
-    ConversationId,
-    LeaseToken,
-    TurnId,
-)
+from fogmoe_bot.application.runtime import AdaptivePollingPolicy
 from fogmoe_bot.domain.context_window.budget import TokenCount
 from fogmoe_bot.domain.context_window.compaction import (
     Compaction,
@@ -23,7 +21,11 @@ from fogmoe_bot.domain.context_window.compaction import (
     CompactionSummary,
     StaleCompactionClaimError,
 )
-
+from fogmoe_bot.domain.conversation.identity import (
+    ConversationId,
+    LeaseToken,
+    TurnId,
+)
 
 NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)
 """@brief 确定性测试时钟 / Deterministic test clock."""
@@ -261,6 +263,57 @@ class _OverclaimingPersistence(_Persistence):
         return (self._claim, self._claim)
 
 
+class _PeriodicRecoveryPersistence(_Persistence):
+    """@brief 记录独立 recovery owner 与并行 claims / Record the independent recovery owner and concurrent claims."""
+
+    def __init__(self, *, fail_first: bool) -> None:
+        """@brief 初始化调用记录与可选首轮故障 / Initialize call records and an optional first-pass failure.
+
+        @param fail_first 是否让首次回收失败 / Whether the first recovery call fails.
+        """
+
+        super().__init__()
+        self.fail_first = fail_first
+        self.claim_calls = 0
+        self.periodic_recovery = asyncio.Event()
+
+    async def claim_compactions(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        lease_for: timedelta,
+    ) -> Sequence[Compaction]:
+        """@brief 记录 recovery 任务运行时 claim 仍继续 / Record claims continuing while the recovery task runs.
+
+        @param now 当前时间 / Current instant.
+        @param limit claim 上限 / Claim limit.
+        @param lease_for claim 租约 / Claim lease.
+        @return 始终为空 / Always empty.
+        """
+
+        del now, lease_for
+        assert limit == 1
+        self.claim_calls += 1
+        return ()
+
+    async def recover_expired_compaction_leases(self, *, now: datetime) -> int:
+        """@brief 记录周期回收并可注入首轮故障 / Record periodic recovery and optionally fail its first pass.
+
+        @param now 当前时间 / Current instant.
+        @return 测试中无需回收的行 / No rows need recovery in this test.
+        @raise RuntimeError 配置时首轮注入 / Injected on the first pass when configured.
+        """
+
+        del now
+        self.recovered += 1
+        if self.recovered >= 2:
+            self.periodic_recovery.set()
+        if self.fail_first and self.recovered == 1:
+            raise RuntimeError("temporary compaction recovery failure")
+        return 0
+
+
 def _claim(*, attempt_count: int = 1) -> Compaction:
     """@brief 构造指定 attempt_count 的 processing Segment / Build a processing segment with a selected attempt count."""
 
@@ -312,7 +365,7 @@ def _worker(
         persistence=persistence,
         generator=generator,
         worker_count=1,
-        poll_interval=0.001,
+        polling_policy=AdaptivePollingPolicy(0.001, 0.004, jitter_ratio=0.0),
         attempt_timeout=timedelta(seconds=10),
         lease_for=timedelta(seconds=20),
         retry_policy=FullJitterCompactionRetryPolicy(
@@ -413,6 +466,45 @@ def test_run_recovers_expired_leases_and_stops_structurally() -> None:
         stop.set()
         await task
         assert persistence.recovered == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("fail_first", [False, True], ids=["steady", "retry"])
+def test_run_recovers_periodically_without_blocking_claims(fail_first: bool) -> None:
+    """@brief 单独 recovery owner 按 lease cadence 重试且不阻断 claim / A sole recovery owner retries on the lease cadence without blocking claims.
+
+    @param fail_first 是否注入首轮 recovery 故障 / Whether to inject a first-pass recovery failure.
+    """
+
+    async def scenario() -> None:
+        """@brief 观察启动与第二次周期回收 / Observe startup and the second periodic recovery pass."""
+
+        persistence = _PeriodicRecoveryPersistence(fail_first=fail_first)
+        worker = CompactionWorker(
+            persistence=persistence,
+            generator=_Generator(
+                CompactionSummary("unused", TokenCount(1), "fake:model")
+            ),
+            worker_count=1,
+            polling_policy=AdaptivePollingPolicy(
+                0.001,
+                0.002,
+                jitter_ratio=0.0,
+            ),
+            attempt_timeout=timedelta(milliseconds=1),
+            lease_for=timedelta(milliseconds=4),
+            clock=_Clock(),
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(worker.run(stop))
+
+        await asyncio.wait_for(persistence.periodic_recovery.wait(), timeout=1)
+        assert not task.done()
+        assert persistence.claim_calls > 0
+        stop.set()
+        await task
+        assert persistence.recovered >= 2
 
     asyncio.run(scenario())
 

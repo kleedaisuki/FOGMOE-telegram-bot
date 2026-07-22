@@ -1,8 +1,8 @@
 """@brief 可恢复推理活动 worker 测试 / Tests for the recoverable inference-activity worker."""
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 import logging
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from observability_testkit import make_telemetry
@@ -10,8 +10,8 @@ from observability_testkit import make_telemetry
 import fogmoe_bot.application.conversation.inference_worker as inference_worker_module
 from fogmoe_bot.application.conversation.inference_worker import (
     FullJitterInferenceRetryPolicy,
-    InferenceErrorCategory,
     InferenceDependencyPending,
+    InferenceErrorCategory,
     InferenceOutboundIntent,
     InferenceResult,
     InferenceRuntimeLimits,
@@ -19,6 +19,8 @@ from fogmoe_bot.application.conversation.inference_worker import (
     PermanentInferenceError,
     RetryableInferenceError,
 )
+from fogmoe_bot.application.runtime import AdaptivePollingPolicy
+from fogmoe_bot.domain.conversation.errors import StaleClaimError
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
@@ -37,8 +39,6 @@ from fogmoe_bot.domain.conversation.outbox import (
     SEND_TELEGRAM_MESSAGE,
     OutboundDraft,
 )
-from fogmoe_bot.domain.conversation.errors import StaleClaimError
-
 
 NOW = datetime(2026, 7, 11, 10, tzinfo=timezone.utc)
 """@brief 测试基准时间 / Test reference time."""
@@ -89,7 +89,12 @@ class _Clock:
 class _Repository:
     """@brief 记录活动状态调用的 repository 替身 / Repository double recording activity state calls."""
 
-    def __init__(self, claims: tuple[InferenceActivityClaim, ...] = ()) -> None:
+    def __init__(
+        self,
+        claims: tuple[InferenceActivityClaim, ...] = (),
+        *,
+        recovery_failures: int = 0,
+    ) -> None:
         """@brief 创建替身 / Create the double.
 
         @param claims 首轮 claims / Claims available in the first poll.
@@ -103,6 +108,7 @@ class _Repository:
         self.retried: list[tuple[InferenceActivityClaim, datetime, datetime, str]] = []
         self.failed: list[tuple[InferenceActivityClaim, datetime, str]] = []
         self.recover_calls = 0
+        self.recovery_failures = recovery_failures
 
     async def claim_inference_activities(
         self,
@@ -161,6 +167,9 @@ class _Repository:
 
         del now
         self.recover_calls += 1
+        if self.recovery_failures:
+            self.recovery_failures -= 1
+            raise OSError("temporary inference lease-recovery failure")
         return 0
 
 
@@ -217,6 +226,8 @@ def _worker(
     *,
     worker_count: int = 1,
     attempt_timeout: timedelta = timedelta(seconds=5),
+    lease_for: timedelta = timedelta(seconds=30),
+    polling_policy: AdaptivePollingPolicy | None = None,
 ) -> InferenceWorker:
     """@brief 构造测试 worker / Build a test worker."""
 
@@ -224,11 +235,12 @@ def _worker(
         repository=repository,  # type: ignore[arg-type]
         inference=inference,  # type: ignore[arg-type]
         worker_count=worker_count,
-        poll_interval=0.005,
+        polling_policy=polling_policy
+        or AdaptivePollingPolicy(0.005, 0.01, jitter_ratio=0.0),
         runtime_limits=InferenceRuntimeLimits(
             provider_timeout=min(timedelta(seconds=2), attempt_timeout / 2),
             attempt_timeout=attempt_timeout,
-            lease_for=timedelta(seconds=30),
+            lease_for=lease_for,
         ),
         retry_policy=FullJitterInferenceRetryPolicy(
             max_attempts=3,
@@ -419,10 +431,48 @@ def test_task_group_capacity_and_graceful_shutdown_are_bounded() -> None:
             await asyncio.sleep(0.001)
         assert max(repository.claim_limits) == 2
         assert len(repository.claims) == 2
+        assert repository.recover_calls == 1
         stop.set()
         inference.release.set()
         await task
         assert len(repository.completed) == 2
+
+    asyncio.run(scenario())
+
+
+def test_lease_recovery_survives_failure_and_saturated_capacity() -> None:
+    """@brief 恢复故障不阻断推理 claim，容量饱和也不暂停 cadence / Recovery failure does not block inference claims, and saturated capacity does not pause the cadence."""
+
+    async def scenario() -> None:
+        """@brief 阻塞唯一推理 consumer 并等待第二次恢复 / Block the sole inference consumer and await a second recovery pass."""
+
+        repository = _Repository((_claim(),), recovery_failures=1)
+        inference = _Inference(_result())
+        inference.release = asyncio.Event()
+        worker = _worker(
+            repository,
+            inference,
+            attempt_timeout=timedelta(milliseconds=90),
+            lease_for=timedelta(milliseconds=100),
+            polling_policy=AdaptivePollingPolicy(
+                0.001,
+                0.002,
+                jitter_ratio=0.0,
+            ),
+        )
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(worker.run(stop_event))
+
+        async with asyncio.timeout(1):
+            while not inference.started or repository.recover_calls < 2:
+                await asyncio.sleep(0.001)
+
+        assert repository.claim_limits == [1]
+        assert repository.recover_calls >= 2
+
+        stop_event.set()
+        inference.release.set()
+        await asyncio.wait_for(task, timeout=1)
 
     asyncio.run(scenario())
 

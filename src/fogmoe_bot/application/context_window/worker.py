@@ -7,14 +7,20 @@ import json
 import logging
 import math
 import random
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
-from fogmoe_bot.application.runtime import Jitter, SystemUtcClock, UtcClock
+from fogmoe_bot.application.runtime import (
+    AdaptivePollingPolicy,
+    Jitter,
+    LeaseRecoveryCadence,
+    SystemUtcClock,
+    UtcClock,
+)
 from fogmoe_bot.domain.context.token_estimator import estimate_tokens
-from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
 from fogmoe_bot.domain.context_window.compaction import (
     Compaction,
@@ -22,7 +28,7 @@ from fogmoe_bot.domain.context_window.compaction import (
     CompactionSummary,
     StaleCompactionClaimError,
 )
-
+from fogmoe_bot.domain.temporal import ensure_utc
 
 logger = logging.getLogger(__name__)
 
@@ -280,22 +286,23 @@ class CompactionWorker:
         persistence: CompactionPersistence,
         generator: CompactionSummaryGenerator,
         worker_count: int,
-        poll_interval: float,
+        polling_policy: AdaptivePollingPolicy,
         attempt_timeout: timedelta,
         lease_for: timedelta,
         retry_policy: FullJitterCompactionRetryPolicy | None = None,
         fallback: DeterministicSummaryFallback | None = None,
         clock: UtcClock | None = None,
+        recovery_monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         """@brief 注入 persistence、provider、容量与时间预算 / Inject persistence, provider, capacity, and time budgets.
 
+        @param recovery_monotonic lease recovery cadence 的可替换单调时钟 /
+            Replaceable monotonic clock for the lease-recovery cadence.
         @raise ValueError worker、poll 或 timeout 层级非法 / Raised for invalid worker, poll, or timeout budgets.
         """
 
         if worker_count < 1:
             raise ValueError("Compaction worker_count must be positive")
-        if poll_interval <= 0:
-            raise ValueError("Compaction poll_interval must be positive")
         if attempt_timeout <= timedelta():
             raise ValueError("Compaction attempt_timeout must be positive")
         if lease_for <= attempt_timeout:
@@ -303,7 +310,7 @@ class CompactionWorker:
         self._persistence = persistence
         self._generator = generator
         self._worker_count = worker_count
-        self._poll_interval = poll_interval
+        self._polling_policy = polling_policy
         self._attempt_timeout = attempt_timeout
         """@brief 单 Segment provider 总预算 / Whole provider-attempt budget."""
         self._lease_for = lease_for
@@ -313,6 +320,7 @@ class CompactionWorker:
         self._fallback = fallback or DeterministicSummaryFallback()
         """@brief provider 耗尽 fallback / Provider-exhaustion fallback."""
         self._clock = clock or SystemUtcClock()
+        self._recovery_monotonic = recovery_monotonic
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """@brief 运行至 stop 后 drain 当前 claims / Run until stopped, then drain current claims.
@@ -323,27 +331,70 @@ class CompactionWorker:
         Task cancellation deliberately leaves claims for lease recovery so a stale worker cannot overwrite a new owner.
         """
 
-        try:
-            await self._persistence.recover_expired_compaction_leases(
-                now=self._clock.now()
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception(
-                "Initial conversation-compaction lease recovery failed; "
-                "claim polling will retry recovery"
-            )
+        recovery = LeaseRecoveryCadence.for_lease(
+            self._lease_for,
+            monotonic=self._recovery_monotonic,
+        )
         async with asyncio.TaskGroup() as task_group:
+            task_group.create_task(
+                self._recover_leases(stop_event, recovery=recovery),
+                name="conversation-compaction-recovery",
+            )
             for ordinal in range(self._worker_count):
                 task_group.create_task(
                     self._consume(stop_event),
                     name=f"conversation-compaction:{ordinal}",
                 )
 
+    async def _recover_leases(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        recovery: LeaseRecoveryCadence,
+    ) -> None:
+        """@brief 以单一 owner 低频回收过期 compaction leases / Recover expired compaction leases at low frequency under one owner.
+
+        @param stop_event 顶层结构化停止信号 / Top-level structured stop signal.
+        @param recovery 与 lease 半程对齐的恢复节奏 / Recovery cadence aligned with half the lease.
+        @return None；恢复故障不会取消并行 claim consumers /
+            None; recovery failures do not cancel concurrent claim consumers.
+        """
+
+        while not stop_event.is_set():
+            if recovery.take_due():
+                await self._recover_expired_leases()
+            try:
+                async with asyncio.timeout(recovery.interval_seconds):
+                    await stop_event.wait()
+            except TimeoutError:
+                continue
+
+    async def _recover_expired_leases(self) -> None:
+        """@brief 将到期 processing rows 转为可重领状态 / Move expired processing rows into a reclaimable state.
+
+        @return None；存储故障被隔离到后续 cadence / None; storage failures are isolated until a later cadence.
+        """
+
+        try:
+            recovered = await self._persistence.recover_expired_compaction_leases(
+                now=self._clock.now()
+            )
+            if recovered:
+                logger.warning(
+                    "Recovered expired conversation-compaction leases: count=%s",
+                    recovered,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Conversation-compaction lease recovery failed; a later pass will retry"
+            )
+
     async def _consume(self, stop_event: asyncio.Event) -> None:
         """@brief 一个 bounded consumer 循环 / One bounded consumer loop."""
 
+        polling = self._polling_policy.start()
         while not stop_event.is_set():
             try:
                 claims = tuple(
@@ -361,11 +412,12 @@ class CompactionWorker:
                 raise
             except Exception:
                 logger.exception("Conversation-compaction claim polling failed")
-                await _wait_or_stop(stop_event, self._poll_interval)
+                await polling.wait(stop_event)
                 continue
             if not claims:
-                await _wait_or_stop(stop_event, self._poll_interval)
+                await polling.wait(stop_event)
                 continue
+            polling.reset()
             claim = claims[0]
             try:
                 await self.process_claim(claim)
@@ -472,18 +524,6 @@ class CompactionWorker:
             failed_at=failed_at,
             error=error_text,
         )
-
-
-async def _wait_or_stop(stop_event: asyncio.Event, delay: float) -> None:
-    """@brief 等待 stop 或短轮询间隔 / Wait for stop or a short polling interval.
-
-    @return None / None.
-    """
-
-    try:
-        await asyncio.wait_for(stop_event.wait(), timeout=delay)
-    except TimeoutError:
-        return
 
 
 def _trim_text_to_tokens(text: str, maximum: int) -> str:

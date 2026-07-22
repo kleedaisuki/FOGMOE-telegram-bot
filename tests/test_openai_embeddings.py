@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 
+import pytest
 from aiohttp import web
 
 from fogmoe_bot.application.observability.telemetry import Telemetry, TelemetryBuffer
+from fogmoe_bot.application.retrieval import RetryableEmbeddingError
 from fogmoe_bot.domain.observability.signals import SpanSignal
 from fogmoe_bot.domain.retrieval import EmbeddingSpace
 from fogmoe_bot.infrastructure.retrieval import OpenAICompatibleEmbeddings
@@ -94,5 +96,59 @@ def test_adapter_formats_qwen_query_and_restores_provider_index_order() -> None:
         ]
         assert spans[0].attributes["retrieval.batch.size"] == 2
         assert spans[0].attributes["http.response.status_code"] == 200
+
+    asyncio.run(scenario())
+
+
+def test_adapter_enforces_total_request_timeout() -> None:
+    """@brief adapter 对整个 embedding HTTP 请求执行明确总 deadline / Adapter enforces an explicit total deadline for the whole embedding HTTP request."""
+
+    async def scenario() -> None:
+        """@brief 用阻塞本地端点验证 ClientTimeout.total / Verify ClientTimeout.total with a blocking local endpoint.
+
+        @return None / None.
+        """
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def embeddings(request: web.Request) -> web.Response:
+            """@brief 阻塞至测试释放 / Block until released by the test.
+
+            @param request aiohttp 请求 / aiohttp request.
+            @return 释放后的空成功响应 / Empty success response after release.
+            """
+
+            del request
+            started.set()
+            await release.wait()
+            return web.json_response({"object": "list", "data": []})
+
+        application = web.Application()
+        application.router.add_post("/v1/embeddings", embeddings)
+        runner = web.AppRunner(application)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        sockets = getattr(site._server, "sockets", None)
+        assert sockets
+        port = sockets[0].getsockname()[1]
+        client = OpenAICompatibleEmbeddings(
+            api_key="test-key",
+            api_base=f"http://127.0.0.1:{port}/v1",
+            timeout_seconds=0.02,
+            telemetry=Telemetry(TelemetryBuffer(16)),
+        )
+        try:
+            request = asyncio.create_task(
+                client.embed_documents(("alpha",), space=_space())
+            )
+            await asyncio.wait_for(started.wait(), timeout=1)
+            with pytest.raises(RetryableEmbeddingError, match="TimeoutError"):
+                await asyncio.wait_for(request, timeout=1)
+        finally:
+            release.set()
+            await client.aclose()
+            await runner.cleanup()
 
     asyncio.run(scenario())
