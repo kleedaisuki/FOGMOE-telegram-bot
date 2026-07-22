@@ -75,7 +75,7 @@ class PostgresAssistantTurnAcceptanceUoW:
         self._workflow_repository = workflow_repository
         """@brief 同事务 acceptance primitive / Same-transaction acceptance primitive."""
         self._plans = plans
-        """@brief 实时管理员与订阅方案解析 / Live administrator and subscription plan resolution."""
+        """@brief 实时管理员、付费余额与订阅方案解析 / Live administrator, paid-balance, and subscription plan resolution."""
         self._profiles = profiles or PostgresUserProfileStore()
         """@brief acceptance-pinned Profile reader / acceptance-pinned Profile reader."""
 

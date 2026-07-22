@@ -43,8 +43,8 @@ class PostgresAccountOperations(AccountOperations):
     def __init__(self, plans: TransactionalAccountPlanResolver) -> None:
         """@brief 注入同事务方案解析器 / Inject the transaction-bound plan resolver.
 
-        @param plans 由管理员策略与 Billing 订阅推导方案的端口 /
-            Port deriving plans from administrator policy and Billing subscriptions.
+        @param plans 由管理员策略、Bank 付费余额与 Billing 订阅推导方案的端口 /
+            Port deriving plans from administrator policy, Bank paid balance, and Billing subscriptions.
         @return None / None.
         """
 

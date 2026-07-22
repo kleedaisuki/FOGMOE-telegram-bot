@@ -37,7 +37,7 @@ class PostgresScheduledAssistantProfileReader:
         """
 
         self._plans = plans
-        """@brief 实时管理员与订阅方案解析 / Live administrator and subscription plan resolution."""
+        """@brief 实时管理员、付费余额与订阅方案解析 / Live administrator, paid-balance, and subscription plan resolution."""
         self._profiles = profiles or PostgresUserProfileStore()
 
     async def read(self, user_id: int) -> DurableAssistantUser | None:

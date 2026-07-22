@@ -271,8 +271,8 @@ def create_account_service(
     plans = PostgresAccountPlanResolver(
         AccountPlanPolicy(administrator_id=identity.administrator.user_id)
     )
-    # @brief 由实时订阅与显式管理员身份推导方案 /
-    # Derive plans from live subscriptions and explicit administrator identity.
+    # @brief 由实时付费余额、订阅与显式管理员身份推导方案 /
+    # Derive plans from live paid balance, subscriptions, and explicit administrator identity.
     return AccountService(
         PostgresAccountOperations(plans),
         initial_coins=economy.new_user_bonus_coins,

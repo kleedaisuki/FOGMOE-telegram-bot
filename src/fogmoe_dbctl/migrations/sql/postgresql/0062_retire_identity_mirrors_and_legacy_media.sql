@@ -9,6 +9,7 @@ LOCK TABLE identity.users IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE bank.accounts IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE bank.account_balances IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE bank.ledger_postings IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE billing.subscriptions IN SHARE MODE;
 LOCK TABLE media.picture_request_receipts IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE media.picture_offers IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE conversation.outbound_messages IN SHARE MODE;
@@ -30,6 +31,38 @@ BEGIN
   ) THEN
     RAISE EXCEPTION
       'cannot retire identity money mirrors: identity and Bank balances differ'
+      USING ERRCODE = '23514';
+  END IF;
+END;
+$$;
+
+-- @brief 仅在旧 paid/admin 标签不会丢失权益时删除 user_plan /
+-- Drop user_plan only when no legacy paid/admin label would lose an entitlement.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM identity.users AS users
+    LEFT JOIN bank.account_balances AS paid_balance
+      ON paid_balance.account_key = 'user:' || users.id::TEXT || ':paid'
+    WHERE users.user_plan NOT IN ('free', 'paid', 'admin')
+       OR (users.user_plan = 'admin' AND users.id <> {{ admin_user_id }})
+       OR (users.id = {{ admin_user_id }} AND users.user_plan <> 'admin')
+       OR (
+         users.user_plan = 'paid'
+         AND COALESCE(paid_balance.balance, 0) <= 0
+         AND NOT EXISTS (
+          SELECT 1
+          FROM billing.subscriptions AS subscription
+          WHERE subscription.owner_id = users.id
+            AND subscription.status = 'active'
+            AND subscription.period_starts_at <= CURRENT_TIMESTAMP
+            AND CURRENT_TIMESTAMP < subscription.period_ends_at
+         )
+       )
+  ) THEN
+    RAISE EXCEPTION
+      'cannot retire identity plan mirror: a legacy paid/admin label lacks authoritative Bank, Billing, or administrator evidence'
       USING ERRCODE = '23514';
   END IF;
 END;

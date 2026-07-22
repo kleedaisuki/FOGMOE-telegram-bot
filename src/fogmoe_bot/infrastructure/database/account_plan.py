@@ -30,7 +30,7 @@ class TransactionalAccountPlanResolver(Protocol):
 
 
 class PostgresAccountPlanResolver:
-    """@brief 从 Billing 订阅和显式管理员策略推导方案 / Derive plans from Billing subscriptions and an explicit administrator policy."""
+    """@brief 从 Billing、Bank 与管理员策略推导方案 / Derive plans from Billing, Bank, and the administrator policy."""
 
     def __init__(self, policy: AccountPlanPolicy) -> None:
         """@brief 注入纯账户方案策略 / Inject the pure account-plan policy.
@@ -48,16 +48,17 @@ class PostgresAccountPlanResolver:
         *,
         connection: AsyncConnection,
     ) -> AccountPlan:
-        """@brief 以事务时间读取当前有效订阅并推导方案 / Read an effective subscription at transaction time and derive the plan.
+        """@brief 在同一事务读取订阅与付费余额并推导方案 / Read subscription and paid balance in one transaction and derive the plan.
 
         @param user_id 待分类用户 / User to classify.
         @param connection 调用方拥有的事务连接 / Caller-owned transaction connection.
         @return admin、paid 或 free / ``admin``, ``paid``, or ``free``.
         @raise RuntimeError PostgreSQL 未返回 EXISTS 结果 / PostgreSQL returns no EXISTS result.
-        @note 当前没有 product-to-plan 映射；``paid`` 的唯一规则是存在状态为 active
-            且当前事务时间位于 ``[period_starts_at, period_ends_at)`` 的 user
-            subscription。/ No product-to-plan mapping exists yet; ``paid`` means exactly that
-            an active user subscription covers the current transaction instant.
+        @note 正的 Bank paid-token 余额保全旧套餐行为；active 且当前事务时间位于
+            ``[period_starts_at, period_ends_at)`` 的 Billing user subscription 表达新商业
+            权益。/ A positive Bank paid-token balance preserves legacy plan behavior; an
+            active Billing user subscription covering the transaction instant expresses the
+            new commercial entitlement.
         """
 
         row = await db_connection.fetch_one(
@@ -66,15 +67,19 @@ class PostgresAccountPlanResolver:
             "WHERE owner_id = %s AND status = 'active' "
             "AND period_starts_at <= CURRENT_TIMESTAMP "
             "AND CURRENT_TIMESTAMP < period_ends_at"
-            ")",
-            (user_id,),
+            "), COALESCE(("
+            "SELECT balance > 0 FROM bank.account_balances "
+            "WHERE account_key = 'user:' || %s::TEXT || ':paid'"
+            "), FALSE)",
+            (user_id, user_id),
             connection=connection,
         )
         if row is None:
-            raise RuntimeError("Account-plan subscription query returned no row")
+            raise RuntimeError("Account-plan fact query returned no row")
         return self._policy.resolve(
             user_id=user_id,
             has_active_subscription=bool(row[0]),
+            has_paid_token_balance=bool(row[1]),
         )
 
 

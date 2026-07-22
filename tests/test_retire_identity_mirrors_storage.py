@@ -40,6 +40,30 @@ def test_0062_fails_closed_before_retiring_identity_money_mirrors() -> None:
     assert "DROP COLUMN user_plan" in migration
 
 
+def test_0062_fails_closed_before_retiring_the_plan_mirror() -> None:
+    """@brief 0062 拒绝没有权威事实支撑的旧 paid/admin 标签 / 0062 rejects legacy paid/admin labels unsupported by authoritative facts.
+
+    @return None / None.
+    """
+
+    migration = _migration()
+    preflight = migration.index(
+        "lacks authoritative Bank, Billing, or administrator evidence"
+    )
+    column_drop = migration.index("DROP COLUMN user_plan")
+
+    assert "LOCK TABLE billing.subscriptions IN SHARE MODE" in migration
+    assert "users.user_plan NOT IN ('free', 'paid', 'admin')" in migration
+    assert "users.user_plan = 'admin' AND users.id <> {{ admin_user_id }}" in migration
+    assert "users.id = {{ admin_user_id }} AND users.user_plan <> 'admin'" in migration
+    assert "users.user_plan = 'paid'" in migration
+    assert "COALESCE(paid_balance.balance, 0) <= 0" in migration
+    assert "FROM billing.subscriptions AS subscription" in migration
+    assert "subscription.status = 'active'" in migration
+    assert "CURRENT_TIMESTAMP < subscription.period_ends_at" in migration
+    assert preflight < column_drop
+
+
 def test_0062_uses_delivery_and_refund_facts_for_preview_liability() -> None:
     """@brief 滞后的 preview_pending 只有 delivered receipt 或退款证据时可清理 / A stale preview_pending row is removable only with delivered-receipt or refund evidence."""
 
