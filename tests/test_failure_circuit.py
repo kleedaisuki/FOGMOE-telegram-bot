@@ -49,24 +49,81 @@ def test_failure_circuit_uses_rolling_window_cooldown_and_success_reset() -> Non
         monotonic=clock,
     )
 
-    circuit.record_failure("embedding")
+    first = circuit.try_acquire("embedding")
+    assert first is not None
+    circuit.record_failure(first)
     clock.advance(11.0)
-    circuit.record_failure("embedding")
-    circuit.record_failure("embedding")
-    assert circuit.is_open("embedding") is False
-
-    circuit.record_success("embedding")
-    circuit.record_failure("embedding")
-    circuit.record_failure("embedding")
-    circuit.record_failure("embedding")
-    assert circuit.is_open("embedding") is True
-    assert circuit.is_open("provider") is False
+    second = circuit.try_acquire("embedding")
+    third = circuit.try_acquire("embedding")
+    assert second is not None and third is not None
+    circuit.record_failure(second)
+    circuit.record_failure(third)
+    success = circuit.try_acquire("embedding")
+    assert success is not None
+    circuit.record_success(success)
+    failures = tuple(circuit.try_acquire("embedding") for _ in range(3))
+    assert all(permit is not None for permit in failures)
+    for permit in failures:
+        assert permit is not None
+        circuit.record_failure(permit)
+    assert circuit.try_acquire("embedding") is None
+    assert circuit.try_acquire("provider") is not None
 
     clock.advance(30.0)
-    assert circuit.is_open("embedding") is False
-    circuit.record_failure("embedding")
-    circuit.record_success("embedding")
-    assert circuit.is_open("embedding") is False
+    probe = circuit.try_acquire("embedding")
+    assert probe is not None and probe.half_open
+    assert circuit.try_acquire("embedding") is None
+    circuit.record_success(probe)
+    assert circuit.try_acquire("embedding") is not None
+
+
+def test_failure_circuit_limits_half_open_to_one_probe_and_rejects_stale_outcomes() -> (
+    None
+):
+    """@brief Half-Open 仅放行一个探针且迟到结果无法覆盖新代 / Half-Open admits one probe and rejects stale outcomes."""
+
+    clock = _Clock()
+    circuit = FailureCircuit[str](
+        FailureCircuitPolicy(1, 10.0, 30.0),
+        monotonic=clock,
+    )
+    original = circuit.try_acquire("provider")
+    concurrent = circuit.try_acquire("provider")
+    assert original is not None and concurrent is not None
+    circuit.record_failure(original)
+    circuit.record_success(concurrent)
+    assert circuit.try_acquire("provider") is None
+
+    clock.advance(30.0)
+    abandoned = circuit.try_acquire("provider")
+    assert abandoned is not None and abandoned.half_open
+    assert circuit.try_acquire("provider") is None
+    circuit.abandon(abandoned)
+    failed_probe = circuit.try_acquire("provider")
+    assert failed_probe is not None and failed_probe.half_open
+    circuit.record_failure(failed_probe)
+
+    clock.advance(30.0)
+    current_probe = circuit.try_acquire("provider")
+    assert current_probe is not None and current_probe.half_open
+    circuit.record_success(failed_probe)
+    assert circuit.try_acquire("provider") is None
+    circuit.record_success(current_probe)
+    assert circuit.try_acquire("provider") is not None
+
+
+def test_failure_circuit_consumes_each_permit_at_most_once() -> None:
+    """@brief 重复上报同一许可不会重复计数 / Reporting one permit twice does not count it twice."""
+
+    circuit = FailureCircuit[str](FailureCircuitPolicy(2, 10.0, 30.0))
+    permit = circuit.try_acquire("provider")
+    assert permit is not None
+    circuit.record_failure(permit)
+    circuit.record_failure(permit)
+
+    still_closed = circuit.try_acquire("provider")
+    assert still_closed is not None and not still_closed.half_open
+    circuit.record_success(still_closed)
 
 
 def test_failure_circuit_policy_rejects_invalid_numbers() -> None:

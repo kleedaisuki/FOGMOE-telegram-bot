@@ -167,7 +167,10 @@ class AssistantInferenceService:
         last_error: Exception | None = None
         for service_name in self._service_order:
             route = self._profiles.get(service_name)
-            if route is None or self._circuit.is_open(service_name):
+            if route is None:
+                continue
+            permit = self._circuit.try_acquire(service_name)
+            if permit is None:
                 continue
             route_context = ContextState(
                 context_id=context_state.context_id,
@@ -178,6 +181,7 @@ class AssistantInferenceService:
                 text_fallback_messages=context_state.text_fallback_messages,
                 current_user_text=context_state.current_user_text,
             )
+            outcome_recorded = False
             try:
                 response = await self._run_route(
                     route,
@@ -195,10 +199,16 @@ class AssistantInferenceService:
                 raise
             except Exception as error:
                 logging.warning("Assistant route %s failed: %s", service_name, error)
-                self._circuit.record_failure(service_name)
+                self._circuit.record_failure(permit)
+                outcome_recorded = True
                 last_error = error
                 continue
-            self._circuit.record_success(service_name)
+            else:
+                self._circuit.record_success(permit)
+                outcome_recorded = True
+            finally:
+                if not outcome_recorded:
+                    self._circuit.abandon(permit)
             if response.context_state is not None:
                 context_state.messages = response.context_state.messages
                 context_state.text_fallback_messages = (

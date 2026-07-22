@@ -221,7 +221,12 @@ def test_open_circuit_skips_to_next_route(monkeypatch):
         profiles={"gemini": _route("gemini"), "siliconflow": _route("siliconflow")},
         runner=runner,
     )
-    monkeypatch.setattr(service.circuit, "is_open", lambda name: name == "gemini")
+    acquire = service.circuit.try_acquire
+    monkeypatch.setattr(
+        service.circuit,
+        "try_acquire",
+        lambda name: None if name == "gemini" else acquire(name),
+    )
 
     response = asyncio.run(service.infer(_context([])))
     assert response.text == "ok"

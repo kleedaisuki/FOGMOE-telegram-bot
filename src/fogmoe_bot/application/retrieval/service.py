@@ -121,7 +121,8 @@ class SemanticRecall:
                     "retrieval.result.limit": query.limit,
                 },
             ) as recall_span:
-                if self._failure_circuit.is_open(self._circuit_key):
+                permit = self._failure_circuit.try_acquire(self._circuit_key)
+                if permit is None:
                     recall_span.set_attribute("retrieval.availability", "unavailable")
                     recall_span.set_attribute(
                         "retrieval.unavailable.reason", "circuit_open"
@@ -129,6 +130,7 @@ class SemanticRecall:
                     raise SemanticRecallUnavailableError(
                         "Semantic recall circuit is open"
                     )
+                outcome_recorded = False
                 try:
                     async with asyncio.timeout(self._query_timeout_seconds):
                         selected = await self._execute(query)
@@ -140,7 +142,8 @@ class SemanticRecall:
                     EmbeddingContractError,
                     RetrievalIOError,
                 ) as error:
-                    self._failure_circuit.record_failure(self._circuit_key)
+                    self._failure_circuit.record_failure(permit)
+                    outcome_recorded = True
                     recall_span.set_attribute("retrieval.availability", "unavailable")
                     recall_span.set_attribute(
                         "retrieval.unavailable.reason",
@@ -149,7 +152,12 @@ class SemanticRecall:
                     raise SemanticRecallUnavailableError(
                         "Semantic recall dependency is unavailable"
                     ) from error
-                self._failure_circuit.record_success(self._circuit_key)
+                else:
+                    self._failure_circuit.record_success(permit)
+                    outcome_recorded = True
+                finally:
+                    if not outcome_recorded:
+                        self._failure_circuit.abandon(permit)
                 recall_span.set_attribute("retrieval.availability", "available")
                 recall_span.set_attribute("retrieval.result.count", len(selected))
         except Exception:

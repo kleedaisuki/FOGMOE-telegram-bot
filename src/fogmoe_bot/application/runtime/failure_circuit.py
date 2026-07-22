@@ -47,14 +47,39 @@ class FailureCircuitPolicy:
 
 @dataclass(slots=True)
 class _FailureState:
-    """@brief 单个 key 的私有滚动失败状态 / Private rolling failure state for one key.
+    """@brief 单个 key 的私有断路状态 / Private circuit state for one key.
 
     @param failure_times 未过期失败的单调时刻 / Monotonic instants of unexpired failures.
     @param open_until 熔断截止单调时刻 / Monotonic instant until which the circuit is open.
+    @param generation 拒绝迟到结果的代际 / Generation rejecting stale outcomes.
+    @param probe_attempt 半开状态唯一探针的序号 / Attempt number of the sole half-open probe.
+    @param active_attempts 本代尚未终结的许可序号 / Unfinished permit ordinals in this generation.
     """
 
     failure_times: deque[float] = field(default_factory=deque)
     open_until: float | None = None
+    generation: int = 0
+    probe_attempt: int | None = None
+    active_attempts: set[int] = field(default_factory=set)
+
+
+@dataclass(frozen=True, slots=True)
+class CircuitPermit[K: Hashable]:
+    """@brief 一次外部依赖调用的强类型许可 / Strongly typed permit for one dependency call.
+
+    @param key 外部依赖 identity / External-dependency identity.
+    @param generation 取得许可时的断路代际 / Circuit generation at acquisition.
+    @param attempt 进程内唯一调用序号 / Process-local unique call ordinal.
+    @param half_open 是否为半开恢复探针 / Whether this is the half-open recovery probe.
+    @note 调用方必须恰好调用 ``record_success``、``record_failure`` 或
+        ``abandon`` 之一。/ The caller must finish the permit exactly once with
+        ``record_success``, ``record_failure``, or ``abandon``.
+    """
+
+    key: K
+    generation: int
+    attempt: int
+    half_open: bool
 
 
 class FailureCircuit[K: Hashable]:
@@ -81,6 +106,7 @@ class FailureCircuit[K: Hashable]:
         self._policy = policy
         self._monotonic = monotonic
         self._states: dict[K, _FailureState] = {}
+        self._next_attempt = 0
 
     @property
     def policy(self) -> FailureCircuitPolicy:
@@ -91,44 +117,68 @@ class FailureCircuit[K: Hashable]:
 
         return self._policy
 
-    def is_open(self, key: K) -> bool:
-        """@brief 判断 key 是否仍处于快速失败冷却 / Check whether a key remains in fast-fail cooldown.
+    def try_acquire(self, key: K) -> CircuitPermit[K] | None:
+        """@brief 获取调用许可或快速失败 / Acquire a call permit or fail fast.
 
         @param key 外部依赖的稳定 identity / Stable external-dependency identity.
-        @return 冷却期内为 True / True during cooldown.
+        @return Closed 时的普通许可、Half-Open 时的唯一探针，或 Open 时 None /
+            A normal Closed permit, the sole Half-Open probe, or None while Open.
+        @note 本方法无 await，半开探针的领取在单 asyncio 进程内为原子操作。/
+            This method has no await, so half-open probe acquisition is atomic within
+            one asyncio process.
         """
 
-        state = self._states.get(key)
-        if state is None or state.open_until is None:
-            return False
-        if self._now() < state.open_until:
-            return True
-        self._states.pop(key, None)
-        return False
+        state = self._states.setdefault(key, _FailureState())
+        self._next_attempt += 1
+        attempt = self._next_attempt
+        if state.open_until is None:
+            state.active_attempts.add(attempt)
+            return CircuitPermit(key, state.generation, attempt, False)
+        if self._now() < state.open_until or state.probe_attempt is not None:
+            return None
+        state.probe_attempt = attempt
+        state.active_attempts.add(attempt)
+        return CircuitPermit(key, state.generation, attempt, True)
 
-    def record_success(self, key: K) -> None:
-        """@brief 成功后关闭并清空 key 的失败历史 / Close and clear a key after success.
+    def record_success(self, permit: CircuitPermit[K]) -> None:
+        """@brief 成功后关闭并清空该代失败历史 / Close and clear this generation after success.
 
-        @param key 外部依赖的稳定 identity / Stable external-dependency identity.
+        @param permit ``try_acquire`` 返回的许可 / Permit returned by ``try_acquire``.
         @return None / None.
+        @note 旧代成功不能关闭新一轮熔断 / A stale success cannot close a newer open generation.
         """
 
-        self._states.pop(key, None)
+        state = self._take_state(permit)
+        if state is None:
+            return
+        if state.open_until is not None and (
+            not permit.half_open or state.probe_attempt != permit.attempt
+        ):
+            return
+        state.failure_times.clear()
+        state.open_until = None
+        state.probe_attempt = None
+        state.generation += 1
+        state.active_attempts.clear()
 
-    def record_failure(self, key: K) -> None:
+    def record_failure(self, permit: CircuitPermit[K]) -> None:
         """@brief 记录窗口内失败并在达到阈值时打开 / Record a windowed failure and open at threshold.
 
-        @param key 外部依赖的稳定 identity / Stable external-dependency identity.
+        @param permit ``try_acquire`` 返回的许可 / Permit returned by ``try_acquire``.
         @return None / None.
+        @note Half-Open 探针失败立即重新 Open；旧代失败被忽略。/
+            A failed Half-Open probe immediately reopens the circuit; stale failures are ignored.
         """
 
         now = self._now()
-        state = self._states.setdefault(key, _FailureState())
+        state = self._take_state(permit)
+        if state is None:
+            return
         if state.open_until is not None:
-            if now < state.open_until:
+            if not permit.half_open or state.probe_attempt != permit.attempt:
                 return
-            state.failure_times.clear()
-            state.open_until = None
+            self._open(state, now=now)
+            return
 
         cutoff = now - self._policy.failure_window_seconds
         while state.failure_times and state.failure_times[0] < cutoff:
@@ -136,8 +186,57 @@ class FailureCircuit[K: Hashable]:
         state.failure_times.append(now)
         if len(state.failure_times) < self._policy.failure_threshold:
             return
+        self._open(state, now=now)
+
+    def abandon(self, permit: CircuitPermit[K]) -> None:
+        """@brief 释放未归类成功/失败的半开探针 / Release an unclassified half-open probe.
+
+        @param permit ``try_acquire`` 返回的许可 / Permit returned by ``try_acquire``.
+        @return None / None.
+        @note 取消、安全拦截等不代表依赖健康的结果必须走此路径。/
+            Cancellation, safety blocks, and other outcomes unrelated to dependency health
+            must use this path.
+        """
+
+        state = self._take_state(permit)
+        if (
+            state is not None
+            and permit.half_open
+            and state.probe_attempt == permit.attempt
+        ):
+            state.probe_attempt = None
+
+    def _take_state(self, permit: CircuitPermit[K]) -> _FailureState | None:
+        """@brief 原子消费许可并返回匹配状态 / Atomically consume a permit and return matching state.
+
+        @param permit 待验证许可 / Permit to validate.
+        @return 匹配状态，迟到或重复终结则为 None /
+            Matching state, or None for a stale or already-finished permit.
+        """
+
+        state = self._states.get(permit.key)
+        if (
+            state is None
+            or state.generation != permit.generation
+            or permit.attempt not in state.active_attempts
+        ):
+            return None
+        state.active_attempts.remove(permit.attempt)
+        return state
+
+    def _open(self, state: _FailureState, *, now: float) -> None:
+        """@brief 进入新一代 Open 冷却 / Enter a new Open cooldown generation.
+
+        @param state 待更新 key 状态 / Key state to update.
+        @param now 已验证单调时刻 / Validated monotonic instant.
+        @return None / None.
+        """
+
         state.failure_times.clear()
         state.open_until = now + self._policy.cooldown_seconds
+        state.probe_attempt = None
+        state.generation += 1
+        state.active_attempts.clear()
 
     def _now(self) -> float:
         """@brief 读取有限单调时刻 / Read a finite monotonic instant.
@@ -154,4 +253,4 @@ class FailureCircuit[K: Hashable]:
         return value
 
 
-__all__ = ["FailureCircuit", "FailureCircuitPolicy"]
+__all__ = ["CircuitPermit", "FailureCircuit", "FailureCircuitPolicy"]
