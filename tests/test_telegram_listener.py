@@ -2,10 +2,13 @@
 
 import asyncio
 import json
+import logging
+from collections.abc import Sequence
 from datetime import datetime, timezone
 
 import pytest
 from telegram import Update
+from telegram.error import NetworkError
 
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from fogmoe_bot.presentation.telegram.listener import (
@@ -67,7 +70,7 @@ class _Source:
         *,
         offset: int | None,
         timeout: float,
-        allowed_updates: tuple[str, ...] | None,
+        allowed_updates: Sequence[str] | None,
     ) -> tuple[Update, ...]:
         """@brief 记录 offset 并返回下一批 / Record offset and return the next batch.
 
@@ -114,6 +117,46 @@ class _Sink:
             self.failed = True
             raise OSError("database unavailable")
         return True
+
+
+class _FailingOnceSource(_Source):
+    """@brief 首轮失败、重试时停止的 Telegram source / Telegram source failing once and stopping on retry."""
+
+    def __init__(self, error: Exception, stop_event: asyncio.Event) -> None:
+        """@brief 注入一次异常与停止信号 / Inject one exception and a stop signal.
+
+        @param error 首次 poll 异常 / First-poll exception.
+        @param stop_event 重试已发生后的停止信号 / Stop signal set after a retry occurs.
+        """
+
+        super().__init__([])
+        self._error: Exception | None = error
+        self._stop_event = stop_event
+
+    async def get_updates(
+        self,
+        *,
+        offset: int | None,
+        timeout: float,
+        allowed_updates: Sequence[str] | None,
+    ) -> tuple[Update, ...]:
+        """@brief 首轮抛错，次轮证明重试后请求停止 / Fail once, then prove a retry and request stop.
+
+        @param offset 请求 offset / Requested offset.
+        @param timeout long-poll 超时 / Long-poll timeout.
+        @param allowed_updates Update allow-list / Update allow-list.
+        @return 重试轮为空 / An empty retry batch.
+        @raise Exception 首轮注入异常 / Injected exception on the first poll.
+        """
+
+        del timeout, allowed_updates
+        self.offsets.append(offset)
+        error = self._error
+        self._error = None
+        if error is not None:
+            raise error
+        self._stop_event.set()
+        return ()
 
 
 def _listener(source: _Source, sink: _Sink) -> TelegramPollingListener:
@@ -187,6 +230,50 @@ def test_listener_does_not_advance_offset_after_partial_persistence_failure() ->
         assert sink.writes == [20, 21, 20, 21]
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("error", "expects_traceback"),
+    (
+        (NetworkError("proxy connection reset"), False),
+        (OSError("database unavailable"), True),
+    ),
+    ids=("expected-network", "unexpected-persistence"),
+)
+def test_listener_only_logs_tracebacks_for_unexpected_failures(
+    error: Exception,
+    expects_traceback: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """@brief 可恢复网络抖动不刷堆栈，未知故障保留诊断信息 / Recoverable network noise omits stacks while unknown failures retain diagnostics.
+
+    @param error 注入异常 / Injected failure.
+    @param expects_traceback 是否应保留 traceback / Whether a traceback should be retained.
+    @param caplog pytest 日志捕获器 / pytest log capture.
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 失败一次并确认 listener 已重试 / Fail once and verify that the listener retries.
+
+        @return None / None.
+        """
+
+        stop = asyncio.Event()
+        source = _FailingOnceSource(error, stop)
+        await _listener(source, _Sink()).run(stop)
+        assert source.offsets == [None, None]
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(scenario())
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "fogmoe_bot.presentation.telegram.listener"
+    ]
+    assert len(records) == 1
+    assert bool(records[0].exc_info) is expects_traceback
 
 
 def test_stop_cancels_in_flight_long_poll() -> None:

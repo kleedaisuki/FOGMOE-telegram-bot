@@ -25,6 +25,7 @@ from telegram.error import (
     EndPointNotFound,
     Forbidden,
     InvalidToken,
+    NetworkError,
     RetryAfter,
 )
 
@@ -213,7 +214,7 @@ class TelegramPollingListener:
                     "Telegram ingress poll/persist failed; retrying in %.3fs: %s",
                     delay,
                     error,
-                    exc_info=True,
+                    exc_info=not isinstance(error, (NetworkError, RetryAfter)),
                 )
                 if await self._wait_or_stop(delay, stop_event):
                     return
