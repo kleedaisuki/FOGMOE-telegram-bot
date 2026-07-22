@@ -11,6 +11,7 @@ from fogmoe_bot.config import (
     AnthropicProviderSettings,
     OpenAIProviderSettings,
 )
+from fogmoe_bot.domain.assistant.request_metadata import MAX_REQUEST_META_ITEMS
 from fogmoe_bot.infrastructure.assistant.routing_config import build_provider_routes
 
 
@@ -209,6 +210,27 @@ def test_route_meta_defaults_to_an_empty_mapping() -> None:
     route = build_provider_routes(_settings())[0]
 
     assert route.meta == {}
+    with pytest.raises(TypeError):
+        route.meta["operator"] = "forbidden"  # type: ignore[index]
+
+
+def test_route_meta_uses_the_same_bounded_immutable_contract_as_request_meta() -> None:
+    """@brief route 配置与调用方请求共享 metadata 数量边界和冻结语义 / Route configuration and caller requests share metadata item bounds and freeze semantics.
+
+    @return None / None.
+    """
+
+    too_many = {
+        f"operator_{index}": "value"
+        for index in range(MAX_REQUEST_META_ITEMS + 1)
+    }
+    with pytest.raises(ValueError, match="route meta cannot contain more"):
+        _settings(chat_routes=[_route(meta=too_many)])
+
+    settings = _settings(chat_routes=[_route(meta={"tenant": "klee"})])
+    configured_meta = settings.routing.chat.routes[0].meta
+    with pytest.raises(TypeError):
+        configured_meta["operator"] = "forbidden"  # type: ignore[index]
 
 
 @pytest.mark.parametrize(

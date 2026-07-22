@@ -778,7 +778,7 @@ def _write_backup(source_path: Path, backup_path: Path, source: str) -> None:
         Raised when the rollback copy exists or cannot be written safely.
     """
 
-    if backup_path.exists():
+    if backup_path.exists() or backup_path.is_symlink():
         raise ConfigMigrationError(
             f"refusing to overwrite existing rollback copy {backup_path.name}"
         )

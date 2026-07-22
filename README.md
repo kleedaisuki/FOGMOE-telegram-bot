@@ -122,10 +122,10 @@ AI 调用只经过原生 OpenAI-style 或 Anthropic-style HTTP adapter。provide
 ```
 
 调用方也可以在 `AssistantTurnRequest(..., meta={...})` 中附带自己的字符串 metadata；
-缺省为 `{}`，会随 durable inference request 一起保存，但不会进入模型提示词。单次请求最多
-16 对，key 最长 64 字符、value 最长 512 字符；OpenAI-style 会发送为 `metadata`。为防止
-调用方伪造运营归因，route 配置里的同名 `meta` 始终覆盖调用方值；Anthropic-style 仅接受
-`user_id`。
+缺省为 `{}`，会随 durable inference request 一起保存并冻结，但不会进入模型提示词。单次请求
+最多 16 对，key 最长 64 字符、value 最长 512 字符，整体 UTF-8 编码不超过 8 KiB；route
+配置的 `meta` 与最终合并结果也遵守相同边界。OpenAI-style 会发送为 `metadata`。为防止调用方
+伪造运营归因，route 配置里的同名 `meta` 始终覆盖调用方值；Anthropic-style 仅接受 `user_id`。
 
 如果部署仍在使用旧的 `schema_version: 1` 配置，并且四类活动 AI 路由都只指向
 OpenRouter，可先预检再迁移：

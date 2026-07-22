@@ -18,10 +18,17 @@ from pydantic import (
     Field,
     SecretStr,
     ValidationError,
+    field_serializer,
     field_validator,
     model_validator,
 )
 
+from fogmoe_bot.domain.assistant.request_metadata import (
+    RequestMeta,
+    RequestMetaError,
+    normalize_request_meta,
+    request_meta_to_json,
+)
 from fogmoe_bot.domain.temporal import TimeZoneId
 from fogmoe_config.jsonc import JsoncDecodeError, JSONValue, load_jsonc
 
@@ -608,7 +615,7 @@ class AiRouteSettings(_FrozenSettings):
     strict_tools: bool = False
     disabled_tools: ToolNameTuple = ()
     safety_block_is_terminal: bool = False
-    meta: Mapping[str, str] = Field(default_factory=dict)
+    meta: RequestMeta = Field(default_factory=lambda: normalize_request_meta({}))
 
     @field_validator("provider")
     @classmethod
@@ -640,23 +647,30 @@ class AiRouteSettings(_FrozenSettings):
 
     @field_validator("meta")
     @classmethod
-    def _validate_meta(cls, value: Mapping[str, str]) -> Mapping[str, str]:
-        """@brief 校验 protocol metadata 的基础安全性 / Validate basic protocol-metadata safety.
+    def _validate_meta(cls, value: Mapping[str, str]) -> RequestMeta:
+        """@brief 校验受限 protocol metadata / Validate bounded protocol metadata.
 
         @param value 原始 metadata 映射 / Raw metadata mapping.
         @return 规范 metadata 映射 / Normalized metadata mapping.
-        @raise ValueError key 或 value 含 CR/LF 时抛出 / Raised when a key or value contains CR/LF.
+        @raise ValueError 类型、大小或控制字符非法时抛出 / Raised for invalid type, size, or control characters.
         """
 
-        normalized: dict[str, str] = {}
-        for key, item in value.items():
-            clean_key = _non_blank(key, field_name="meta key")
-            if "\r" in clean_key or "\n" in clean_key:
-                raise ValueError("meta keys must not contain CR or LF")
-            if "\r" in item or "\n" in item:
-                raise ValueError("meta values must not contain CR or LF")
-            normalized[clean_key] = item
-        return normalized
+        try:
+            return normalize_request_meta(value)
+        except RequestMetaError as error:
+            raise ValueError(
+                str(error).replace("request meta", "route meta", 1)
+            ) from error
+
+    @field_serializer("meta")
+    def _serialize_meta(self, value: RequestMeta) -> dict[str, str]:
+        """@brief 将冻结 route metadata 复制为配置 JSON / Copy frozen route metadata into configuration JSON.
+
+        @param value 已校验、不可变的 metadata / Validated immutable metadata.
+        @return 独立 JSON object / Independent JSON object.
+        """
+
+        return request_meta_to_json(value)
 
 
 #: @brief JSON 数组解码的不可变任务 route 列表 / Immutable task-route list decoded from a JSON array.

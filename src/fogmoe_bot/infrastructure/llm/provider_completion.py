@@ -38,7 +38,7 @@ from fogmoe_bot.infrastructure.network.proxy import create_aiohttp_session
 from .anthropic_codec import decode_anthropic_response, encode_anthropic_request
 from .messages import MessageContractError, ProviderPayload
 from .openai_codec import decode_openai_response, encode_openai_request
-from .provider_failure import (
+from fogmoe_bot.application.assistant.errors import (
     ProviderContractError,
     ProviderFailure,
     ProviderFailureKind,
@@ -431,7 +431,7 @@ def _request_metadata(
         raise ProviderContractError(
             "Anthropic request metadata may contain only user_id"
         )
-    return metadata
+    return normalize_request_meta(metadata)
 
 
 def _request_headers(route: ProviderRoute) -> dict[str, str]:

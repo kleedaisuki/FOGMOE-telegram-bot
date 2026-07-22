@@ -14,6 +14,11 @@ from types import MappingProxyType
 from typing import Literal, TypeAlias
 from urllib.parse import urlsplit
 
+from fogmoe_bot.domain.assistant.request_metadata import (
+    RequestMetaError,
+    normalize_request_meta,
+)
+
 #: @brief 已支持的 provider wire protocol 风格 / Supported provider wire-protocol styles.
 ProviderStyle: TypeAlias = Literal["openai", "anthropic"]
 
@@ -65,14 +70,10 @@ def _validated_meta(values: Mapping[str, str]) -> Mapping[str, str]:
         Raised when metadata is not a safe string mapping.
     """
 
-    normalized: dict[str, str] = {}
-    for key, value in values.items():
-        if not isinstance(key, str) or not key.strip() or "\r" in key or "\n" in key:
-            raise ValueError("ProviderRoute.meta keys must be non-blank strings")
-        if not isinstance(value, str) or "\r" in value or "\n" in value:
-            raise ValueError("ProviderRoute.meta values must be strings without CR or LF")
-        normalized[key] = value
-    return _freeze_mapping(normalized)
+    try:
+        return normalize_request_meta(values)
+    except RequestMetaError as error:
+        raise ValueError(f"ProviderRoute.meta {error}") from error
 
 
 @dataclass(frozen=True, slots=True)

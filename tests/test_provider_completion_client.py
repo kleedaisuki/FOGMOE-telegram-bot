@@ -12,7 +12,10 @@ from aiohttp import web
 
 from fogmoe_bot.application.observability.telemetry import Telemetry, TelemetryBuffer
 from fogmoe_bot.domain.assistant.messages import CanonicalMessage
-from fogmoe_bot.domain.assistant.request_metadata import normalize_request_meta
+from fogmoe_bot.domain.assistant.request_metadata import (
+    MAX_REQUEST_META_ITEMS,
+    normalize_request_meta,
+)
 from fogmoe_bot.domain.assistant.routing.models import (
     ProviderAuth,
     ProviderRoute,
@@ -21,7 +24,7 @@ from fogmoe_bot.domain.assistant.routing.models import (
 from fogmoe_bot.infrastructure.llm.messages import MessageContractError
 from fogmoe_bot.infrastructure.llm.openai_codec import decode_openai_response
 from fogmoe_bot.infrastructure.llm.provider_completion import ProviderCompletionClient
-from fogmoe_bot.infrastructure.llm.provider_failure import (
+from fogmoe_bot.application.assistant.errors import (
     ProviderContractError,
     ProviderFailure,
     ProviderFailureKind,
@@ -169,6 +172,52 @@ def test_openrouter_style_request_maps_custom_metadata_and_tool_role() -> None:
             "tool_call_id": "call_weather",
             "content": '{"temperature":30}',
         }
+
+    asyncio.run(scenario())
+
+
+def test_route_and_caller_metadata_cannot_bypass_the_merged_size_limit() -> None:
+    """@brief route 与调用方 metadata 合并后仍必须满足统一上限 / Route and caller metadata must still satisfy the shared limit after merging.
+
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 在不建立 HTTP 连接前验证合并 metadata / Validate merged metadata before any HTTP connection is opened.
+
+        @return None / None.
+        """
+
+        client = _client()
+        route = ProviderRoute(
+            route_id="chat-openrouter-meta-limit",
+            provider_id="openrouter",
+            provider_label="OpenRouter",
+            style="openai",
+            endpoint="http://127.0.0.1:1/chat/completions",
+            auth=ProviderAuth(api_key=None),
+            models=(RouteModel("openrouter/test-model"),),
+            meta={
+                f"operator_{index}": "value"
+                for index in range(MAX_REQUEST_META_ITEMS)
+            },
+        )
+        try:
+            with pytest.raises(ProviderContractError, match="provider contract"):
+                await client.complete(
+                    route=route,
+                    model="openrouter/test-model",
+                    messages=(
+                        _message("user", [{"type": "text", "text": "hello"}]),
+                    ),
+                    tools=(),
+                    tool_choice=None,
+                    max_tokens=128,
+                    timeout_seconds=None,
+                    request_meta=normalize_request_meta({"caller": "value"}),
+                )
+        finally:
+            await client.aclose()
 
     asyncio.run(scenario())
 

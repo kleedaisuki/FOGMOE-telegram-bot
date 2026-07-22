@@ -43,7 +43,11 @@ def normalize_request_meta(value: object) -> RequestMeta:
         )
     result: dict[str, str] = {}
     for key, item in value.items():
-        if not isinstance(key, str) or not key or len(key) > MAX_REQUEST_META_KEY_LENGTH:
+        if (
+            not isinstance(key, str)
+            or not key.strip()
+            or len(key) > MAX_REQUEST_META_KEY_LENGTH
+        ):
             raise RequestMetaError(
                 "request meta keys must contain 1-64 characters"
             )

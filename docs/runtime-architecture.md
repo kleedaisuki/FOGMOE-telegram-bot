@@ -846,7 +846,7 @@ Telegram `sendMessage` 没有通用 idempotency key。若请求在服务端成�
 | `infrastructure/assistant/external_tools.py` | `external_reads.py` + `generated_media.py` + `sticker_catalog.py` | HTTP read、媒体生成与 Telegram sticker catalog 的依赖/变化轴分离；无 facade |
 | `application/moderation/verification_service.py` 中的 worker | `verification_service.py` + `verification_worker.py` | 命令用例与长驻 lease worker 生命周期分离；组合根直接导入 owner 模块 |
 | `presentation/telegram/assistant_route.py` | `assistant_primary_route.py` + `assistant_update_models.py` + `assistant_update_parser.py` | route 编排、typed mapping 与 PTB JSON parser 分离；无兼容 facade |
-| `infrastructure/llm/*` | provider adapters/serialization | config translation 在 composition/application boundary |
+| `infrastructure/llm/*` | 仅保留原生 OpenAI-style / Anthropic-style wire codec 与共享 HTTP client | adapter 消费自包含 `ProviderRoute`；不读取配置、不拼接 endpoint、不保留兼容 provider registry |
 | `infrastructure/telegram/telegram_utils.py` | 仅保留 Telegram transport 的 retry/backoff、Markdown fallback、chunk/partial-send 原语 | 每个 fallback 步骤是可独立测试的私有函数；业务文案不进 infrastructure |
 | `infrastructure/network/proxy.py` | 保留为共享 transport policy | requests/aiohttp 共用代理校验与 session factory；不向 domain/application 暴露 client |
 | ~~`infrastructure/crypto/biance_api.py`~~ | 已替换为 `infrastructure/crypto/binance_monitor.py` | 修正拼写；同步 SDK 仅在 `to_thread` adapter 边界；严格解析返回值 |
@@ -873,9 +873,9 @@ Telegram `sendMessage` 没有通用 idempotency key。若请求在服务端成�
 
 | 重复/分散代码 | 合并目标 |
 |---|---|
-| ~~`assistant/tools/models.py` + `schemas.py` + `registry.py`~~ | 已合并为不可变 typed `catalog.py`；Pydantic argument model 自动生成 provider-neutral schema，仅在 `infrastructure/llm/tool_serialization.py` 转成 provider 字典 |
+| ~~`assistant/tools/models.py` + `schemas.py` + `registry.py`~~ | 已合并为不可变 typed `catalog.py`；Pydantic argument model 自动生成 provider-neutral schema，再由各原生 wire codec 在自身边界渲染 |
 | generated image/audio/sticker sender | artifact delivery service + Telegram renderer；media kind 作为 union 分支 |
-| `provider_profiles.py` + `task_profiles.py` 的 provider/model 映射 | 已合并为 `infrastructure/assistant/routing_config.py`；application inference 只消费 `ProviderRoute` |
+| `provider_profiles.py` + `task_profiles.py` 的 provider/model 映射 | 已替换为配置中的 `ai.providers` + `ai.routing` 图，并由 `infrastructure/assistant/routing_config.py` 投影为 `ProviderRoute`；application inference 只消费该自包含值对象 |
 | summary、chat、scheduled prompt 各自 executor | runtime-owned blocking/LLM bulkheads |
 | command cooldown、media provider rate limit、callback cooldown | key-aware admission/rate-limit services，策略配置化；`/tl` 受 inbox/runtime/provider 三层容量控制 |
 | pic/music 各自 aiohttp session/proxy/timeout/retry | infrastructure HTTP client factory + per-provider adapter；未注册的 `/sf` 死实现已整体删除 |

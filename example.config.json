@@ -217,7 +217,7 @@
             "disabled_tools": [],
             // true 时 safety block 不允许通过后续 route 绕过；默认 false。
             "safety_block_is_terminal": false,
-            // OpenAI-style provider 可传任意 string-to-string metadata；未配置时保持空对象。
+            // OpenAI-style provider 可传任意 string-to-string metadata；与调用方一样最多 16 对、整体不超过 8 KiB；同名键覆盖调用方值。未配置时保持空对象。
             "meta": {}
           }
         ]

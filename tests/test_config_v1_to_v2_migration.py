@@ -164,6 +164,32 @@ def test_non_openrouter_active_route_fails_closed_without_writing(
     assert not (tmp_path / ".config.json.schema-v1.bak").exists()
 
 
+def test_existing_dangling_rollback_symlink_fails_closed_without_writing(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    """@brief 悬空回滚符号链接也必须拒绝覆盖 / A dangling rollback symlink must also be refused rather than overwritten.
+
+    @param tmp_path pytest 隔离目录 / Pytest isolated directory.
+    @param capsys pytest 输出捕获器 / Pytest output capture fixture.
+    @return None / None.
+    """
+
+    config_path = tmp_path / "config.json"
+    legacy_source = _legacy_config_source()
+    config_path.write_text(legacy_source, encoding="utf-8")
+    backup_path = tmp_path / ".config.json.schema-v1.bak"
+    backup_path.symlink_to(tmp_path / "missing-rollback-target")
+
+    assert MIGRATION.main([str(config_path)]) == 2
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert "refusing to overwrite existing rollback copy" in captured.err
+    assert TEST_SECRET not in captured.out
+    assert TEST_SECRET not in captured.err
+    assert config_path.read_text(encoding="utf-8") == legacy_source
+    assert backup_path.is_symlink()
+
+
 def _route_models(
     routing: dict[str, object],
     task: str,

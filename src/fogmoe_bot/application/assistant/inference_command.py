@@ -11,16 +11,25 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+from collections.abc import Mapping
 from typing import Literal, Self, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from fogmoe_bot.application.conversation.telegram_identity import (
     TelegramConversationAddress,
 )
 from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.assistant.request_metadata import (
+    RequestMeta,
     RequestMetaError,
     normalize_request_meta,
     request_meta_to_json,
@@ -201,22 +210,32 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
     disable_web_page_preview: bool = True
     allow_tools: bool = True
     allowed_tools: tuple[str, ...] | None = Field(default=None, max_length=32)
-    meta: dict[str, str] = Field(default_factory=dict)
+    meta: RequestMeta = Field(default_factory=lambda: normalize_request_meta({}))
 
     @field_validator("meta")
     @classmethod
-    def validate_meta(cls, value: dict[str, str]) -> dict[str, str]:
+    def validate_meta(cls, value: Mapping[str, str]) -> RequestMeta:
         """@brief 校验受限请求 metadata / Validate bounded request metadata.
 
         @param value 候选 string mapping / Candidate string mapping.
-        @return 独立且可 JSON 序列化的 mapping / Independent JSON-serializable mapping.
+        @return 独立且不可变的 mapping / Independent immutable mapping.
         @raise ValueError metadata 越界时抛出 / Raised when metadata violates its boundary.
         """
 
         try:
-            return request_meta_to_json(normalize_request_meta(value))
+            return normalize_request_meta(value)
         except RequestMetaError as error:
             raise ValueError(str(error)) from error
+
+    @field_serializer("meta")
+    def serialize_meta(self, value: RequestMeta) -> dict[str, str]:
+        """@brief 将冻结 metadata 复制为 durable JSON / Copy frozen metadata into durable JSON.
+
+        @param value 已校验、不可变的 metadata / Validated immutable metadata.
+        @return 独立 JSON object / Independent JSON object.
+        """
+
+        return request_meta_to_json(value)
 
     @field_validator("allowed_tools")
     @classmethod

@@ -16,6 +16,9 @@ from pathlib import Path
 import pytest
 from sqlalchemy.exc import DBAPIError
 
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage, ToolCallPart
+from fogmoe_bot.domain.context_window.compaction import compaction_source_digest
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_dbctl.commands import bootstrap, migration_execution
 from fogmoe_dbctl.config import DbctlSettings
 from fogmoe_dbctl.postgres import direct_psql_environment, quote_identifier
@@ -633,6 +636,24 @@ def _seed_legacy_0068_messages(
             '{"tool_call_id":"call-tool","name":"lookup","content":"{\\"answer\\":42}"}'::JSONB,
             'canonical-v2:legacy-projectable:tool', CURRENT_TIMESTAMP
           );
+
+        INSERT INTO context_window.compactions (
+          compaction_id, conversation_id, owner_user_id, epoch_floor_sequence,
+          from_sequence, through_sequence, anchor_turn_id,
+          predecessor_compaction_id, projection_version, source_digest,
+          source_snapshot, source_row_count, source_token_count, status, version,
+          attempt_count, next_attempt_at, claim_token, lease_expires_at,
+          completion_token, summary_text, summary_token_count, summary_route_key,
+          last_error, created_at, updated_at, completed_at
+        ) VALUES (
+          '83000000-0000-4000-8000-000000000001',
+          'canonical-v2:legacy-projectable', 1001, 0, 1, 1,
+          '81000000-0000-4000-8000-000000000002', NULL, 1,
+          repeat('0', 64),
+          '[{"role":"assistant","content":null,"tool_calls":[{"id":"call-digest","type":"function","function":{"name":"lookup","arguments":"{\\"ratio\\":0.000001,\\"whole\\":1.0,\\"large\\":1e20}"}}]}]'::JSON,
+          1, 1, 'failed_final', 0, 0, NULL, NULL, NULL, NULL, NULL, NULL,
+          NULL, 'fixture', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        );
         """,
     )
 
@@ -970,6 +991,57 @@ def test_0068_converts_legacy_projectable_rows_and_rejects_non_object_tools() ->
                 """,
             )
             == "tool:tool_result:42"
+        )
+        expected_snapshot_digest = compaction_source_digest(
+            (
+                CanonicalMessage(
+                    MessageRole.ASSISTANT,
+                    (
+                        ToolCallPart(
+                            "call-digest",
+                            "lookup",
+                            {
+                                "ratio": 0.000001,
+                                "whole": 1.0,
+                                # PostgreSQL JSONB 会在写回 JSON 前以无指数记法规范化该整数 / PostgreSQL JSONB canonicalizes this integral value without exponent notation before writing it back to JSON.
+                                "large": 100_000_000_000_000_000_000,
+                            },
+                        ),
+                    ),
+                ).to_json(),
+            )
+        )
+        actual_snapshot_digest = _scalar(
+            cluster,
+            success,
+            """
+            SELECT source_digest
+            FROM context_window.compactions
+            WHERE compaction_id = '83000000-0000-4000-8000-000000000001';
+            """,
+        )
+        actual_snapshot = _scalar(
+            cluster,
+            success,
+            """
+            SELECT source_snapshot::TEXT
+            FROM context_window.compactions
+            WHERE compaction_id = '83000000-0000-4000-8000-000000000001';
+            """,
+        )
+        assert actual_snapshot_digest == expected_snapshot_digest, actual_snapshot
+        assert (
+            _scalar(
+                cluster,
+                success,
+                """
+                SELECT projection_version::TEXT || ':' ||
+                  (source_snapshot::JSONB #>> '{0,schema_version}')
+                FROM context_window.compactions
+                WHERE compaction_id = '83000000-0000-4000-8000-000000000001';
+                """,
+            )
+            == "1:2"
         )
 
         invalid = _clone_database(
