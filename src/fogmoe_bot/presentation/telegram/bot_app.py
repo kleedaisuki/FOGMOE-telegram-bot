@@ -46,9 +46,6 @@ from fogmoe_bot.application.conversation.router import IngressRouter
 from fogmoe_bot.application.conversation.translation_ingress import (
     TranslationIngressCoordinator,
 )
-from fogmoe_bot.application.conversation.workflow import (
-    ConversationWorkflow,
-)
 from fogmoe_bot.application.crypto.market_monitor import (
     BTC_MONITOR_DATA_KEY,
     BtcPatternMonitor,
@@ -74,11 +71,9 @@ from fogmoe_bot.application.runtime import (
     ServiceBinding,
     ShutdownMode,
 )
-from fogmoe_bot.application.scheduling.dispatcher import ScheduleDispatcher
-from fogmoe_bot.application.scheduling.prompt_turn import PromptTurnHandler
+from fogmoe_bot.application.scheduling.worker import ScheduleWorker
 from fogmoe_bot.application.telegram import DurableGroupAdministratorAuthorization
 from fogmoe_bot.application.town.service import TOWN_SERVICE_DATA_KEY, TownService
-from fogmoe_bot.application.scheduling.runtime import SchedulingWorkLoop
 from fogmoe_bot.application.observability.runtime_metrics import RuntimeMetricsService
 from fogmoe_bot.infrastructure.blocking import (
     AsyncBlockingBulkhead,
@@ -119,11 +114,12 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
 from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
     PostgresTurnRepository,
 )
-from fogmoe_bot.infrastructure.database.repositories.schedule_repository import (
-    ScheduleRepository,
-)
 from fogmoe_bot.infrastructure.database.scheduled_assistant_profile import (
     PostgresScheduledAssistantProfileReader,
+)
+from fogmoe_bot.infrastructure.scheduling.postgres import (
+    PostgresScheduleQueue,
+    PostgresScheduledOccurrenceAcceptance,
 )
 from fogmoe_bot.infrastructure.database.user_profile.management import (
     PostgresUserProfileManagementUoW,
@@ -523,21 +519,17 @@ def _compose_services(
         attempt_timeout=timedelta(seconds=runtime.outbox.attempt_timeout_seconds),
         telemetry=observability.telemetry,
     )
-    scheduling = SchedulingWorkLoop(
-        dispatcher=ScheduleDispatcher(
-            repository=ScheduleRepository(),
-            handlers=(
-                PromptTurnHandler(
-                    workflow=ConversationWorkflow(primitives.turns),
-                    profiles=PostgresScheduledAssistantProfileReader(),
-                ),
-            ),
-            batch_size=runtime.scheduling.worker_count,
-            stale_after=timedelta(seconds=runtime.scheduling.lease_seconds),
-        ),
-        maintenance=(),
+    scheduling = ScheduleWorker(
+        queue=PostgresScheduleQueue(),
+        acceptance=PostgresScheduledOccurrenceAcceptance(primitives.turns),
+        profiles=PostgresScheduledAssistantProfileReader(),
         poll_interval=runtime.scheduling.poll_interval_seconds,
         worker_count=runtime.scheduling.worker_count,
+        lease_for=timedelta(seconds=runtime.scheduling.lease_seconds),
+        attempt_timeout=timedelta(seconds=runtime.scheduling.attempt_timeout_seconds),
+        max_attempts=runtime.scheduling.max_attempts,
+        retry_base=runtime.scheduling.retry_base_seconds,
+        retry_cap=runtime.scheduling.retry_cap_seconds,
     )
     btc_bulkhead = AsyncBlockingBulkhead(
         capacity=4,
@@ -549,9 +541,7 @@ def _compose_services(
         source=BinanceBtcPatternSource(bulkhead=btc_bulkhead),
         notifications=TelegramMonitorNotificationSink(application.bot),
     )
-    blocking = BlockingBulkheadLifecycle(
-        (*assistant.blocking_bulkheads, btc_bulkhead)
-    )
+    blocking = BlockingBulkheadLifecycle((*assistant.blocking_bulkheads, btc_bulkhead))
     bindings = (
         ServiceBinding("telegram-listener", listener, shutdown_phase=0),
         ServiceBinding("inbox", inbox, shutdown_phase=10),
