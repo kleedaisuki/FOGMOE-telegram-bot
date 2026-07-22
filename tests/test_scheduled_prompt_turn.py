@@ -1,104 +1,56 @@
-"""@brief Durable 定时 Prompt Turn 测试 / Durable scheduled-prompt Turn tests."""
+"""@brief Scheduled Assistant occurrence 纯构造测试 / Pure-construction tests for scheduled Assistant occurrences."""
 
-import asyncio
-from datetime import datetime, timedelta, timezone
-
-import pytest
+from datetime import UTC, datetime, timedelta
 
 from fogmoe_bot.application.assistant.inference_command import (
     DurableAssistantInferenceCommand,
     DurableAssistantUser,
+    DurableUserProfile,
 )
-from fogmoe_bot.application.conversation.workflow import ConversationWorkflow
-from fogmoe_bot.application.scheduling.prompt_turn import PromptTurnHandler
-from fogmoe_bot.domain.conversation.turn import ConversationTurn
-from fogmoe_bot.domain.conversation.inference import InferenceActivityDraft
-from fogmoe_bot.domain.conversation.message import MessageDraft
-from fogmoe_bot.domain.scheduling import (
-    PROMPT_JOB_KIND,
-    PromptJobPayload,
-    Recurrence,
-    ScheduledJob,
+from fogmoe_bot.application.scheduling.occurrence import (
+    occurrence_key,
+    prepare_scheduled_occurrence,
 )
+from fogmoe_bot.domain.conversation.identity import ConversationId, DeliveryStreamId
+from fogmoe_bot.domain.scheduling.assistant_schedule import (
+    OneShot,
+    ScheduleTarget,
+    ScheduledAssistantTurn,
+)
+from fogmoe_bot.domain.temporal import TimeZoneId
 
 
-NOW = datetime(2026, 7, 11, 12, tzinfo=timezone.utc)
-"""@brief 测试 acceptance 时间 / Test acceptance time."""
+CREATED_AT = datetime(2026, 7, 10, 8, tzinfo=UTC)
+"""@brief 测试 schedule 创建时刻 / Test schedule creation instant."""
 
-RUN_AT = datetime(2026, 7, 11, 11, 30, tzinfo=timezone.utc)
-"""@brief 测试计划发生时间 / Test scheduled occurrence time."""
+RUN_AT = datetime(2026, 7, 11, 11, 30, 0, 123456, tzinfo=UTC)
+"""@brief 测试计划发生时刻 / Test planned occurrence instant."""
 
-
-class _FixedClock:
-    """@brief 固定 UTC 时钟 / Fixed UTC clock."""
-
-    def now(self) -> datetime:
-        """@brief 返回固定时刻 / Return the fixed instant.
-
-        @return NOW / NOW.
-        """
-
-        return NOW
+OBSERVED_AT = RUN_AT + timedelta(seconds=9)
+"""@brief worker 实际观察时刻 / Actual worker observation instant."""
 
 
-class _Profiles:
-    """@brief 可控用户快照端口 / Controllable user-snapshot port."""
+def _profile() -> DurableUserProfile:
+    """@brief 构造可识别的私有 Profile / Build a recognizable private profile.
 
-    def __init__(self, profile: DurableAssistantUser | None) -> None:
-        """@brief 注入返回快照 / Inject the returned profile.
+    @return 测试 Profile / Test profile.
+    """
 
-        @param profile 返回值 / Returned value.
-        """
-
-        self.profile = profile
-        self.user_ids: list[int] = []
-
-    async def read(self, user_id: int) -> DurableAssistantUser | None:
-        """@brief 记录并返回快照 / Record the lookup and return the profile.
-
-        @param user_id 用户 ID / User identifier.
-        @return 注入快照 / Injected profile.
-        """
-
-        self.user_ids.append(user_id)
-        return self.profile
+    return DurableUserProfile(
+        revision=3,
+        observed_through_event_id=71,
+        prompt_version=2,
+        route_key="profile:test:klee",
+        created_at=CREATED_AT,
+        updated_at=CREATED_AT + timedelta(minutes=1),
+        claims=(),
+    )
 
 
-class _Persistence:
-    """@brief 记录 Conversation acceptance 的持久化替身 / Persistence double recording Conversation acceptances."""
+def _user() -> DurableAssistantUser:
+    """@brief 构造携带私有上下文的用户 / Build a user carrying private context.
 
-    def __init__(self) -> None:
-        """@brief 初始化 acceptance 列表 / Initialize the acceptance list."""
-
-        self.acceptances: list[
-            tuple[ConversationTurn, MessageDraft, InferenceActivityDraft, datetime]
-        ] = []
-
-    async def create_and_accept_turn(
-        self,
-        turn: ConversationTurn,
-        *,
-        message: MessageDraft,
-        activity: InferenceActivityDraft,
-        accepted_at: datetime,
-    ) -> object:
-        """@brief 记录原子 acceptance 参数 / Record atomic-acceptance arguments.
-
-        @param turn 初始 Turn / Initial Turn.
-        @param message 用户消息 / User message.
-        @param activity 推理意图 / Inference intent.
-        @param accepted_at 接受时间 / Acceptance time.
-        @return 固定回执 / Fixed receipt.
-        """
-
-        self.acceptances.append((turn, message, activity, accepted_at))
-        return "accepted"
-
-
-def _profile() -> DurableAssistantUser:
-    """@brief 构造严格用户快照 / Build a strict user snapshot.
-
-    @return 测试用户快照 / Test user snapshot.
+    @return acceptance-time 用户快照 / Acceptance-time user snapshot.
     """
 
     return DurableAssistantUser(
@@ -108,118 +60,160 @@ def _profile() -> DurableAssistantUser:
         coins=19,
         plan="paid",
         permission=1,
-        profile=None,
-        personal_info="",
+        profile=_profile(),
+        personal_info="CS PhD student",
         diary_exists=True,
     )
 
 
-def _job(*, run_at: datetime = RUN_AT) -> ScheduledJob[PromptJobPayload]:
-    """@brief 构造 Prompt 调度发生项 / Build a prompt schedule occurrence.
+def _target(*, group: bool) -> ScheduleTarget:
+    """@brief 构造私聊或群 Topic 目标 / Build a private or group-topic target.
 
-    @param run_at 本次计划时间 / Occurrence time.
-    @return 类型化调度任务 / Typed scheduled job.
+    @param group 是否为群目标 / Whether to build a group target.
+    @return 完整的冻结投递目标 / Complete frozen delivery target.
     """
 
-    return ScheduledJob(
-        schedule_id=7,
-        owner_id=42,
-        kind=PROMPT_JOB_KIND,
-        run_at=run_at,
-        created_at=RUN_AT - timedelta(days=1),
-        recurrence=Recurrence(),
-        payload=PromptJobPayload(
-            trigger_reason="timer",
-            context_text="previous context",
-            instruction="Send the reminder",
-        ),
+    if group:
+        return ScheduleTarget(
+            conversation_id=ConversationId("assistant-group:-1001:thread:23"),
+            delivery_stream_id=DeliveryStreamId(
+                "telegram:primary:chat:-1001:thread:23"
+            ),
+            chat_id=-1001,
+            is_group=True,
+            message_thread_id=23,
+        )
+    return ScheduleTarget(
+        conversation_id=ConversationId("assistant-user:42"),
+        delivery_stream_id=DeliveryStreamId("telegram:primary:chat:42:thread:0"),
+        chat_id=42,
+        is_group=False,
     )
 
 
-def test_retry_converges_on_one_occurrence_identity_and_durable_command() -> None:
-    """@brief 同一发生项重放得到相同 Turn/Message/Activity / Replaying an occurrence yields identical Turn, message, and activity identities."""
+def _schedule(*, group: bool, schedule_id: int = 7) -> ScheduledAssistantTurn:
+    """@brief 构造定时 Assistant 回合 / Build a scheduled Assistant turn.
 
-    async def scenario() -> None:
-        """@brief 执行同一任务两次 / Execute the same job twice.
+    @param group 是否为群目标 / Whether the target is a group.
+    @param schedule_id 不复用的 schedule ID / Never-reused schedule ID.
+    @return 领域 schedule / Domain schedule.
+    """
 
-        @return None / None.
-        """
-
-        persistence = _Persistence()
-        handler = PromptTurnHandler(
-            workflow=ConversationWorkflow(persistence),  # type: ignore[arg-type]
-            profiles=_Profiles(_profile()),
-            clock=_FixedClock(),
-        )
-
-        await handler.handle(_job())
-        await handler.handle(_job())
-
-        first, replay = persistence.acceptances
-        assert first[0].turn_id == replay[0].turn_id
-        assert first[1].message_id == replay[1].message_id
-        assert first[2].activity_id == replay[2].activity_id
-        assert first[0].source.kind == "schedule.prompt"
-        assert first[0].source.key == "7:2026-07-11T11:30:00.000000Z"
-        assert first[0].source.update_id is None
-        assert first[0].conversation_id.value == "assistant-user:42"
-        assert first[1].content["content_kind"] == "scheduled_prompt"
-        assert "Send the reminder" in str(first[1].content["text"])
-        command = DurableAssistantInferenceCommand.from_json(first[2].request)
-        assert command.typed_turn_id == first[0].turn_id
-        assert command.user == _profile()
-        assert command.chat_id == 42
-        assert command.reply_to_message_id is None
-        assert command.delivery_stream_id == "telegram:primary:chat:42:thread:0"
-
-    asyncio.run(scenario())
+    return ScheduledAssistantTurn(
+        schedule_id=schedule_id,
+        creator_user_id=42,
+        target=_target(group=group),
+        trigger_reason="timer",
+        context_snapshot="previous context",
+        instruction="Send the reminder",
+        cadence=OneShot(),
+        next_run_at=RUN_AT,
+        created_at=CREATED_AT,
+        time_zone=TimeZoneId("Asia/Shanghai"),
+    )
 
 
-def test_recurrence_occurrences_have_distinct_turn_identities() -> None:
-    """@brief 同一 schedule 的不同发生项得到不同 Turn / Different occurrences of one schedule receive different Turns."""
+def _command(
+    schedule: ScheduledAssistantTurn,
+) -> DurableAssistantInferenceCommand:
+    """@brief 构造 occurrence 并解析 durable command / Prepare an occurrence and parse its durable command.
 
-    async def scenario() -> None:
-        """@brief 接受两个周期发生项 / Accept two recurring occurrences.
+    @param schedule 计划定义 / Schedule definition.
+    @return 严格 durable Assistant command / Strict durable Assistant command.
+    """
 
-        @return None / None.
-        """
-
-        persistence = _Persistence()
-        handler = PromptTurnHandler(
-            workflow=ConversationWorkflow(persistence),  # type: ignore[arg-type]
-            profiles=_Profiles(_profile()),
-            clock=_FixedClock(),
-        )
-
-        await handler.handle(_job())
-        await handler.handle(_job(run_at=RUN_AT + timedelta(hours=1)))
-
-        assert (
-            persistence.acceptances[0][0].turn_id
-            != persistence.acceptances[1][0].turn_id
-        )
-
-    asyncio.run(scenario())
+    prepared = prepare_scheduled_occurrence(
+        schedule,
+        user=_user(),
+        observed_at=OBSERVED_AT,
+    )
+    return DurableAssistantInferenceCommand.from_json(prepared.activity.request)
 
 
-def test_missing_owner_fails_before_conversation_acceptance() -> None:
-    """@brief 所有者不存在时不产生 Conversation 写入 / A missing owner causes no Conversation write."""
+def test_occurrence_identity_is_deterministic_and_scoped_by_planned_instant() -> None:
+    """@brief 重放同一 occurrence 收敛而不同时刻分离 / Replays converge while distinct planned instants remain separate."""
 
-    async def scenario() -> None:
-        """@brief 执行无所有者任务 / Execute a job whose owner is absent.
+    schedule = _schedule(group=False)
+    first = prepare_scheduled_occurrence(
+        schedule,
+        user=_user(),
+        observed_at=OBSERVED_AT,
+    )
+    replay = prepare_scheduled_occurrence(
+        schedule,
+        user=_user(),
+        observed_at=OBSERVED_AT + timedelta(seconds=5),
+    )
+    later_schedule = ScheduledAssistantTurn(
+        schedule_id=schedule.schedule_id,
+        creator_user_id=schedule.creator_user_id,
+        target=schedule.target,
+        trigger_reason=schedule.trigger_reason,
+        instruction=schedule.instruction,
+        cadence=schedule.cadence,
+        next_run_at=RUN_AT + timedelta(hours=1),
+        created_at=schedule.created_at,
+        time_zone=schedule.time_zone,
+        context_snapshot=schedule.context_snapshot,
+    )
+    later = prepare_scheduled_occurrence(
+        later_schedule,
+        user=_user(),
+        observed_at=OBSERVED_AT + timedelta(hours=1),
+    )
 
-        @return None / None.
-        """
+    assert occurrence_key(7, RUN_AT) == "7:2026-07-11T11:30:00.123456Z"
+    assert first.turn.source.kind == "schedule.prompt"
+    assert first.turn.source.key == occurrence_key(7, RUN_AT)
+    assert first.turn.turn_id == replay.turn.turn_id
+    assert first.message.message_id == replay.message.message_id
+    assert first.activity.activity_id == replay.activity.activity_id
+    assert first.turn.turn_id != later.turn.turn_id
 
-        persistence = _Persistence()
-        handler = PromptTurnHandler(
-            workflow=ConversationWorkflow(persistence),  # type: ignore[arg-type]
-            profiles=_Profiles(None),
-            clock=_FixedClock(),
-        )
 
-        with pytest.raises(LookupError, match="owner not found"):
-            await handler.handle(_job())
-        assert persistence.acceptances == []
+def test_private_occurrence_preserves_target_and_private_profile() -> None:
+    """@brief 私聊 occurrence 保留完整目标与用户快照 / A private occurrence preserves its exact target and user snapshot."""
 
-    asyncio.run(scenario())
+    schedule = _schedule(group=False)
+    prepared = prepare_scheduled_occurrence(
+        schedule,
+        user=_user(),
+        observed_at=OBSERVED_AT,
+    )
+    command = DurableAssistantInferenceCommand.from_json(prepared.activity.request)
+
+    assert prepared.turn.conversation_id == schedule.target.conversation_id
+    assert command.conversation_id == "assistant-user:42"
+    assert command.delivery_stream_id == "telegram:primary:chat:42:thread:0"
+    assert command.chat_id == 42
+    assert command.message_thread_id is None
+    assert command.scope.is_group is False
+    assert command.scope.group_id is None
+    assert command.user == _user()
+    assert command.allow_tools is False
+    assert prepared.message.content["content_kind"] == "scheduled_prompt"
+    assert prepared.message.content["source"] == {
+        "kind": "schedule.prompt",
+        "schedule_id": 7,
+        "scheduled_for": "2026-07-11T11:30:00Z",
+    }
+    assert "Send the reminder" in str(prepared.message.content["text"])
+
+
+def test_group_occurrence_preserves_topic_but_removes_private_context() -> None:
+    """@brief 群 occurrence 保留 Topic 并清除三类私有上下文 / A group occurrence preserves its topic and clears all three private-context fields."""
+
+    schedule = _schedule(group=True)
+    command = _command(schedule)
+
+    assert command.conversation_id == "assistant-group:-1001:thread:23"
+    assert command.delivery_stream_id == "telegram:primary:chat:-1001:thread:23"
+    assert command.chat_id == -1001
+    assert command.message_thread_id == 23
+    assert command.scope.is_group is True
+    assert command.scope.group_id == -1001
+    assert command.scope.message_thread_id == 23
+    assert command.user.profile is None
+    assert command.user.personal_info == ""
+    assert command.user.diary_exists is False
+    assert command.allow_tools is False
