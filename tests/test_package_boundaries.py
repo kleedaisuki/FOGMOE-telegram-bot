@@ -1,10 +1,11 @@
 import ast
+import sys
 from pathlib import Path
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src" / "fogmoe_bot"
 DBCTL_ROOT = PROJECT_ROOT / "src" / "fogmoe_dbctl"
+CONFIG_ROOT = PROJECT_ROOT / "src" / "fogmoe_config"
 MIGRATIONS_ROOT = DBCTL_ROOT / "migrations"
 
 
@@ -312,7 +313,6 @@ def test_crypto_workflows_have_pure_core_thin_telegram_and_no_process_locks() ->
     assert "from telegram" not in core_text
     assert "import telegram" not in core_text
     assert "fogmoe_bot.infrastructure" not in core_text
-    assert "db_connection" not in core_text
     assert "UMFutures" not in core_text
 
     crypto_text = "\n".join(
@@ -403,7 +403,6 @@ def test_games_keep_only_omikuji_and_reject_retired_wager_modules() -> None:
     assert "from telegram" not in core_text
     assert "import telegram" not in core_text
     assert "fogmoe_bot.infrastructure" not in core_text
-    assert "db_connection" not in core_text
     assert "command_cooldown" not in core_text
 
     active_text = "\n".join(
@@ -627,9 +626,9 @@ def test_application_layer_does_not_contain_direct_sql():
         SRC_ROOT / "application",
     ]
     forbidden_snippets = [
-        "db_connection.fetch_one",
-        "db_connection.fetch_all",
-        "db_connection.execute",
+        "db.fetch_one",
+        "db.fetch_all",
+        "db.execute",
         "exec_driver_sql(",
         "SELECT ",
         "INSERT ",
@@ -658,6 +657,111 @@ def test_database_engine_has_one_event_loop_owner() -> None:
     assert "threading.Lock" not in source
     assert "_ENGINES" not in source
     assert "scheduling daemon" not in source
+
+
+def test_database_primitives_have_one_module_owner() -> None:
+    """@brief 数据库 primitive 不再经过 connection facade / Database primitives have no connection facade.
+
+    @return None / None.
+    """
+
+    database_root = SRC_ROOT / "infrastructure" / "database"
+    assert not (database_root / "connection.py").exists()
+
+    forbidden_module = "fogmoe_bot.infrastructure.database.connection"
+    offenders: list[str] = []
+    for root in (SRC_ROOT, PROJECT_ROOT / "tests"):
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    if node.module == forbidden_module or (
+                        node.module == "fogmoe_bot.infrastructure.database"
+                        and any(alias.name == "connection" for alias in node.names)
+                    ):
+                        offenders.append(
+                            f"{path.relative_to(PROJECT_ROOT)}:{node.lineno}"
+                        )
+                if isinstance(node, ast.Import) and any(
+                    alias.name == forbidden_module for alias in node.names
+                ):
+                    offenders.append(f"{path.relative_to(PROJECT_ROOT)}:{node.lineno}")
+
+    assert offenders == []
+    source = (database_root / "db.py").read_text(encoding="utf-8")
+    for primitive in ("fetch_one", "fetch_all", "execute"):
+        assert f"async def {primitive}(" in source
+
+
+def test_database_adapters_have_bounded_context_ownership() -> None:
+    """@brief 数据库适配器不再藏于泛化 repositories 包 / Database adapters are no longer hidden in a generic repositories package.
+
+    @return None / None.
+    """
+
+    database_root = SRC_ROOT / "infrastructure" / "database"
+    repositories_root = database_root / "repositories"
+    assistant_context = database_root / "assistant_user_context.py"
+    verification = database_root / "moderation" / "verification.py"
+
+    assert not repositories_root.exists()
+    assert assistant_context.is_file()
+    assert verification.is_file()
+    assert "from fogmoe_bot.infrastructure.database import db" in (
+        assistant_context.read_text(encoding="utf-8")
+    )
+    assert "from fogmoe_bot.infrastructure.database import db" in (
+        verification.read_text(encoding="utf-8")
+    )
+
+    old_prefix = "fogmoe_bot.infrastructure.database.repositories"
+    offenders: list[str] = []
+    for root in (SRC_ROOT, PROJECT_ROOT / "tests"):
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module is not None:
+                    if node.module == old_prefix or node.module.startswith(
+                        f"{old_prefix}."
+                    ):
+                        offenders.append(
+                            f"{path.relative_to(PROJECT_ROOT)}:{node.lineno}"
+                        )
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name == old_prefix or alias.name.startswith(
+                            f"{old_prefix}."
+                        ):
+                            offenders.append(
+                                f"{path.relative_to(PROJECT_ROOT)}:{node.lineno}"
+                            )
+
+    assert offenders == []
+
+
+def test_neutral_config_decoder_depends_only_on_the_standard_library() -> None:
+    """@brief 共享 JSONC 只拥有语法，不反向依赖任一可执行程序 / Shared JSONC owns syntax only and does not depend on an executable package.
+
+    @return None / None.
+    """
+
+    offenders: list[str] = []
+    for path in CONFIG_ROOT.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported = (alias.name.partition(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                imported = ((node.module or "").partition(".")[0],)
+            else:
+                continue
+            for root_module in imported:
+                if root_module not in sys.stdlib_module_names:
+                    offenders.append(
+                        f"{path.relative_to(PROJECT_ROOT)}:{node.lineno}:{root_module}"
+                    )
+
+    assert offenders == []
 
 
 def test_domain_and_application_module_state_is_not_a_mutable_literal() -> None:
@@ -874,6 +978,9 @@ def test_database_control_plane_stays_out_of_bot_package():
     assert (DBCTL_ROOT / "cli.py").is_file()
     assert (DBCTL_ROOT / "commands" / "bootstrap.py").is_file()
     assert (DBCTL_ROOT / "commands" / "migrate.py").is_file()
+    assert (DBCTL_ROOT / "commands" / "access_policy.py").is_file()
+    assert (DBCTL_ROOT / "commands" / "access_sql.py").is_file()
+    assert (DBCTL_ROOT / "commands" / "migration_execution.py").is_file()
     assert (DBCTL_ROOT / "postgres.py").is_file()
     assert not (DBCTL_ROOT / "bootstrap_postgres.py").exists()
     assert not (DBCTL_ROOT / "migrate_as_role.py").exists()
@@ -1004,7 +1111,6 @@ def test_media_picture_and_music_have_explicit_feature_ownership() -> None:
     )
     assert "from telegram" not in core_text
     assert "fogmoe_bot.infrastructure" not in core_text
-    assert "db_connection" not in core_text
 
     source_text = "\n".join(
         path.read_text(encoding="utf-8") for path in SRC_ROOT.rglob("*.py")

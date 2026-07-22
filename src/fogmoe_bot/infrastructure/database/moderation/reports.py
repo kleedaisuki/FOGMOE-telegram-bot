@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from fogmoe_bot.application.moderation.ports import ReportRepository
 from fogmoe_bot.domain.moderation.reporting import ReportKey, ReportRegistration
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 class PostgresModerationReportRepository(ReportRepository):
@@ -24,8 +24,8 @@ class PostgresModerationReportRepository(ReportRepository):
         if deduplication_window <= timedelta(0):
             raise ValueError("deduplication_window must be positive")
         timestamp = _utc(now)
-        async with db_connection.transaction() as connection:
-            row = await db_connection.fetch_one(
+        async with db.transaction() as connection:
+            row = await db.fetch_one(
                 "INSERT INTO moderation.reports "
                 "(chat_id, message_id, reporter_id, created_at) VALUES (%s, %s, %s, %s) "
                 "ON CONFLICT (chat_id, message_id, reporter_id) DO UPDATE SET "

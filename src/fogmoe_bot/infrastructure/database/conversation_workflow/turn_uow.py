@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from fogmoe_bot.domain.conversation.errors import (
+    ConcurrentTurnUpdateError,
+    IdempotencyConflictError,
+    TurnNotFoundError,
+)
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     ConversationMessageId,
@@ -12,23 +17,18 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnSource,
     UpdateId,
 )
-from fogmoe_bot.domain.conversation.turn import (
-    TERMINAL_TURN_STATES,
-    ConversationTurn,
-    TurnState,
-)
 from fogmoe_bot.domain.conversation.message import (
     ConversationMessage,
     MessageAppendResult,
     MessageDraft,
     MessageRole,
 )
-from fogmoe_bot.domain.conversation.errors import (
-    ConcurrentTurnUpdateError,
-    IdempotencyConflictError,
-    TurnNotFoundError,
+from fogmoe_bot.domain.conversation.turn import (
+    TERMINAL_TURN_STATES,
+    ConversationTurn,
+    TurnState,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 from .common import (
     _datetime,
@@ -41,7 +41,6 @@ from .common import (
     _text,
     _uuid,
 )
-
 
 _TURN_COLUMNS = (
     "turn_id, conversation_id, source_kind, source_key, source_update_id, "
@@ -61,7 +60,7 @@ async def _load_turn_for_mutation(
 ) -> ConversationTurn:
     """@brief 锁定并读取一个回合 / Lock and load one turn."""
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         _TURN_SELECT + " WHERE turn_id = CAST(%s AS UUID) FOR UPDATE",
         (str(turn_id),),
         connection=connection,
@@ -80,7 +79,7 @@ async def _persist_turn(
     """@brief 以 expected version 持久化回合 / Persist a turn at an expected version."""
 
     completed_at = updated.updated_at if updated.state in TERMINAL_TURN_STATES else None
-    rowcount = await db_connection.execute(
+    rowcount = await db.execute(
         "UPDATE conversation.conversation_turns "
         "SET state = %s, version = %s, inference_attempts = %s, "
         "delivery_attempts = %s, next_retry_at = %s, last_error = %s, "
@@ -119,7 +118,7 @@ async def _append_message(
         _validate_message_idempotency(existing, draft)
         return MessageAppendResult(existing, False)
 
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (str(draft.conversation_id),),
         connection=connection,
@@ -130,7 +129,7 @@ async def _append_message(
         _validate_message_idempotency(existing, draft)
         return MessageAppendResult(existing, False)
 
-    sequence_row = await db_connection.fetch_one(
+    sequence_row = await db.fetch_one(
         "SELECT COALESCE(MAX(sequence), 0) + 1 "
         "FROM conversation.conversation_messages WHERE conversation_id = %s",
         (str(draft.conversation_id),),
@@ -139,7 +138,7 @@ async def _append_message(
     if sequence_row is None:
         raise RuntimeError("Could not allocate a conversation message sequence")
     sequence = _integer(sequence_row[0])
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "INSERT INTO conversation.conversation_messages "
         "(message_id, conversation_id, sequence, turn_id, source_update_id, "
         "role, content, idempotency_key, created_at) "
@@ -190,7 +189,7 @@ async def _find_message(
 ) -> object | None:
     """@brief 通过实体 ID 或幂等键寻找消息 / Find a message by entity ID or idempotency key."""
 
-    row: object | None = await db_connection.fetch_one(
+    row: object | None = await db.fetch_one(
         "SELECT message_id, conversation_id, sequence, turn_id, source_update_id, "
         "role, content, idempotency_key, created_at "
         "FROM conversation.conversation_messages "

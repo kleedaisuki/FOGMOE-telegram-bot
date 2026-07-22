@@ -11,10 +11,10 @@ must fail closed on read. Successful payments also rely on the partial unique co
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-import json
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -56,7 +56,7 @@ from fogmoe_bot.domain.billing.orders import (
     PaymentProvider,
 )
 from fogmoe_bot.domain.billing.refunds import Refund, RefundStatus
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 class _BillingConflictError(ValueError):
@@ -89,7 +89,7 @@ class PostgresBillingCatalog:
         """
 
         normalized_created_at = _as_utc(created_at)
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO billing.products ("
             "product_id, code, display_name, kind, status, description, created_at, "
             "retired_at, version, updated_at"
@@ -121,8 +121,8 @@ class PostgresBillingCatalog:
         """
 
         period_seconds = _subscription_period_seconds(offer.subscription_period)
-        async with db_connection.transaction() as connection:
-            product = await db_connection.fetch_one(
+        async with db.transaction() as connection:
+            product = await db.fetch_one(
                 "SELECT kind, status FROM billing.products WHERE product_id = %s "
                 "FOR KEY SHARE",
                 (offer.product_id,),
@@ -134,7 +134,7 @@ class PostgresBillingCatalog:
                 raise ValueError("Billing offer kind does not match its product")
             if str(product[1]) != ProductStatus.ACTIVE.value:
                 raise ValueError("Cannot create an offer for a retired product")
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO billing.offers ("
                 "offer_id, product_id, product_kind, currency, price_units, "
                 "entitlement_codes, created_at, subscription_period_seconds, "
@@ -166,7 +166,7 @@ class PostgresBillingCatalog:
         @return 发生状态变迁时为 True / True when a state transition occurred.
         """
 
-        changed = await db_connection.execute(
+        changed = await db.execute(
             "UPDATE billing.products SET status = 'retired', retired_at = %s, "
             "version = version + 1, updated_at = CURRENT_TIMESTAMP "
             "WHERE product_id = %s AND status = 'active'",
@@ -182,7 +182,7 @@ class PostgresBillingCatalog:
         @return 发生状态变迁时为 True / True when a state transition occurred.
         """
 
-        changed = await db_connection.execute(
+        changed = await db.execute(
             "UPDATE billing.offers SET status = 'retired', retired_at = %s, "
             "version = version + 1, updated_at = CURRENT_TIMESTAMP "
             "WHERE offer_id = %s AND status = 'active'",
@@ -197,7 +197,7 @@ class PostgresBillingCatalog:
         @return 报价；不存在时为 None / Offer, or None when absent.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT offer_id, product_id, product_kind, currency, price_units, "
             "entitlement_codes, created_at, subscription_period_seconds, "
             "available_from, available_until, status "
@@ -225,7 +225,7 @@ class PostgresBillingOperations(BillingOperations):
 
         operation_kind = "order.place"
         request_fingerprint = _place_order_request_fingerprint(command)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_idempotency_key(command.idempotency_key, connection)
             try:
                 replay = await _load_receipt(
@@ -309,7 +309,7 @@ class PostgresBillingOperations(BillingOperations):
 
         operation_kind = "payment_event.record"
         request_fingerprint = _record_payment_event_request_fingerprint(command)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_idempotency_key(command.idempotency_key, connection)
             try:
                 replay = await _load_receipt(
@@ -431,7 +431,7 @@ class PostgresBillingOperations(BillingOperations):
 
         operation_kind = "order.fulfill"
         request_fingerprint = _fulfill_order_request_fingerprint(command)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_idempotency_key(command.idempotency_key, connection)
             try:
                 replay = await _load_receipt(
@@ -483,7 +483,7 @@ class PostgresBillingOperations(BillingOperations):
 
         operation_kind = "refund.request"
         request_fingerprint = _request_refund_request_fingerprint(command)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_idempotency_key(command.idempotency_key, connection)
             try:
                 replay = await _load_receipt(
@@ -544,7 +544,7 @@ class PostgresBillingOperations(BillingOperations):
 
         operation_kind = "refund.review"
         request_fingerprint = _review_refund_request_fingerprint(command)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_idempotency_key(command.idempotency_key, connection)
             try:
                 replay = await _load_receipt(
@@ -619,7 +619,7 @@ class PostgresBillingOperations(BillingOperations):
 
         operation_kind = "refund.settle"
         request_fingerprint = _settle_refund_request_fingerprint(command)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_idempotency_key(command.idempotency_key, connection)
             try:
                 replay = await _load_receipt(
@@ -725,7 +725,7 @@ class PostgresBillingOperations(BillingOperations):
 
         operation_kind = "subscription.cancel"
         request_fingerprint = _cancel_subscription_request_fingerprint(command)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_idempotency_key(command.idempotency_key, connection)
             try:
                 replay = await _load_receipt(
@@ -789,7 +789,7 @@ class PostgresBillingOperations(BillingOperations):
         """
 
         normalized_observed_at = _as_utc(observed_at)
-        rows = await db_connection.fetch_all(
+        rows = await db.fetch_all(
             "SELECT grant_id, code, scope, subject_id, source_order_id, starts_at, "
             "expires_at, status, ended_at, revocation_reason, version "
             "FROM billing.entitlement_grants "
@@ -1171,7 +1171,7 @@ async def _identity_exists(user_id: int, connection: AsyncConnection) -> bool:
     @return 用户存在时为 True / True when user exists.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT 1 FROM identity.users WHERE id = %s",
         (user_id,),
         connection=connection,
@@ -1190,7 +1190,7 @@ async def _lock_idempotency_key(
     @return None / None.
     """
 
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (f"billing:receipt:{idempotency_key}",),
         connection=connection,
@@ -1208,7 +1208,7 @@ async def _lock_provider_event(
     @return None / None.
     """
 
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (f"billing:provider-event:{event.receipt_key}",),
         connection=connection,
@@ -1232,7 +1232,7 @@ async def _lock_successful_payment(
 
     if event.kind is not PaymentEventKind.PAYMENT_SUCCEEDED:
         raise ValueError("Only successful payments have a payment-ownership lock")
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (
             "billing:successful-payment:"
@@ -1261,7 +1261,7 @@ async def _load_receipt(
         Raised when one idempotency key changes operation, actor, or command semantics.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT operation_kind, actor_id, request_fingerprint, result "
         "FROM billing.operation_receipts WHERE idempotency_key = %s",
         (idempotency_key,),
@@ -1312,7 +1312,7 @@ async def _save_receipt(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO billing.operation_receipts "
         "(idempotency_key, operation_kind, actor_id, request_fingerprint, result) "
         "VALUES (%s, %s, %s, %s, CAST(%s AS JSONB))",
@@ -1342,7 +1342,7 @@ async def _lock_sellable_offer(
     @return 可售报价；不可售或不存在时为 None / Sellable offer, or None when unavailable or absent.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT offer.offer_id, offer.product_id, offer.product_kind, offer.currency, "
         "offer.price_units, offer.entitlement_codes, offer.created_at, "
         "offer.subscription_period_seconds, offer.available_from, offer.available_until, "
@@ -1371,7 +1371,7 @@ async def _load_order_offer(
     @return 匹配报价；目录损坏时为 None / Matching offer, or None on catalog corruption.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT offer.offer_id, offer.product_id, offer.product_kind, offer.currency, "
         "offer.price_units, offer.entitlement_codes, offer.created_at, "
         "offer.subscription_period_seconds, offer.available_from, offer.available_until, "
@@ -1438,7 +1438,7 @@ async def _select_order(
     """
 
     lock_clause = " FOR UPDATE OF orders" if for_update else ""
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT orders.order_id, orders.buyer_id, orders.product_id, orders.offer_id, "
         "orders.renewal_subscription_id, orders.product_kind, orders.currency, "
         "orders.price_units, orders.status, orders.created_at, orders.payment_provider, "
@@ -1501,7 +1501,7 @@ async def _select_refund(
     """
 
     lock_clause = " FOR UPDATE" if for_update else ""
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT refund_id, order_id, requester_id, currency, amount_units, reason, "
         "status, requested_at, reviewer_id, reviewed_at, review_note, "
         "settlement_provider, provider_settlement_id, settled_at, cancelled_at, version "
@@ -1551,7 +1551,7 @@ async def _has_open_renewal_order(
         database partial unique index protects concurrent writes that bypass this path.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT 1 FROM billing.orders "
         "WHERE renewal_subscription_id = %s "
         "AND status IN ('awaiting_payment', 'paid', 'refund_pending') "
@@ -1599,7 +1599,7 @@ async def _select_subscription(
     """
 
     lock_clause = " FOR UPDATE OF subscriptions" if for_update else ""
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT subscriptions.subscription_id, subscriptions.owner_id, "
         "subscriptions.product_id, subscriptions.offer_id, subscriptions.source_order_id, "
         "subscriptions.current_order_id, subscriptions.period_starts_at, "
@@ -1631,7 +1631,7 @@ async def _current_subscription_order_id(
     @raise RuntimeError 锁定订阅消失时抛出 / Raised when locked subscription disappears.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT current_order_id FROM billing.subscriptions WHERE subscription_id = %s",
         (subscription_id,),
         connection=connection,
@@ -1655,7 +1655,7 @@ async def _lock_active_order_entitlements(
     @return 已锁定有效权益 / Locked active entitlements.
     """
 
-    rows = await db_connection.fetch_all(
+    rows = await db.fetch_all(
         "SELECT grant_id, code, scope, subject_id, source_order_id, starts_at, "
         "expires_at, status, ended_at, revocation_reason, version "
         "FROM billing.entitlement_grants WHERE source_order_id = %s "
@@ -1679,7 +1679,7 @@ async def _load_provider_event(
     @return 已记录事实；不存在时为 None / Recorded fact, or None when absent.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT event_id, provider, provider_event_id, provider_payment_id, order_id, "
         "refund_id, event_kind, currency, amount_units, occurred_at "
         "FROM billing.payment_events WHERE provider = %s AND provider_event_id = %s",
@@ -1709,7 +1709,7 @@ async def _load_successful_payment(
 
     if event.kind is not PaymentEventKind.PAYMENT_SUCCEEDED:
         raise ValueError("Only successful payments can have payment ownership")
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT event_id, provider, provider_event_id, provider_payment_id, order_id, "
         "refund_id, event_kind, currency, amount_units, occurred_at "
         "FROM billing.payment_events WHERE provider = %s "
@@ -1820,7 +1820,7 @@ async def _insert_order_from_offer(
         created_at=command.created_at,
         renewal_subscription_id=command.renewal_subscription_id,
     )
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO billing.orders ("
         "order_id, buyer_id, product_id, offer_id, renewal_subscription_id, "
         "product_kind, currency, price_units, status, created_at, version, updated_at"
@@ -1853,7 +1853,7 @@ async def _persist_order(order: Order, connection: AsyncConnection) -> None:
         Raised when order unexpectedly changes while locked.
     """
 
-    changed = await db_connection.execute(
+    changed = await db.execute(
         "UPDATE billing.orders SET status = %s, payment_provider = %s, "
         "provider_payment_id = %s, paid_at = %s, fulfilled_at = %s, "
         "refund_requested_at = %s, refunded_at = %s, cancelled_at = %s, "
@@ -1895,7 +1895,7 @@ async def _insert_payment_event(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO billing.payment_events ("
         "event_id, provider, provider_event_id, provider_payment_id, order_id, "
         "refund_id, event_kind, currency, amount_units, occurred_at"
@@ -1934,7 +1934,7 @@ async def _insert_fulfillment(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO billing.fulfillments "
         "(fulfillment_id, order_id, operator_id, fulfilled_at) "
         "VALUES (%s, %s, %s, %s)",
@@ -1956,7 +1956,7 @@ async def _insert_entitlement(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO billing.entitlement_grants ("
         "grant_id, code, scope, subject_id, source_order_id, fulfillment_id, "
         "starts_at, expires_at, status, ended_at, revocation_reason, version, updated_at"
@@ -1992,7 +1992,7 @@ async def _persist_entitlement(
         Raised when entitlement unexpectedly changes while locked.
     """
 
-    changed = await db_connection.execute(
+    changed = await db.execute(
         "UPDATE billing.entitlement_grants SET status = %s, ended_at = %s, "
         "revocation_reason = %s, version = %s, updated_at = CURRENT_TIMESTAMP "
         "WHERE grant_id = %s AND version = %s",
@@ -2024,7 +2024,7 @@ async def _insert_subscription(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO billing.subscriptions ("
         "subscription_id, owner_id, product_id, offer_id, source_order_id, "
         "current_order_id, period_starts_at, period_ends_at, status, "
@@ -2065,7 +2065,7 @@ async def _persist_subscription(
         Raised when subscription unexpectedly changes while locked.
     """
 
-    changed = await db_connection.execute(
+    changed = await db.execute(
         "UPDATE billing.subscriptions SET current_order_id = %s, period_starts_at = %s, "
         "period_ends_at = %s, status = %s, cancellation_requested_at = %s, "
         "ended_at = %s, revocation_reason = %s, version = %s, "
@@ -2106,7 +2106,7 @@ async def _insert_subscription_period(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO billing.subscription_periods "
         "(subscription_id, order_id, period_starts_at, period_ends_at) "
         "VALUES (%s, %s, %s, %s)",
@@ -2133,7 +2133,7 @@ async def _attach_subscription_entitlement(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO billing.subscription_entitlement_grants "
         "(subscription_id, source_order_id, grant_id, attached_at) "
         "VALUES (%s, %s, %s, %s)",
@@ -2150,7 +2150,7 @@ async def _insert_refund(refund: Refund, connection: AsyncConnection) -> None:
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO billing.refunds ("
         "refund_id, order_id, requester_id, currency, amount_units, reason, status, "
         "requested_at, reviewer_id, reviewed_at, review_note, settlement_provider, "
@@ -2192,7 +2192,7 @@ async def _persist_refund(refund: Refund, connection: AsyncConnection) -> None:
         Raised when refund unexpectedly changes while locked.
     """
 
-    changed = await db_connection.execute(
+    changed = await db.execute(
         "UPDATE billing.refunds SET status = %s, reviewer_id = %s, reviewed_at = %s, "
         "review_note = %s, settlement_provider = %s, provider_settlement_id = %s, "
         "settled_at = %s, cancelled_at = %s, version = %s, "

@@ -9,8 +9,8 @@ from datetime import datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
 
-from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.application.retrieval import (
     CONVERSATION_TURN_SOURCE_KIND,
@@ -20,7 +20,6 @@ from fogmoe_bot.application.retrieval import (
     RetrievalIOError,
     StaleVectorClaimError,
 )
-from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.retrieval import (
     EmbeddingSpace,
     EmbeddingVector,
@@ -29,9 +28,9 @@ from fogmoe_bot.domain.retrieval import (
     RetrievalScope,
     RetrievalScopeKind,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.domain.temporal import ensure_utc
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.retrieval_scope import lock_retrieval_scope
-
 
 _PASSAGE_COLUMNS = (
     "passage_id, corpus_id, scope_kind, scope_id, source_kind, source_id, ordinal, "
@@ -64,7 +63,7 @@ class PostgresEpisodicSource:
             raise ValueError("Episodic format_version must be positive")
         if not 1 <= limit <= 128:
             raise ValueError("Episodic source limit must be between 1 and 128")
-        rows = await db_connection.fetch_all(
+        rows = await db.fetch_all(
             "WITH candidates AS ("
             "SELECT activity.turn_id, "
             "CASE WHEN COALESCE(activity.request #>> '{scope,is_group}', 'false') = 'true' "
@@ -147,8 +146,8 @@ class PostgresRetrievalStore:
 
         if space.dimensions != 1024:
             raise ValueError("PostgreSQL retrieval schema v1 requires 1024 dimensions")
-        async with db_connection.transaction() as connection:
-            await db_connection.execute(
+        async with db.transaction() as connection:
+            await db.execute(
                 "INSERT INTO retrieval.embedding_spaces "
                 "(space_id, model, dimensions, distance_metric, query_instruction, "
                 "passage_format_version) VALUES (%s, %s, %s, 'cosine', %s, %s) "
@@ -162,7 +161,7 @@ class PostgresRetrievalStore:
                 ),
                 connection=connection,
             )
-            row = await db_connection.fetch_one(
+            row = await db.fetch_one(
                 "SELECT model, dimensions, distance_metric, query_instruction, "
                 "passage_format_version FROM retrieval.embedding_spaces "
                 "WHERE space_id = %s FOR UPDATE",
@@ -180,7 +179,7 @@ class PostgresRetrievalStore:
                 raise RuntimeError(
                     f"Embedding space contract drifted: {space.space_id}"
                 )
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO retrieval.passage_vectors "
                 "(passage_id, space_id, status, version, attempt_count, next_attempt_at, "
                 "created_at, updated_at) SELECT passage.passage_id, %s, 'pending', 0, 0, "
@@ -211,9 +210,9 @@ class PostgresRetrievalStore:
             raise ValueError("Episodic projection requires at least one passage")
         _validate_projection(turn, canonical, space)
         source_digest = _projection_digest(canonical)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await lock_retrieval_scope(connection, turn.scope)
-            boundary = await db_connection.fetch_one(
+            boundary = await db.fetch_one(
                 "SELECT forgotten_through "
                 "FROM retrieval.scope_forgetting_boundaries "
                 "WHERE scope_kind = %s AND scope_id = %s",
@@ -226,7 +225,7 @@ class PostgresRetrievalStore:
                     raise TypeError("Retrieval forgetting boundary must be a datetime")
                 if turn.occurred_at <= ensure_utc(forgotten_through):
                     return
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO retrieval.source_projections "
                 "(corpus_id, scope_kind, scope_id, personal_user_id, source_kind, "
                 "source_id, format_version, source_digest, projected_at) "
@@ -245,7 +244,7 @@ class PostgresRetrievalStore:
                 ),
                 connection=connection,
             )
-            existing = await db_connection.fetch_one(
+            existing = await db.fetch_one(
                 "SELECT scope_kind, scope_id, personal_user_id, source_digest "
                 "FROM retrieval.source_projections "
                 "WHERE corpus_id = %s AND source_kind = %s "
@@ -288,7 +287,7 @@ class PostgresRetrievalStore:
         @return None / None.
         """
 
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO retrieval.passages "
             "(passage_id, corpus_id, scope_kind, scope_id, personal_user_id, source_kind, "
             "source_id, ordinal, format_version, content_text, content_digest, occurred_at, "
@@ -312,7 +311,7 @@ class PostgresRetrievalStore:
             ),
             connection=connection,
         )
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT corpus_id, scope_kind, scope_id, source_kind, source_id, ordinal, "
             "format_version, content_text, content_digest, occurred_at "
             "FROM retrieval.passages WHERE passage_id = CAST(%s AS UUID)",
@@ -323,7 +322,7 @@ class PostgresRetrievalStore:
             passage
         ):
             raise RuntimeError(f"Retrieval passage drifted: {passage.passage_id}")
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO retrieval.passage_vectors "
             "(passage_id, space_id, status, version, attempt_count, next_attempt_at, "
             "created_at, updated_at) VALUES (CAST(%s AS UUID), %s, 'pending', 0, 0, "
@@ -356,8 +355,8 @@ class PostgresRetrievalStore:
             raise ValueError("Vector claim bounds are invalid")
         lease_expires_at = timestamp + lease_for
         claims: list[PassageVectorClaim] = []
-        async with db_connection.transaction() as connection:
-            candidates = await db_connection.fetch_all(
+        async with db.transaction() as connection:
+            candidates = await db.fetch_all(
                 "SELECT vector.passage_id FROM retrieval.passage_vectors AS vector "
                 "WHERE vector.space_id = %s AND vector.status IN ('pending', 'retry_wait') "
                 "AND vector.next_attempt_at <= %s ORDER BY vector.next_attempt_at, "
@@ -368,7 +367,7 @@ class PostgresRetrievalStore:
             for candidate in candidates:
                 passage_id = _uuid(_row_values(candidate, 1)[0])
                 token = uuid4()
-                row = await db_connection.fetch_one(
+                row = await db.fetch_one(
                     "UPDATE retrieval.passage_vectors SET status = 'processing', "
                     "version = version + 1, attempt_count = attempt_count + 1, "
                     "next_attempt_at = NULL, claim_token = CAST(%s AS UUID), "
@@ -386,7 +385,7 @@ class PostgresRetrievalStore:
                 )
                 if row is None:
                     raise RuntimeError("Locked vector candidate was not claimable")
-                passage_row = await db_connection.fetch_one(
+                passage_row = await db.fetch_one(
                     "SELECT " + _PASSAGE_COLUMNS + " FROM retrieval.passages "
                     "WHERE passage_id = CAST(%s AS UUID)",
                     (str(passage_id),),
@@ -414,12 +413,13 @@ class PostgresRetrievalStore:
         """@brief fenced 保存完整向量 / Persist a complete vector with fencing.
 
         @return None / None.
-        @raise StaleVectorClaimError claim 过期 / Stale claim.
+        @raise StaleVectorClaimError recovery/reclaim 后 claim token 已非当前 owner /
+            Claim token no longer identifies the current owner after recovery or reclaim.
         """
 
         vector.require_space(claim.space)
         timestamp = ensure_utc(completed_at)
-        rowcount = await db_connection.execute(
+        rowcount = await db.execute(
             "UPDATE retrieval.passage_vectors SET status = 'completed', "
             "version = version + 1, embedding = CAST(%s AS vector), "
             "claim_token = NULL, lease_expires_at = NULL, completed_at = %s, "
@@ -493,7 +493,7 @@ class PostgresRetrievalStore:
         message = error.strip()[:1_000]
         if not message:
             raise ValueError("Vector failure error cannot be blank")
-        rowcount = await db_connection.execute(
+        rowcount = await db.execute(
             "UPDATE retrieval.passage_vectors SET status = %s, version = version + 1, "
             "next_attempt_at = %s, claim_token = NULL, lease_expires_at = NULL, "
             "last_error = %s, updated_at = %s WHERE passage_id = CAST(%s AS UUID) "
@@ -526,7 +526,7 @@ class PostgresRetrievalStore:
         """
 
         timestamp = ensure_utc(now)
-        return await db_connection.execute(
+        return await db.execute(
             "UPDATE retrieval.passage_vectors SET status = 'retry_wait', "
             "version = version + 1, next_attempt_at = %s, claim_token = NULL, "
             "lease_expires_at = NULL, updated_at = %s, "
@@ -553,7 +553,7 @@ class PostgresRetrievalStore:
             raise ValueError("Retrieval limit must be between 1 and 384")
         query_vector.require_space(space)
         try:
-            rows = await db_connection.fetch_all(
+            rows = await db.fetch_all(
                 "SELECT "
                 + ", ".join(
                     f"passage.{column.strip()}"

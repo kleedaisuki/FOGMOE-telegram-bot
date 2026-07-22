@@ -9,25 +9,25 @@ from typing import cast
 from uuid import uuid4
 
 import pytest
+from postgres_test_support import configure_bot_database
 
+from fogmoe_bot.application.assistant.temporal_memory import TemporalMemoryReader
 from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectRequest,
     ToolExecutionContext,
 )
-from fogmoe_bot.application.assistant.temporal_memory import TemporalMemoryReader
-from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.application.scheduling.service import SchedulingService
-from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
     TurnId,
 )
+from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.temporal import UTC_TIME_ZONE
 from fogmoe_bot.infrastructure.assistant.tool_operations.dispatcher import (
     AssistantToolOperationDispatcher,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.assistant_tool_effects import (
     PostgresAssistantToolStore,
@@ -39,7 +39,6 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
 from fogmoe_bot.infrastructure.database.group_message_projection import (
     PostgresGroupMessageProjection,
 )
-from postgres_test_support import configure_bot_database
 
 
 class _External:
@@ -155,15 +154,15 @@ def test_diary_and_schedule_share_atomic_receipt_transactions(
             request_hash="b" * 64,
         )
         try:
-            async with db_connection.transaction() as connection:
-                await db_connection.execute(
+            async with db.transaction() as connection:
+                await db.execute(
                     "INSERT INTO identity.users "
                     "(id, tg_uid, provider, name) "
                     "VALUES (%s, %s, 'telegram', %s)",
                     (user_id, user_id, f"atomic_{suffix}"),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "INSERT INTO conversation.conversation_turns "
                     "(turn_id, conversation_id, source_kind, source_key, "
                     "source_update_id, state) VALUES "
@@ -184,25 +183,25 @@ def test_diary_and_schedule_share_atomic_receipt_transactions(
                 assert first.replayed is False
                 assert replay.replayed is True
                 assert replay.result == first.result
-            diary_row = await db_connection.fetch_one(
+            diary_row = await db.fetch_one(
                 "SELECT content FROM conversation.ai_user_diary_pages "
                 "WHERE user_id = %s AND page_no = 1",
                 (user_id,),
             )
             assert diary_row is not None and diary_row[0] == "durable note"
-            schedule_row = await db_connection.fetch_one(
+            schedule_row = await db.fetch_one(
                 "SELECT status, trigger_reason, instruction "
                 "FROM scheduling.assistant_schedules WHERE creator_user_id = %s",
                 (user_id,),
             )
             assert schedule_row is not None
             assert tuple(schedule_row) == ("pending", "contract test", "say hello")
-            bank_entries = await db_connection.fetch_one(
+            bank_entries = await db.fetch_one(
                 "SELECT count(*) FROM bank.ledger_entries WHERE actor_id = %s",
                 (user_id,),
             )
             assert bank_entries is not None and bank_entries[0] == 0
-            receipts = await db_connection.fetch_all(
+            receipts = await db.fetch_all(
                 "SELECT status, attempt_count FROM assistant.tool_effect_receipts "
                 "WHERE turn_id = CAST(%s AS UUID) ORDER BY invocation_id",
                 (str(turn_id),),
@@ -212,25 +211,25 @@ def test_diary_and_schedule_share_atomic_receipt_transactions(
                 ("succeeded", 1),
             ]
         finally:
-            async with db_connection.transaction() as connection:
-                await db_connection.execute(
+            async with db.transaction() as connection:
+                await db.execute(
                     "DELETE FROM conversation.conversation_turns "
                     "WHERE turn_id = CAST(%s AS UUID)",
                     (str(turn_id),),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM conversation.ai_user_diary_pages WHERE user_id = %s",
                     (user_id,),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM scheduling.assistant_schedules "
                     "WHERE creator_user_id = %s",
                     (user_id,),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM identity.users WHERE id = %s",
                     (user_id,),
                     connection=connection,

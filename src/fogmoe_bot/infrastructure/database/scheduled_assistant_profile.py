@@ -9,13 +9,9 @@ from fogmoe_bot.application.assistant.inference_command import (
 from fogmoe_bot.application.conversation.assistant_ingress import (
     normalize_assistant_personal_info,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import assistant_user_context, db
 from fogmoe_bot.infrastructure.database.account_plan import (
     TransactionalAccountPlanResolver,
-)
-from fogmoe_bot.infrastructure.database.repositories import (
-    conversation_repository,
-    user_repository,
 )
 from fogmoe_bot.infrastructure.database.user_profile.store import (
     PostgresUserProfileStore,
@@ -23,7 +19,15 @@ from fogmoe_bot.infrastructure.database.user_profile.store import (
 
 
 class PostgresScheduledAssistantProfileReader:
-    """@brief 在一个只读快照中装配定时回合用户上下文 / Assemble scheduled-turn user context in one read snapshot."""
+    """@brief 在一个可重复读只读快照中装配定时回合用户上下文 / Assemble scheduled-turn user context in one repeatable-read, read-only snapshot.
+
+    @note 事务第一条语句设置 PostgreSQL ``REPEATABLE READ, READ ONLY``，因此后续 Identity、
+        Bank、User Profile、Conversation 与 Billing 查询共享首个事实查询时冻结的 snapshot，
+        同时继续复用各 bounded context 的权威映射与业务策略。/ The first statement selects
+        PostgreSQL ``REPEATABLE READ, READ ONLY``; subsequent Identity, Bank, User Profile,
+        Conversation, and Billing reads therefore share the snapshot frozen by the first fact query
+        while continuing to reuse each bounded context's authoritative mapping and policy.
+    """
 
     def __init__(
         self,
@@ -47,38 +51,42 @@ class PostgresScheduledAssistantProfileReader:
         @return 严格用户快照；账户不存在时为 None / Strict user snapshot, or None when absent.
         """
 
-        async with db_connection.transaction() as connection:
-            account = await user_repository.fetch_user_account(
+        async with db.transaction() as connection:
+            await db.execute(
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+                connection=connection,
+            )
+            snapshot = await assistant_user_context.fetch_assistant_user_snapshot(
                 user_id,
                 connection=connection,
             )
-            if account is None:
+            if snapshot is None:
                 return None
             profile = await self._profiles.read_profile_in_transaction(
                 user_id, connection=connection
             )
-            diary_exists = await conversation_repository.user_diary_exists(
+            diary_exists = await assistant_user_context.assistant_diary_exists(
                 user_id,
                 connection=connection,
             )
             plan = await self._plans.resolve(user_id, connection=connection)
 
-        display_name = account.name.strip()[:256] or f"user-{user_id}"
-        username_candidate = account.name.strip()
+        display_name = snapshot.name.strip()[:256] or f"user-{user_id}"
+        username_candidate = snapshot.name.strip()
         username = username_candidate if 1 <= len(username_candidate) <= 64 else None
         return DurableAssistantUser(
             user_id=user_id,
             username=username,
             display_name=display_name,
-            coins=account.total_coins,
+            coins=snapshot.total_coins,
             plan=plan,
-            permission=account.permission,
+            permission=snapshot.permission,
             profile=(
                 DurableUserProfile.from_snapshot(profile)
                 if profile is not None
                 else None
             ),
-            personal_info=normalize_assistant_personal_info(account.info),
+            personal_info=normalize_assistant_personal_info(snapshot.info),
             diary_exists=diary_exists,
         )
 

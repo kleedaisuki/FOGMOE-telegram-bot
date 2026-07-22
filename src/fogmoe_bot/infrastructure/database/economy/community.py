@@ -23,7 +23,7 @@ from fogmoe_bot.domain.banking.money import (
     TokenAmount,
     TokenBucket,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.banking import (
     lock_bank_account_balances,
     post_bank_transfer,
@@ -53,9 +53,9 @@ class PostgresCommunityOperations(CommunityOperations):
         """
 
         operation_kind = "coin_gift"
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_operation_key(command.idempotency_key, connection)
-            target = await db_connection.fetch_one(
+            target = await db.fetch_one(
                 "SELECT id, name FROM identity.users WHERE name = %s "
                 "ORDER BY id LIMIT 1",
                 (command.target_name,),
@@ -98,7 +98,7 @@ class PostgresCommunityOperations(CommunityOperations):
                 )
                 sender_free = balances[sender_wallet]
                 """@brief 账本稳定锁下的赠送者可用免费金币 / Sender free balance under the stable ledger lock."""
-                counter = await db_connection.fetch_one(
+                counter = await db.fetch_one(
                     "SELECT give_count FROM economy.user_give_daily "
                     "WHERE user_id = %s AND give_date = %s FOR UPDATE",
                     (command.sender_id, command.business_date),
@@ -154,7 +154,7 @@ class PostgresCommunityOperations(CommunityOperations):
                             connection=connection,
                             metadata={"burn_kind": "gift_fee"},
                         )
-                    await db_connection.execute(
+                    await db.execute(
                         "INSERT INTO economy.user_give_daily "
                         "(user_id, give_date, give_count) VALUES (%s, %s, 1) "
                         "ON CONFLICT (user_id, give_date) DO UPDATE SET "
@@ -186,7 +186,7 @@ class PostgresCommunityOperations(CommunityOperations):
         """
 
         operation_kind = "coin_leaderboard"
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_operation_key(command.idempotency_key, connection)
             if not await _registered_user_exists(command.requester_id, connection):
                 return LeaderboardResult(EconomyCode.NOT_REGISTERED)
@@ -198,7 +198,7 @@ class PostgresCommunityOperations(CommunityOperations):
             )
             if replay is not None:
                 return _leaderboard_from_mapping(command, replay, replayed=True)
-            rows = await db_connection.fetch_all(
+            rows = await db.fetch_all(
                 "SELECT users.name, COALESCE(SUM(balances.balance), 0) AS total "
                 "FROM identity.users AS users "
                 "LEFT JOIN bank.accounts AS accounts "
@@ -236,7 +236,7 @@ class PostgresCommunityOperations(CommunityOperations):
         @return 领取结果 / Claim result.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_operation_key(command.idempotency_key, connection)
             if not await _registered_user_exists(command.user_id, connection):
                 return TaskClaimResult(EconomyCode.NOT_REGISTERED)
@@ -246,7 +246,7 @@ class PostgresCommunityOperations(CommunityOperations):
                     EconomyCode(str(replay["code"])),
                     reward=int(replay.get("reward", 0)),
                 )
-            inserted = await db_connection.execute(
+            inserted = await db.execute(
                 "INSERT INTO economy.user_task (user_id, task_id) VALUES (%s, %s) "
                 "ON CONFLICT (user_id, task_id) DO NOTHING",
                 (command.user_id, command.task_id),

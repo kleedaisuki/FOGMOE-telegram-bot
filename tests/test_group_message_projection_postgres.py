@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
 import os
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -14,7 +14,6 @@ from fogmoe_bot.application.chat.group_messages import (
     GroupMessageObservation,
 )
 from fogmoe_bot.infrastructure.database import db
-from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.group_message_projection import (
     PostgresGroupMessageProjection,
 )
@@ -38,7 +37,7 @@ def test_projection_replay_edit_order_and_context_window_are_canonical() -> None
         now = datetime.now(UTC)
         projection = PostgresGroupMessageProjection()
         try:
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO identity.users "
                 "(id, tg_uid, provider, name) "
                 "VALUES (%s, %s, 'telegram', %s)",
@@ -113,7 +112,7 @@ def test_projection_replay_edit_order_and_context_window_are_canonical() -> None
                 )
             )
 
-            rows = await db_connection.fetch_all(
+            rows = await db.fetch_all(
                 "SELECT message_id, source_update_id, content, is_edited "
                 "FROM conversation.group_message_projection "
                 "WHERE group_id = %s AND is_canonical ORDER BY message_id",
@@ -145,16 +144,16 @@ def test_projection_replay_edit_order_and_context_window_are_canonical() -> None
             assert [message.message_id for message in topic_context] == [3]
             assert topic_context[0].sender_name == "Unregistered Speaker"
             assert topic_context[0].sender_username == "visitor"
-            old_relation = await db_connection.fetch_one(
+            old_relation = await db.fetch_one(
                 "SELECT to_regclass('conversation.chat_records_group')"
             )
             assert old_relation is not None and old_relation[0] is None
         finally:
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM conversation.group_message_projection WHERE group_id = %s",
                 (group_id,),
             )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM identity.users WHERE id = %s",
                 (user_id,),
             )

@@ -14,7 +14,7 @@ from fogmoe_bot.application.chat.group_messages import (
     GroupMessageKind,
     GroupMessageObservation,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 class PostgresGroupMessageProjection:
@@ -29,7 +29,7 @@ class PostgresGroupMessageProjection:
         Equal or older Updates never overwrite a newer edit; one SQL statement is the full transaction boundary.
         """
 
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO conversation.group_message_projection "
             "(group_id, message_id, message_thread_id, user_id, sender_name, "
             "sender_username, message_type, content, created_at, source_update_id, "
@@ -107,7 +107,7 @@ class PostgresGroupMessageProjection:
             if before_message_id is None
             else (group_id, message_thread_id, before_message_id, limit)
         )
-        rows = await db_connection.fetch_all(
+        rows = await db.fetch_all(
             "SELECT projection.group_id, projection.message_id, projection.user_id, "
             "projection.message_thread_id, "
             "projection.message_type, projection.content, projection.content_encoding, "

@@ -10,13 +10,14 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
+from postgres_test_support import configure_bot_database
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from fogmoe_bot.application.conversation.workflow import PreparedTurnAcceptance
 from fogmoe_bot.application.assistant.inference_command import DurableAssistantUser
-from fogmoe_bot.domain.accounts.plan import AccountPlan
+from fogmoe_bot.application.conversation.workflow import PreparedTurnAcceptance
 from fogmoe_bot.application.scheduling.assistant_ports import ScheduleDefinition
 from fogmoe_bot.application.scheduling.occurrence import prepare_scheduled_occurrence
+from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.conversation.identity import ConversationId, DeliveryStreamId
 from fogmoe_bot.domain.scheduling.assistant_schedule import (
     CalendarDaily,
@@ -29,7 +30,6 @@ from fogmoe_bot.domain.scheduling.assistant_schedule import (
     StaleScheduleClaimError,
 )
 from fogmoe_bot.domain.temporal import TimeZoneId
-from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
     PostgresTurnRepository,
@@ -40,8 +40,6 @@ from fogmoe_bot.infrastructure.scheduling.postgres import (
     PostgresScheduledOccurrenceAcceptance,
     PostgresScheduleQueue,
 )
-from postgres_test_support import configure_bot_database
-
 
 NOW = datetime(2030, 1, 2, 12, tzinfo=UTC)
 """@brief 测试共享 UTC 时刻 / UTC instant shared by tests."""
@@ -247,9 +245,9 @@ def test_catalog_binds_every_crud_query_to_the_caller_transaction(
         calls.append((sql, params, connection))
         return 1
 
-    monkeypatch.setattr(db_connection, "fetch_one", fake_fetch_one)
-    monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
-    monkeypatch.setattr(db_connection, "execute", fake_execute)
+    monkeypatch.setattr(db, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(db, "execute", fake_execute)
     catalog = PostgresScheduleCatalog(cast(AsyncConnection, connection))
     definition = _definition()
 
@@ -351,8 +349,8 @@ def test_claim_due_uses_skip_locked_head_of_line_and_distinct_uuid_token(
         returned = True
         return _row(status="processing", attempt_count=1)
 
-    monkeypatch.setattr(db_connection, "transaction", lambda: transaction)
-    monkeypatch.setattr(db_connection, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(db, "transaction", lambda: transaction)
+    monkeypatch.setattr(db, "fetch_one", fake_fetch_one)
     claims = asyncio.run(
         PostgresScheduleQueue().claim_due(
             now=NOW,
@@ -392,7 +390,7 @@ def test_every_claim_finalization_write_is_token_fenced(
         captured.append((sql, params))
         return 0
 
-    monkeypatch.setattr(db_connection, "execute", fake_execute)
+    monkeypatch.setattr(db, "execute", fake_execute)
     claim = _claim()
     with pytest.raises(StaleScheduleClaimError):
         asyncio.run(
@@ -442,9 +440,9 @@ def test_acceptance_locks_claim_accepts_turn_and_advances_cursor_in_one_transact
         executed.append((sql, params, connection))
         return 1
 
-    monkeypatch.setattr(db_connection, "transaction", lambda: transaction)
-    monkeypatch.setattr(db_connection, "fetch_one", fake_fetch_one)
-    monkeypatch.setattr(db_connection, "execute", fake_execute)
+    monkeypatch.setattr(db, "transaction", lambda: transaction)
+    monkeypatch.setattr(db, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(db, "execute", fake_execute)
     claim = _claim(cadence=FixedInterval(timedelta(hours=1)))
     prepared = cast(
         PreparedTurnAcceptance,
@@ -508,9 +506,9 @@ def test_acceptance_rolls_back_schedule_when_turn_acceptance_fails(
         writes.append(sql)
         return 1
 
-    monkeypatch.setattr(db_connection, "transaction", lambda: transaction)
-    monkeypatch.setattr(db_connection, "fetch_one", fake_fetch_one)
-    monkeypatch.setattr(db_connection, "execute", unexpected_execute)
+    monkeypatch.setattr(db, "transaction", lambda: transaction)
+    monkeypatch.setattr(db, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(db, "execute", unexpected_execute)
     claim = _claim()
     prepared = cast(
         PreparedTurnAcceptance,
@@ -557,8 +555,8 @@ def test_acceptance_rejects_a_stale_claim_before_creating_a_turn(
         del sql, params, mapping, connection
         return None
 
-    monkeypatch.setattr(db_connection, "transaction", lambda: transaction)
-    monkeypatch.setattr(db_connection, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(db, "transaction", lambda: transaction)
+    monkeypatch.setattr(db, "fetch_one", fake_fetch_one)
     claim = _claim()
     prepared = cast(
         PreparedTurnAcceptance,
@@ -603,7 +601,7 @@ def test_misfire_expiration_is_terminal_and_token_fenced(
         captured.append((sql, params))
         return 1
 
-    monkeypatch.setattr(db_connection, "execute", fake_execute)
+    monkeypatch.setattr(db, "execute", fake_execute)
     claim = _claim()
     asyncio.run(
         PostgresScheduleQueue().skip_misfire(
@@ -651,8 +649,8 @@ def test_real_postgres_claim_and_turn_acceptance_advance_one_cursor() -> None:
             time_zone=TimeZoneId("UTC"),
         )
         try:
-            async with db_connection.transaction() as connection:
-                await db_connection.execute(
+            async with db.transaction() as connection:
+                await db.execute(
                     "INSERT INTO identity.users "
                     "(id, tg_uid, provider, name) "
                     "VALUES (%s, %s, 'telegram', %s)",
@@ -695,7 +693,7 @@ def test_real_postgres_claim_and_turn_acceptance_advance_one_cursor() -> None:
                 accepted_at=observed_at,
             )
 
-            schedule_row = await db_connection.fetch_one(
+            schedule_row = await db.fetch_one(
                 "SELECT status, next_run_at, last_accepted_for, last_accepted_at, "
                 "claim_token, lease_expires_at FROM scheduling.assistant_schedules "
                 "WHERE schedule_id = %s",
@@ -710,7 +708,7 @@ def test_real_postgres_claim_and_turn_acceptance_advance_one_cursor() -> None:
                 None,
                 None,
             )
-            turn_row = await db_connection.fetch_one(
+            turn_row = await db.fetch_one(
                 "SELECT state, conversation_id FROM conversation.conversation_turns "
                 "WHERE turn_id = CAST(%s AS UUID)",
                 (str(prepared.turn.turn_id),),
@@ -718,32 +716,32 @@ def test_real_postgres_claim_and_turn_acceptance_advance_one_cursor() -> None:
             assert turn_row is not None
             assert tuple(turn_row) == ("waiting_inference", str(conversation_id))
         finally:
-            async with db_connection.transaction() as connection:
-                await db_connection.execute(
+            async with db.transaction() as connection:
+                await db.execute(
                     "DELETE FROM conversation.inference_activities "
                     "WHERE conversation_id = %s",
                     (str(conversation_id),),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM conversation.conversation_messages "
                     "WHERE conversation_id = %s",
                     (str(conversation_id),),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM conversation.conversation_turns "
                     "WHERE conversation_id = %s",
                     (str(conversation_id),),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM scheduling.assistant_schedules "
                     "WHERE creator_user_id = %s",
                     (user_id,),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM identity.users WHERE id = %s",
                     (user_id,),
                     connection=connection,

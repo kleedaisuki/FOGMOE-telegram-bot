@@ -7,7 +7,7 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.domain.accounts.plan import AccountPlan, AccountPlanPolicy
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 class TransactionalAccountPlanResolver(Protocol):
@@ -61,7 +61,7 @@ class PostgresAccountPlanResolver:
             new commercial entitlement.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT EXISTS ("
             "SELECT 1 FROM billing.subscriptions "
             "WHERE owner_id = %s AND status = 'active' "

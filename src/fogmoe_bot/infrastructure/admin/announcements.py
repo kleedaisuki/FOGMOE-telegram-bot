@@ -19,7 +19,7 @@ from fogmoe_bot.domain.admin.models import (
     AnnouncementRecipientKind,
 )
 from fogmoe_bot.domain.conversation.identity import OutboundMessageId
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 class AnnouncementIdempotencyConflict(RuntimeError):
@@ -38,8 +38,8 @@ class PostgresAdminAnnouncementOperations:
         """
 
         announcement_id = AnnouncementId.for_idempotency_key(command.idempotency_key)
-        async with db_connection.transaction() as connection:
-            inserted_row = await db_connection.fetch_one(
+        async with db.transaction() as connection:
+            inserted_row = await db.fetch_one(
                 "INSERT INTO admin.announcements "
                 "(announcement_id, idempotency_key, requested_by, source_update_id, "
                 "body, recipient_count, state, created_at, updated_at) "
@@ -63,7 +63,7 @@ class PostgresAdminAnnouncementOperations:
                     announcement_id=announcement_id,
                     command=command,
                 )
-            row = await db_connection.fetch_one(
+            row = await db.fetch_one(
                 "SELECT announcement.announcement_id, announcement.idempotency_key, "
                 "announcement.requested_by, announcement.source_update_id, "
                 "announcement.body, announcement.recipient_count, announcement.created_at, "
@@ -109,7 +109,7 @@ class PostgresAdminAnnouncementOperations:
             command.requested_at,
             command.requested_at,
         )
-        await db_connection.execute(
+        await db.execute(
             """
             INSERT INTO admin.announcement_recipients
               (announcement_id, recipient_kind, chat_id, status,
@@ -125,7 +125,7 @@ class PostgresAdminAnnouncementOperations:
             (*parameters, command.requested_at),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             """
             INSERT INTO admin.announcement_recipients
               (announcement_id, recipient_kind, chat_id, status,
@@ -149,7 +149,7 @@ class PostgresAdminAnnouncementOperations:
             (*parameters, command.requested_at),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO admin.announcement_recipients "
             "(announcement_id, recipient_kind, chat_id, message_thread_id, "
             "reply_to_message_id, status, next_attempt_at, created_at, updated_at) "
@@ -165,7 +165,7 @@ class PostgresAdminAnnouncementOperations:
             ),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "UPDATE admin.announcements SET "
             "recipient_count = (SELECT COUNT(*) FROM admin.announcement_recipients "
             "WHERE announcement_id = CAST(%s AS UUID) "
@@ -226,8 +226,8 @@ class PostgresAdminAnnouncementOperations:
 
         _require_positive_limit(limit)
         timestamp = _utc(now)
-        async with db_connection.transaction() as connection:
-            return await db_connection.execute(
+        async with db.transaction() as connection:
+            return await db.execute(
                 """
                 WITH candidates AS (
                   SELECT announcement.announcement_id
@@ -287,8 +287,8 @@ class PostgresAdminAnnouncementOperations:
         lease_expires_at = claimed_at + lease_for
         claims: list[AnnouncementRecipientClaim] = []
         """@brief 本事务领取列表 / Claims acquired by this transaction."""
-        async with db_connection.transaction() as connection:
-            rows = await db_connection.fetch_all(
+        async with db.transaction() as connection:
+            rows = await db.fetch_all(
                 """
                 SELECT
                   recipient.announcement_id,
@@ -344,7 +344,7 @@ class PostgresAdminAnnouncementOperations:
             )
             for row in rows:
                 token = uuid4()
-                rowcount = await db_connection.execute(
+                rowcount = await db.execute(
                     "UPDATE admin.announcement_recipients SET "
                     "status = 'processing', attempt_count = attempt_count + 1, "
                     "next_attempt_at = NULL, claim_token = CAST(%s AS UUID), "
@@ -402,8 +402,8 @@ class PostgresAdminAnnouncementOperations:
         """
 
         timestamp = _utc(completed_at)
-        async with db_connection.transaction() as connection:
-            rowcount = await db_connection.execute(
+        async with db.transaction() as connection:
+            rowcount = await db.execute(
                 "UPDATE admin.announcement_recipients SET "
                 "status = 'expanded', outbound_message_id = CAST(%s AS UUID), "
                 "expanded_at = %s, claim_token = NULL, lease_expires_at = NULL, "
@@ -450,7 +450,7 @@ class PostgresAdminAnnouncementOperations:
 
         timestamp = _utc(retry_at)
         error = _error_category(error_category)
-        rowcount = await db_connection.execute(
+        rowcount = await db.execute(
             "UPDATE admin.announcement_recipients SET "
             "status = 'retry_wait', next_attempt_at = %s, claim_token = NULL, "
             "lease_expires_at = NULL, last_error = %s, updated_at = %s "
@@ -486,8 +486,8 @@ class PostgresAdminAnnouncementOperations:
 
         timestamp = _utc(failed_at)
         error = _error_category(error_category)
-        async with db_connection.transaction() as connection:
-            rowcount = await db_connection.execute(
+        async with db.transaction() as connection:
+            rowcount = await db.execute(
                 "UPDATE admin.announcement_recipients SET "
                 "status = 'failed_final', terminal_at = %s, claim_token = NULL, "
                 "lease_expires_at = NULL, last_error = %s, updated_at = %s "
@@ -531,7 +531,7 @@ class PostgresAdminAnnouncementOperations:
         @return None / None.
         """
 
-        await db_connection.execute(
+        await db.execute(
             "UPDATE admin.announcements AS announcement SET "
             "state = 'delivering', updated_at = %s "
             "WHERE announcement.announcement_id = CAST(%s AS UUID) "
@@ -554,8 +554,8 @@ class PostgresAdminAnnouncementOperations:
 
         _require_positive_limit(limit)
         timestamp = _utc(now)
-        async with db_connection.transaction() as connection:
-            return await db_connection.execute(
+        async with db.transaction() as connection:
+            return await db.execute(
                 """
                 WITH expired AS (
                   SELECT announcement_id, recipient_kind, chat_id

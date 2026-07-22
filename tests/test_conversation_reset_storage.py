@@ -8,11 +8,10 @@ from datetime import UTC, datetime
 import pytest
 
 from fogmoe_bot.domain.conversation.identity import ConversationId, TurnId
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.conversation_reset import (
     PostgresConversationResetUoW,
 )
-
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定 reset 时刻 / Fixed reset instant."""
@@ -92,9 +91,9 @@ def test_reset_cancels_active_workflow_without_legacy_billing_reads(
             writes.append(sql)
             return 1
 
-        monkeypatch.setattr(db_connection, "fetch_all", fetch_all)
-        monkeypatch.setattr(db_connection, "fetch_one", fetch_one)
-        monkeypatch.setattr(db_connection, "execute", execute)
+        monkeypatch.setattr(db, "fetch_all", fetch_all)
+        monkeypatch.setattr(db, "fetch_one", fetch_one)
+        monkeypatch.setattr(db, "execute", execute)
         persistence = PostgresConversationResetUoW(outbox=object())  # type: ignore[arg-type]
 
         await persistence._cancel_active_inference_turns(

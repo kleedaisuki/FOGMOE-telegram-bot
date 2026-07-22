@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
-import json
 from uuid import UUID
 
 from fogmoe_bot.application.assistant.tool_runtime import (
@@ -13,24 +13,23 @@ from fogmoe_bot.application.assistant.tool_runtime import (
     ToolExecutionContext,
 )
 from fogmoe_bot.application.memory.ports import WorkingMemoryQuery
+from fogmoe_bot.domain.context.token_estimator import estimate_tokens
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
     TurnId,
 )
-from fogmoe_bot.domain.context.token_estimator import estimate_tokens
 from fogmoe_bot.domain.memory import (
     WorkingMemory,
     WorkingMemoryAvailability,
     WorkingMemoryMessage,
 )
 from fogmoe_bot.infrastructure.assistant.tool_operations.memory import search_memory
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.assistant_tool_effects import (
     PostgresAssistantToolStore,
     ToolTransactionMode,
 )
-
 
 NOW = datetime(2032, 1, 2, 3, 4, tzinfo=UTC)
 """@brief 确定性来源时间 / Deterministic source instant."""
@@ -200,8 +199,8 @@ def test_memory_tool_result_bypasses_durable_receipts(monkeypatch) -> None:
     async def scenario() -> None:
         """@brief 连续执行相同 invocation / Execute the same invocation twice."""
 
-        monkeypatch.setattr(db_connection, "fetch_one", reject_database)
-        monkeypatch.setattr(db_connection, "execute", reject_database)
+        monkeypatch.setattr(db, "fetch_one", reject_database)
+        monkeypatch.setattr(db, "execute", reject_database)
         operations = _Operations()
         store = PostgresAssistantToolStore(operations=operations)
         request = replace(_request(), result_cacheable=False)

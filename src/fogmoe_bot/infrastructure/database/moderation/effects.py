@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -26,7 +26,7 @@ from fogmoe_bot.domain.moderation.models import (
     RuleKind,
     UserId,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 _EFFECT_SELECT = """
 SELECT effect_id, source_update_id, kind, chat_id, user_id, message_id,
@@ -45,7 +45,7 @@ class PostgresModerationEffectRepository(ModerationEffectRepository):
     ) -> ModerationEffect | None:
         """@brief 读取治理 effect / Load a moderation effect."""
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             _EFFECT_SELECT + " WHERE effect_id = CAST(%s AS UUID)",
             (str(effect_id),),
         )
@@ -63,8 +63,8 @@ class PostgresModerationEffectRepository(ModerationEffectRepository):
         timestamp = _utc(now)
         payload = _plan_payload(plan)
         kind = _plan_kind(plan)
-        async with db_connection.transaction() as connection:
-            inserted = await db_connection.fetch_one(
+        async with db.transaction() as connection:
+            inserted = await db.fetch_one(
                 """
                 INSERT INTO moderation.effects
                   (effect_id, source_update_id, kind, chat_id, user_id, message_id,
@@ -95,13 +95,13 @@ class PostgresModerationEffectRepository(ModerationEffectRepository):
                     now=timestamp,
                     warning_window=warning_window,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "UPDATE moderation.effects SET warning_count = %s "
                     "WHERE effect_id = CAST(%s AS UUID)",
                     (warning_count, str(plan.effect_id)),
                     connection=connection,
                 )
-            row = await db_connection.fetch_one(
+            row = await db.fetch_one(
                 _EFFECT_SELECT + " WHERE effect_id = CAST(%s AS UUID) FOR UPDATE",
                 (str(plan.effect_id),),
                 connection=connection,
@@ -125,7 +125,7 @@ class PostgresModerationEffectRepository(ModerationEffectRepository):
 
         if effect.version != expected_version + 1:
             raise ValueError("Saved moderation effect must advance exactly one version")
-        changed = await db_connection.execute(
+        changed = await db.execute(
             "UPDATE moderation.effects SET status = %s, version = %s, last_error = %s, "
             "updated_at = %s WHERE effect_id = CAST(%s AS UUID) AND version = %s",
             (
@@ -152,7 +152,7 @@ class PostgresModerationEffectRepository(ModerationEffectRepository):
     ) -> int:
         """@brief 原子增加或重置成员警告窗口 / Atomically increment or reset a member warning window."""
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             """
             INSERT INTO moderation.member_warning_windows
               (chat_id, user_id, window_started_at, warning_count, version, updated_at)

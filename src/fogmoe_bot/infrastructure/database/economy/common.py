@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import json
+from collections.abc import Mapping
 from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 async def _registered_user_exists(
@@ -27,7 +27,7 @@ async def _registered_user_exists(
         so it cannot form an inverse lock dependency with the ledger-projection trigger.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT 1 FROM identity.users WHERE id = %s",
         (user_id,),
         connection=connection,
@@ -53,7 +53,7 @@ async def _lock_operation_key(
     normalized = key.strip()
     if not normalized:
         raise ValueError("Economy operation lock key cannot be blank")
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (f"economy:operation:{normalized}",),
         connection=connection,
@@ -76,7 +76,7 @@ async def _load_result(
     @return JSON 结果；未执行为 None / JSON result, or None.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT operation_kind, user_id, result FROM economy.operation_receipts "
         "WHERE idempotency_key = %s",
         (idempotency_key,),
@@ -112,7 +112,7 @@ async def _save_result(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO economy.operation_receipts "
         "(idempotency_key, operation_kind, user_id, result) "
         "VALUES (%s, %s, %s, CAST(%s AS JSONB))",

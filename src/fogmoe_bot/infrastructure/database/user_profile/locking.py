@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 async def lock_user_profile(connection: AsyncConnection, user_id: int) -> None:
@@ -20,7 +20,7 @@ async def lock_user_profile(connection: AsyncConnection, user_id: int) -> None:
 
     if isinstance(user_id, bool) or user_id <= 0:
         raise ValueError("Profile lock user_id must be positive")
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (f"user-profile:{user_id}",),
         connection=connection,

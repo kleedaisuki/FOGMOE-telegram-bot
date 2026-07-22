@@ -21,7 +21,7 @@ from fogmoe_bot.domain.banking.money import (
     TokenAmount,
     TokenBucket,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.banking import post_bank_transfer
 
 from .common import (
@@ -42,7 +42,7 @@ class PostgresRewardOperations(RewardOperations):
         @return 签到结果 / Check-in result.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_operation_key(command.idempotency_key, connection)
             await _lock_operation_key(
                 f"checkin:{command.user_id}:{command.day.isoformat()}",
@@ -58,7 +58,7 @@ class PostgresRewardOperations(RewardOperations):
                     reward=int(replay.get("reward", 0)),
                     replayed=True,
                 )
-            row = await db_connection.fetch_one(
+            row = await db.fetch_one(
                 "SELECT last_checkin_date, consecutive_days "
                 "FROM economy.user_checkin WHERE user_id = %s FOR UPDATE",
                 (command.user_id,),
@@ -83,7 +83,7 @@ class PostgresRewardOperations(RewardOperations):
             ):
                 consecutive = cast(int, row[1]) + 1
             reward = calculate_checkin_reward(consecutive)
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO economy.user_checkin "
                 "(user_id, last_checkin_date, consecutive_days) VALUES (%s, %s, %s) "
                 "ON CONFLICT (user_id) DO UPDATE SET "
@@ -127,7 +127,7 @@ class PostgresRewardOperations(RewardOperations):
         """
 
         operation_kind = "lottery_claim"
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_operation_key(command.idempotency_key, connection)
             await _lock_operation_key(f"lottery:{command.user_id}", connection)
             if not await _registered_user_exists(command.user_id, connection):
@@ -141,7 +141,7 @@ class PostgresRewardOperations(RewardOperations):
             if replay is not None:
                 return _lottery_from_mapping(replay, replayed=True)
 
-            row = await db_connection.fetch_one(
+            row = await db.fetch_one(
                 "SELECT last_lottery_date FROM economy.user_lottery "
                 "WHERE user_id = %s FOR UPDATE",
                 (command.user_id,),
@@ -176,7 +176,7 @@ class PostgresRewardOperations(RewardOperations):
                     connection=connection,
                     metadata={"grant_kind": "daily_lottery"},
                 )
-                await db_connection.execute(
+                await db.execute(
                     "INSERT INTO economy.user_lottery (user_id, last_lottery_date) "
                     "VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET "
                     "last_lottery_date = EXCLUDED.last_lottery_date",

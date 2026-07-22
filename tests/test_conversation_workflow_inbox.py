@@ -4,21 +4,20 @@ import asyncio
 from datetime import timedelta
 from typing import Any
 
+from conversation_workflow_testkit import (
+    NOW,
+    _inbound_row,
+    _TransactionContext,
+)
 
 from fogmoe_bot.domain.conversation.identity import LeaseToken
 from fogmoe_bot.domain.conversation.inbox import InboundClaim
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.conversation_workflow import (
     inbox as inbox_repository,
 )
 from fogmoe_bot.infrastructure.database.conversation_workflow.inbox import (
     PostgresInboxRepository,
-)
-
-from conversation_workflow_testkit import (
-    NOW,
-    _inbound_row,
-    _TransactionContext,
 )
 
 
@@ -43,11 +42,11 @@ def test_claim_inbound_preserves_conversation_order_across_workers(
         return [_inbound_row()]
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
 
     claims = asyncio.run(
         PostgresInboxRepository().claim_inbound(
@@ -84,7 +83,7 @@ def test_fail_inbound_uses_fencing_token_and_explicit_failure_time(
         captured["params"] = params
         return 1
 
-    monkeypatch.setattr(db_connection, "execute", fake_execute)
+    monkeypatch.setattr(db, "execute", fake_execute)
     token = LeaseToken.new()
     claim = InboundClaim(
         update=inbox_repository._map_inbound(_inbound_row()),

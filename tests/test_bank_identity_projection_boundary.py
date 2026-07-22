@@ -117,7 +117,7 @@ def test_runtime_cannot_rebootstrap_identity_money_or_retain_assistant_billing()
     assert "legacy-projection-bootstrap" not in banking
     assert "SELECT coins, coins_paid FROM identity.users" not in banking
     assert "coin_cost" not in assistant_ingress
-    assert "fetch_user_account" not in acceptance
+    assert "fetch_assistant_user_snapshot" not in acceptance
     assert "set_coin_balances_and_plan" not in acceptance
     assert ".reserve(" not in acceptance
     assert not billing.exists()

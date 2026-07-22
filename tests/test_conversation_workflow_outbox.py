@@ -6,7 +6,21 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from conversation_workflow_testkit import (
+    NOW,
+    TURN_UUID,
+    _outbound_claim_row,
+    _outbound_draft,
+    _outbound_row,
+    _standalone_outbound_draft,
+    _TransactionContext,
+    _turn_row,
+)
 
+from fogmoe_bot.domain.conversation.errors import (
+    IdempotencyConflictError,
+    StaleClaimError,
+)
 from fogmoe_bot.domain.conversation.identity import (
     LeaseToken,
     OutboundMessageId,
@@ -17,28 +31,13 @@ from fogmoe_bot.domain.conversation.outbox import (
     OutboundDraft,
     OutboundStatus,
 )
-from fogmoe_bot.domain.conversation.errors import (
-    IdempotencyConflictError,
-    StaleClaimError,
-)
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.conversation_workflow import (
     outbox as outbox_repository,
 )
 from fogmoe_bot.infrastructure.database.conversation_workflow import turn_uow
 from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
     PostgresOutboxRepository,
-)
-
-from conversation_workflow_testkit import (
-    NOW,
-    TURN_UUID,
-    _outbound_claim_row,
-    _outbound_draft,
-    _outbound_row,
-    _standalone_outbound_draft,
-    _TransactionContext,
-    _turn_row,
 )
 
 
@@ -79,11 +78,11 @@ def test_claim_outbound_uses_skip_locked_fencing_and_delivery_stream_head(
         )
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
     monkeypatch.setattr(outbox_repository, "_load_turn_for_mutation", fake_load_turn)
 
     claims = asyncio.run(
@@ -140,11 +139,11 @@ def test_claim_standalone_outbound_does_not_load_or_transition_a_turn(
         raise AssertionError("standalone claim loaded a Turn")
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
     monkeypatch.setattr(
         outbox_repository, "_load_turn_for_mutation", unexpected_turn_load
     )
@@ -203,11 +202,11 @@ def test_claim_retry_outbound_keeps_delivery_plan_waiting(
         raise AssertionError("retry claim rewrote delivery-plan state")
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
     monkeypatch.setattr(outbox_repository, "_load_turn_for_mutation", fake_load_turn)
     monkeypatch.setattr(outbox_repository, "_persist_turn", unexpected_persist)
 
@@ -251,11 +250,11 @@ def test_transactional_outbox_allocates_stream_sequence_under_advisory_lock(
         return responses.pop(0)
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    monkeypatch.setattr(db_connection, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(db, "fetch_one", fake_fetch_one)
     draft = _outbound_draft()
 
     result = asyncio.run(
@@ -322,11 +321,11 @@ def test_standalone_outbox_uses_one_short_transaction_and_persists_null_turn(
         return responses.pop(0)
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: transaction,
     )
-    monkeypatch.setattr(db_connection, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(db, "fetch_one", fake_fetch_one)
 
     result = asyncio.run(PostgresOutboxRepository().enqueue_standalone_outbound(draft))
 
@@ -467,11 +466,11 @@ def test_stale_outbound_claim_cannot_ack_newer_lease(monkeypatch: Any) -> None:
 
     connection = object()
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    monkeypatch.setattr(db_connection, "execute", fake_execute)
+    monkeypatch.setattr(db, "execute", fake_execute)
     repository = PostgresOutboxRepository()
 
     message = outbox_repository._map_outbound(_outbound_row())
@@ -550,12 +549,12 @@ def test_delivered_outbound_atomically_completes_turn(monkeypatch: Any) -> None:
         captured["version"] = expected_version
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    monkeypatch.setattr(db_connection, "execute", fake_execute)
-    monkeypatch.setattr(db_connection, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(db, "execute", fake_execute)
+    monkeypatch.setattr(db, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(outbox_repository, "_load_turn_for_mutation", fake_load_turn)
     monkeypatch.setattr(outbox_repository, "_persist_turn", fake_persist)
     claim = OutboundClaim(
@@ -618,12 +617,12 @@ def test_delivered_effect_keeps_turn_waiting_until_delivery_plan_is_empty(
         raise AssertionError("intermediate delivery completed the Turn")
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    monkeypatch.setattr(db_connection, "execute", fake_execute)
-    monkeypatch.setattr(db_connection, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(db, "execute", fake_execute)
+    monkeypatch.setattr(db, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(
         outbox_repository, "_load_turn_for_mutation", unexpected_turn_load
     )
@@ -712,11 +711,11 @@ def test_permanent_delivery_failure_cancels_unclaimed_sibling_effects(
         assert connection is not None
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    monkeypatch.setattr(db_connection, "execute", fake_execute)
+    monkeypatch.setattr(db, "execute", fake_execute)
     monkeypatch.setattr(outbox_repository, "_load_turn_for_mutation", fake_load_turn)
     monkeypatch.setattr(outbox_repository, "_persist_turn", fake_persist)
     claim = OutboundClaim(
@@ -767,11 +766,11 @@ def test_delivered_standalone_outbound_never_transitions_a_turn(
         raise AssertionError("standalone finalization loaded a Turn")
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    monkeypatch.setattr(db_connection, "execute", fake_execute)
+    monkeypatch.setattr(db, "execute", fake_execute)
     monkeypatch.setattr(
         outbox_repository, "_load_turn_for_mutation", unexpected_turn_load
     )
@@ -817,11 +816,11 @@ def test_expired_outbound_recovery_leaves_delivery_plan_state_unchanged(
         raise AssertionError("lease recovery rewrote delivery-plan state")
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
     monkeypatch.setattr(
         outbox_repository, "_load_turn_for_mutation", unexpected_turn_load
     )
@@ -858,11 +857,11 @@ def test_expired_standalone_outbound_recovery_does_not_touch_a_turn(
         raise AssertionError("standalone recovery loaded a Turn")
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
     monkeypatch.setattr(
         outbox_repository, "_load_turn_for_mutation", unexpected_turn_load
     )

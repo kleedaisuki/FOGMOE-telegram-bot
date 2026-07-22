@@ -9,11 +9,10 @@ from uuid import UUID
 from fogmoe_bot.application.assistant.temporal_memory import TemporalMemoryQuery
 from fogmoe_bot.domain.retrieval import RetrievalScope
 from fogmoe_bot.domain.temporal import UtcInterval
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.temporal_memory import (
     PostgresTemporalMemoryReader,
 )
-
 
 ANCHOR = datetime(2034, 5, 6, 7, 8, tzinfo=UTC)
 """@brief SQL 参数化测试的固定锚点 / Fixed anchor for SQL-parameterization tests."""
@@ -54,7 +53,7 @@ def test_interval_reader_filters_half_open_before_latest_limit(monkeypatch) -> N
     async def scenario() -> None:
         """@brief 执行普通区间查询 / Execute a plain interval query."""
 
-        monkeypatch.setattr(db_connection, "fetch_all", fetch_all)
+        monkeypatch.setattr(db, "fetch_all", fetch_all)
         window = UtcInterval(
             ANCHOR - timedelta(hours=2),
             ANCHOR + timedelta(hours=2),
@@ -138,7 +137,7 @@ def test_around_reader_uses_all_stable_nearest_tie_breakers(monkeypatch) -> None
     async def scenario() -> None:
         """@brief 执行定点检索 / Execute a point retrieval."""
 
-        monkeypatch.setattr(db_connection, "fetch_all", fetch_all)
+        monkeypatch.setattr(db, "fetch_all", fetch_all)
         window = UtcInterval.around(ANCHOR, timedelta(minutes=10))
         reader = PostgresTemporalMemoryReader(
             corpus_id="conversation.episodic",

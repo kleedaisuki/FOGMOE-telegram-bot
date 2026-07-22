@@ -29,9 +29,9 @@ entry in the same transaction rather than bypassing the bank ledger.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
-import json
 from typing import Any, cast
 from uuid import UUID
 
@@ -63,7 +63,7 @@ from fogmoe_bot.domain.personal_rpg.exploration import (
 )
 from fogmoe_bot.domain.personal_rpg.profile import PersonalRpgProfile
 from fogmoe_bot.domain.world.scope import PersonalScope
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 class PostgresPersonalRpgOperations(PersonalRpgOperations):
@@ -88,7 +88,7 @@ class PostgresPersonalRpgOperations(PersonalRpgOperations):
         operation_kind = "personal_rpg.create_character"
         fingerprint = _create_fingerprint(command)
         actor_id = command.scope.user_id
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_receipt_key(command.idempotency_key, connection)
             await _lock_scope(command.scope, connection)
             replay = await _load_receipt(
@@ -141,7 +141,7 @@ class PostgresPersonalRpgOperations(PersonalRpgOperations):
         operation_kind = "personal_rpg.explore_daily"
         fingerprint = _exploration_fingerprint(command)
         actor_id = command.scope.user_id
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_receipt_key(command.idempotency_key, connection)
             await _lock_scope(command.scope, connection)
             replay = await _load_receipt(
@@ -219,7 +219,7 @@ class PostgresPersonalRpgOperations(PersonalRpgOperations):
         operation_kind = "personal_rpg.craft_recipe"
         fingerprint = _craft_fingerprint(command)
         actor_id = command.scope.user_id
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_receipt_key(command.idempotency_key, connection)
             await _lock_scope(command.scope, connection)
             replay = await _load_receipt(
@@ -295,7 +295,7 @@ class PostgresPersonalRpgOperations(PersonalRpgOperations):
 
         if not isinstance(scope, PersonalScope):
             raise TypeError("Personal RPG overview must use PersonalScope")
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             profile = await _load_profile(scope, connection, for_update=False)
             return (
                 PersonalRpgResult(PersonalRpgCode.SUCCESS, profile=profile)
@@ -315,7 +315,7 @@ async def _identity_exists(
     @return 身份存在时为 True / True when identity exists.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT 1 FROM identity.users WHERE id = %s",
         (scope.user_id,),
         connection=connection,
@@ -336,7 +336,7 @@ async def _lock_receipt_key(
         A hash collision can only serialize unrelated work and cannot merge business results.
     """
 
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (idempotency_key,),
         connection=connection,
@@ -357,7 +357,7 @@ async def _lock_scope(
         creations; this lock closes that empty-row window.
     """
 
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (f"personal-rpg:scope:{scope.user_id}",),
         connection=connection,
@@ -384,7 +384,7 @@ async def _load_receipt(
         Raised when one key changes operation, actor, or semantics.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT operation_kind, actor_id, request_fingerprint, result "
         "FROM personal_rpg.operation_receipts WHERE idempotency_key = %s",
         (idempotency_key,),
@@ -428,7 +428,7 @@ async def _save_receipt(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO personal_rpg.operation_receipts ("
         "idempotency_key, operation_kind, actor_id, request_fingerprint, result"
         ") VALUES (%s, %s, %s, CAST(%s AS JSONB), CAST(%s AS JSONB))",
@@ -458,7 +458,7 @@ async def _load_profile(
     """
 
     lock_clause = " FOR UPDATE" if for_update else ""
-    character_row = await db_connection.fetch_one(
+    character_row = await db.fetch_one(
         "SELECT user_id, name, experience, last_exploration_day, character_version, "
         "profile_version FROM personal_rpg.characters WHERE user_id = %s" + lock_clause,
         (scope.user_id,),
@@ -466,13 +466,13 @@ async def _load_profile(
     )
     if character_row is None:
         return None
-    material_rows = await db_connection.fetch_all(
+    material_rows = await db.fetch_all(
         "SELECT material_kind, quantity FROM personal_rpg.materials WHERE user_id = %s "
         "ORDER BY material_kind" + lock_clause,
         (scope.user_id,),
         connection=connection,
     )
-    collection_rows = await db_connection.fetch_all(
+    collection_rows = await db.fetch_all(
         "SELECT collectible_kind FROM personal_rpg.collections WHERE user_id = %s "
         "ORDER BY collectible_kind" + lock_clause,
         (scope.user_id,),
@@ -544,7 +544,7 @@ async def _insert_character(
         or profile.character.experience != 0
     ):
         raise ValueError("A new personal RPG character must have blank progression")
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO personal_rpg.characters ("
         "user_id, name, experience, last_exploration_day, character_version, profile_version, "
         "created_at, updated_at"
@@ -580,7 +580,7 @@ async def _persist_profile(
 
     if previous.scope != current.scope:
         raise ValueError("Personal RPG profile mutation cannot change scope")
-    changed = await db_connection.execute(
+    changed = await db.execute(
         "UPDATE personal_rpg.characters SET name = %s, experience = %s, "
         "last_exploration_day = %s, character_version = %s, profile_version = %s, "
         "updated_at = CURRENT_TIMESTAMP WHERE user_id = %s AND profile_version = %s",
@@ -612,7 +612,7 @@ async def _replace_materials(
         Material kinds form a fixed small set; delete-then-insert by stable code removes stale zero rows.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "DELETE FROM personal_rpg.materials WHERE user_id = %s",
         (profile.scope.user_id,),
         connection=connection,
@@ -621,7 +621,7 @@ async def _replace_materials(
         profile.materials.quantities.items(),
         key=lambda item: item[0].value,
     ):
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO personal_rpg.materials (user_id, material_kind, quantity) "
             "VALUES (%s, %s, %s)",
             (profile.scope.user_id, kind.value, quantity),
@@ -642,7 +642,7 @@ async def _exploration_day_exists(
     @return 已有探索时为 True / True when an exploration already exists.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT exploration_id FROM personal_rpg.explorations "
         "WHERE user_id = %s AND exploration_day = %s FOR UPDATE",
         (scope.user_id, exploration_day),
@@ -662,7 +662,7 @@ async def _exploration_id_exists(
     @return 标识已被使用时为 True / True when identity is already used.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT exploration_id FROM personal_rpg.explorations "
         "WHERE exploration_id = %s FOR UPDATE",
         (exploration_id,),
@@ -682,7 +682,7 @@ async def _insert_exploration(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO personal_rpg.explorations ("
         "exploration_id, user_id, exploration_day, route, explored_at, experience_reward, "
         "material_rewards, audit_digest"
@@ -712,7 +712,7 @@ async def _craft_id_exists(
     @return 标识已被使用时为 True / True when identity is already used.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT craft_id FROM personal_rpg.collections WHERE craft_id = %s FOR UPDATE",
         (craft_id,),
         connection=connection,
@@ -733,7 +733,7 @@ async def _insert_collection(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO personal_rpg.collections ("
         "user_id, collectible_kind, recipe_code, craft_id, crafted_at"
         ") VALUES (%s, %s, %s, %s, %s)",

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from postgres_test_support import configure_bot_database
 
 from fogmoe_bot.application.memory import ForgetMemory
 from fogmoe_bot.application.retrieval import EpisodicPassageRenderer
@@ -29,7 +30,6 @@ from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE, OutboundDraft
 from fogmoe_bot.domain.retrieval import EmbeddingSpace, RetrievalScope
 from fogmoe_bot.domain.user_profile.models import ProfileEvidence, ProfileMetadata
-from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.conversation_workflow.inbox import (
     PostgresInboxRepository,
@@ -37,8 +37,10 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.inbox import (
 from fogmoe_bot.infrastructure.database.memory_management import (
     PostgresMemoryForgetUoW,
 )
-from fogmoe_bot.infrastructure.database.retrieval import PostgresRetrievalStore
-from fogmoe_bot.infrastructure.database.retrieval import PostgresEpisodicSource
+from fogmoe_bot.infrastructure.database.retrieval import (
+    PostgresEpisodicSource,
+    PostgresRetrievalStore,
+)
 from fogmoe_bot.infrastructure.database.telegram_authorization import (
     PostgresGroupAdministratorDecisionStore,
 )
@@ -51,7 +53,6 @@ from fogmoe_bot.infrastructure.database.user_profile.source import (
 from fogmoe_bot.infrastructure.database.user_profile.store import (
     PostgresUserProfileStore,
 )
-from postgres_test_support import configure_bot_database
 
 
 def _postgres_url() -> str:
@@ -132,7 +133,7 @@ async def _insert_profile_turn(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO conversation.conversation_turns "
         "(turn_id, conversation_id, state, created_at, updated_at, completed_at, "
         "source_kind, source_key) VALUES (CAST(%s AS UUID), %s, 'delivered', "
@@ -177,8 +178,8 @@ async def _insert_delayed_completed_turn(
         },
         "scope": {"is_group": False, "group_id": None},
     }
-    async with db_connection.transaction() as connection:
-        await db_connection.execute(
+    async with db.transaction() as connection:
+        await db.execute(
             "INSERT INTO conversation.conversation_turns "
             "(turn_id, conversation_id, source_update_id, state, created_at, updated_at, "
             "completed_at, source_kind, source_key) VALUES (CAST(%s AS UUID), %s, %s, "
@@ -194,7 +195,7 @@ async def _insert_delayed_completed_turn(
             ),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO conversation.inference_activities "
             "(activity_id, turn_id, conversation_id, request, status, version, "
             "attempt_count, next_attempt_at, claim_token, lease_expires_at, "
@@ -218,7 +219,7 @@ async def _insert_delayed_completed_turn(
             (("user", "delayed old fact"), ("assistant", "delayed old answer")),
             start=1,
         ):
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO conversation.conversation_messages "
                 "(message_id, conversation_id, sequence, turn_id, role, content, "
                 "idempotency_key, created_at) VALUES (CAST(%s AS UUID), %s, %s, "
@@ -273,7 +274,7 @@ def test_real_postgres_forgetting_boundaries_prevent_resurrection_and_replay(
         retrieval_turns = (uuid4(), uuid4())
         delayed_turn = str(uuid4())
         try:
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO identity.users (id, tg_uid, provider, name) "
                 "VALUES (%s, %s, 'telegram', %s)",
                 (user_id, user_id, f"management-{suffix}"),
@@ -346,7 +347,7 @@ def test_real_postgres_forgetting_boundaries_prevent_resurrection_and_replay(
             )
             first = await memory_management.forget(personal_command)
             assert first.applied is True and first.deleted_passages == 1
-            personal_markers = await db_connection.fetch_one(
+            personal_markers = await db.fetch_one(
                 "SELECT COUNT(*) FROM retrieval.source_projections "
                 "WHERE scope_kind = 'personal' AND scope_id = %s",
                 (user_id,),
@@ -373,7 +374,7 @@ def test_real_postgres_forgetting_boundaries_prevent_resurrection_and_replay(
             )
             replay = await memory_management.forget(personal_command)
             assert replay.applied is False and replay.deleted_passages == 0
-            counts = await db_connection.fetch_all(
+            counts = await db.fetch_all(
                 "SELECT scope_kind, COUNT(*) FROM retrieval.passages "
                 "WHERE (scope_kind = 'personal' AND scope_id = %s) "
                 "OR (scope_kind = 'group' AND scope_id = %s) "
@@ -417,15 +418,15 @@ def test_real_postgres_forgetting_boundaries_prevent_resurrection_and_replay(
                 metadata=ProfileMetadata("Klee", None, "old metadata"),
             )
             await profile_store.project_evidence(old_evidence, projected_at=cutoff)
-            event_row = await db_connection.fetch_one(
+            event_row = await db.fetch_one(
                 "SELECT event_id FROM user_profile.evidence_events "
                 "WHERE source_turn_id = CAST(%s AS UUID)",
                 (profile_turns[0],),
             )
             assert event_row is not None
             event_id = int(event_row[0])
-            async with db_connection.transaction() as connection:
-                await db_connection.execute(
+            async with db.transaction() as connection:
+                await db.execute(
                     "INSERT INTO user_profile.profile_revisions "
                     "(user_id, revision, document, observed_through_event_id, route_key, "
                     "prompt_version, created_at) VALUES (%s, 1, CAST(%s AS JSONB), %s, "
@@ -433,7 +434,7 @@ def test_real_postgres_forgetting_boundaries_prevent_resurrection_and_replay(
                     (user_id, json.dumps({"claims": []}), event_id, cutoff),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "UPDATE user_profile.profiles SET current_revision = 1, "
                     "observed_through_event_id = %s, updated_at = %s WHERE user_id = %s",
                     (event_id, cutoff, user_id),
@@ -500,7 +501,7 @@ def test_real_postgres_forgetting_boundaries_prevent_resurrection_and_replay(
             )
             replay_clear = await profile_management.clear(clear_command)
             assert replay_clear.applied is False
-            evidence_rows = await db_connection.fetch_all(
+            evidence_rows = await db.fetch_all(
                 "SELECT user_text FROM user_profile.evidence_events "
                 "WHERE owner_user_id = %s ORDER BY event_id",
                 (user_id,),
@@ -523,32 +524,32 @@ def test_real_postgres_forgetting_boundaries_prevent_resurrection_and_replay(
                 regeneration
             )
             assert requested.applied is True and replay_requested.applied is False
-            due = await db_connection.fetch_one(
+            due = await db.fetch_one(
                 "SELECT next_eligible_at, forgotten_through "
                 "FROM user_profile.profiles WHERE user_id = %s",
                 (user_id,),
             )
             assert due is not None and due[0] == cutoff and due[1] == cutoff
         finally:
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM conversation.inference_activities "
                 "WHERE conversation_id = %s",
                 (str(conversation_id),),
             )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM conversation.conversation_messages "
                 "WHERE conversation_id = %s",
                 (str(conversation_id),),
             )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM conversation.outbound_messages WHERE conversation_id = %s",
                 (str(conversation_id),),
             )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM identity.users WHERE id = %s",
                 (user_id,),
             )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM conversation.conversation_turns "
                 "WHERE turn_id = ANY(CAST(%s AS UUID[]))",
                 (
@@ -559,22 +560,22 @@ def test_real_postgres_forgetting_boundaries_prevent_resurrection_and_replay(
                     ],
                 ),
             )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM conversation.inbound_updates "
                 "WHERE update_id = ANY(CAST(%s AS BIGINT[]))",
                 (list(int(item) for item in updates),),
             )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM retrieval.source_projections "
                 "WHERE scope_kind = 'group' AND scope_id = %s",
                 (group_id,),
             )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM retrieval.scope_forgetting_boundaries "
                 "WHERE scope_kind = 'group' AND scope_id = %s",
                 (group_id,),
             )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM retrieval.embedding_spaces WHERE space_id = %s",
                 (space.space_id,),
             )

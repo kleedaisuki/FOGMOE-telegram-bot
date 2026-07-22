@@ -12,7 +12,7 @@ from fogmoe_bot.application.user_profile import (
     UserProfileManagementResult,
 )
 from fogmoe_bot.domain.conversation.outbox import OutboundEnqueueResult
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.command_source import (
     validate_telegram_command_source,
 )
@@ -45,7 +45,7 @@ class PostgresUserProfileManagementUoW:
         @return 规范幂等结果 / Canonical idempotent result.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             confirmation = await self._begin(
                 command,
                 operation="Profile reset",
@@ -66,7 +66,7 @@ class PostgresUserProfileManagementUoW:
                     and forgotten_through > command.requested_at
                 ):
                     return UserProfileManagementResult(True, confirmation)
-                await db_connection.execute(
+                await db.execute(
                     "UPDATE user_profile.profiles SET current_revision = NULL, "
                     "observed_through_event_id = 0, next_eligible_at = NULL, "
                     "forgotten_through = GREATEST(COALESCE(forgotten_through, %s), %s), "
@@ -79,17 +79,17 @@ class PostgresUserProfileManagementUoW:
                     ),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM user_profile.dreams WHERE user_id = %s",
                     (command.user_id,),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM user_profile.profile_revisions WHERE user_id = %s",
                     (command.user_id,),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM user_profile.evidence_events "
                     "WHERE owner_user_id = %s AND occurred_at <= %s",
                     (command.user_id, command.requested_at),
@@ -107,7 +107,7 @@ class PostgresUserProfileManagementUoW:
         @return 规范幂等结果 / Canonical idempotent result.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             confirmation = await self._begin(
                 command,
                 operation="Profile regeneration",
@@ -128,13 +128,13 @@ class PostgresUserProfileManagementUoW:
                     and forgotten_through > command.requested_at
                 ):
                     return UserProfileManagementResult(True, confirmation)
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM user_profile.dreams "
                     "WHERE user_id = %s AND status = 'failed_final'",
                     (command.user_id,),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "UPDATE user_profile.profiles SET next_eligible_at = "
                     "LEAST(COALESCE(next_eligible_at, %s), %s), "
                     "updated_at = GREATEST(updated_at, %s) WHERE user_id = %s",
@@ -189,7 +189,7 @@ class PostgresUserProfileManagementUoW:
         @return 用户是否存在及当前遗忘边界 / Whether the user exists and the current forgetting boundary.
         """
 
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO user_profile.profiles "
             "(user_id, current_revision, observed_through_event_id, next_eligible_at, "
             "forgotten_through, created_at, updated_at) "
@@ -198,7 +198,7 @@ class PostgresUserProfileManagementUoW:
             (now, now, user_id),
             connection=connection,
         )
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT forgotten_through FROM user_profile.profiles "
             "WHERE user_id = %s FOR UPDATE",
             (user_id,),

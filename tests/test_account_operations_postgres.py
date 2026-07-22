@@ -7,19 +7,18 @@ import os
 from uuid import uuid4
 
 import pytest
+from postgres_test_support import configure_bot_database
 
 from fogmoe_bot.application.accounts.operations import (
     PersonalInfoCommand,
     RegisterAccount,
 )
 from fogmoe_bot.domain.accounts.plan import AccountPlanPolicy
-from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.account_operations import (
     PostgresAccountOperations,
 )
 from fogmoe_bot.infrastructure.database.account_plan import PostgresAccountPlanResolver
-from postgres_test_support import configure_bot_database
 
 
 def _postgres_url() -> str:
@@ -81,8 +80,8 @@ def test_real_postgres_registration_and_personal_info_have_stable_receipts(
             assert second.profile == first.profile
             assert {first.replayed, second.replayed} == {False, True}
 
-            async with db_connection.transaction() as connection:
-                await db_connection.execute(
+            async with db.transaction() as connection:
+                await db.execute(
                     "UPDATE identity.users SET permission = permission + 5 WHERE id = %s",
                     (user_id,),
                     connection=connection,
@@ -108,8 +107,8 @@ def test_real_postgres_registration_and_personal_info_have_stable_receipts(
             committed = await operations.personal_info(info)
             assert committed.previous_info == ""
             assert committed.current_info == "first value"
-            async with db_connection.transaction() as connection:
-                await db_connection.execute(
+            async with db.transaction() as connection:
+                await db.execute(
                     "UPDATE identity.users SET info = 'later value' WHERE id = %s",
                     (user_id,),
                     connection=connection,
@@ -118,8 +117,8 @@ def test_real_postgres_registration_and_personal_info_have_stable_receipts(
             assert replay.replayed
             assert replay.current_info == "first value"
 
-            async with db_connection.connect() as connection:
-                row = await db_connection.fetch_one(
+            async with db.connect() as connection:
+                row = await db.fetch_one(
                     "SELECT name, permission, info FROM identity.users WHERE id = %s",
                     (user_id,),
                     connection=connection,
@@ -128,20 +127,20 @@ def test_real_postgres_registration_and_personal_info_have_stable_receipts(
                 assert row[0] == command.username
                 assert row[1] == 5
                 assert row[2] == "later value"
-                bank_balance = await db_connection.fetch_one(
+                bank_balance = await db.fetch_one(
                     "SELECT balance FROM bank.account_balances WHERE account_key = %s",
                     (f"user:{user_id}:free",),
                     connection=connection,
                 )
                 assert bank_balance is not None and bank_balance[0] == 20
         finally:
-            async with db_connection.transaction() as connection:
-                await db_connection.execute(
+            async with db.transaction() as connection:
+                await db.execute(
                     "DELETE FROM identity.operation_receipts WHERE user_id = %s",
                     (user_id,),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM identity.users WHERE id = %s",
                     (user_id,),
                     connection=connection,

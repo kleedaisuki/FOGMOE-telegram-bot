@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
 from fogmoe_bot.domain.conversation.identity import ConversationId, TurnSource
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 async def validate_telegram_command_source(
@@ -29,7 +29,7 @@ async def validate_telegram_command_source(
     update_id = source.update_id
     if update_id is None:
         return
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT conversation_id FROM conversation.inbound_updates "
         "WHERE update_id = %s FOR UPDATE",
         (int(update_id),),

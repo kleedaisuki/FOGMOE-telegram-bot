@@ -7,17 +7,14 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from fogmoe_bot.domain.conversation.errors import (
+    ConcurrentTurnUpdateError,
+    IdempotencyConflictError,
+)
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     InferenceActivityId,
     TurnId,
-)
-from fogmoe_bot.domain.temporal import ensure_utc
-from fogmoe_bot.domain.conversation.turn import (
-    POST_ACCEPTANCE_TURN_STATES,
-    ConversationTurn,
-    TurnEvent,
-    TurnState,
 )
 from fogmoe_bot.domain.conversation.inference import (
     InferenceActivityDraft,
@@ -30,12 +27,15 @@ from fogmoe_bot.domain.conversation.message import (
     MessageRole,
 )
 from fogmoe_bot.domain.conversation.outbox import OutboundStatus
-from fogmoe_bot.domain.conversation.workflow_results import TurnAcceptanceResult
-from fogmoe_bot.domain.conversation.errors import (
-    ConcurrentTurnUpdateError,
-    IdempotencyConflictError,
+from fogmoe_bot.domain.conversation.turn import (
+    POST_ACCEPTANCE_TURN_STATES,
+    ConversationTurn,
+    TurnEvent,
+    TurnState,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.domain.conversation.workflow_results import TurnAcceptanceResult
+from fogmoe_bot.domain.temporal import ensure_utc
+from fogmoe_bot.infrastructure.database import db
 
 from .common import (
     _INFERENCE_ACTIVITY_COLUMNS,
@@ -47,13 +47,13 @@ from .common import (
     _validate_inference_activity_idempotency,
 )
 from .turn_uow import (
+    _TURN_SELECT,
     _append_message,
     _load_turn_for_mutation,
-    _persist_turn,
-    _require_existing_message,
-    _TURN_SELECT,
     _map_message,
     _map_turn,
+    _persist_turn,
+    _require_existing_message,
     _validate_message_for_turn,
 )
 
@@ -96,7 +96,7 @@ class PostgresTurnRepository:
         Any write failure rolls back the Turn insert; there is no orphan RECEIVED window.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             return await self.create_and_accept_turn_in_transaction(
                 connection,
                 turn,
@@ -216,7 +216,7 @@ class PostgresTurnRepository:
         @raise IdempotencyConflictError ID/source 已承载不同语义时抛出 / Raised when an ID or source carries different semantics.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "INSERT INTO conversation.conversation_turns "
             "(turn_id, conversation_id, source_kind, source_key, source_update_id, state, version, "
             "inference_attempts, delivery_attempts, next_retry_at, last_error, "
@@ -244,7 +244,7 @@ class PostgresTurnRepository:
         )
         if row is not None:
             return turn
-        existing_row = await db_connection.fetch_one(
+        existing_row = await db.fetch_one(
             _TURN_SELECT + " WHERE turn_id = CAST(%s AS UUID) "
             "OR (source_kind = %s AND source_key = %s) "
             "OR (%s IS NOT NULL AND source_update_id = %s) FOR UPDATE",
@@ -282,7 +282,7 @@ class PostgresTurnRepository:
         @return 回合或 None / Turn or None.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             _TURN_SELECT + " WHERE turn_id = CAST(%s AS UUID)",
             (str(turn_id),),
         )
@@ -311,7 +311,7 @@ class PostgresTurnRepository:
 
         if not 1 <= limit <= 512:
             raise ValueError("conversation history limit must be between 1 and 512")
-        rows = await db_connection.fetch_all(
+        rows = await db.fetch_all(
             "WITH turn_bounds AS ("
             "SELECT MIN(sequence) AS first_sequence, MAX(sequence) AS last_sequence "
             "FROM conversation.conversation_messages "
@@ -363,7 +363,7 @@ class PostgresTurnRepository:
         @return 规范活动与插入标志 / Canonical activity and insertion flag.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "INSERT INTO conversation.inference_activities "
             "(activity_id, turn_id, conversation_id, request, status, version, "
             "attempt_count, next_attempt_at, created_at, updated_at, traceparent) "
@@ -408,7 +408,7 @@ class PostgresTurnRepository:
         @return inserted=False 的规范活动 / Canonical activity with inserted=False.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             _INFERENCE_ACTIVITY_SELECT
             + " WHERE activity_id = CAST(%s AS UUID) OR turn_id = CAST(%s AS UUID) "
             "LIMIT 1",
@@ -444,7 +444,7 @@ class PostgresTurnRepository:
         if expected_version < 0:
             raise ValueError("expected_version cannot be negative")
         timestamp = ensure_utc(cancelled_at)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await self._lock_active_inference_for_turn(
                 turn_id,
                 connection=connection,
@@ -488,7 +488,7 @@ class PostgresTurnRepository:
                     f"Turn {turn_id} expected version {expected_version}, "
                     f"found {current.version}"
                 )
-            await db_connection.execute(
+            await db.execute(
                 "UPDATE conversation.inference_activities "
                 "SET status = 'cancelled', version = version + 1, "
                 "next_attempt_at = NULL, updated_at = %s, claim_token = NULL, "
@@ -497,7 +497,7 @@ class PostgresTurnRepository:
                 (timestamp, str(turn_id)),
                 connection=connection,
             )
-            await db_connection.execute(
+            await db.execute(
                 "UPDATE conversation.outbound_messages "
                 "SET status = 'cancelled', version = version + 1, next_attempt_at = NULL, "
                 "updated_at = %s, claim_token = NULL, lease_expires_at = NULL "
@@ -530,7 +530,7 @@ class PostgresTurnRepository:
         @return 活动状态行 / Active-status rows.
         """
 
-        rows: Sequence[object] = await db_connection.fetch_all(
+        rows: Sequence[object] = await db.fetch_all(
             "SELECT status FROM conversation.inference_activities "
             "WHERE turn_id = CAST(%s AS UUID) "
             "AND status IN ('pending', 'processing', 'retry') FOR UPDATE",
@@ -552,7 +552,7 @@ class PostgresTurnRepository:
         @return 活动状态行 / Active-status rows.
         """
 
-        rows: Sequence[object] = await db_connection.fetch_all(
+        rows: Sequence[object] = await db.fetch_all(
             "SELECT status FROM conversation.outbound_messages "
             "WHERE turn_id = CAST(%s AS UUID) "
             "AND status IN ('pending', 'processing', 'retry_wait') FOR UPDATE",

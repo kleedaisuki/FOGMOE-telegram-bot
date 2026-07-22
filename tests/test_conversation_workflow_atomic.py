@@ -3,19 +3,18 @@
 import asyncio
 from typing import Any
 
+from conversation_workflow_testkit import (
+    NOW,
+    PROJECT_ROOT,
+    _TransactionContext,
+)
 
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.conversation_workflow.inbox import (
     PostgresInboxRepository,
 )
 from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
     PostgresOutboxRepository,
-)
-
-from conversation_workflow_testkit import (
-    NOW,
-    PROJECT_ROOT,
-    _TransactionContext,
 )
 
 
@@ -48,12 +47,12 @@ def test_inbound_and_outbound_lease_recovery_are_isolated(monkeypatch: Any) -> N
         return []
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    monkeypatch.setattr(db_connection, "execute", fake_execute)
-    monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(db, "execute", fake_execute)
+    monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
     inbox = PostgresInboxRepository()
     outbox = PostgresOutboxRepository()
 

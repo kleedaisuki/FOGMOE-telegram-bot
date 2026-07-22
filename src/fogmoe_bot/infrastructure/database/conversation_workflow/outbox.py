@@ -7,6 +7,10 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from fogmoe_bot.domain.conversation.errors import (
+    ConcurrentTurnUpdateError,
+    IdempotencyConflictError,
+)
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
@@ -14,12 +18,6 @@ from fogmoe_bot.domain.conversation.identity import (
     MessageSequence,
     OutboundMessageId,
     TurnId,
-)
-from fogmoe_bot.domain.temporal import ensure_utc
-from fogmoe_bot.domain.conversation.turn import (
-    ConversationTurn,
-    TurnEvent,
-    TurnState,
 )
 from fogmoe_bot.domain.conversation.outbox import (
     OutboundClaim,
@@ -29,12 +27,14 @@ from fogmoe_bot.domain.conversation.outbox import (
     OutboundMessage,
     OutboundStatus,
 )
-from fogmoe_bot.domain.conversation.errors import (
-    ConcurrentTurnUpdateError,
-    IdempotencyConflictError,
+from fogmoe_bot.domain.conversation.turn import (
+    ConversationTurn,
+    TurnEvent,
+    TurnState,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.domain.observability.trace import TraceContext
+from fogmoe_bot.domain.temporal import ensure_utc
+from fogmoe_bot.infrastructure.database import db
 
 from .common import (
     _claim_window,
@@ -158,7 +158,7 @@ class PostgresOutboxRepository:
         @raise ValueError 草稿不是规范 standalone 副作用时抛出 / Raised when the draft is not a canonical standalone effect.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             return await self.enqueue_standalone_outbound_in_transaction(
                 connection,
                 draft,
@@ -210,12 +210,12 @@ class PostgresOutboxRepository:
             _validate_outbound_idempotency(existing, draft)
             return OutboundEnqueueResult(existing, False)
 
-        await db_connection.fetch_one(
+        await db.fetch_one(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
             (f"outbox-idempotency:{draft.conversation_id}",),
             connection=connection,
         )
-        await db_connection.fetch_one(
+        await db.fetch_one(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
             (str(draft.delivery_stream_id),),
             connection=connection,
@@ -226,7 +226,7 @@ class PostgresOutboxRepository:
             _validate_outbound_idempotency(existing, draft)
             return OutboundEnqueueResult(existing, False)
 
-        sequence_row = await db_connection.fetch_one(
+        sequence_row = await db.fetch_one(
             "SELECT COALESCE(MAX(stream_sequence), 0) + 1 "
             "FROM conversation.outbound_messages WHERE delivery_stream_id = %s",
             (str(draft.delivery_stream_id),),
@@ -237,7 +237,7 @@ class PostgresOutboxRepository:
                 "Could not allocate an outbound delivery-stream sequence"
             )
         stream_sequence = _integer(sequence_row[0])
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "INSERT INTO conversation.outbound_messages "
             "(message_id, conversation_id, turn_id, delivery_stream_id, stream_sequence, "
             "kind, payload, idempotency_key, status, version, attempt_count, "
@@ -303,7 +303,7 @@ class PostgresOutboxRepository:
         @return 数据库行或 None / Database row or None.
         """
 
-        row: object | None = await db_connection.fetch_one(
+        row: object | None = await db.fetch_one(
             "SELECT message_id, conversation_id, turn_id, delivery_stream_id, "
             "stream_sequence, kind, payload, idempotency_key, status, version, "
             "attempt_count, next_attempt_at, created_at, updated_at, delivered_at, "
@@ -324,7 +324,7 @@ class PostgresOutboxRepository:
         @return 消息或 None / Message or None.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT message_id, conversation_id, turn_id, delivery_stream_id, "
             "stream_sequence, kind, payload, idempotency_key, status, version, "
             "attempt_count, next_attempt_at, created_at, updated_at, delivered_at, "
@@ -355,8 +355,8 @@ class PostgresOutboxRepository:
         if limit < 1:
             return ()
         token = LeaseToken.new()
-        async with db_connection.transaction() as connection:
-            rows = await db_connection.fetch_all(
+        async with db.transaction() as connection:
+            rows = await db.fetch_all(
                 "WITH abandoned AS ("
                 "UPDATE conversation.outbound_messages AS outbound "
                 "SET status = 'cancelled', version = outbound.version + 1, "
@@ -469,8 +469,8 @@ class PostgresOutboxRepository:
         timestamp = ensure_utc(delivered_at)
         if timestamp < claim.message.updated_at:
             raise ValueError("delivered_at cannot precede claim time")
-        async with db_connection.transaction() as connection:
-            rowcount = await db_connection.execute(
+        async with db.transaction() as connection:
+            rowcount = await db.execute(
                 "UPDATE conversation.outbound_messages "
                 "SET status = 'delivered', version = version + 1, delivered_at = %s, "
                 "external_message_id = %s, updated_at = %s, next_attempt_at = NULL, "
@@ -522,8 +522,8 @@ class PostgresOutboxRepository:
         if retry_time <= failure_time:
             raise ValueError("retry_at must be later than failed_at")
         normalized_error = _required_error(error)
-        async with db_connection.transaction() as connection:
-            rowcount = await db_connection.execute(
+        async with db.transaction() as connection:
+            rowcount = await db.execute(
                 "UPDATE conversation.outbound_messages "
                 "SET status = 'retry_wait', version = version + 1, next_attempt_at = %s, "
                 "updated_at = %s, claim_token = NULL, lease_expires_at = NULL, "
@@ -564,8 +564,8 @@ class PostgresOutboxRepository:
         if failure_time < claim.message.updated_at:
             raise ValueError("failed_at cannot precede claim time")
         normalized_error = _required_error(error)
-        async with db_connection.transaction() as connection:
-            rowcount = await db_connection.execute(
+        async with db.transaction() as connection:
+            rowcount = await db.execute(
                 "UPDATE conversation.outbound_messages "
                 "SET status = 'failed_final', version = version + 1, next_attempt_at = NULL, "
                 "updated_at = %s, claim_token = NULL, lease_expires_at = NULL, "
@@ -616,7 +616,7 @@ class PostgresOutboxRepository:
         turn_id = claim.message.turn_id
         if turn_id is None:
             return None
-        remaining_row = await db_connection.fetch_one(
+        remaining_row = await db.fetch_one(
             "SELECT EXISTS ("
             "SELECT 1 FROM conversation.outbound_messages "
             "WHERE turn_id = CAST(%s AS UUID) AND status <> 'delivered'"
@@ -711,7 +711,7 @@ class PostgresOutboxRepository:
         turn_id = claim.message.turn_id
         if turn_id is None:
             return
-        await db_connection.execute(
+        await db.execute(
             "UPDATE conversation.outbound_messages "
             "SET status = 'cancelled', version = version + 1, "
             "next_attempt_at = NULL, updated_at = %s, claim_token = NULL, "
@@ -738,8 +738,8 @@ class PostgresOutboxRepository:
         timestamp = ensure_utc(now)
         retry_time = timestamp + timedelta(microseconds=1)
         recovery_error = "recovered expired worker lease"
-        async with db_connection.transaction() as connection:
-            rows = await db_connection.fetch_all(
+        async with db.transaction() as connection:
+            rows = await db.fetch_all(
                 "WITH expired AS ("
                 "SELECT message_id FROM conversation.outbound_messages "
                 "WHERE status = 'processing' AND lease_expires_at <= %s "

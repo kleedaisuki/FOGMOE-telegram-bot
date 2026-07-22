@@ -21,8 +21,9 @@ from fogmoe_bot.domain.user_profile.models import (
     ProfileEvidence,
     UserProfileSnapshot,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
+from .locking import lock_user_profile
 from .mapping import (
     _EVIDENCE_COLUMNS,
     _document_json,
@@ -40,7 +41,6 @@ from .mapping import (
     _uuid,
     _values,
 )
-from .locking import lock_user_profile
 
 
 class PostgresUserProfileStore:
@@ -58,7 +58,7 @@ class PostgresUserProfileStore:
 
         if isinstance(user_id, bool) or user_id <= 0:
             raise ValueError("Profile user_id must be positive")
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT profile.user_id, revision.revision, revision.document, "
             "revision.observed_through_event_id, profile.created_at, "
             "revision.created_at, revision.route_key, revision.prompt_version "
@@ -84,7 +84,7 @@ class PostgresUserProfileStore:
         @return 当前 snapshot 或 None / Current snapshot or None.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT profile.user_id, revision.revision, revision.document, "
             "revision.observed_through_event_id, profile.created_at, "
             "revision.created_at, revision.route_key, revision.prompt_version "
@@ -117,9 +117,9 @@ class PostgresUserProfileStore:
         timestamp = ensure_utc(projected_at)
         metadata = _metadata_json(evidence.metadata)
         digest = _evidence_digest(evidence)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await lock_user_profile(connection, evidence.owner_user_id)
-            boundary = await db_connection.fetch_one(
+            boundary = await db.fetch_one(
                 "SELECT forgotten_through FROM user_profile.profiles "
                 "WHERE user_id = %s",
                 (evidence.owner_user_id,),
@@ -131,7 +131,7 @@ class PostgresUserProfileStore:
                     raise TypeError("Profile forgetting boundary must be a datetime")
                 if evidence.occurred_at <= ensure_utc(forgotten_through):
                     return
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO user_profile.evidence_events "
                 "(source_turn_id, owner_user_id, user_text, assistant_text, occurred_at, "
                 "metadata, source_digest, projected_at) "
@@ -149,7 +149,7 @@ class PostgresUserProfileStore:
                 ),
                 connection=connection,
             )
-            row = await db_connection.fetch_one(
+            row = await db.fetch_one(
                 "SELECT owner_user_id, user_text, assistant_text, occurred_at, metadata, "
                 "source_digest FROM user_profile.evidence_events "
                 "WHERE source_turn_id = CAST(%s AS UUID)",
@@ -167,7 +167,7 @@ class PostgresUserProfileStore:
                 raise RuntimeError(
                     f"Profile evidence projection drifted for Turn {evidence.source_turn_id}"
                 )
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO user_profile.profiles "
                 "(user_id, current_revision, observed_through_event_id, next_eligible_at, "
                 "forgotten_through, created_at, updated_at) "
@@ -200,8 +200,8 @@ class PostgresUserProfileStore:
         if not 4_096 <= max_evidence_chars <= 1_000_000:
             raise ValueError("Dream evidence character budget is invalid")
         inserted = 0
-        async with db_connection.transaction() as connection:
-            candidates = await db_connection.fetch_all(
+        async with db.transaction() as connection:
+            candidates = await db.fetch_all(
                 "SELECT profile.user_id FROM user_profile.profiles AS profile "
                 "WHERE profile.next_eligible_at <= %s "
                 "AND EXISTS (SELECT 1 FROM user_profile.evidence_events AS evidence "
@@ -240,7 +240,7 @@ class PostgresUserProfileStore:
         @return 插入为 1，竞态收敛为 0 / One when inserted, zero when a race converged.
         """
 
-        profile_row = await db_connection.fetch_one(
+        profile_row = await db.fetch_one(
             "SELECT COALESCE(current_revision, 0), observed_through_event_id "
             "FROM user_profile.profiles WHERE user_id = %s",
             (user_id,),
@@ -251,7 +251,7 @@ class PostgresUserProfileStore:
         base_revision, base_watermark = (
             _integer(value) for value in _values(profile_row, 2)
         )
-        event_rows = await db_connection.fetch_all(
+        event_rows = await db.fetch_all(
             "SELECT event_id, metadata, char_length(user_text) + "
             "least(char_length(assistant_text), 4000) "
             "FROM user_profile.evidence_events "
@@ -277,7 +277,7 @@ class PostgresUserProfileStore:
         dream_id = _dream_identity(
             user_id, base_revision, base_watermark, through_event_id
         )
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "INSERT INTO user_profile.dreams "
             "(dream_id, user_id, base_revision, base_observed_through_event_id, "
             "through_event_id, source_count, metadata, status, version, attempt_count, "
@@ -301,13 +301,13 @@ class PostgresUserProfileStore:
         if row is None:
             return 0
         for ordinal, event_id in enumerate(event_ids):
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO user_profile.dream_sources (dream_id, ordinal, event_id) "
                 "VALUES (CAST(%s AS UUID), %s, %s)",
                 (str(dream_id), ordinal, event_id),
                 connection=connection,
             )
-        await db_connection.execute(
+        await db.execute(
             "UPDATE user_profile.profiles SET next_eligible_at = NULL, updated_at = %s "
             "WHERE user_id = %s",
             (now, user_id),
@@ -331,8 +331,8 @@ class PostgresUserProfileStore:
         if not 1 <= limit <= 64 or lease_for <= timedelta():
             raise ValueError("Dream claim bounds are invalid")
         claims: list[DreamClaim] = []
-        async with db_connection.transaction() as connection:
-            candidates = await db_connection.fetch_all(
+        async with db.transaction() as connection:
+            candidates = await db.fetch_all(
                 "SELECT dream_id FROM user_profile.dreams "
                 "WHERE status IN ('pending','retry_wait') AND next_attempt_at <= %s "
                 "ORDER BY next_attempt_at, dream_id FOR UPDATE SKIP LOCKED LIMIT %s",
@@ -342,7 +342,7 @@ class PostgresUserProfileStore:
             for candidate in candidates:
                 dream_id = _uuid(_values(candidate, 1)[0])
                 token = uuid4()
-                row = await db_connection.fetch_one(
+                row = await db.fetch_one(
                     "UPDATE user_profile.dreams SET status = 'processing', "
                     "version = version + 1, attempt_count = attempt_count + 1, "
                     "next_attempt_at = NULL, claim_token = CAST(%s AS UUID), "
@@ -390,7 +390,7 @@ class PostgresUserProfileStore:
         attempt_count = _integer(values[5])
         document = ProfileDocument()
         if base_revision > 0:
-            revision_row = await db_connection.fetch_one(
+            revision_row = await db.fetch_one(
                 "SELECT document FROM user_profile.profile_revisions "
                 "WHERE user_id = %s AND revision = %s",
                 (user_id, base_revision),
@@ -399,7 +399,7 @@ class PostgresUserProfileStore:
             if revision_row is None:
                 raise RuntimeError("Dream base Profile revision does not exist")
             document = _map_document(_values(revision_row, 1)[0])
-        evidence_rows = await db_connection.fetch_all(
+        evidence_rows = await db.fetch_all(
             "SELECT "
             + _EVIDENCE_COLUMNS
             + " FROM user_profile.dream_sources AS source "
@@ -440,10 +440,10 @@ class PostgresUserProfileStore:
         if refresh_after <= timedelta():
             raise ValueError("Profile refresh_after must be positive")
         patch_json = _patch_json(result)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await lock_user_profile(connection, claim.owner_user_id)
             await self._lock_claim(claim, connection=connection)
-            profile_row = await db_connection.fetch_one(
+            profile_row = await db.fetch_one(
                 "SELECT COALESCE(current_revision, 0), observed_through_event_id, created_at "
                 "FROM user_profile.profiles WHERE user_id = %s FOR UPDATE",
                 (claim.owner_user_id,),
@@ -462,7 +462,7 @@ class PostgresUserProfileStore:
             next_revision = claim.base_revision
             if changed:
                 next_revision += 1
-                await db_connection.execute(
+                await db.execute(
                     "INSERT INTO user_profile.profile_revisions "
                     "(user_id, revision, document, observed_through_event_id, route_key, "
                     "prompt_version, created_at) VALUES (%s, %s, CAST(%s AS JSONB), %s, %s, %s, %s)",
@@ -479,7 +479,7 @@ class PostgresUserProfileStore:
                     ),
                     connection=connection,
                 )
-            more_row = await db_connection.fetch_one(
+            more_row = await db.fetch_one(
                 "SELECT 1 FROM user_profile.evidence_events "
                 "WHERE owner_user_id = %s AND event_id > %s LIMIT 1",
                 (claim.owner_user_id, claim.through_event_id),
@@ -488,7 +488,7 @@ class PostgresUserProfileStore:
             next_eligible_at = (
                 timestamp if more_row is not None else timestamp + refresh_after
             )
-            await db_connection.execute(
+            await db.execute(
                 "UPDATE user_profile.profiles SET current_revision = %s, "
                 "observed_through_event_id = %s, next_eligible_at = %s, updated_at = %s "
                 "WHERE user_id = %s",
@@ -501,7 +501,7 @@ class PostgresUserProfileStore:
                 ),
                 connection=connection,
             )
-            row = await db_connection.fetch_one(
+            row = await db.fetch_one(
                 "UPDATE user_profile.dreams SET status = 'completed', claim_token = NULL, "
                 "lease_expires_at = NULL, result_patch = CAST(%s AS JSONB), route_key = %s, "
                 "completed_at = %s, updated_at = %s WHERE dream_id = CAST(%s AS UUID) "
@@ -545,7 +545,7 @@ class PostgresUserProfileStore:
         retry_time = ensure_utc(retry_at)
         if retry_time <= failure_time:
             raise ValueError("Dream retry_at must follow failed_at")
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "UPDATE user_profile.dreams SET status = 'retry_wait', next_attempt_at = %s, "
             "claim_token = NULL, lease_expires_at = NULL, last_error = %s, updated_at = %s "
             "WHERE dream_id = CAST(%s AS UUID) AND status = 'processing' "
@@ -571,7 +571,7 @@ class PostgresUserProfileStore:
         """@brief fenced 终结 job / Finally fail a job."""
 
         timestamp = ensure_utc(failed_at)
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "UPDATE user_profile.dreams SET status = 'failed_final', next_attempt_at = NULL, "
             "claim_token = NULL, lease_expires_at = NULL, last_error = %s, "
             "completed_at = %s, updated_at = %s WHERE dream_id = CAST(%s AS UUID) "
@@ -594,7 +594,7 @@ class PostgresUserProfileStore:
         """
 
         timestamp = ensure_utc(now)
-        return await db_connection.execute(
+        return await db.execute(
             "UPDATE user_profile.dreams SET status = 'retry_wait', next_attempt_at = %s, "
             "claim_token = NULL, lease_expires_at = NULL, "
             "last_error = COALESCE(last_error, 'recovered expired Dream lease'), "
@@ -610,7 +610,7 @@ class PostgresUserProfileStore:
     ) -> None:
         """@brief 锁定并验证 processing/fencing 状态 / Lock and validate processing/fencing state."""
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT status, claim_token FROM user_profile.dreams "
             "WHERE dream_id = CAST(%s AS UUID) FOR UPDATE",
             (str(claim.dream_id),),

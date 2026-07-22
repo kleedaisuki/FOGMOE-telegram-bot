@@ -3,25 +3,24 @@
 from __future__ import annotations
 
 import asyncio
-from observability_testkit import make_telemetry
-from datetime import UTC, datetime, timedelta
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from observability_testkit import make_telemetry
 
 from fogmoe_bot.application.admin.models import RequestAnnouncement
+from fogmoe_bot.domain.conversation.identity import OutboundMessageId
 from fogmoe_bot.infrastructure.admin.announcements import (
     AnnouncementIdempotencyConflict,
     PostgresAdminAnnouncementOperations,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.standalone_outbound import (
     PostgresStandaloneOutboundCapability,
 )
-from fogmoe_bot.domain.conversation.identity import OutboundMessageId
 from fogmoe_bot.presentation.telegram.admin_handlers import (
     TelegramAnnouncementOutboundFactory,
 )
@@ -80,14 +79,14 @@ def test_admin_announcement_snapshot_is_concurrent_replayable_and_fenced() -> No
             requested_at=now,
         )
         try:
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO identity.users "
                 "(id, tg_uid, provider, name) "
                 "VALUES (%s, %s, 'telegram', 'admin-pg-a'), "
                 "(%s, %s, 'telegram', 'admin-pg-b')",
                 (users[0], users[0], users[1], users[1]),
             )
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO conversation.inbound_updates "
                 "(update_id, conversation_id, payload, status, version, attempt_count, "
                 "next_attempt_at, received_at, updated_at) "
@@ -111,14 +110,14 @@ def test_admin_announcement_snapshot_is_concurrent_replayable_and_fenced() -> No
             assert first.recipient_count == second.recipient_count
             assert first.recipient_count >= 2
             announcement_conversation = f"admin-announcement:{first.announcement_id}"
-            known_snapshot = await db_connection.fetch_one(
+            known_snapshot = await db.fetch_one(
                 "SELECT COUNT(*) FROM admin.announcement_recipients "
                 "WHERE announcement_id = CAST(%s AS UUID) "
                 "AND recipient_kind = 'user' AND chat_id = ANY(%s)",
                 (str(first.announcement_id), users),
             )
             assert known_snapshot is not None and int(known_snapshot[0]) == 2
-            completion = await db_connection.fetch_one(
+            completion = await db.fetch_one(
                 "SELECT status FROM admin.announcement_recipients "
                 "WHERE announcement_id = CAST(%s AS UUID) "
                 "AND recipient_kind = 'completion' AND chat_id = %s",
@@ -203,26 +202,26 @@ def test_admin_announcement_snapshot_is_concurrent_replayable_and_fenced() -> No
                     )
                 )
         finally:
-            acceptance_row = await db_connection.fetch_one(
+            acceptance_row = await db.fetch_one(
                 "SELECT announcement_id FROM admin.announcements "
                 "WHERE idempotency_key = %s",
                 (key,),
             )
             if acceptance_row is not None:
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM admin.announcements WHERE announcement_id = CAST(%s AS UUID)",
                     (str(acceptance_row[0]),),
                 )
             if announcement_conversation is not None:
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM conversation.outbound_messages WHERE conversation_id = %s",
                     (announcement_conversation,),
                 )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM conversation.inbound_updates WHERE update_id = %s",
                 (update_id,),
             )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM identity.users WHERE id = ANY(%s)",
                 (users,),
             )

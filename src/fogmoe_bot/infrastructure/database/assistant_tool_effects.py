@@ -25,13 +25,12 @@ from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectConflictError,
     ToolEffectRequest,
 )
+from fogmoe_bot.domain.conversation.identity import TurnId
 from fogmoe_bot.domain.conversation.payloads import (
     JsonObject,
     JsonValue,
 )
-from fogmoe_bot.domain.conversation.identity import TurnId
-from fogmoe_bot.infrastructure.database import connection as db_connection
-
+from fogmoe_bot.infrastructure.database import db
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +156,7 @@ class PostgresAssistantToolStore:
 
         if step_no < 0:
             raise ValueError("step_no must be non-negative")
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT request_hash, route_key, response FROM assistant.tool_agent_steps "
             "WHERE turn_id = CAST(%s AS UUID) AND step_no = %s",
             (str(turn_id), step_no),
@@ -174,8 +173,8 @@ class PostgresAssistantToolStore:
         if checkpoint.step_no < 0:
             raise ValueError("step_no must be non-negative")
         payload = _encode_completion(checkpoint.completion)
-        async with db_connection.transaction() as connection:
-            await db_connection.execute(
+        async with db.transaction() as connection:
+            await db.execute(
                 "INSERT INTO assistant.tool_agent_steps "
                 "(turn_id, step_no, request_hash, route_key, response) "
                 "VALUES (CAST(%s AS UUID), %s, %s, %s, CAST(%s AS JSONB)) "
@@ -189,7 +188,7 @@ class PostgresAssistantToolStore:
                 ),
                 connection=connection,
             )
-            row = await db_connection.fetch_one(
+            row = await db.fetch_one(
                 "SELECT request_hash, route_key, response FROM assistant.tool_agent_steps "
                 "WHERE turn_id = CAST(%s AS UUID) AND step_no = %s FOR UPDATE",
                 (str(checkpoint.turn_id), checkpoint.step_no),
@@ -262,8 +261,8 @@ class PostgresAssistantToolStore:
         """
 
         now = _aware(self._now())
-        async with db_connection.transaction() as connection:
-            await db_connection.execute(
+        async with db.transaction() as connection:
+            await db.execute(
                 "INSERT INTO assistant.tool_effect_receipts "
                 "(turn_id, invocation_id, effect_kind, tool_name, provider_call_id, "
                 "request_hash, request, mutating, status) VALUES "
@@ -283,7 +282,7 @@ class PostgresAssistantToolStore:
                 ),
                 connection=connection,
             )
-            row = await db_connection.fetch_one(
+            row = await db.fetch_one(
                 "SELECT request_hash, status, result, claim_token, lease_expires_at "
                 "FROM assistant.tool_effect_receipts WHERE turn_id = CAST(%s AS UUID) "
                 "AND invocation_id = %s AND effect_kind = %s FOR UPDATE",
@@ -312,7 +311,7 @@ class PostgresAssistantToolStore:
                 raise ToolEffectBusyError(
                     f"Tool receipt {request.invocation_id} is already processing"
                 )
-            rowcount = await db_connection.execute(
+            rowcount = await db.execute(
                 "UPDATE assistant.tool_effect_receipts SET status = 'processing', "
                 "claim_token = CAST(%s AS UUID), lease_expires_at = %s, "
                 "attempt_count = attempt_count + 1, last_error = NULL, updated_at = %s "
@@ -344,7 +343,7 @@ class PostgresAssistantToolStore:
         @return 新结果 / New result.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_claim(request, token=token, connection=connection)
             result = await self._operations.execute(request, connection=connection)
             await self._after_operation(request, result)
@@ -373,7 +372,7 @@ class PostgresAssistantToolStore:
         @return 新结果 / New result.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_claim(request, token=token, connection=connection)
             await self._operations.finalize(request, result, connection=connection)
             await _mark_succeeded(
@@ -399,7 +398,7 @@ class PostgresAssistantToolStore:
         """
 
         try:
-            await db_connection.execute(
+            await db.execute(
                 "UPDATE assistant.tool_effect_receipts SET status = 'pending', claim_token = NULL, "
                 "lease_expires_at = NULL, updated_at = %s, last_error = 'operation failed' "
                 "WHERE turn_id = CAST(%s AS UUID) AND invocation_id = %s AND effect_kind = %s "
@@ -437,7 +436,7 @@ async def _lock_claim(
     @return None / None.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT 1 FROM assistant.tool_effect_receipts WHERE turn_id = CAST(%s AS UUID) "
         "AND invocation_id = %s AND effect_kind = %s AND status = 'processing' "
         "AND claim_token = CAST(%s AS UUID) FOR UPDATE",
@@ -473,7 +472,7 @@ async def _mark_succeeded(
     @return None / None.
     """
 
-    rowcount = await db_connection.execute(
+    rowcount = await db.execute(
         "UPDATE assistant.tool_effect_receipts SET status = 'succeeded', "
         "result = CAST(%s AS JSONB), claim_token = NULL, lease_expires_at = NULL, "
         "completed_at = %s, updated_at = %s, last_error = NULL "

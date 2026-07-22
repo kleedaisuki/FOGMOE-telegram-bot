@@ -10,7 +10,7 @@ from fogmoe_bot.application.assistant.temporal_memory import (
     TemporalMemoryPassage,
     TemporalMemoryQuery,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 class PostgresTemporalMemoryReader:
@@ -72,7 +72,7 @@ class PostgresTemporalMemoryReader:
                 "passage_id ASC LIMIT %s"
             )
         parameters.append(query.limit)
-        rows = await db_connection.fetch_all(sql, tuple(parameters))
+        rows = await db.fetch_all(sql, tuple(parameters))
         return tuple(_map_passage(row) for row in rows)
 
 

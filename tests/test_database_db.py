@@ -1,6 +1,6 @@
-from contextlib import asynccontextmanager
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 from sqlalchemy import create_engine, text
 
@@ -47,6 +47,127 @@ def test_exec_sql_uses_connection_from_context(monkeypatch):
     statement, params = fake_connection.calls[0]
     assert str(statement) == "SELECT :p0"
     assert params == {"p0": 42}
+
+
+def test_execute_without_connection_owns_and_closes_transaction(monkeypatch) -> None:
+    """@brief 独立写入拥有自动提交事务 / A standalone write owns its auto-commit transaction.
+
+    @return None / None.
+    """
+
+    transaction_connection = object()
+    lifecycle: list[str] = []
+    observed_connections: list[object] = []
+
+    @asynccontextmanager
+    async def fake_transaction():
+        """@brief 提供可观测的事务上下文 / Provide an observable transaction context."""
+
+        lifecycle.append("enter")
+        try:
+            yield transaction_connection
+        finally:
+            lifecycle.append("exit")
+
+    class Result:
+        """@brief 提供 rowcount 的执行结果 / Execution result exposing rowcount."""
+
+        rowcount = 3
+
+    async def fake_exec_sql(
+        sql: str,
+        params: db.SqlParams = None,
+        *,
+        connection: object | None = None,
+    ) -> Result:
+        """@brief 记录写入所属连接 / Record the connection owning the write.
+
+        @param sql SQL 文本 / SQL text.
+        @param params SQL 参数 / SQL parameters.
+        @param connection 事务连接 / Transaction connection.
+        @return 伪造结果 / Fake result.
+        """
+
+        assert sql == "UPDATE item SET value = %s"
+        assert params == (7,)
+        assert connection is not None
+        observed_connections.append(connection)
+        return Result()
+
+    monkeypatch.setattr(db, "transaction", fake_transaction)
+    monkeypatch.setattr(db, "exec_sql", fake_exec_sql)
+
+    assert asyncio.run(db.execute("UPDATE item SET value = %s", (7,))) == 3
+    assert observed_connections == [transaction_connection]
+    assert lifecycle == ["enter", "exit"]
+
+
+def test_typed_fetch_primitives_preserve_row_and_mapping_modes(monkeypatch) -> None:
+    """@brief typed fetch 保留 row/mapping 分支 / Typed fetches preserve row and mapping modes.
+
+    @return None / None.
+    """
+
+    class Result:
+        """@brief 提供 fetch 所需的游标形状 / Cursor shape required by fetch helpers."""
+
+        def fetchone(self) -> tuple[int]:
+            """@brief 返回单行 / Return one row.
+
+            @return 单行 / One row.
+            """
+
+            return (1,)
+
+        def fetchall(self) -> list[tuple[int]]:
+            """@brief 返回全部行 / Return all rows.
+
+            @return 所有行 / All rows.
+            """
+
+            return [(1,), (2,)]
+
+        def mappings(self) -> Result:
+            """@brief 切换到 mapping 视图 / Switch to a mapping view.
+
+            @return 当前游标替身 / This cursor double.
+            """
+
+            return self
+
+        def first(self) -> dict[str, int]:
+            """@brief 返回首个 mapping / Return the first mapping.
+
+            @return 首个 mapping / First mapping.
+            """
+
+            return {"value": 1}
+
+        def all(self) -> list[dict[str, int]]:
+            """@brief 返回全部 mapping / Return every mapping.
+
+            @return 所有 mapping / All mappings.
+            """
+
+            return [{"value": 1}, {"value": 2}]
+
+    async def fake_exec_sql(*_: object, **__: object) -> Result:
+        """@brief 返回确定性游标 / Return a deterministic cursor.
+
+        @return 游标替身 / Cursor double.
+        """
+
+        return Result()
+
+    monkeypatch.setattr(db, "exec_sql", fake_exec_sql)
+
+    assert asyncio.run(db.fetch_one("SELECT 1")) == (1,)
+    assert asyncio.run(db.fetch_all("SELECT 1")) == [(1,), (2,)]
+    assert asyncio.run(db.fetch_one("SELECT 1", mapping=True)) == {"value": 1}
+    assert asyncio.run(db.fetch_all("SELECT 1", mapping=True)) == [
+        {"value": 1},
+        {"value": 2},
+    ]
 
 
 def test_sql_operation_is_low_cardinality_and_never_returns_statement() -> None:

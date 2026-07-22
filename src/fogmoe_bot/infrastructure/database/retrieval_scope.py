@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.domain.retrieval import RetrievalScope
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 async def lock_retrieval_scope(
@@ -21,7 +21,7 @@ async def lock_retrieval_scope(
         Projection and forgetting must share this lock to prevent asynchronous resurrection.
     """
 
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (f"retrieval-scope:{scope.kind}:{scope.scope_id}",),
         connection=connection,

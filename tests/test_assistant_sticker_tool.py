@@ -11,14 +11,13 @@ from typing import cast
 from pytest import MonkeyPatch
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from fogmoe_bot.application.assistant.temporal_memory import TemporalMemoryReader
 from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectRequest,
     ToolExecutionContext,
 )
-from fogmoe_bot.application.assistant.temporal_memory import TemporalMemoryReader
-from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.application.scheduling.service import SchedulingService
-from fogmoe_bot.domain.conversation.payloads import JsonValue
+from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
@@ -30,11 +29,12 @@ from fogmoe_bot.domain.conversation.outbox import (
     SEND_TELEGRAM_STICKER,
     OutboundDraft,
 )
+from fogmoe_bot.domain.conversation.payloads import JsonValue
 from fogmoe_bot.domain.temporal import UTC_TIME_ZONE
 from fogmoe_bot.infrastructure.assistant.tool_operations.dispatcher import (
     AssistantToolOperationDispatcher,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.assistant_tool_effects import (
     PostgresAssistantToolStore,
     ToolTransactionMode,
@@ -283,17 +283,17 @@ def test_receipt_replay_queues_exactly_one_standalone_sticker_outbox(
 
         database = _ReceiptDatabase()
         monkeypatch.setattr(
-            db_connection,
+            db,
             "transaction",
             database.transaction,
         )
         monkeypatch.setattr(
-            db_connection,
+            db,
             "execute",
             database.execute,
         )
         monkeypatch.setattr(
-            db_connection,
+            db,
             "fetch_one",
             database.fetch_one,
         )
@@ -377,9 +377,9 @@ def test_generated_media_runs_outside_transaction_then_finalizes_once(
 
     async def scenario() -> None:
         database = _ReceiptDatabase()
-        monkeypatch.setattr(db_connection, "transaction", database.transaction)
-        monkeypatch.setattr(db_connection, "execute", database.execute)
-        monkeypatch.setattr(db_connection, "fetch_one", database.fetch_one)
+        monkeypatch.setattr(db, "transaction", database.transaction)
+        monkeypatch.setattr(db, "execute", database.execute)
+        monkeypatch.setattr(db, "fetch_one", database.fetch_one)
         outbox = _WorkflowRecorder()
         unused = _UnusedAdapters()
         generated = _GeneratedMedia(database)

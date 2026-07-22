@@ -198,7 +198,7 @@ def test_wrong_user_keeps_the_original_product_rejection_text() -> None:
             callback_query=query,
             effective_chat=SimpleNamespace(id=-1001),
         )
-        await verify_callback(update, SimpleNamespace())
+        await verify_callback(update, SimpleNamespace())  # type: ignore[arg-type]
 
         assert query.answers == [("这不是为您准备的验证按钮。", True)]
 
@@ -311,7 +311,7 @@ def test_verification_layers_follow_inward_dependency_direction() -> None:
         source_root / "application/moderation/verification_service.py"
     ).read_text(encoding="utf-8")
     repository_source = (
-        source_root / "infrastructure/database/repositories/verification_repository.py"
+        source_root / "infrastructure/database/moderation/verification.py"
     ).read_text(encoding="utf-8")
     presentation_source = (
         source_root / "presentation/telegram/verification_handlers.py"

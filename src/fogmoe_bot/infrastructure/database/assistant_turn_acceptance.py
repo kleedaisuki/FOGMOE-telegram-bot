@@ -18,20 +18,16 @@ from fogmoe_bot.application.conversation.assistant_ingress import (
 from fogmoe_bot.application.conversation.workflow import (
     ConversationWorkflow,
 )
+from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
 from fogmoe_bot.domain.conversation.identity import (
     TurnId,
     TurnSource,
 )
 from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.user_profile.models import UserProfileSnapshot
-from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import assistant_user_context, db
 from fogmoe_bot.infrastructure.database.account_plan import (
     TransactionalAccountPlanResolver,
-)
-from fogmoe_bot.infrastructure.database.repositories import (
-    conversation_repository,
-    user_repository,
 )
 from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
     PostgresTurnRepository,
@@ -101,9 +97,9 @@ class PostgresAssistantTurnAcceptanceUoW:
 
         timestamp = ensure_utc(accepted_at)
         turn_id = TurnId.for_source(TurnSource.telegram(request.update_id))
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await self._lock_and_validate_inbound(request, connection=connection)
-            await db_connection.fetch_one(
+            await db.fetch_one(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                 (str(request.conversation_id),),
                 connection=connection,
@@ -116,10 +112,9 @@ class PostgresAssistantTurnAcceptanceUoW:
             if existing_state is not None and existing_state != "received":
                 return AssistantTurnAccepted(acceptance=None, replayed=True)
 
-            identity_context = await user_repository.fetch_user_identity_context(
+            identity_context = await assistant_user_context.lock_assistant_identity_context_in_transaction(
                 request.user_id,
                 connection=connection,
-                for_update=True,
             )
             if identity_context is None:
                 return AssistantUserNotRegistered()
@@ -148,7 +143,7 @@ class PostgresAssistantTurnAcceptanceUoW:
                 diary_exists=(
                     False
                     if request.is_group
-                    else await conversation_repository.user_diary_exists(
+                    else await assistant_user_context.assistant_diary_exists(
                         request.user_id,
                         connection=connection,
                     )
@@ -191,7 +186,7 @@ class PostgresAssistantTurnAcceptanceUoW:
         @return None / None.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT conversation_id FROM conversation.inbound_updates "
             "WHERE update_id = %s FOR UPDATE",
             (request.update_id.value,),
@@ -221,7 +216,7 @@ class PostgresAssistantTurnAcceptanceUoW:
         @return 状态；不存在为 None / State, or None when absent.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT turn_id, conversation_id, state FROM conversation.conversation_turns "
             "WHERE source_update_id = %s FOR UPDATE",
             (request.update_id.value,),

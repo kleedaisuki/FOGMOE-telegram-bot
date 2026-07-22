@@ -31,7 +31,6 @@ from fogmoe_bot.presentation.telegram.group_message_observer import (
     extract_group_message_observation,
 )
 
-
 NOW = datetime(2026, 7, 12, tzinfo=UTC)
 
 
@@ -237,7 +236,7 @@ def test_postgres_reader_filters_canonical_rows_and_decodes_legacy_base64(
                 }
             ]
 
-        monkeypatch.setattr(postgres_module.db_connection, "fetch_all", fake_fetch_all)
+        monkeypatch.setattr(postgres_module.db, "fetch_all", fake_fetch_all)
         messages = await PostgresGroupMessageProjection().fetch_before(
             -1001,
             message_thread_id=None,

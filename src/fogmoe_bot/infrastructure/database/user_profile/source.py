@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fogmoe_bot.domain.conversation.identity import TELEGRAM_UPDATE_SOURCE_KIND
 from fogmoe_bot.domain.user_profile.models import ProfileEvidence
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 from .mapping import _map_source_evidence
 
@@ -22,7 +22,7 @@ class PostgresProfileEvidenceSource:
 
         if not 1 <= limit <= 128:
             raise ValueError("Profile source limit must be between 1 and 128")
-        rows = await db_connection.fetch_all(
+        rows = await db.fetch_all(
             "WITH candidates AS ("
             "SELECT activity.turn_id, "
             "CAST(activity.request #>> '{user,user_id}' AS BIGINT) AS owner_user_id, "

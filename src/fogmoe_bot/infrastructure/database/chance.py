@@ -34,11 +34,11 @@ seed exists only in the fairness proof.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from fractions import Fraction
 from hashlib import sha256
-import json
 from typing import Any, cast
 from uuid import UUID
 
@@ -83,12 +83,11 @@ from fogmoe_bot.domain.chance.scope import (
     PersonalRoundScope,
     RoundScope,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.banking import (
     lock_bank_account_balances,
     post_bank_transfer,
 )
-
 
 _COMMIT_OPERATION: str = "chance.commit"
 """@brief 建立承诺的稳定回执操作名 / Stable receipt operation for commitment creation."""
@@ -125,7 +124,7 @@ class PostgresChanceRoundOperations(ChanceRoundOperations):
         """
 
         fingerprint = _commit_request_fingerprint(command)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_receipt_key(command.idempotency_key, connection)
             try:
                 replay = await _load_receipt(
@@ -190,7 +189,7 @@ class PostgresChanceRoundOperations(ChanceRoundOperations):
         """
 
         fingerprint = _bind_request_fingerprint(command)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_receipt_key(command.idempotency_key, connection)
             try:
                 replay = await _load_receipt(
@@ -316,7 +315,7 @@ class PostgresChanceRoundOperations(ChanceRoundOperations):
         @return 安全公开视图或标准拒绝结果 / Safe public view or standard rejection result.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             row = await _load_round_row(
                 command.round_id,
                 connection,
@@ -341,7 +340,7 @@ async def _identity_exists(user_id: int, connection: AsyncConnection) -> bool:
     @return identity 行存在时为 True / True when the identity row exists.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT 1 FROM identity.users WHERE id = %s",
         (user_id,),
         connection=connection,
@@ -360,7 +359,7 @@ async def _lock_receipt_key(
     @return None / None.
     """
 
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (f"chance:receipt:{idempotency_key}",),
         connection=connection,
@@ -377,7 +376,7 @@ async def _lock_round_id(round_id: UUID, connection: AsyncConnection) -> None:
         / ``FOR UPDATE`` cannot protect a creation race before a row exists; this lock fills it.
     """
 
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (f"chance:round:{round_id}",),
         connection=connection,
@@ -403,7 +402,7 @@ async def _load_receipt(
         Raised when one key is reused for a different request.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT operation_kind, actor_id, request_fingerprint, result "
         "FROM chance.operation_receipts WHERE idempotency_key = %s",
         (idempotency_key,),
@@ -441,7 +440,7 @@ async def _save_receipt(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO chance.operation_receipts ("
         "idempotency_key, operation_kind, actor_id, request_fingerprint, result"
         ") VALUES (%s, %s, %s, %s, CAST(%s AS JSONB))",
@@ -482,7 +481,7 @@ async def _load_round_row(
         + "client_seed, status, outcome_code, payout, proof"
     )
     lock_clause = " FOR UPDATE" if for_update else ""
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT " + columns + " FROM chance.rounds WHERE round_id = %s" + lock_clause,
         (round_id,),
         mapping=True,
@@ -504,7 +503,7 @@ async def _insert_committed_round(
 
     committed = private_round.committed_round
     scope_kind, scope_id, topic_id = _scope_columns(committed.scope)
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO chance.rounds ("
         "round_id, owner_id, scope_kind, scope_id, topic_id, ruleset, "
         "ruleset_fingerprint, rule_code, stake, nonce, commitment, server_seed, "
@@ -553,7 +552,7 @@ async def _persist_settlement(
         Raised when row state unexpectedly changes while locked.
     """
 
-    changed = await db_connection.execute(
+    changed = await db.execute(
         "UPDATE chance.rounds SET client_seed = %s, status = %s, outcome_code = %s, "
         "payout = %s, proof = CAST(%s AS JSONB), server_seed = NULL, settled_at = %s "
         "WHERE round_id = %s AND status = %s",

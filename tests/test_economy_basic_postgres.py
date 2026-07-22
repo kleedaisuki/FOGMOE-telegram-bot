@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, date, datetime, timedelta
 import os
+from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from postgres_test_support import configure_bot_database
 
 from fogmoe_bot.application.economy.common import EconomyCode
 from fogmoe_bot.application.economy.community import (
@@ -17,19 +18,17 @@ from fogmoe_bot.application.economy.community import (
 from fogmoe_bot.application.economy.rewards import LotteryCommand
 from fogmoe_bot.domain.banking.ledger import LedgerAccount, LedgerReason
 from fogmoe_bot.domain.banking.money import SystemAccountKind, TokenAmount, TokenBucket
-from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
+from fogmoe_bot.infrastructure.database.banking import (
+    load_bank_overview,
+    post_bank_transfer,
+)
 from fogmoe_bot.infrastructure.database.economy.community import (
     PostgresCommunityOperations,
 )
 from fogmoe_bot.infrastructure.database.economy.rewards import (
     PostgresRewardOperations,
 )
-from fogmoe_bot.infrastructure.database.banking import (
-    load_bank_overview,
-    post_bank_transfer,
-)
-from postgres_test_support import configure_bot_database
 
 
 def _postgres_url() -> str:
@@ -80,8 +79,8 @@ def test_real_postgres_lottery_and_gift_replay_without_double_credit(
         rewards = PostgresRewardOperations()
         community = PostgresCommunityOperations()
         try:
-            async with db_connection.transaction() as connection:
-                await db_connection.execute(
+            async with db.transaction() as connection:
+                await db.execute(
                     "INSERT INTO identity.users "
                     "(id, tg_uid, provider, name) "
                     "VALUES (%s, %s, 'telegram', %s), "
@@ -160,7 +159,7 @@ def test_real_postgres_lottery_and_gift_replay_without_double_credit(
             )
             leaderboard = await community.leaderboard(leaderboard_command)
             assert all(isinstance(entry.coins, int) for entry in leaderboard.entries)
-            async with db_connection.transaction() as connection:
+            async with db.transaction() as connection:
                 await post_bank_transfer(
                     namespace="test-economy-seed",
                     source_idempotency_key=f"{suffix}:later",
@@ -176,29 +175,29 @@ def test_real_postgres_lottery_and_gift_replay_without_double_credit(
             assert leaderboard_replay.replayed
             assert leaderboard_replay.entries == leaderboard.entries
 
-            async with db_connection.connect() as connection:
+            async with db.connect() as connection:
                 sender_balance = await load_bank_overview(sender_id, connection)
                 recipient_balance = await load_bank_overview(recipient_id, connection)
                 assert sender_balance.total == 95
                 assert recipient_balance.total == 110
         finally:
-            async with db_connection.transaction() as connection:
-                await db_connection.execute(
+            async with db.transaction() as connection:
+                await db.execute(
                     "DELETE FROM economy.operation_receipts WHERE user_id IN (%s, %s)",
                     (sender_id, recipient_id),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM economy.user_give_daily WHERE user_id = %s",
                     (sender_id,),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM economy.user_lottery WHERE user_id = %s",
                     (sender_id,),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM identity.users WHERE id IN (%s, %s)",
                     (sender_id, recipient_id),
                     connection=connection,

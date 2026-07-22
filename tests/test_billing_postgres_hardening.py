@@ -38,7 +38,6 @@ from fogmoe_bot.domain.billing.orders import (
 )
 from fogmoe_bot.infrastructure.database import billing as postgres_module
 
-
 NOW = datetime(2030, 1, 2, 3, 4, tzinfo=UTC)
 """@brief 测试使用的稳定 UTC 时刻 / Stable UTC instant used by tests."""
 
@@ -249,7 +248,7 @@ def test_receipt_loader_binds_sha256_and_fails_closed_for_legacy_placeholder(
         queries.append(sql)
         return stored
 
-    monkeypatch.setattr(postgres_module.db_connection, "fetch_one", fetch_one)
+    monkeypatch.setattr(postgres_module.db, "fetch_one", fetch_one)
 
     replay = asyncio.run(
         postgres_module._load_receipt(
@@ -322,7 +321,7 @@ def test_receipt_writer_persists_the_canonical_request_fingerprint(
         writes.append((sql, params))
         return 1
 
-    monkeypatch.setattr(postgres_module.db_connection, "execute", execute)
+    monkeypatch.setattr(postgres_module.db, "execute", execute)
     asyncio.run(
         postgres_module._save_receipt(
             command.idempotency_key,
@@ -376,7 +375,7 @@ def test_successful_payment_ownership_lock_query_conflict_and_replay(
         queries.append((sql, params))
         return existing if "FROM billing.payment_events" in sql else None
 
-    monkeypatch.setattr(postgres_module.db_connection, "fetch_one", fetch_one)
+    monkeypatch.setattr(postgres_module.db, "fetch_one", fetch_one)
     asyncio.run(
         postgres_module._lock_successful_payment(
             event,
@@ -459,7 +458,7 @@ def test_successful_payment_ownership_lock_query_conflict_and_replay(
         return paid_order
 
     monkeypatch.setattr(
-        postgres_module.db_connection, "transaction", asynccontextmanager(transaction)
+        postgres_module.db, "transaction", asynccontextmanager(transaction)
     )
     monkeypatch.setattr(postgres_module, "_lock_idempotency_key", no_op)
     monkeypatch.setattr(postgres_module, "_load_receipt", no_receipt)
@@ -651,7 +650,7 @@ def test_future_entitlements_are_locked_for_refund_or_chargeback_revocation(
         queries.append((sql, params))
         return []
 
-    monkeypatch.setattr(postgres_module.db_connection, "fetch_all", fetch_all)
+    monkeypatch.setattr(postgres_module.db, "fetch_all", fetch_all)
     asyncio.run(
         postgres_module._lock_active_order_entitlements(
             order_id=ORDER_ID,
@@ -803,7 +802,7 @@ def test_renewal_placement_requires_subscription_to_be_active_at_creation_time(
         del args
         return None
 
-    monkeypatch.setattr(postgres_module.db_connection, "transaction", transaction)
+    monkeypatch.setattr(postgres_module.db, "transaction", transaction)
     monkeypatch.setattr(postgres_module, "_lock_idempotency_key", no_op)
     monkeypatch.setattr(postgres_module, "_load_receipt", no_receipt)
     monkeypatch.setattr(postgres_module, "_identity_exists", identity_exists)
@@ -864,7 +863,7 @@ def test_open_renewal_lookup_uses_the_same_nonterminal_state_boundary_as_storage
         queries.append((sql, params))
         return (1,)
 
-    monkeypatch.setattr(postgres_module.db_connection, "fetch_one", fetch_one)
+    monkeypatch.setattr(postgres_module.db, "fetch_one", fetch_one)
     exists = asyncio.run(
         postgres_module._has_open_renewal_order(
             SUBSCRIPTION_ID,

@@ -1,4 +1,4 @@
-"""@brief PostgreSQL 成员验证工作流仓储 / PostgreSQL member-verification workflow repository."""
+"""@brief PostgreSQL 成员验证持久化适配器 / PostgreSQL member-verification persistence adapter."""
 
 from __future__ import annotations
 
@@ -23,14 +23,13 @@ from fogmoe_bot.domain.moderation.verification import (
     VerificationTask,
     VerificationVersion,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.toggle_command_receipts import (
     load_toggle_receipt,
     lock_toggle_command,
     lock_toggle_scope,
     save_toggle_receipt,
 )
-
 
 _VERIFICATION_TOGGLE_OPERATION = "member_verification"
 """@brief 成员验证开关的持久操作名 / Persisted operation name for the member-verification switch."""
@@ -46,7 +45,7 @@ class PostgresVerificationRepository:
         @return 已启用时为 True / True when enabled.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT group_id FROM moderation.group_verification WHERE group_id = %s",
             (int(chat_id),),
         )
@@ -60,13 +59,13 @@ class PostgresVerificationRepository:
         @return None / None.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await lock_toggle_scope(
                 operation_kind=_VERIFICATION_TOGGLE_OPERATION,
                 chat_id=int(chat_id),
                 connection=connection,
             )
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO moderation.group_verification (group_id, group_name) VALUES (%s, %s) "
                 "ON CONFLICT (group_id) DO UPDATE SET group_name = EXCLUDED.group_name",
                 (int(chat_id), group_name),
@@ -80,13 +79,13 @@ class PostgresVerificationRepository:
         @return None / None.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await lock_toggle_scope(
                 operation_kind=_VERIFICATION_TOGGLE_OPERATION,
                 chat_id=int(chat_id),
                 connection=connection,
             )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM moderation.group_verification WHERE group_id = %s",
                 (int(chat_id),),
                 connection=connection,
@@ -110,7 +109,7 @@ class PostgresVerificationRepository:
         """
 
         request_payload: dict[str, object] = {"group_name": group_name}
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await lock_toggle_command(
                 idempotency_key=idempotency_key,
                 operation_kind=_VERIFICATION_TOGGLE_OPERATION,
@@ -128,7 +127,7 @@ class PostgresVerificationRepository:
             if replay is not None:
                 return replay
 
-            existing = await db_connection.fetch_one(
+            existing = await db.fetch_one(
                 "SELECT group_id FROM moderation.group_verification "
                 "WHERE group_id = %s FOR UPDATE",
                 (int(chat_id),),
@@ -136,14 +135,14 @@ class PostgresVerificationRepository:
             )
             enabled = existing is None
             if enabled:
-                changed = await db_connection.execute(
+                changed = await db.execute(
                     "INSERT INTO moderation.group_verification (group_id, group_name) "
                     "VALUES (%s, %s) ON CONFLICT (group_id) DO NOTHING",
                     (int(chat_id), group_name),
                     connection=connection,
                 )
             else:
-                changed = await db_connection.execute(
+                changed = await db.execute(
                     "DELETE FROM moderation.group_verification WHERE group_id = %s",
                     (int(chat_id),),
                     connection=connection,
@@ -181,8 +180,8 @@ class PostgresVerificationRepository:
             or task.message_id is not None
         ):
             raise ValueError("create requires a CREATING task without message_id")
-        async with db_connection.transaction() as connection:
-            row = await db_connection.fetch_one(
+        async with db.transaction() as connection:
+            row = await db.fetch_one(
                 "INSERT INTO moderation.verification_tasks "
                 "(user_id, group_id, message_id, expire_time, token_hash, member_name, status, version, "
                 "next_attempt_at, claim_token, lease_expires_at, attempt_count, last_error, updated_at) "
@@ -218,7 +217,7 @@ class PostgresVerificationRepository:
         @return 聚合；不存在时为 None / Aggregate, or None.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT user_id, group_id, message_id, expire_time, token_hash, member_name, status, version "
             "FROM moderation.verification_tasks WHERE user_id = %s AND group_id = %s",
             (int(key.user_id), int(key.chat_id)),
@@ -245,8 +244,8 @@ class PostgresVerificationRepository:
         """
 
         timestamp = _utc(now)
-        async with db_connection.transaction() as connection:
-            row = await db_connection.fetch_one(
+        async with db.transaction() as connection:
+            row = await db.fetch_one(
                 "SELECT user_id, group_id, message_id, expire_time, token_hash, member_name, status, version "
                 "FROM moderation.verification_tasks WHERE user_id = %s AND group_id = %s FOR UPDATE",
                 (int(key.user_id), int(key.chat_id)),
@@ -266,7 +265,7 @@ class PostgresVerificationRepository:
                 message_id=message_id,
             )
             next_attempt_at = _next_attempt(updated, timestamp)
-            changed = await db_connection.execute(
+            changed = await db.execute(
                 "UPDATE moderation.verification_tasks SET message_id = %s, status = %s, version = %s, "
                 "next_attempt_at = %s, claim_token = NULL, lease_expires_at = NULL, "
                 "last_error = NULL, updated_at = %s "
@@ -338,7 +337,7 @@ class PostgresVerificationRepository:
             expected_version=claim.task.version,
             now=timestamp,
         )
-        changed = await db_connection.execute(
+        changed = await db.execute(
             "UPDATE moderation.verification_tasks SET status = %s, version = %s, "
             "next_attempt_at = NULL, claim_token = NULL, lease_expires_at = NULL, "
             "last_error = NULL, updated_at = %s "
@@ -375,7 +374,7 @@ class PostgresVerificationRepository:
         @return None / None.
         """
 
-        changed = await db_connection.execute(
+        changed = await db.execute(
             "UPDATE moderation.verification_tasks SET next_attempt_at = %s, claim_token = NULL, "
             "lease_expires_at = NULL, last_error = %s, updated_at = %s "
             "WHERE user_id = %s AND group_id = %s AND version = %s "
@@ -401,7 +400,7 @@ class PostgresVerificationRepository:
         """
 
         timestamp = _utc(now)
-        return await db_connection.execute(
+        return await db.execute(
             "UPDATE moderation.verification_tasks SET claim_token = NULL, lease_expires_at = NULL, "
             "next_attempt_at = %s, last_error = 'recovered expired verification lease', updated_at = %s "
             "WHERE claim_token IS NOT NULL AND lease_expires_at <= %s "
@@ -439,8 +438,8 @@ class PostgresVerificationRepository:
             key_clause = " AND user_id = %s AND group_id = %s"
             params.extend((int(key.user_id), int(key.chat_id)))
         params.extend((limit, token, lease_expires_at, timestamp))
-        async with db_connection.transaction() as connection:
-            rows = await db_connection.fetch_all(
+        async with db.transaction() as connection:
+            rows = await db.fetch_all(
                 "WITH candidate AS ("
                 "SELECT user_id, group_id FROM moderation.verification_tasks "
                 "WHERE next_attempt_at <= %s AND claim_token IS NULL "

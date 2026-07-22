@@ -8,7 +8,7 @@ from fogmoe_bot.application.economy.web_password import (
     WebPasswordOperations,
     WebPasswordStatus,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 class PostgresWebPasswordOperations(WebPasswordOperations):
@@ -21,7 +21,7 @@ class PostgresWebPasswordOperations(WebPasswordOperations):
         @return 密码状态 / Password status.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT created_at, updated_at FROM identity.web_password WHERE user_id = %s",
             (user_id,),
         )
@@ -40,7 +40,7 @@ class PostgresWebPasswordOperations(WebPasswordOperations):
         @return 写入成功为 True / True when written.
         """
 
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO identity.web_password (user_id, password) VALUES (%s, %s) "
             "ON CONFLICT (user_id) DO UPDATE SET password = EXCLUDED.password, "
             "updated_at = CURRENT_TIMESTAMP",

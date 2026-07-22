@@ -12,7 +12,7 @@ from fogmoe_bot.application.telegram.authorization import (
 )
 from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
 from fogmoe_bot.domain.conversation.identity import UpdateId
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 class PostgresGroupAdministratorDecisionStore:
@@ -28,7 +28,7 @@ class PostgresGroupAdministratorDecisionStore:
         @return 已有决定或 None / Existing decision or None.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT source_update_id, resource_id, actor_user_id, allowed, observed_at "
             "FROM conversation.command_authorization_decisions "
             "WHERE source_update_id = %s AND capability = %s",
@@ -47,8 +47,8 @@ class PostgresGroupAdministratorDecisionStore:
         @raise IdempotencyConflictError Update 来源不存在 / The source Update does not exist.
         """
 
-        async with db_connection.transaction() as connection:
-            row = await db_connection.fetch_one(
+        async with db.transaction() as connection:
+            row = await db.fetch_one(
                 "SELECT conversation_id FROM conversation.inbound_updates "
                 "WHERE update_id = %s FOR UPDATE",
                 (int(decision.update_id),),
@@ -58,7 +58,7 @@ class PostgresGroupAdministratorDecisionStore:
                 raise IdempotencyConflictError(
                     f"Authorization source Update {int(decision.update_id)} does not exist"
                 )
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO conversation.command_authorization_decisions "
                 "(source_update_id, capability, resource_id, actor_user_id, allowed, "
                 "observed_at) VALUES (%s, %s, %s, %s, %s, %s) "
@@ -73,7 +73,7 @@ class PostgresGroupAdministratorDecisionStore:
                 ),
                 connection=connection,
             )
-            canonical = await db_connection.fetch_one(
+            canonical = await db.fetch_one(
                 "SELECT source_update_id, resource_id, actor_user_id, allowed, observed_at "
                 "FROM conversation.command_authorization_decisions "
                 "WHERE source_update_id = %s AND capability = %s",

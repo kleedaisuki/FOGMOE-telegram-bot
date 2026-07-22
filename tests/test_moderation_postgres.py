@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -38,7 +38,7 @@ from fogmoe_bot.domain.moderation.reporting import (
     ReportKey,
     ReportRegistration,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.moderation.effects import (
     PostgresModerationEffectRepository,
 )
@@ -48,7 +48,7 @@ from fogmoe_bot.infrastructure.database.moderation.group import (
 from fogmoe_bot.infrastructure.database.moderation.reports import (
     PostgresModerationReportRepository,
 )
-from fogmoe_bot.infrastructure.database.repositories.verification_repository import (
+from fogmoe_bot.infrastructure.database.moderation.verification import (
     PostgresVerificationRepository,
 )
 
@@ -157,9 +157,9 @@ def _bind_repository_io(
             result = await owned.execute(statement, bindings)
             return result.rowcount
 
-    monkeypatch.setattr(db_connection, "transaction", transaction)
-    monkeypatch.setattr(db_connection, "fetch_one", fetch_one)
-    monkeypatch.setattr(db_connection, "execute", execute)
+    monkeypatch.setattr(db, "transaction", transaction)
+    monkeypatch.setattr(db, "fetch_one", fetch_one)
+    monkeypatch.setattr(db, "execute", execute)
 
 
 def test_moderation_migration_declares_occ_idempotency_and_p2_state() -> None:

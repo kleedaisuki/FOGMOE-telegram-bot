@@ -9,10 +9,9 @@ from fogmoe_bot.domain.conversation.payloads import (
     JsonObject,
     JsonValue,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 from .parsing import bounded_int, iso_instant, optional_int, required_connection
-
 
 _MAX_DIARY_CHARS = 10_000
 _MAX_DIARY_PAGES = 100
@@ -33,13 +32,13 @@ async def execute_diary(
         maximum=_MAX_DIARY_PAGES,
     )
     if connection is not None:
-        await db_connection.fetch_one(
+        await db.fetch_one(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
             (f"assistant-diary:{request.context.user_id}",),
             connection=connection,
         )
     lock = " FOR UPDATE" if connection is not None else ""
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT content, created_at, updated_at FROM conversation.ai_user_diary_pages "
         f"WHERE user_id = %s AND page_no = %s{lock}",
         (request.context.user_id, page),
@@ -50,7 +49,7 @@ async def execute_diary(
         return _read_diary(request, page=page, content=content, row=row)
 
     transaction = required_connection(connection)
-    max_row = await db_connection.fetch_one(
+    max_row = await db.fetch_one(
         "SELECT COALESCE(MAX(page_no), 0) FROM conversation.ai_user_diary_pages "
         "WHERE user_id = %s",
         (request.context.user_id,),
@@ -74,7 +73,7 @@ async def execute_diary(
     truncated = len(merged) > _MAX_DIARY_CHARS
     if truncated:
         merged = merged[-_MAX_DIARY_CHARS:]
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO conversation.ai_user_diary_pages (user_id, page_no, content) "
         "VALUES (%s, %s, %s) ON CONFLICT (user_id, page_no) DO UPDATE "
         "SET content = EXCLUDED.content, updated_at = CURRENT_TIMESTAMP",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import TracebackType
+
 import pytest
 
 from fogmoe_bot.domain.moderation.models import (
@@ -11,7 +12,7 @@ from fogmoe_bot.domain.moderation.models import (
     ModerationCommandReceiptConflict,
     ModerationToggleResult,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.moderation.group import (
     PostgresModerationGroupRepository,
 )
@@ -124,12 +125,12 @@ def test_spam_toggle_mutation_and_receipt_commit_once(
         return 1
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: transaction,
     )
-    monkeypatch.setattr(db_connection, "fetch_one", fetch_one)
-    monkeypatch.setattr(db_connection, "execute", execute)
+    monkeypatch.setattr(db, "fetch_one", fetch_one)
+    monkeypatch.setattr(db, "execute", execute)
     repository = PostgresModerationGroupRepository()
     key = "telegram-update:88:moderation.spam-toggle"
 

@@ -20,17 +20,17 @@ from fogmoe_bot.application.scheduling.service import SchedulingService
 from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
 from fogmoe_bot.domain.scheduling.assistant_schedule import (
+    Cadence,
     CalendarDaily,
     CalendarWeekly,
-    Cadence,
     FixedInterval,
     MisfirePolicy,
     OneShot,
+    ScheduledAssistantTurn,
     ScheduleSnapshot,
     ScheduleTarget,
-    ScheduledAssistantTurn,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.scheduling.postgres import PostgresScheduleCatalog
 
 from .parsing import required_connection
@@ -56,7 +56,7 @@ async def execute_schedule(
 
     arguments = ScheduleAIMessageArgs.model_validate(request.arguments)
     if arguments.action == "list":
-        async with db_connection.transaction() as read_connection:
+        async with db.transaction() as read_connection:
             snapshots = await scheduling.list(
                 creator_user_id=request.context.user_id,
                 conversation_id=str(request.context.conversation_id),

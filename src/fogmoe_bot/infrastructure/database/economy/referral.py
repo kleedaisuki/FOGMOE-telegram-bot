@@ -18,7 +18,7 @@ from fogmoe_bot.domain.banking.money import (
     TokenAmount,
     TokenBucket,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.banking import post_bank_transfer
 
 from .common import _load_result, _lock_operation_key, _save_result
@@ -39,16 +39,16 @@ class PostgresReferralOperations(ReferralOperations):
             tokens, preserving the global bank-account-first lock order.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_operation_key(command.idempotency_key, connection)
-            referrer = await db_connection.fetch_one(
+            referrer = await db.fetch_one(
                 "SELECT name FROM identity.users WHERE id = %s",
                 (command.referrer_id,),
                 connection=connection,
             )
             if referrer is None:
                 return ReferralResult(EconomyCode.REFERRER_NOT_FOUND)
-            created = await db_connection.execute(
+            created = await db.execute(
                 "INSERT INTO identity.users (id, tg_uid, provider, name) "
                 "VALUES (%s, %s, 'telegram', %s) ON CONFLICT (id) DO NOTHING",
                 (
@@ -65,7 +65,7 @@ class PostgresReferralOperations(ReferralOperations):
                     new_user=bool(replay.get("new_user", False)),
                     referrer_name=str(replay.get("referrer_name", "")) or None,
                 )
-            inserted_invitation = await db_connection.fetch_one(
+            inserted_invitation = await db.fetch_one(
                 "INSERT INTO economy.user_invitations "
                 "(invited_user_id, referrer_id, invitation_time, reward_claimed) "
                 "VALUES (%s, %s, CURRENT_TIMESTAMP, TRUE) "
@@ -142,17 +142,17 @@ class PostgresReferralOperations(ReferralOperations):
         @return 推荐概览 / Referral summary.
         """
 
-        referrer = await db_connection.fetch_one(
+        referrer = await db.fetch_one(
             "SELECT i.referrer_id, u.name FROM economy.user_invitations i "
             "JOIN identity.users u ON u.id = i.referrer_id "
             "WHERE i.invited_user_id = %s",
             (user_id,),
         )
-        count_row = await db_connection.fetch_one(
+        count_row = await db.fetch_one(
             "SELECT COUNT(*) FROM economy.user_invitations WHERE referrer_id = %s",
             (user_id,),
         )
-        rows = await db_connection.fetch_all(
+        rows = await db.fetch_all(
             "SELECT i.invited_user_id, u.name, i.invitation_time "
             "FROM economy.user_invitations i "
             "JOIN identity.users u ON u.id = i.invited_user_id "

@@ -9,13 +9,13 @@ module deliberately imports no legacy account, balance, or prediction structures
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import json
+from collections.abc import Mapping
 from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 async def lock_chart_receipt(key: str, connection: AsyncConnection) -> None:
@@ -37,7 +37,7 @@ async def advisory_lock(value: str, connection: AsyncConnection) -> None:
     @return None / None.
     """
 
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (value,),
         connection=connection,
@@ -62,7 +62,7 @@ async def load_chart_receipt(
         Raised when a key changes operation semantics or receipt shape is invalid.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT operation_kind, actor_id, result "
         "FROM crypto.operation_receipts WHERE idempotency_key = %s",
         (key,),
@@ -98,7 +98,7 @@ async def save_chart_receipt(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO crypto.operation_receipts "
         "(idempotency_key, operation_kind, actor_id, result) "
         "VALUES (%s, %s, %s, CAST(%s AS JSONB))",

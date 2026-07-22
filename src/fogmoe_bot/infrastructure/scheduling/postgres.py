@@ -14,25 +14,24 @@ from fogmoe_bot.application.conversation.workflow import PreparedTurnAcceptance
 from fogmoe_bot.application.scheduling.assistant_ports import ScheduleDefinition
 from fogmoe_bot.domain.conversation.identity import ConversationId, DeliveryStreamId
 from fogmoe_bot.domain.scheduling.assistant_schedule import (
+    Cadence,
     CalendarDaily,
     CalendarWeekly,
-    Cadence,
     FixedInterval,
     MisfirePolicy,
     OneShot,
     ScheduleClaim,
+    ScheduledAssistantTurn,
     ScheduleSnapshot,
     ScheduleStatus,
     ScheduleTarget,
-    ScheduledAssistantTurn,
     StaleScheduleClaimError,
 )
 from fogmoe_bot.domain.temporal import TimeZoneId, ensure_utc
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
     PostgresTurnRepository,
 )
-
 
 _SCHEDULE_COLUMNS = (
     "schedule_id, creator_user_id, target_kind, target_chat_id, "
@@ -73,7 +72,7 @@ class PostgresScheduleCatalog:
         """
 
         scope_key = _scope_key(creator_user_id, conversation_id)
-        await db_connection.fetch_one(
+        await db.fetch_one(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
             (scope_key,),
             connection=self._connection,
@@ -91,7 +90,7 @@ class PostgresScheduleCatalog:
         @return 活跃 schedule 数 / Active schedule count.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT COUNT(*) FROM scheduling.assistant_schedules "
             "WHERE creator_user_id = %s AND target_conversation_id = %s "
             "AND status IN ('pending', 'processing', 'retry_wait')",
@@ -125,7 +124,7 @@ class PostgresScheduleCatalog:
             definition.cadence,
             next_run_at=definition.first_run_at,
         )
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "INSERT INTO scheduling.assistant_schedules ("
             "creator_user_id, target_kind, target_chat_id, target_thread_id, "
             "target_conversation_id, target_delivery_stream_id, trigger_reason, "
@@ -192,7 +191,7 @@ class PostgresScheduleCatalog:
             definition.cadence,
             next_run_at=definition.first_run_at,
         )
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "UPDATE scheduling.assistant_schedules SET "
             "target_kind = %s, target_chat_id = %s, target_thread_id = %s, "
             "target_delivery_stream_id = %s, trigger_reason = %s, "
@@ -252,7 +251,7 @@ class PostgresScheduleCatalog:
         @return 按创建时间逆序的快照 / Snapshots ordered newest first.
         """
 
-        rows = await db_connection.fetch_all(
+        rows = await db.fetch_all(
             f"SELECT {_SCHEDULE_COLUMNS} FROM scheduling.assistant_schedules "
             "WHERE creator_user_id = %s AND target_conversation_id = %s "
             "ORDER BY created_at DESC, schedule_id DESC LIMIT %s",
@@ -282,7 +281,7 @@ class PostgresScheduleCatalog:
         """
 
         timestamp = ensure_utc(cancelled_at)
-        changed = await db_connection.execute(
+        changed = await db.execute(
             "UPDATE scheduling.assistant_schedules SET status = 'cancelled', "
             "version = version + 1, next_attempt_at = NULL, claim_token = NULL, "
             "lease_expires_at = NULL, updated_at = %s, terminal_at = %s "
@@ -312,7 +311,7 @@ class PostgresScheduleQueue:
         """
 
         timestamp = ensure_utc(now)
-        return await db_connection.execute(
+        return await db.execute(
             "UPDATE scheduling.assistant_schedules SET status = 'retry_wait', "
             "version = version + 1, next_attempt_at = %s, claim_token = NULL, "
             "lease_expires_at = NULL, last_error = 'recovered expired lease', "
@@ -343,10 +342,10 @@ class PostgresScheduleQueue:
         if limit == 0:
             return ()
         claims: list[ScheduleClaim] = []
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             for _ in range(limit):
                 token = uuid4()
-                row = await db_connection.fetch_one(
+                row = await db.fetch_one(
                     "WITH candidate AS ("
                     "SELECT schedule.schedule_id "
                     "FROM scheduling.assistant_schedules AS schedule "
@@ -564,8 +563,8 @@ class PostgresScheduledOccurrenceAcceptance:
         if next_run is not None and next_run <= claim.schedule.next_run_at:
             raise ValueError("next_run_at must advance the schedule cursor")
 
-        async with db_connection.transaction() as connection:
-            locked = await db_connection.fetch_one(
+        async with db.transaction() as connection:
+            locked = await db.fetch_one(
                 "SELECT schedule_id FROM scheduling.assistant_schedules "
                 "WHERE schedule_id = %s AND status = 'processing' "
                 "AND claim_token = %s FOR UPDATE",
@@ -592,7 +591,7 @@ class PostgresScheduledOccurrenceAcceptance:
                 )
             )
             if next_run is None:
-                changed = await db_connection.execute(
+                changed = await db.execute(
                     "UPDATE scheduling.assistant_schedules SET status = 'completed', "
                     "version = version + 1, attempt_count = 0, next_attempt_at = NULL, "
                     "claim_token = NULL, lease_expires_at = NULL, last_accepted_for = %s, "
@@ -610,7 +609,7 @@ class PostgresScheduledOccurrenceAcceptance:
                     connection=connection,
                 )
             else:
-                changed = await db_connection.execute(
+                changed = await db.execute(
                     "UPDATE scheduling.assistant_schedules SET status = 'pending', "
                     "version = version + 1, attempt_count = 0, next_run_at = %s, "
                     "next_attempt_at = %s, calendar_anchor_date = %s, claim_token = NULL, "
@@ -884,7 +883,7 @@ async def _fenced_update(
     @raise StaleScheduleClaimError 更新未命中唯一行时抛出 / Raised unless exactly one row is updated.
     """
 
-    changed = await db_connection.execute(sql, params)
+    changed = await db.execute(sql, params)
     _require_current_claim(changed, claim)
 
 

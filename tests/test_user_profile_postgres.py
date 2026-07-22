@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from postgres_test_support import configure_bot_database
 
 from fogmoe_bot.application.user_profile.ports import DreamResult, StaleDreamClaimError
 from fogmoe_bot.domain.user_profile.models import (
@@ -20,12 +21,10 @@ from fogmoe_bot.domain.user_profile.models import (
     UpsertProfileClaim,
     apply_profile_patch,
 )
-from fogmoe_bot.infrastructure.database import db as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.user_profile.store import (
     PostgresUserProfileStore,
 )
-from postgres_test_support import configure_bot_database
 
 
 def _postgres_url() -> str:
@@ -55,14 +54,14 @@ def test_projection_job_claim_and_revision_converge_under_concurrency(
         )
         store = PostgresUserProfileStore()
         try:
-            async with db_connection.transaction() as connection:
-                await db_connection.execute(
+            async with db.transaction() as connection:
+                await db.execute(
                     "INSERT INTO identity.users (id, tg_uid, provider, name) "
                     "VALUES (%s, %s, 'telegram', %s)",
                     (user_id, user_id, f"profile-{suffix}"),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "INSERT INTO conversation.conversation_turns "
                     "(turn_id, conversation_id, state, created_at, updated_at, completed_at, "
                     "source_kind, source_key) VALUES (CAST(%s AS UUID), %s, 'delivered', "
@@ -90,13 +89,13 @@ def test_projection_job_claim_and_revision_converge_under_concurrency(
             await asyncio.gather(
                 *(store.project_evidence(source, projected_at=now) for _ in range(8))
             )
-            evidence_count = await db_connection.fetch_one(
+            evidence_count = await db.fetch_one(
                 "SELECT COUNT(*) FROM user_profile.evidence_events WHERE owner_user_id = %s",
                 (user_id,),
             )
             assert evidence_count is not None and evidence_count[0] == 1
 
-            unrelated_ready = await db_connection.fetch_one(
+            unrelated_ready = await db.fetch_one(
                 "SELECT "
                 "(SELECT COUNT(*) FROM user_profile.profiles "
                 "WHERE user_id <> %s AND next_eligible_at <= %s) + "
@@ -201,7 +200,7 @@ def test_projection_job_claim_and_revision_converge_under_concurrency(
                     refresh_after=timedelta(hours=6),
                 )
         finally:
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM identity.users WHERE id = %s",
                 (user_id,),
             )

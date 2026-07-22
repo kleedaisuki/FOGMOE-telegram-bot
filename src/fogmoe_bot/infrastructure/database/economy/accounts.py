@@ -1,7 +1,7 @@
 """@brief PostgreSQL 经济账户查询适配器 / PostgreSQL economy account-query adapter."""
 
 from fogmoe_bot.application.economy.common import AccountLookup
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 class PostgresAccountLookup(AccountLookup):
@@ -14,7 +14,7 @@ class PostgresAccountLookup(AccountLookup):
         @return 存在为 True / True when present.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT 1 FROM identity.users WHERE id = %s",
             (user_id,),
         )

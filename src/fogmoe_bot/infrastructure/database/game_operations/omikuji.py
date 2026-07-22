@@ -28,7 +28,7 @@ from fogmoe_bot.domain.banking.money import (
     TokenBucket,
 )
 from fogmoe_bot.domain.games import FortuneLevel
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.banking import (
     lock_bank_account_balances,
     post_bank_transfer,
@@ -48,7 +48,7 @@ class PostgresOmikujiOperations(OmikujiOperations):
             inspecting the balance.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_receipt_key(command.idempotency_key, connection)
             replay = await _load_receipt(
                 command.idempotency_key,
@@ -68,7 +68,7 @@ class PostgresOmikujiOperations(OmikujiOperations):
                     (free_wallet, burn_wallet), connection
                 )
                 free_balance = balances[free_wallet]
-                row = await db_connection.fetch_one(
+                row = await db.fetch_one(
                     "SELECT fortune FROM game.user_omikuji "
                     "WHERE user_id = %s AND fortune_date = %s",
                     (command.user_id, command.day),
@@ -99,7 +99,7 @@ class PostgresOmikujiOperations(OmikujiOperations):
                         connection=connection,
                         metadata={"burn_kind": "omikuji_offering"},
                     )
-                    await db_connection.execute(
+                    await db.execute(
                         "INSERT INTO game.user_omikuji "
                         "(user_id, fortune_date, fortune) VALUES (%s, %s, %s)",
                         (command.user_id, command.day, command.drawn_fortune.value),
@@ -135,7 +135,7 @@ async def _registered_user_exists(
         balance authority.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT 1 FROM identity.users WHERE id = %s",
         (user_id,),
         connection=connection,
@@ -157,7 +157,7 @@ async def _lock_receipt_key(
 
     if not idempotency_key.strip() or len(idempotency_key) > 255:
         raise ValueError("Invalid Omikuji idempotency key")
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (f"omikuji-receipt:{idempotency_key}",),
         connection=connection,
@@ -180,7 +180,7 @@ async def _load_receipt(
     @raise ValueError 同一键改变业务语义时抛出 / Raised when the same key changes semantics.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT operation, user_id, result FROM game.game_receipts "
         "WHERE idempotency_key = %s",
         (idempotency_key,),
@@ -210,7 +210,7 @@ async def _save_receipt(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO game.game_receipts "
         "(idempotency_key, operation, user_id, result) VALUES (%s, %s, %s, CAST(%s AS JSONB))",
         (idempotency_key, operation, user_id, _encode_json(result)),

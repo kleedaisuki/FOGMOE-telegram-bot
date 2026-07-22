@@ -10,7 +10,7 @@ from fogmoe_bot.application.crypto.chart_service import (
     ClearChartToken,
 )
 from fogmoe_bot.domain.crypto import Blockchain, ChartToken, ContractAddress
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 from .chart_receipts import (
     advisory_lock,
@@ -30,7 +30,7 @@ class PostgresChartOperations:
         @return 已绑定代币或 None / Bound token or None.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT chain, ca FROM crypto.group_chart_tokens WHERE group_id = %s",
             (group_id,),
         )
@@ -46,7 +46,7 @@ class PostgresChartOperations:
             chart receipts; it never accesses an account balance.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await lock_chart_receipt(command.idempotency_key, connection)
             replay = await load_chart_receipt(
                 command.idempotency_key,
@@ -58,7 +58,7 @@ class PostgresChartOperations:
                 token = _token_from_mapping(replay.get("token"))
                 return ChartMutationResult(token, replayed=True)
             await advisory_lock(f"crypto-chart:{command.group_id}", connection)
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO crypto.group_chart_tokens "
                 "(group_id, chain, ca, set_by) VALUES (%s, %s, %s, %s) "
                 "ON CONFLICT (group_id) DO UPDATE SET chain = EXCLUDED.chain, "
@@ -89,7 +89,7 @@ class PostgresChartOperations:
         @return 清除或幂等回放结果 / Clear or idempotent replay result.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await lock_chart_receipt(command.idempotency_key, connection)
             replay = await load_chart_receipt(
                 command.idempotency_key,
@@ -100,7 +100,7 @@ class PostgresChartOperations:
             if replay is not None:
                 return ChartMutationResult(None, replayed=True)
             await advisory_lock(f"crypto-chart:{command.group_id}", connection)
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM crypto.group_chart_tokens WHERE group_id = %s",
                 (command.group_id,),
                 connection=connection,

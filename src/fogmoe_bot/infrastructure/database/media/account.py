@@ -11,7 +11,7 @@ read-only.
 from dataclasses import dataclass
 
 from fogmoe_bot.domain.media.identifiers import UserId
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +39,7 @@ class PostgresMediaAccountProfiles:
             balance columns.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT permission FROM identity.users WHERE id = %s",
             (int(user_id),),
         )

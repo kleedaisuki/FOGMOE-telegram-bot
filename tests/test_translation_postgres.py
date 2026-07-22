@@ -3,38 +3,37 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import replace
 from datetime import UTC, datetime
-import os
 from uuid import uuid4
 
 import pytest
+from postgres_test_support import configure_bot_database
 
 from fogmoe_bot.application.conversation.assistant_ingress import AssistantTurnAccepted
 from fogmoe_bot.application.conversation.translation_ingress import (
     TranslationReplyTarget,
     TranslationTurnRequest,
 )
+from fogmoe_bot.domain.accounts.plan import AccountPlanPolicy
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
-from fogmoe_bot.domain.accounts.plan import AccountPlanPolicy
-from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
+from fogmoe_bot.infrastructure.database.account_plan import PostgresAccountPlanResolver
 from fogmoe_bot.infrastructure.database.assistant_turn_acceptance import (
     PostgresAssistantTurnAcceptanceUoW,
 )
-from fogmoe_bot.infrastructure.database.account_plan import PostgresAccountPlanResolver
 from fogmoe_bot.infrastructure.database.conversation_workflow.inbox import (
     PostgresInboxRepository,
 )
 from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
     PostgresTurnRepository,
 )
-from postgres_test_support import configure_bot_database
 
 
 def _postgres_url() -> str:
@@ -97,8 +96,8 @@ def test_translation_turn_and_activity_replay_atomically_without_billing(
             text="x" * 501,
         ).to_assistant_request()
         try:
-            async with db_connection.transaction() as connection:
-                await db_connection.execute(
+            async with db.transaction() as connection:
+                await db.execute(
                     "INSERT INTO identity.users "
                     "(id, tg_uid, provider, name) "
                     "VALUES (%s, %s, 'telegram', %s)",
@@ -117,12 +116,12 @@ def test_translation_turn_and_activity_replay_atomically_without_billing(
 
             assert isinstance(first, AssistantTurnAccepted) and not first.replayed
             assert isinstance(replay, AssistantTurnAccepted) and replay.replayed
-            ledger_entries = await db_connection.fetch_one(
+            ledger_entries = await db.fetch_one(
                 "SELECT count(*) FROM bank.ledger_entries WHERE actor_id = %s",
                 (user_id,),
             )
             assert ledger_entries is not None and ledger_entries[0] == 0
-            facts = await db_connection.fetch_one(
+            facts = await db.fetch_one(
                 "SELECT turn.state, message.content, activity.request "
                 "FROM conversation.conversation_turns AS turn "
                 "JOIN conversation.conversation_messages AS message "
@@ -175,32 +174,32 @@ def test_translation_turn_and_activity_replay_atomically_without_billing(
                 "ordinary follow-up"
             ]
         finally:
-            async with db_connection.transaction() as connection:
-                await db_connection.execute(
+            async with db.transaction() as connection:
+                await db.execute(
                     "DELETE FROM conversation.inference_activities "
                     "WHERE conversation_id = %s",
                     (str(conversation_id),),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM conversation.conversation_messages "
                     "WHERE conversation_id = %s",
                     (str(conversation_id),),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM conversation.conversation_turns "
                     "WHERE conversation_id = %s",
                     (str(conversation_id),),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM conversation.inbound_updates "
                     "WHERE update_id IN (%s, %s)",
                     (update_id, update_id + 1),
                     connection=connection,
                 )
-                await db_connection.execute(
+                await db.execute(
                     "DELETE FROM identity.users WHERE id = %s",
                     (user_id,),
                     connection=connection,

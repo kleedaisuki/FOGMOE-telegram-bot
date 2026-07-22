@@ -12,6 +12,10 @@ from fogmoe_bot.application.conversation.reset import (
     ConversationResetResult,
     ResetConversation,
 )
+from fogmoe_bot.domain.conversation.errors import (
+    ConcurrentTurnUpdateError,
+    IdempotencyConflictError,
+)
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     TurnId,
@@ -19,11 +23,7 @@ from fogmoe_bot.domain.conversation.identity import (
     UpdateId,
 )
 from fogmoe_bot.domain.temporal import ensure_utc
-from fogmoe_bot.domain.conversation.errors import (
-    ConcurrentTurnUpdateError,
-    IdempotencyConflictError,
-)
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.command_source import (
     validate_telegram_command_source,
 )
@@ -58,14 +58,14 @@ class PostgresConversationResetUoW:
             appends, so the boundary always falls between two complete sequences.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await validate_telegram_command_source(
                 command.source,
                 command.conversation_id,
                 operation="Conversation reset",
                 connection=connection,
             )
-            await db_connection.fetch_one(
+            await db.fetch_one(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                 (str(command.conversation_id),),
                 connection=connection,
@@ -91,7 +91,7 @@ class PostgresConversationResetUoW:
                 connection=connection,
             )
 
-            sequence_row = await db_connection.fetch_one(
+            sequence_row = await db.fetch_one(
                 "SELECT COALESCE(MAX(sequence), 0) "
                 "FROM conversation.conversation_messages WHERE conversation_id = %s",
                 (str(command.conversation_id),),
@@ -100,7 +100,7 @@ class PostgresConversationResetUoW:
             if sequence_row is None:
                 raise RuntimeError("Could not calculate Conversation reset sequence")
             through_sequence = int(str(sequence_row[0]))
-            inserted_row = await db_connection.fetch_one(
+            inserted_row = await db.fetch_one(
                 "INSERT INTO conversation.conversation_history_resets "
                 "(conversation_id, source_kind, source_key, source_update_id, "
                 "through_sequence, created_at) VALUES (%s, %s, %s, %s, %s, %s) "
@@ -166,7 +166,7 @@ class PostgresConversationResetUoW:
         timestamp = ensure_utc(cancelled_at)
         activity_rows = cast(
             Sequence[object],
-            await db_connection.fetch_all(
+            await db.fetch_all(
                 "SELECT activity.activity_id, activity.turn_id, activity.status "
                 "FROM conversation.inference_activities AS activity "
                 "WHERE activity.conversation_id = %s "
@@ -190,7 +190,7 @@ class PostgresConversationResetUoW:
 
         turn_rows: dict[TurnId, Sequence[object]] = {}
         for turn_id in turn_ids:
-            row = await db_connection.fetch_one(
+            row = await db.fetch_one(
                 "SELECT turn_id, state, updated_at "
                 "FROM conversation.conversation_turns "
                 "WHERE turn_id = CAST(%s AS UUID) FOR UPDATE",
@@ -219,7 +219,7 @@ class PostgresConversationResetUoW:
             activity_id = str(activity_values[0])
             turn_updated_at = cast(datetime, turn_rows[turn_id][2])
             transition_at = max(timestamp, ensure_utc(turn_updated_at))
-            activity_count = await db_connection.execute(
+            activity_count = await db.execute(
                 "UPDATE conversation.inference_activities "
                 "SET status = 'cancelled', version = version + 1, "
                 "next_attempt_at = NULL, claim_token = NULL, lease_expires_at = NULL, "
@@ -233,7 +233,7 @@ class PostgresConversationResetUoW:
                 raise ConcurrentTurnUpdateError(
                     f"Inference activity {activity_id} changed while row-locked"
                 )
-            turn_count = await db_connection.execute(
+            turn_count = await db.execute(
                 "UPDATE conversation.conversation_turns "
                 "SET state = 'cancelled', version = version + 1, "
                 "next_retry_at = NULL, last_error = NULL, updated_at = %s, "
@@ -262,7 +262,7 @@ class PostgresConversationResetUoW:
 
         return cast(
             Sequence[object] | None,
-            await db_connection.fetch_one(
+            await db.fetch_one(
                 "SELECT conversation_id, source_update_id, through_sequence, created_at "
                 "FROM conversation.conversation_history_resets "
                 "WHERE source_kind = %s AND source_key = %s FOR UPDATE",

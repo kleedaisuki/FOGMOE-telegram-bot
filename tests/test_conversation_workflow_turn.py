@@ -6,12 +6,22 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from conversation_workflow_testkit import (
+    NOW,
+    TURN_UUID,
+    _activity_draft,
+    _initial_turn,
+    _message_draft,
+    _message_result,
+    _TransactionContext,
+    _turn_row,
+)
 
+from fogmoe_bot.domain.conversation.errors import ConcurrentTurnUpdateError
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     TurnId,
 )
-from fogmoe_bot.domain.conversation.turn import ConversationTurn
 from fogmoe_bot.domain.conversation.inference import (
     InferenceActivity,
     InferenceActivityDraft,
@@ -22,25 +32,14 @@ from fogmoe_bot.domain.conversation.message import (
     MessageDraft,
     MessageRole,
 )
-from fogmoe_bot.domain.conversation.errors import ConcurrentTurnUpdateError
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.domain.conversation.turn import ConversationTurn
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.conversation_workflow import (
     turn as turn_repository,
 )
 from fogmoe_bot.infrastructure.database.conversation_workflow import turn_uow
 from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
     PostgresTurnRepository,
-)
-
-from conversation_workflow_testkit import (
-    NOW,
-    TURN_UUID,
-    _activity_draft,
-    _initial_turn,
-    _message_draft,
-    _message_result,
-    _TransactionContext,
-    _turn_row,
 )
 
 
@@ -103,7 +102,7 @@ def test_accept_turn_commits_state_and_user_message_in_one_transaction(
         )
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: transaction,
     )
@@ -189,7 +188,7 @@ def test_create_and_accept_failure_rolls_back_without_persisting_turn_state(
         persisted = True
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: transaction,
     )
@@ -266,7 +265,7 @@ def test_connection_bound_acceptance_uses_caller_transaction_without_nesting(
         raise AssertionError("connection-bound primitive opened a nested transaction")
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         unexpected_transaction,
     )
@@ -323,7 +322,7 @@ def test_inference_activity_insert_binds_traceparent_after_timestamps(
             inserted=False,
         )
 
-    monkeypatch.setattr(db_connection, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(db, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(
         repository,
         "_require_existing_inference_activity",
@@ -388,7 +387,7 @@ def test_history_reader_uses_turn_sequence_cutoff_and_bounded_ascending_window(
             ),
         ]
 
-    monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
     repository = PostgresTurnRepository()
     messages = asyncio.run(
         repository.read_conversation_messages(
@@ -479,7 +478,7 @@ def test_accept_uow_late_replay_returns_descendant_turn(
         )
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
@@ -527,7 +526,7 @@ def test_accept_uow_rejects_non_idempotent_version_conflict(
         return turn_uow._map_turn(_turn_row(state="accepted", version=1))
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
@@ -619,7 +618,7 @@ def test_cancel_turn_rechecks_outbox_after_acquiring_turn_lock(
         captured["turn_connection"] = connection
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
@@ -630,7 +629,7 @@ def test_cancel_turn_rechecks_outbox_after_acquiring_turn_lock(
         fake_lock_inference,
     )
     monkeypatch.setattr(turn_repository, "_load_turn_for_mutation", fake_load_turn)
-    monkeypatch.setattr(db_connection, "execute", fake_execute)
+    monkeypatch.setattr(db, "execute", fake_execute)
     monkeypatch.setattr(turn_repository, "_persist_turn", fake_persist)
 
     cancelled = asyncio.run(

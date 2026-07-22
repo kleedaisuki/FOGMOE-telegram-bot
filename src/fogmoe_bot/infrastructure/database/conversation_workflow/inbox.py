@@ -4,21 +4,20 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-
+from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     LeaseToken,
     UpdateId,
 )
-from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.inbox import (
     InboundClaim,
     InboundStatus,
     InboundUpdate,
 )
-from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
-from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.domain.observability.trace import TraceContext
+from fogmoe_bot.domain.temporal import ensure_utc
+from fogmoe_bot.infrastructure.database import db
 
 from .common import (
     _claim_window,
@@ -74,8 +73,8 @@ class PostgresInboxRepository:
         ):
             raise ValueError("add_inbound requires an initial pending Update")
 
-        async with db_connection.transaction() as connection:
-            row = await db_connection.fetch_one(
+        async with db.transaction() as connection:
+            row = await db.fetch_one(
                 "INSERT INTO conversation.inbound_updates "
                 "(update_id, conversation_id, payload, status, version, attempt_count, "
                 "next_attempt_at, received_at, updated_at, traceparent) "
@@ -98,7 +97,7 @@ class PostgresInboxRepository:
             if row is not None:
                 return True
 
-            existing_row = await db_connection.fetch_one(
+            existing_row = await db.fetch_one(
                 "SELECT update_id, conversation_id, payload, status, version, attempt_count, "
                 "next_attempt_at, received_at, updated_at, processed_at, last_error, traceparent "
                 "FROM conversation.inbound_updates WHERE update_id = %s",
@@ -140,8 +139,8 @@ class PostgresInboxRepository:
         if limit < 1:
             return ()
         token = LeaseToken.new()
-        async with db_connection.transaction() as connection:
-            rows = await db_connection.fetch_all(
+        async with db.transaction() as connection:
+            rows = await db.fetch_all(
                 "WITH candidates AS ("
                 "SELECT candidate.update_id "
                 "FROM conversation.inbound_updates AS candidate "
@@ -191,13 +190,14 @@ class PostgresInboxRepository:
         @param claim 领取凭证 / Claim receipt.
         @param processed_at 完成时间 / Completion time.
         @return None / None.
-        @raise StaleClaimError token 已过期或被替换时抛出 / Raised when the token expired or was superseded.
+        @raise StaleClaimError recovery/reclaim 后 token 已非当前 owner 时抛出 /
+            Raised when recovery or reclaim means the token no longer identifies the current owner.
         """
 
         timestamp = ensure_utc(processed_at)
         if timestamp < claim.update.updated_at:
             raise ValueError("processed_at cannot precede claim time")
-        rowcount = await db_connection.execute(
+        rowcount = await db.execute(
             "UPDATE conversation.inbound_updates "
             "SET status = 'processed', version = version + 1, processed_at = %s, "
             "updated_at = %s, next_attempt_at = NULL, claim_token = NULL, "
@@ -223,7 +223,8 @@ class PostgresInboxRepository:
         @param retry_at 下次尝试时间 / Next attempt time.
         @param error 失败原因 / Failure reason.
         @return None / None.
-        @raise StaleClaimError token 已过期或被替换时抛出 / Raised when the token expired or was superseded.
+        @raise StaleClaimError recovery/reclaim 后 token 已非当前 owner 时抛出 /
+            Raised when recovery or reclaim means the token no longer identifies the current owner.
         """
 
         failure_time = ensure_utc(failed_at)
@@ -233,7 +234,7 @@ class PostgresInboxRepository:
         if retry_time <= failure_time:
             raise ValueError("retry_at must be later than failed_at")
         normalized_error = _required_error(error)
-        rowcount = await db_connection.execute(
+        rowcount = await db.execute(
             "UPDATE conversation.inbound_updates "
             "SET status = 'retry_wait', version = version + 1, next_attempt_at = %s, "
             "updated_at = %s, claim_token = NULL, lease_expires_at = NULL, "
@@ -263,14 +264,15 @@ class PostgresInboxRepository:
         @param failed_at 最终失败时间 / Final failure time.
         @param error 最终失败原因 / Final failure reason.
         @return None / None.
-        @raise StaleClaimError token 已过期或被替换时抛出 / Raised when the token expired or was superseded.
+        @raise StaleClaimError recovery/reclaim 后 token 已非当前 owner 时抛出 /
+            Raised when recovery or reclaim means the token no longer identifies the current owner.
         """
 
         failure_time = ensure_utc(failed_at)
         if failure_time < claim.update.updated_at:
             raise ValueError("failed_at cannot precede claim time")
         normalized_error = _required_error(error)
-        rowcount = await db_connection.execute(
+        rowcount = await db.execute(
             "UPDATE conversation.inbound_updates "
             "SET status = 'failed_final', version = version + 1, next_attempt_at = NULL, "
             "updated_at = %s, claim_token = NULL, lease_expires_at = NULL, "
@@ -293,7 +295,7 @@ class PostgresInboxRepository:
         """
 
         timestamp = ensure_utc(now)
-        rowcount = await db_connection.execute(
+        rowcount = await db.execute(
             "UPDATE conversation.inbound_updates "
             "SET status = 'retry_wait', version = version + 1, next_attempt_at = %s, "
             "updated_at = %s, claim_token = NULL, lease_expires_at = NULL, "

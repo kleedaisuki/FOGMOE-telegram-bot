@@ -24,7 +24,7 @@ from fogmoe_bot.domain.moderation.models import (
     RuleScope,
     UserId,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.toggle_command_receipts import (
     load_toggle_receipt,
     lock_toggle_command,
@@ -54,7 +54,7 @@ class PostgresModerationGroupRepository(GroupModerationRepository):
         """@brief 原子切换垃圾过滤并保存 source receipt / Atomically toggle spam control and save its source receipt."""
 
         request_payload: dict[str, object] = {}
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await lock_toggle_command(
                 idempotency_key=idempotency_key,
                 operation_kind=_SPAM_TOGGLE_OPERATION,
@@ -115,7 +115,7 @@ class PostgresModerationGroupRepository(GroupModerationRepository):
             raise ValueError(
                 "Saved moderation aggregate must advance exactly one version"
             )
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await lock_toggle_scope(
                 operation_kind=_SPAM_TOGGLE_OPERATION,
                 chat_id=int(aggregate.chat_id),
@@ -137,13 +137,13 @@ class PostgresModerationGroupRepository(GroupModerationRepository):
                 raise StaleModerationVersion(
                     f"Moderation group {int(aggregate.chat_id)} is no longer version {expected_version}"
                 )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM moderation.group_spam_keywords WHERE group_id = %s",
                 (int(aggregate.chat_id),),
                 connection=connection,
             )
             for rule in aggregate.spam_rules:
-                await db_connection.execute(
+                await db.execute(
                     "INSERT INTO moderation.group_spam_keywords "
                     "(group_id, keyword, is_regex, created_by) VALUES (%s, %s, %s, %s)",
                     (
@@ -154,13 +154,13 @@ class PostgresModerationGroupRepository(GroupModerationRepository):
                     ),
                     connection=connection,
                 )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM moderation.group_keywords WHERE group_id = %s",
                 (int(aggregate.chat_id),),
                 connection=connection,
             )
             for reply in aggregate.keyword_replies:
-                await db_connection.execute(
+                await db.execute(
                     "INSERT INTO moderation.group_keywords "
                     "(group_id, keyword, response, created_by) VALUES (%s, %s, %s, %s)",
                     (
@@ -180,7 +180,7 @@ class PostgresModerationGroupRepository(GroupModerationRepository):
     ) -> GroupModeration:
         """@brief 在可选事务中读取完整聚合 / Load the aggregate inside an optional transaction."""
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             """
             SELECT
               COALESCE(control.enabled, FALSE),
@@ -256,7 +256,7 @@ class PostgresModerationGroupRepository(GroupModerationRepository):
         """@brief 更新已存在控制行 / Update an existing control row."""
 
         policy = aggregate.policy
-        return await db_connection.execute(
+        return await db.execute(
             "UPDATE moderation.group_spam_control SET enabled = %s, block_links = %s, "
             "block_mentions = %s, exempt_administrators = %s, rule_merge_mode = %s, "
             "failure_mode = %s, version = %s, enabled_by = %s, updated_at = CURRENT_TIMESTAMP "
@@ -286,7 +286,7 @@ class PostgresModerationGroupRepository(GroupModerationRepository):
         """@brief 创建首个控制行 / Create the initial control row."""
 
         policy = aggregate.policy
-        return await db_connection.execute(
+        return await db.execute(
             "INSERT INTO moderation.group_spam_control "
             "(group_id, enabled, block_links, block_mentions, exempt_administrators, "
             "rule_merge_mode, failure_mode, version, enabled_by) "

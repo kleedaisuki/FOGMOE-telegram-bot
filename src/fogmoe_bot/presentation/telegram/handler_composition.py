@@ -92,7 +92,7 @@ from fogmoe_bot.infrastructure.database.media.music import (
 from fogmoe_bot.infrastructure.database.personal_rpg import (
     PostgresPersonalRpgOperations,
 )
-from fogmoe_bot.infrastructure.database.repositories.verification_repository import (
+from fogmoe_bot.infrastructure.database.moderation.verification import (
     PostgresVerificationRepository,
 )
 from fogmoe_bot.infrastructure.database.town import PostgresTownOperations

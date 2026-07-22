@@ -10,7 +10,7 @@ from fogmoe_bot.application.admin.models import (
     GroupFeatureStats,
     RecentUser,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 class PostgresAdminStatsProjection:
@@ -21,7 +21,7 @@ class PostgresAdminStatsProjection:
 
         if group_limit < 1 or group_limit > 50:
             raise ValueError("Admin group sample limit must be between 1 and 50")
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             """
             SELECT
               (SELECT COUNT(*) FROM identity.users),

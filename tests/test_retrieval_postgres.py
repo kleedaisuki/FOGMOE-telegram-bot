@@ -3,23 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from postgres_test_support import configure_bot_database
 
 from fogmoe_bot.application.retrieval import EpisodicPassageRenderer
 from fogmoe_bot.application.retrieval.ports import StaleVectorClaimError
 from fogmoe_bot.domain.retrieval import EmbeddingSpace, EmbeddingVector, RetrievalScope
-from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.retrieval import (
     PostgresEpisodicSource,
     PostgresRetrievalStore,
 )
-from postgres_test_support import configure_bot_database
 
 
 def _postgres_url() -> str:
@@ -53,14 +52,14 @@ async def _insert_episode(
         "user": {"user_id": user_id},
         "scope": {"is_group": group_id is not None, "group_id": group_id},
     }
-    async with db_connection.transaction() as connection:
-        await db_connection.execute(
+    async with db.transaction() as connection:
+        await db.execute(
             "INSERT INTO identity.users (id, tg_uid, provider, name) "
             "VALUES (%s, %s, 'telegram', %s) ON CONFLICT (id) DO NOTHING",
             (user_id, user_id, f"retrieval-{suffix}"),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO conversation.conversation_turns "
             "(turn_id, conversation_id, state, created_at, updated_at, completed_at, "
             "source_kind, source_key) VALUES (CAST(%s AS UUID), %s, 'delivered', "
@@ -75,7 +74,7 @@ async def _insert_episode(
             ),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO conversation.inference_activities "
             "(activity_id, turn_id, conversation_id, request, status, version, "
             "attempt_count, next_attempt_at, claim_token, lease_expires_at, "
@@ -99,7 +98,7 @@ async def _insert_episode(
             (("user", text), ("assistant", f"remembered {text}")),
             start=1,
         ):
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO conversation.conversation_messages "
                 "(message_id, conversation_id, sequence, turn_id, role, content, "
                 "idempotency_key, created_at) VALUES (CAST(%s AS UUID), %s, %s, "
@@ -123,35 +122,35 @@ async def _cleanup(
 ) -> None:
     """@brief 依赖级联删除测试资料 / Delete test data through dependency cascades."""
 
-    async with db_connection.transaction() as connection:
+    async with db.transaction() as connection:
         conversation_ids = [
             *(f"assistant-user:{user_id}" for user_id in user_ids),
             *(f"assistant-group:{group_id}" for group_id in group_ids),
         ]
-        await db_connection.execute(
+        await db.execute(
             "DELETE FROM conversation.inference_activities "
             "WHERE conversation_id = ANY(CAST(%s AS TEXT[]))",
             (conversation_ids,),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "DELETE FROM conversation.conversation_messages "
             "WHERE conversation_id = ANY(CAST(%s AS TEXT[]))",
             (conversation_ids,),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "DELETE FROM conversation.conversation_turns "
             "WHERE conversation_id = ANY(CAST(%s AS TEXT[]))",
             (conversation_ids,),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "DELETE FROM identity.users WHERE id = ANY(CAST(%s AS BIGINT[]))",
             (list(user_ids),),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "DELETE FROM retrieval.embedding_spaces WHERE space_id = %s",
             (space_id,),
             connection=connection,
@@ -183,7 +182,7 @@ def test_episodic_source_materializes_projection_exclusion_once(
         captured["params"] = params
         return []
 
-    monkeypatch.setattr(db_connection, "fetch_all", fetch_all)
+    monkeypatch.setattr(db, "fetch_all", fetch_all)
 
     assert (
         asyncio.run(
@@ -356,16 +355,16 @@ def test_real_pgvector_projection_fencing_and_privacy_scoped_exact_search(
                 assert len(group_evidence) == 1
                 assert group_evidence[0].passage.scope == scope
                 assert str(group_evidence[0].passage.source_id) == expected_turn
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM identity.users WHERE id = %s",
                 (owner_b,),
             )
-            erased = await db_connection.fetch_one(
+            erased = await db.fetch_one(
                 "SELECT COUNT(*) FROM retrieval.passages "
                 "WHERE scope_kind = 'personal' AND scope_id = %s",
                 (owner_b,),
             )
-            shared = await db_connection.fetch_one(
+            shared = await db.fetch_one(
                 "SELECT COUNT(*) FROM retrieval.passages WHERE scope_kind = 'group' "
                 "AND scope_id = ANY(CAST(%s AS BIGINT[]))",
                 ([group_a, group_b],),

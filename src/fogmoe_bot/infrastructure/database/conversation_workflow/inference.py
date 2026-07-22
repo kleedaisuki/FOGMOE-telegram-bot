@@ -2,22 +2,20 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 from collections.abc import Sequence
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from fogmoe_bot.domain.conversation.errors import (
+    ConcurrentTurnUpdateError,
+    StaleClaimError,
+    TurnNotFoundError,
+)
 from fogmoe_bot.domain.conversation.identity import (
     InferenceActivityId,
     LeaseToken,
-)
-from fogmoe_bot.domain.temporal import ensure_utc
-from fogmoe_bot.domain.conversation.turn import (
-    POST_INFERENCE_COMPLETION_TURN_STATES,
-    ConversationTurn,
-    TurnEvent,
-    TurnState,
 )
 from fogmoe_bot.domain.conversation.inference import (
     InferenceActivity,
@@ -32,13 +30,15 @@ from fogmoe_bot.domain.conversation.outbox import (
     OutboundDraft,
     OutboundEnqueueResult,
 )
-from fogmoe_bot.domain.conversation.workflow_results import InferenceCompletionResult
-from fogmoe_bot.domain.conversation.errors import (
-    ConcurrentTurnUpdateError,
-    StaleClaimError,
-    TurnNotFoundError,
+from fogmoe_bot.domain.conversation.turn import (
+    POST_INFERENCE_COMPLETION_TURN_STATES,
+    ConversationTurn,
+    TurnEvent,
+    TurnState,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.domain.conversation.workflow_results import InferenceCompletionResult
+from fogmoe_bot.domain.temporal import ensure_utc
+from fogmoe_bot.infrastructure.database import db
 
 from .common import (
     _INFERENCE_ACTIVITY_COLUMNS,
@@ -133,7 +133,7 @@ class PostgresInferenceRepository:
         @return 活动或 None / Activity or None.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             _INFERENCE_ACTIVITY_SELECT + " WHERE activity_id = CAST(%s AS UUID)",
             (str(activity_id),),
         )
@@ -160,8 +160,8 @@ class PostgresInferenceRepository:
         if limit < 1:
             return ()
         token = LeaseToken.new()
-        async with db_connection.transaction() as connection:
-            rows = await db_connection.fetch_all(
+        async with db.transaction() as connection:
+            rows = await db.fetch_all(
                 "WITH candidates AS ("
                 "SELECT candidate.activity_id, candidate.status AS previous_status "
                 "FROM conversation.inference_activities AS candidate "
@@ -261,8 +261,8 @@ class PostgresInferenceRepository:
             outbound.created_at > timestamp for outbound in outbounds
         ):
             raise ValueError("Inference effects cannot be created after completed_at")
-        async with db_connection.transaction() as connection:
-            await db_connection.fetch_one(
+        async with db.transaction() as connection:
+            await db.fetch_one(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                 (str(claim.activity.conversation_id),),
                 connection=connection,
@@ -344,7 +344,7 @@ class PostgresInferenceRepository:
                     for outbound in outbounds
                 ]
             )
-            activity_row = await db_connection.fetch_one(
+            activity_row = await db.fetch_one(
                 "UPDATE conversation.inference_activities "
                 "SET status = 'completed', version = version + 1, "
                 "next_attempt_at = NULL, claim_token = NULL, lease_expires_at = NULL, "
@@ -410,7 +410,7 @@ class PostgresInferenceRepository:
         if retry_time <= failure_time:
             raise ValueError("retry_at must be later than failed_at")
         normalized_error = _required_error(error)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             current, current_token = await self._load_inference_activity_for_update(
                 claim.activity.activity_id,
                 connection=connection,
@@ -431,7 +431,7 @@ class PostgresInferenceRepository:
                 raise ConcurrentTurnUpdateError(
                     f"Inference retry requires waiting_inference, found {turn.state.value}"
                 )
-            rowcount = await db_connection.execute(
+            rowcount = await db.execute(
                 "UPDATE conversation.inference_activities "
                 "SET status = 'retry', version = version + 1, next_attempt_at = %s, "
                 "claim_token = NULL, lease_expires_at = NULL, completion_token = NULL, "
@@ -479,7 +479,7 @@ class PostgresInferenceRepository:
         if failure_time < claim.activity.updated_at:
             raise ValueError("failed_at cannot precede inference claim time")
         normalized_error = _required_error(error)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             current, current_token = await self._load_inference_activity_for_update(
                 claim.activity.activity_id,
                 connection=connection,
@@ -500,7 +500,7 @@ class PostgresInferenceRepository:
                 raise ConcurrentTurnUpdateError(
                     f"Inference failure requires waiting_inference, found {turn.state.value}"
                 )
-            rowcount = await db_connection.execute(
+            rowcount = await db.execute(
                 "UPDATE conversation.inference_activities "
                 "SET status = 'failed', version = version + 1, next_attempt_at = NULL, "
                 "claim_token = NULL, lease_expires_at = NULL, completion_token = NULL, "
@@ -537,8 +537,8 @@ class PostgresInferenceRepository:
         timestamp = ensure_utc(now)
         retry_time = timestamp + timedelta.resolution
         recovery_error = "inference worker lease expired before finalization"
-        async with db_connection.transaction() as connection:
-            rows = await db_connection.fetch_all(
+        async with db.transaction() as connection:
+            rows = await db.fetch_all(
                 "WITH expired AS (SELECT activity_id "
                 "FROM conversation.inference_activities "
                 "WHERE status = 'processing' AND lease_expires_at <= %s "
@@ -594,7 +594,7 @@ class PostgresInferenceRepository:
         @raise TurnNotFoundError 活动不存在时抛出 / Raised when the activity does not exist.
         """
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT "
             + _INFERENCE_ACTIVITY_COLUMNS
             + ", claim_token FROM conversation.inference_activities "

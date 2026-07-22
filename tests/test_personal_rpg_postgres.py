@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, date, datetime
 import json
+from datetime import UTC, date, datetime
 from typing import cast
 from uuid import uuid4
 
@@ -27,7 +27,6 @@ from fogmoe_bot.domain.personal_rpg.exploration import ExplorationRoute
 from fogmoe_bot.domain.personal_rpg.profile import PersonalRpgProfile
 from fogmoe_bot.domain.world.scope import PersonalScope
 from fogmoe_bot.infrastructure.database import personal_rpg as postgres_module
-
 
 DAY = date(2030, 1, 2)
 """@brief 适配器测试使用的稳定 UTC 业务日 / Stable UTC business day used by adapter tests."""
@@ -147,8 +146,8 @@ def test_load_profile_locks_character_material_and_collection_rows(
             return [("fiber", 2), ("herb", 1)]
         return [("herbal_lantern",)]
 
-    monkeypatch.setattr(postgres_module.db_connection, "fetch_one", fetch_one)
-    monkeypatch.setattr(postgres_module.db_connection, "fetch_all", fetch_all)
+    monkeypatch.setattr(postgres_module.db, "fetch_one", fetch_one)
+    monkeypatch.setattr(postgres_module.db, "fetch_all", fetch_all)
 
     profile = asyncio.run(
         postgres_module._load_profile(
@@ -208,7 +207,7 @@ def test_receipt_loader_rejects_changed_command_semantics(
             json.dumps(stored_result),
         )
 
-    monkeypatch.setattr(postgres_module.db_connection, "fetch_one", fetch_one)
+    monkeypatch.setattr(postgres_module.db, "fetch_one", fetch_one)
 
     replay = asyncio.run(
         postgres_module._load_receipt(

@@ -14,8 +14,8 @@ from fogmoe_bot.application.conversation.assistant_ingress import (
     AssistantTurnRequest,
     AssistantUserNotRegistered,
 )
-from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
 from fogmoe_bot.domain.accounts.plan import AccountPlan
+from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
@@ -27,10 +27,9 @@ from fogmoe_bot.infrastructure.database import assistant_turn_acceptance
 from fogmoe_bot.infrastructure.database.assistant_turn_acceptance import (
     PostgresAssistantTurnAcceptanceUoW,
 )
-from fogmoe_bot.infrastructure.database.repositories.user_repository import (
-    UserIdentityContext,
+from fogmoe_bot.infrastructure.database.assistant_user_context import (
+    AssistantIdentityContext,
 )
-
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定 acceptance 时刻 / Fixed acceptance instant."""
@@ -227,13 +226,13 @@ def _group_request() -> AssistantTurnRequest:
     )
 
 
-def _identity_context() -> UserIdentityContext:
+def _identity_context() -> AssistantIdentityContext:
     """@brief 构造无货币用户身份上下文 / Build a non-monetary user identity context.
 
     @return 身份上下文 / Identity context.
     """
 
-    return UserIdentityContext(
+    return AssistantIdentityContext(
         user_id=42,
         permission=1,
         info="CS student",
@@ -264,7 +263,7 @@ def test_direct_acceptance_reads_identity_only_and_never_touches_balances(
         profiles = NullProfileReader()
         plans = FixedPlanResolver()
         sql_calls: list[str] = []
-        identity_calls: list[tuple[int, object, bool]] = []
+        identity_calls: list[tuple[int, object]] = []
 
         async def fake_fetch_one(
             sql: str,
@@ -287,14 +286,13 @@ def test_direct_acceptance_reads_identity_only_and_never_touches_balances(
             user_id: int,
             *,
             connection: object,
-            for_update: bool,
-        ) -> UserIdentityContext:
+        ) -> AssistantIdentityContext:
             """@brief 返回加锁身份上下文 / Return a locked identity context.
 
             @return 身份上下文 / Identity context.
             """
 
-            identity_calls.append((user_id, connection, for_update))
+            identity_calls.append((user_id, connection))
             return _identity_context()
 
         async def fake_diary(user_id: int, *, connection: object) -> bool:
@@ -316,24 +314,22 @@ def test_direct_acceptance_reads_identity_only_and_never_touches_balances(
             raise AssertionError("zero-cost acceptance touched a balance API")
 
         monkeypatch.setattr(
-            assistant_turn_acceptance.db_connection, "transaction", lambda: transaction
+            assistant_turn_acceptance.db, "transaction", lambda: transaction
         )
+        monkeypatch.setattr(assistant_turn_acceptance.db, "fetch_one", fake_fetch_one)
         monkeypatch.setattr(
-            assistant_turn_acceptance.db_connection, "fetch_one", fake_fetch_one
-        )
-        monkeypatch.setattr(
-            assistant_turn_acceptance.user_repository,
-            "fetch_user_identity_context",
+            assistant_turn_acceptance.assistant_user_context,
+            "lock_assistant_identity_context_in_transaction",
             fake_identity,
         )
         monkeypatch.setattr(
-            assistant_turn_acceptance.user_repository,
-            "fetch_user_account",
+            assistant_turn_acceptance.assistant_user_context,
+            "fetch_assistant_user_snapshot",
             forbidden_balance_access,
         )
         monkeypatch.setattr(
-            assistant_turn_acceptance.conversation_repository,
-            "user_diary_exists",
+            assistant_turn_acceptance.assistant_user_context,
+            "assistant_diary_exists",
             fake_diary,
         )
 
@@ -345,7 +341,7 @@ def test_direct_acceptance_reads_identity_only_and_never_touches_balances(
 
         assert isinstance(result, AssistantTurnAccepted)
         assert not result.replayed
-        assert identity_calls == [(42, transaction.connection, True)]
+        assert identity_calls == [(42, transaction.connection)]
         assert plans.calls == [(42, transaction.connection)]
         assert profiles.calls == [(42, transaction.connection)]
         assert all("coins" not in sql.casefold() for sql in sql_calls)
@@ -395,7 +391,9 @@ def test_group_acceptance_does_not_read_private_profile_or_diary(
                 else None
             )
 
-        async def fake_identity(*args: object, **kwargs: object) -> UserIdentityContext:
+        async def fake_identity(
+            *args: object, **kwargs: object
+        ) -> AssistantIdentityContext:
             """@brief 返回身份上下文 / Return identity context.
 
             @return 身份上下文 / Identity context.
@@ -414,19 +412,17 @@ def test_group_acceptance_does_not_read_private_profile_or_diary(
             raise AssertionError("group acceptance read private state")
 
         monkeypatch.setattr(
-            assistant_turn_acceptance.db_connection, "transaction", lambda: transaction
+            assistant_turn_acceptance.db, "transaction", lambda: transaction
         )
+        monkeypatch.setattr(assistant_turn_acceptance.db, "fetch_one", fake_fetch_one)
         monkeypatch.setattr(
-            assistant_turn_acceptance.db_connection, "fetch_one", fake_fetch_one
-        )
-        monkeypatch.setattr(
-            assistant_turn_acceptance.user_repository,
-            "fetch_user_identity_context",
+            assistant_turn_acceptance.assistant_user_context,
+            "lock_assistant_identity_context_in_transaction",
             fake_identity,
         )
         monkeypatch.setattr(
-            assistant_turn_acceptance.conversation_repository,
-            "user_diary_exists",
+            assistant_turn_acceptance.assistant_user_context,
+            "assistant_diary_exists",
             forbidden_private_read,
         )
 
@@ -490,14 +486,12 @@ def test_replay_returns_before_identity_lookup(
             raise AssertionError("replay reached identity lookup")
 
         monkeypatch.setattr(
-            assistant_turn_acceptance.db_connection, "transaction", lambda: transaction
+            assistant_turn_acceptance.db, "transaction", lambda: transaction
         )
+        monkeypatch.setattr(assistant_turn_acceptance.db, "fetch_one", fake_fetch_one)
         monkeypatch.setattr(
-            assistant_turn_acceptance.db_connection, "fetch_one", fake_fetch_one
-        )
-        monkeypatch.setattr(
-            assistant_turn_acceptance.user_repository,
-            "fetch_user_identity_context",
+            assistant_turn_acceptance.assistant_user_context,
+            "lock_assistant_identity_context_in_transaction",
             forbidden_identity,
         )
 
@@ -551,14 +545,12 @@ def test_missing_identity_is_a_business_rejection(
             return None
 
         monkeypatch.setattr(
-            assistant_turn_acceptance.db_connection, "transaction", lambda: transaction
+            assistant_turn_acceptance.db, "transaction", lambda: transaction
         )
+        monkeypatch.setattr(assistant_turn_acceptance.db, "fetch_one", fake_fetch_one)
         monkeypatch.setattr(
-            assistant_turn_acceptance.db_connection, "fetch_one", fake_fetch_one
-        )
-        monkeypatch.setattr(
-            assistant_turn_acceptance.user_repository,
-            "fetch_user_identity_context",
+            assistant_turn_acceptance.assistant_user_context,
+            "lock_assistant_identity_context_in_transaction",
             missing_identity,
         )
 
@@ -609,7 +601,9 @@ def test_partial_acceptance_receipt_still_rolls_back(
             del params, connection
             return ("assistant-user:42",) if "inbound_updates" in sql else None
 
-        async def fake_identity(*args: object, **kwargs: object) -> UserIdentityContext:
+        async def fake_identity(
+            *args: object, **kwargs: object
+        ) -> AssistantIdentityContext:
             """@brief 返回身份上下文 / Return identity context.
 
             @return 身份上下文 / Identity context.
@@ -628,19 +622,17 @@ def test_partial_acceptance_receipt_still_rolls_back(
             return False
 
         monkeypatch.setattr(
-            assistant_turn_acceptance.db_connection, "transaction", lambda: transaction
+            assistant_turn_acceptance.db, "transaction", lambda: transaction
         )
+        monkeypatch.setattr(assistant_turn_acceptance.db, "fetch_one", fake_fetch_one)
         monkeypatch.setattr(
-            assistant_turn_acceptance.db_connection, "fetch_one", fake_fetch_one
-        )
-        monkeypatch.setattr(
-            assistant_turn_acceptance.user_repository,
-            "fetch_user_identity_context",
+            assistant_turn_acceptance.assistant_user_context,
+            "lock_assistant_identity_context_in_transaction",
             fake_identity,
         )
         monkeypatch.setattr(
-            assistant_turn_acceptance.conversation_repository,
-            "user_diary_exists",
+            assistant_turn_acceptance.assistant_user_context,
+            "assistant_diary_exists",
             fake_diary,
         )
 

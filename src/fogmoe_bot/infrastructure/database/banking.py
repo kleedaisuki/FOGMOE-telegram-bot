@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from hashlib import sha256
-import json
 from types import MappingProxyType
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -39,7 +39,7 @@ from fogmoe_bot.domain.banking.money import (
     WalletBalance,
 )
 from fogmoe_bot.domain.banking.requests import TokenRequest, TokenRequestStatus
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 class PostgresBankOperations(BankOperations):
@@ -53,7 +53,7 @@ class PostgresBankOperations(BankOperations):
         """
 
         operation_kind = "token_request.create"
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_idempotency_key(command.idempotency_key, connection)
             if not await _identity_exists(command.user_id, connection):
                 return TokenRequestResult(BankCode.NOT_REGISTERED)
@@ -67,7 +67,7 @@ class PostgresBankOperations(BankOperations):
                 return _result_from_mapping(replay, replayed=True)
 
             request = command.aggregate()
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO bank.token_requests ("
                 "request_id, requester_id, requested_amount, requested_bucket, purpose, "
                 "status, requested_at, version, updated_at"
@@ -104,7 +104,7 @@ class PostgresBankOperations(BankOperations):
         """
 
         operation_kind = "token_request.review"
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_idempotency_key(command.idempotency_key, connection)
             replay = await _load_receipt(
                 command.idempotency_key,
@@ -176,7 +176,7 @@ class PostgresBankOperations(BankOperations):
         """
 
         operation_kind = "bank.issue"
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_idempotency_key(command.idempotency_key, connection)
             replay = await _load_receipt(
                 command.idempotency_key,
@@ -228,7 +228,7 @@ class PostgresBankOperations(BankOperations):
 
         operation_kind = "bank.activity_pot_fund"
         activity_pot = LedgerAccount.system(SystemAccountKind.ACTIVITY_POT)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_idempotency_key(command.idempotency_key, connection)
             replay = await _load_receipt(
                 command.idempotency_key,
@@ -289,10 +289,10 @@ class PostgresBankOperations(BankOperations):
             to avoid an orphan-account read.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             if not await _identity_exists(command.administrator_id, connection):
                 return PendingTokenRequestsResult(BankCode.NOT_REGISTERED)
-            rows = await db_connection.fetch_all(
+            rows = await db.fetch_all(
                 "SELECT request_id, requester_id, requested_amount, requested_bucket, "
                 "purpose, status, requested_at, reviewed_at, reviewer_id, review_note, "
                 "ledger_entry_id, version FROM bank.token_requests "
@@ -315,7 +315,7 @@ class PostgresBankOperations(BankOperations):
         @return 钱包概览；未注册用户为 None / Wallet overview, or None for an unregistered user.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             if not await _identity_exists(user_id, connection):
                 return None
             await ensure_bank_user_wallets(user_id, connection)
@@ -330,7 +330,7 @@ async def _identity_exists(user_id: int, connection: AsyncConnection) -> bool:
     @return 用户存在时为 True / True when the user exists.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT 1 FROM identity.users WHERE id = %s",
         (user_id,),
         connection=connection,
@@ -351,7 +351,7 @@ async def _lock_idempotency_key(
         A hash collision can only serialize unrelated operations; it cannot merge their business results.
     """
 
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (idempotency_key,),
         connection=connection,
@@ -374,7 +374,7 @@ async def _load_receipt(
     @raise ValueError 同一键改变操作含义时抛出 / Raised when one key changes operation meaning.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT operation_kind, actor_id, result FROM bank.operation_receipts "
         "WHERE idempotency_key = %s",
         (idempotency_key,),
@@ -410,7 +410,7 @@ async def _save_receipt(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO bank.operation_receipts "
         "(idempotency_key, operation_kind, actor_id, result) "
         "VALUES (%s, %s, %s, CAST(%s AS JSONB))",
@@ -430,7 +430,7 @@ async def _lock_token_request(
     @return 请求聚合；不存在为 None / Request aggregate, or None when absent.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT request_id, requester_id, requested_amount, requested_bucket, purpose, "
         "status, requested_at, reviewed_at, reviewer_id, review_note, ledger_entry_id, "
         "version FROM bank.token_requests WHERE request_id = %s FOR UPDATE",
@@ -452,7 +452,7 @@ async def _persist_reviewed_request(
     @raise RuntimeError 乐观版本未匹配时抛出 / Raised when the optimistic version does not match.
     """
 
-    changed = await db_connection.execute(
+    changed = await db.execute(
         "UPDATE bank.token_requests SET status = %s, reviewed_at = %s, reviewer_id = %s, "
         "review_note = %s, ledger_entry_id = %s, version = %s, "
         "updated_at = CURRENT_TIMESTAMP WHERE request_id = %s AND version = %s",
@@ -489,7 +489,7 @@ async def append_bank_entry(entry: LedgerEntry, connection: AsyncConnection) -> 
         (posting.account for posting in sorted_postings),
         connection,
     )
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO bank.ledger_entries "
         "(entry_id, idempotency_key, reason, actor_id, metadata, created_at) "
         "VALUES (%s, %s, %s, %s, CAST(%s AS JSONB), %s)",
@@ -504,7 +504,7 @@ async def append_bank_entry(entry: LedgerEntry, connection: AsyncConnection) -> 
         connection=connection,
     )
     for line_no, posting in enumerate(sorted_postings, start=1):
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO bank.ledger_postings "
             "(entry_id, line_no, account_key, delta) VALUES (%s, %s, %s, %s)",
             (entry.entry_id, line_no, _account_key(posting.account), posting.delta),
@@ -541,7 +541,7 @@ async def lock_bank_account_balances(
     """@brief 全局一致的加锁顺序 / Globally consistent locking order."""
     for account_key in ordered_keys:
         await _ensure_account(accounts_by_key[account_key], connection)
-    rows = await db_connection.fetch_all(
+    rows = await db.fetch_all(
         "SELECT account_key, balance FROM bank.account_balances "
         "WHERE account_key = ANY(%s) ORDER BY account_key FOR UPDATE",
         (list(ordered_keys),),
@@ -643,7 +643,7 @@ async def _ensure_account(
         return
     if account.scope is AccountScope.GROUP:
         key = _account_key(account)
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO bank.accounts ("
             "account_key, account_scope, owner_id, token_bucket, system_kind, allow_negative"
             ") VALUES (%s, 'group', %s, NULL, 'group_treasury', FALSE) "
@@ -651,14 +651,14 @@ async def _ensure_account(
             (key, account.owner_id),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO bank.account_balances (account_key, balance, version, updated_at) "
             "VALUES (%s, 0, 0, CURRENT_TIMESTAMP) ON CONFLICT (account_key) DO NOTHING",
             (key,),
             connection=connection,
         )
         return
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT 1 FROM bank.accounts WHERE account_key = %s",
         (_account_key(account),),
         connection=connection,
@@ -686,7 +686,7 @@ async def ensure_bank_user_wallets(
     for bucket in TokenBucket:
         account = LedgerAccount.user(user_id, bucket)
         key = _account_key(account)
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO bank.accounts ("
             "account_key, account_scope, owner_id, token_bucket, system_kind, allow_negative"
             ") VALUES (%s, 'user', %s, %s, NULL, FALSE) "
@@ -694,7 +694,7 @@ async def ensure_bank_user_wallets(
             (key, user_id, bucket.value),
             connection=connection,
         )
-        await db_connection.execute(
+        await db.execute(
             "INSERT INTO bank.account_balances (account_key, balance, version, updated_at) "
             "VALUES (%s, 0, 0, CURRENT_TIMESTAMP) ON CONFLICT (account_key) DO NOTHING",
             (key,),
@@ -714,7 +714,7 @@ async def load_bank_overview(
     @raise RuntimeError 钱包投影缺失时抛出 / Raised when a wallet projection is missing.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT "
         "(SELECT balance FROM bank.account_balances WHERE account_key = %s), "
         "(SELECT balance FROM bank.account_balances WHERE account_key = %s)",

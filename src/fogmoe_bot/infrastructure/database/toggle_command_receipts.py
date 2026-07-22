@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import json
+from collections.abc import Mapping
 from typing import cast
 
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -12,7 +12,7 @@ from fogmoe_bot.domain.moderation.models import (
     ModerationCommandReceiptConflict,
     ModerationToggleResult,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 
 async def lock_toggle_command(
@@ -36,7 +36,7 @@ async def lock_toggle_command(
         raise ValueError("Invalid moderation-toggle idempotency key")
     if not operation_kind.strip() or len(operation_kind) > 80:
         raise ValueError("Invalid moderation-toggle operation kind")
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (f"moderation-toggle-receipt:{idempotency_key}",),
         connection=connection,
@@ -62,7 +62,7 @@ async def lock_toggle_scope(
     @return None / None.
     """
 
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (f"moderation-toggle-scope:{operation_kind}:{chat_id}",),
         connection=connection,
@@ -90,7 +90,7 @@ async def load_toggle_receipt(
     @raise ModerationCommandReceiptConflict 同一键被复用于不同命令 / The key was reused for a different command.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT operation_kind, chat_id, actor_id, request_payload, enabled "
         "FROM moderation.toggle_command_receipts WHERE idempotency_key = %s",
         (idempotency_key,),
@@ -141,7 +141,7 @@ async def save_toggle_receipt(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO moderation.toggle_command_receipts "
         "(idempotency_key, operation_kind, chat_id, actor_id, request_payload, enabled) "
         "VALUES (%s, %s, %s, %s, CAST(%s AS JSONB), %s)",

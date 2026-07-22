@@ -1,8 +1,8 @@
 """音乐会话的真实 PostgreSQL 持久化测试 / Real-PostgreSQL persistence tests for music sessions."""
 
 import asyncio
-from datetime import UTC, datetime, timedelta
 import os
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -14,7 +14,6 @@ from fogmoe_bot.domain.media.music import (
     MusicSearchSession,
     MusicTrack,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.media.music import (
     PostgresMusicSessionRepository,
@@ -41,7 +40,7 @@ def test_music_session_survives_adapter_restart_and_upsert() -> None:
         )
         repository = PostgresMusicSessionRepository()
         try:
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO identity.users (id, tg_uid, name) VALUES (%s, %s, %s)",
                 (int(requester), int(requester), f"music-test-{requester}"),
             )
@@ -50,11 +49,11 @@ def test_music_session_survives_adapter_restart_and_upsert() -> None:
             loaded = await PostgresMusicSessionRepository().load(search_id, now=now)
             assert loaded == session
         finally:
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM media.music_sessions WHERE search_id = CAST(%s AS UUID)",
                 (str(search_id),),
             )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM identity.users WHERE id = %s",
                 (int(requester),),
             )

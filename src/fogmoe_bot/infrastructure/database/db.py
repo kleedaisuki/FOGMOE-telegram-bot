@@ -3,10 +3,11 @@ import logging
 import re
 from collections.abc import Iterable, Mapping
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal, overload
 
 from sqlalchemy import event, text
-from sqlalchemy.engine import CursorResult
+from sqlalchemy.engine import CursorResult, Row
+from sqlalchemy.engine.row import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.sql.elements import TextClause
 
@@ -32,6 +33,9 @@ _SQL_TARGET = re.compile(
     re.IGNORECASE,
 )
 """@brief 仅提取普通 schema.table 的安全 SQL target / Safe extractor for ordinary schema.table SQL targets."""
+
+type SqlParams = Iterable[Any] | Mapping[str, Any] | None
+"""@brief SQL 位置参数、命名参数或空参数 / Positional, named, or absent SQL parameters."""
 
 
 def configure_observability(telemetry: Telemetry) -> None:
@@ -378,7 +382,7 @@ async def transaction() -> AsyncIterator[AsyncConnection]:
 
 async def exec_sql(
     sql: str,
-    params: Iterable[Any] | Mapping[str, Any] | None = None,
+    params: SqlParams = None,
     *,
     connection: AsyncConnection | None = None,
 ) -> CursorResult[Any]:
@@ -398,9 +402,129 @@ async def exec_sql(
     return await connection.execute(statement, bind_params)
 
 
+@overload
+async def fetch_one(
+    sql: str,
+    params: SqlParams = None,
+    *,
+    mapping: Literal[False] = False,
+    connection: AsyncConnection | None = None,
+) -> Row[Any] | None: ...
+
+
+@overload
+async def fetch_one(
+    sql: str,
+    params: SqlParams = None,
+    *,
+    mapping: Literal[True],
+    connection: AsyncConnection | None = None,
+) -> RowMapping | None: ...
+
+
+async def fetch_one(
+    sql: str,
+    params: SqlParams = None,
+    *,
+    mapping: bool = False,
+    connection: AsyncConnection | None = None,
+) -> Row[Any] | RowMapping | None:
+    """@brief 读取至多一行 / Fetch at most one row.
+
+    @param sql 参数化 SQL 文本 / Parameterized SQL text.
+    @param params 位置参数或命名参数 / Positional or named parameters.
+    @param mapping 是否返回列名映射 / Whether to return a column-name mapping.
+    @param connection 可选的现有事务连接 / Optional existing transactional connection.
+    @return 首行，不存在时为 None / First row, or None when absent.
+    """
+
+    result: CursorResult[Any] = await exec_sql(
+        sql,
+        params,
+        connection=connection,
+    )
+    if mapping:
+        return result.mappings().first()
+    return result.fetchone()
+
+
+@overload
+async def fetch_all(
+    sql: str,
+    params: SqlParams = None,
+    *,
+    mapping: Literal[False] = False,
+    connection: AsyncConnection | None = None,
+) -> list[Row[Any]]: ...
+
+
+@overload
+async def fetch_all(
+    sql: str,
+    params: SqlParams = None,
+    *,
+    mapping: Literal[True],
+    connection: AsyncConnection | None = None,
+) -> list[RowMapping]: ...
+
+
+async def fetch_all(
+    sql: str,
+    params: SqlParams = None,
+    *,
+    mapping: bool = False,
+    connection: AsyncConnection | None = None,
+) -> list[Row[Any]] | list[RowMapping]:
+    """@brief 读取全部结果行 / Fetch all result rows.
+
+    @param sql 参数化 SQL 文本 / Parameterized SQL text.
+    @param params 位置参数或命名参数 / Positional or named parameters.
+    @param mapping 是否返回列名映射 / Whether to return column-name mappings.
+    @param connection 可选的现有事务连接 / Optional existing transactional connection.
+    @return 物化后的结果列表 / Materialized result list.
+    """
+
+    result: CursorResult[Any] = await exec_sql(
+        sql,
+        params,
+        connection=connection,
+    )
+    if mapping:
+        return list(result.mappings().all())
+    return list(result.fetchall())
+
+
+async def execute(
+    sql: str,
+    params: SqlParams = None,
+    *,
+    connection: AsyncConnection | None = None,
+) -> int:
+    """@brief 执行写语句并返回影响行数 / Execute a write and return its row count.
+
+    @param sql 参数化 SQL 文本 / Parameterized SQL text.
+    @param params 位置参数或命名参数 / Positional or named parameters.
+    @param connection 可选的现有事务连接 / Optional existing transactional connection.
+    @return 数据库报告的影响行数 / Database-reported affected row count.
+    @note 未提供连接时自动创建并提交独立事务 / Creates and commits an independent transaction when no connection is supplied.
+    """
+
+    if connection is None:
+        async with transaction() as transaction_connection:
+            result = await exec_sql(
+                sql,
+                params,
+                connection=transaction_connection,
+            )
+            return result.rowcount
+
+    result = await exec_sql(sql, params, connection=connection)
+    return result.rowcount
+
+
 def _prepare_statement(
     sql: str,
-    params: Iterable[Any] | Mapping[str, Any] | None,
+    params: SqlParams,
 ) -> tuple[TextClause, Mapping[str, Any]]:
     """@brief 准备 SQLAlchemy 文本语句 / Prepare a SQLAlchemy text statement.
 

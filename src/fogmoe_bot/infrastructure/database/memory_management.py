@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fogmoe_bot.application.memory import ForgetMemory, ForgetMemoryResult
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.command_source import (
     validate_telegram_command_source,
 )
@@ -34,7 +34,7 @@ class PostgresMemoryForgetUoW:
             The outbox row also acts as the command receipt; replay cannot delete memory formed after the original request.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await validate_telegram_command_source(
                 command.source,
                 command.conversation_id,
@@ -52,14 +52,14 @@ class PostgresMemoryForgetUoW:
 
             await lock_retrieval_scope(connection, command.scope)
             if command.scope.kind == "personal":
-                user = await db_connection.fetch_one(
+                user = await db.fetch_one(
                     "SELECT 1 FROM identity.users WHERE id = %s",
                     (command.scope.scope_id,),
                     connection=connection,
                 )
                 if user is None:
                     return ForgetMemoryResult(0, True, confirmation)
-            await db_connection.execute(
+            await db.execute(
                 "INSERT INTO retrieval.scope_forgetting_boundaries "
                 "(scope_kind, scope_id, personal_user_id, forgotten_through, "
                 "created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s) "
@@ -81,7 +81,7 @@ class PostgresMemoryForgetUoW:
                 ),
                 connection=connection,
             )
-            deleted = await db_connection.execute(
+            deleted = await db.execute(
                 "DELETE FROM retrieval.passages WHERE scope_kind = %s AND scope_id = %s "
                 "AND occurred_at <= %s",
                 (
@@ -91,7 +91,7 @@ class PostgresMemoryForgetUoW:
                 ),
                 connection=connection,
             )
-            await db_connection.execute(
+            await db.execute(
                 "DELETE FROM retrieval.source_projections AS projection "
                 "USING conversation.conversation_turns AS turn "
                 "WHERE projection.source_kind = 'conversation.turn' "

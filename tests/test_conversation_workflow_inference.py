@@ -5,6 +5,16 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
+from conversation_workflow_testkit import (
+    NOW,
+    _activity,
+    _message_draft,
+    _message_result,
+    _outbound_draft,
+    _outbound_row,
+    _TransactionContext,
+    _turn_row,
+)
 
 from fogmoe_bot.domain.conversation.identity import (
     InferenceActivityId,
@@ -25,7 +35,7 @@ from fogmoe_bot.domain.conversation.outbox import (
     OutboundDraft,
     OutboundEnqueueResult,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.conversation_workflow import (
     inference as inference_repository,
 )
@@ -35,17 +45,6 @@ from fogmoe_bot.infrastructure.database.conversation_workflow import (
 from fogmoe_bot.infrastructure.database.conversation_workflow import turn_uow
 from fogmoe_bot.infrastructure.database.conversation_workflow.inference import (
     PostgresInferenceRepository,
-)
-
-from conversation_workflow_testkit import (
-    NOW,
-    _activity,
-    _message_draft,
-    _message_result,
-    _outbound_draft,
-    _outbound_row,
-    _TransactionContext,
-    _turn_row,
 )
 
 
@@ -74,11 +73,11 @@ def test_inference_claim_preserves_conversation_causality_across_workers(
             return []
 
         monkeypatch.setattr(
-            db_connection,
+            db,
             "transaction",
             lambda: _TransactionContext(connection),
         )
-        monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
+        monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
 
         claims = await PostgresInferenceRepository().claim_inference_activities(
             now=NOW,
@@ -185,11 +184,11 @@ def test_expired_inference_recovery_returns_a_complete_activity_projection(
         assert connection is not None
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
-    monkeypatch.setattr(db_connection, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
     monkeypatch.setattr(inference_repository, "_load_turn_for_mutation", fake_load_turn)
     monkeypatch.setattr(inference_repository, "_persist_turn", fake_persist)
 
@@ -283,12 +282,12 @@ def test_inference_uow_failure_exits_the_single_transaction_for_rollback(
         assert params == ("telegram:chat:-100:user:42:thread:9",)
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: transaction,
     )
     monkeypatch.setattr(
-        db_connection,
+        db,
         "fetch_one",
         fake_advisory_lock,
     )
@@ -419,12 +418,12 @@ def test_inference_uow_replay_returns_existing_atomic_effects(
         assert params == ("telegram:chat:-100:user:42:thread:9",)
 
     monkeypatch.setattr(
-        db_connection,
+        db,
         "transaction",
         lambda: _TransactionContext(connection),
     )
     monkeypatch.setattr(
-        db_connection,
+        db,
         "fetch_one",
         fake_advisory_lock,
     )

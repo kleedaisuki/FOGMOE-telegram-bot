@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
-import json
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -31,7 +31,7 @@ from fogmoe_bot.domain.town.models import (
 )
 from fogmoe_bot.domain.town.scope import TownScope
 from fogmoe_bot.domain.world.scope import PersonalScope
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.banking import (
     lock_bank_account_balances,
     post_bank_transfer,
@@ -57,7 +57,7 @@ class PostgresTownOperations(TownOperations):
 
         operation_kind = "town.ensure"
         fingerprint = _ensure_fingerprint(command)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_receipt_key(command.idempotency_key, connection)
             await _lock_town_scope(command.town, connection)
             replay = await _load_receipt(
@@ -100,7 +100,7 @@ class PostgresTownOperations(TownOperations):
 
         operation_kind = "town.create_project"
         fingerprint = _project_fingerprint(command)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_receipt_key(command.idempotency_key, connection)
             await _lock_town_scope(command.town, connection)
             replay = await _load_receipt(
@@ -158,7 +158,7 @@ class PostgresTownOperations(TownOperations):
 
         operation_kind = "town.contribute"
         fingerprint = _contribution_fingerprint(command)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_receipt_key(command.idempotency_key, connection)
             await _lock_town_scope(command.town, connection)
             replay = await _load_receipt(
@@ -287,7 +287,7 @@ class PostgresTownOperations(TownOperations):
 
         operation_kind = "town.complete_project"
         fingerprint = _completion_fingerprint(command)
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             await _lock_receipt_key(command.idempotency_key, connection)
             await _lock_town_scope(command.town, connection)
             replay = await _load_receipt(
@@ -393,7 +393,7 @@ class PostgresTownOperations(TownOperations):
         @return 小镇快照或不存在代码 / Town snapshot or not-found code.
         """
 
-        async with db_connection.transaction() as connection:
+        async with db.transaction() as connection:
             current = await _load_town(town, connection, for_update=False)
             return (
                 TownResult(TownCode.SUCCESS, town=current)
@@ -413,7 +413,7 @@ async def _identity_exists(
     @return 已注册时为 True / True when registered.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT 1 FROM identity.users WHERE id = %s",
         (actor.user_id,),
         connection=connection,
@@ -432,7 +432,7 @@ async def _lock_receipt_key(
     @return None / None.
     """
 
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (idempotency_key,),
         connection=connection,
@@ -454,7 +454,7 @@ async def _lock_town_scope(
         idempotency keys from creating the same group town concurrently.
     """
 
-    await db_connection.fetch_one(
+    await db.fetch_one(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (f"town:scope:{town.group_id}",),
         connection=connection,
@@ -483,7 +483,7 @@ async def _load_receipt(
         Raised when one key changes operation, actor, scope, or semantics.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT operation_kind, actor_id, group_id, request_fingerprint, result "
         "FROM town.operation_receipts WHERE idempotency_key = %s",
         (idempotency_key,),
@@ -525,7 +525,7 @@ async def _save_receipt(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO town.operation_receipts ("
         "idempotency_key, operation_kind, actor_id, group_id, request_fingerprint, result"
         ") VALUES (%s, %s, %s, %s, CAST(%s AS JSONB), CAST(%s AS JSONB))",
@@ -556,7 +556,7 @@ async def _load_town(
     """
 
     lock_clause = " FOR UPDATE" if for_update else ""
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT group_id, title, created_at, treasury_balance, treasury_reserved, "
         "lifetime_contributed, lifetime_settled, contribution_count, prosperity, version "
         "FROM town.towns WHERE group_id = %s" + lock_clause,
@@ -565,7 +565,7 @@ async def _load_town(
     )
     if row is None:
         return None
-    project_rows = await db_connection.fetch_all(
+    project_rows = await db.fetch_all(
         "SELECT project_id, kind, title, required_amount, created_by, created_at, "
         "prosperity_reward, funded_amount, status, completed_at, settlement_ledger_entry_id, "
         "version FROM town.projects WHERE group_id = %s "
@@ -600,7 +600,7 @@ async def _insert_town(town: Town, connection: AsyncConnection) -> None:
     """
 
     treasury = town.treasury
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO town.towns ("
         "group_id, title, created_at, treasury_balance, treasury_reserved, "
         "lifetime_contributed, lifetime_settled, contribution_count, prosperity, version"
@@ -637,7 +637,7 @@ async def _persist_town(
     """
 
     treasury = town.treasury
-    changed = await db_connection.execute(
+    changed = await db.execute(
         "UPDATE town.towns SET title = %s, treasury_balance = %s, treasury_reserved = %s, "
         "lifetime_contributed = %s, lifetime_settled = %s, contribution_count = %s, "
         "prosperity = %s, version = %s, updated_at = CURRENT_TIMESTAMP "
@@ -673,7 +673,7 @@ async def _insert_project(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO town.projects ("
         "project_id, group_id, kind, title, required_amount, created_by, created_at, "
         "prosperity_reward, funded_amount, status, completed_at, settlement_ledger_entry_id, "
@@ -699,7 +699,7 @@ async def _persist_project(
     @raise RuntimeError 项目版本意外变化时抛出 / Raised when the project version unexpectedly changed.
     """
 
-    changed = await db_connection.execute(
+    changed = await db.execute(
         "UPDATE town.projects SET funded_amount = %s, status = %s, completed_at = %s, "
         "settlement_ledger_entry_id = %s, version = %s, updated_at = CURRENT_TIMESTAMP "
         "WHERE project_id = %s AND version = %s",
@@ -729,7 +729,7 @@ async def _insert_contribution(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO town.contributions ("
         "contribution_id, group_id, contributor_id, amount, contributed_at, ledger_entry_id, "
         "project_id"

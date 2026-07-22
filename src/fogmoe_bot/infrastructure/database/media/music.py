@@ -12,7 +12,7 @@ from fogmoe_bot.domain.media.music import (
     MusicSearchSession,
     MusicTrack,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 
 from .common import utc
 
@@ -36,8 +36,8 @@ class PostgresMusicSessionRepository:
             ],
             ensure_ascii=False,
         )
-        async with db_connection.transaction() as connection:
-            await db_connection.execute(
+        async with db.transaction() as connection:
+            await db.execute(
                 "INSERT INTO media.music_sessions "
                 "(search_id, requester_id, query, platform, tracks, expires_at, created_at, updated_at) "
                 "VALUES (CAST(%s AS UUID), %s, %s, %s, CAST(%s AS JSONB), %s, "
@@ -55,7 +55,7 @@ class PostgresMusicSessionRepository:
                 ),
                 connection=connection,
             )
-            await db_connection.execute(
+            await db.execute(
                 "WITH stale AS ("
                 "SELECT search_id FROM media.music_sessions WHERE requester_id = %s "
                 "ORDER BY created_at DESC OFFSET 20) "
@@ -72,7 +72,7 @@ class PostgresMusicSessionRepository:
     ) -> MusicSearchSession | None:
         """读取未过期音乐会话 / Load an unexpired music session."""
 
-        row = await db_connection.fetch_one(
+        row = await db.fetch_one(
             "SELECT search_id, requester_id, query, platform, tracks, expires_at "
             "FROM media.music_sessions WHERE search_id = CAST(%s AS UUID) AND expires_at > %s",
             (str(search_id), utc(now)),

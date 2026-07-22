@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
-import json
 from typing import Any, cast
 from uuid import uuid4
 
@@ -26,7 +26,7 @@ from fogmoe_bot.domain.banking.ledger import (
     LedgerReason,
 )
 from fogmoe_bot.domain.banking.money import SystemAccountKind, TokenAmount, TokenBucket
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.account_plan import (
     TransactionalAccountPlanResolver,
 )
@@ -62,8 +62,8 @@ class PostgresAccountOperations(AccountOperations):
         """
 
         operation_kind = "register_account"
-        async with db_connection.transaction() as connection:
-            inserted = await db_connection.execute(
+        async with db.transaction() as connection:
+            inserted = await db.execute(
                 "INSERT INTO identity.users "
                 "(id, tg_uid, provider, name) "
                 "VALUES (%s, %s, 'telegram', %s) "
@@ -112,7 +112,7 @@ class PostgresAccountOperations(AccountOperations):
                 command.user_id,
                 connection=connection,
             )
-            await db_connection.execute(
+            await db.execute(
                 "UPDATE identity.users SET tg_uid = %s, provider = 'telegram', "
                 "name = %s WHERE id = %s",
                 (command.user_id, command.username, command.user_id),
@@ -147,8 +147,8 @@ class PostgresAccountOperations(AccountOperations):
         """
 
         operation_kind = "personal_info"
-        async with db_connection.transaction() as connection:
-            row = await db_connection.fetch_one(
+        async with db.transaction() as connection:
+            row = await db.fetch_one(
                 "SELECT info FROM identity.users WHERE id = %s FOR UPDATE",
                 (command.user_id,),
                 connection=connection,
@@ -172,7 +172,7 @@ class PostgresAccountOperations(AccountOperations):
             current = previous if command.new_info is None else command.new_info
             updated = command.new_info is not None
             if updated:
-                await db_connection.execute(
+                await db.execute(
                     "UPDATE identity.users SET info = %s WHERE id = %s",
                     (current, command.user_id),
                     connection=connection,
@@ -215,7 +215,7 @@ async def _read_profile(
         ledger projection trigger.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT id, permission, name FROM identity.users WHERE id = %s",
         (user_id,),
         connection=connection,
@@ -238,7 +238,7 @@ async def _load_receipt(
     @return result mapping 或 None / Result mapping or None.
     """
 
-    row = await db_connection.fetch_one(
+    row = await db.fetch_one(
         "SELECT operation_kind, user_id, result "
         "FROM identity.operation_receipts WHERE idempotency_key = %s",
         (idempotency_key,),
@@ -272,7 +272,7 @@ async def _save_receipt(
     @return None / None.
     """
 
-    await db_connection.execute(
+    await db.execute(
         "INSERT INTO identity.operation_receipts "
         "(idempotency_key, operation_kind, user_id, result) "
         "VALUES (%s, %s, %s, CAST(%s AS JSONB))",

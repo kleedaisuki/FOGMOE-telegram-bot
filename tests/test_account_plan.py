@@ -106,7 +106,7 @@ def test_postgres_account_plan_resolver_uses_billing_and_bank_in_caller_transact
             calls.append((sql, params, connection))
             return (False, True)
 
-        monkeypatch.setattr(account_plan.db_connection, "fetch_one", fake_fetch_one)
+        monkeypatch.setattr(account_plan.db, "fetch_one", fake_fetch_one)
         resolver = PostgresAccountPlanResolver(AccountPlanPolicy(administrator_id=1))
 
         assert await resolver.resolve(42, connection=connection) is AccountPlan.PAID  # type: ignore[arg-type]

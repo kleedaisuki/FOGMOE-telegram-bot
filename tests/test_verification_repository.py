@@ -25,11 +25,10 @@ from fogmoe_bot.domain.moderation.verification import (
     VerificationVersion,
     hash_verification_token,
 )
-from fogmoe_bot.infrastructure.database.repositories import verification_repository
-from fogmoe_bot.infrastructure.database.repositories.verification_repository import (
+from fogmoe_bot.infrastructure.database.moderation import verification
+from fogmoe_bot.infrastructure.database.moderation.verification import (
     PostgresVerificationRepository,
 )
-
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 确定性 UTC 测试时刻 / Deterministic UTC test instant."""
@@ -161,13 +160,11 @@ def test_create_upserts_the_existing_single_workflow_table(monkeypatch: Any) -> 
         return _row(status=VerificationStatus.CREATING, version=4, message_id=None)
 
     monkeypatch.setattr(
-        verification_repository.db_connection,
+        verification.db,
         "transaction",
         lambda: transaction,
     )
-    monkeypatch.setattr(
-        verification_repository.db_connection, "fetch_one", fake_fetch_one
-    )
+    monkeypatch.setattr(verification.db, "fetch_one", fake_fetch_one)
     recover_at = NOW + timedelta(seconds=30)
     created = asyncio.run(
         PostgresVerificationRepository().create(
@@ -183,7 +180,9 @@ def test_create_upserts_the_existing_single_workflow_table(monkeypatch: Any) -> 
     assert "verification_tasks_v2" not in sql
     assert created.status is VerificationStatus.CREATING
     assert created.version == VerificationVersion(4)
-    assert captured["params"][-2:] == (recover_at, recover_at)
+    params = captured["params"]
+    assert isinstance(params, tuple)
+    assert params[-2:] == (recover_at, recover_at)
     assert captured["connection"] is transaction.connection
     assert transaction.exit_exception is None
 
@@ -248,17 +247,17 @@ def test_verification_toggle_commits_policy_and_receipt_once(
         return 1
 
     monkeypatch.setattr(
-        verification_repository.db_connection,
+        verification.db,
         "transaction",
         lambda: transaction,
     )
     monkeypatch.setattr(
-        verification_repository.db_connection,
+        verification.db,
         "fetch_one",
         fake_fetch_one,
     )
     monkeypatch.setattr(
-        verification_repository.db_connection,
+        verification.db,
         "execute",
         fake_execute,
     )
@@ -333,14 +332,12 @@ def test_apply_locks_one_row_and_commits_occ_transition_in_one_short_transaction
         return 1
 
     monkeypatch.setattr(
-        verification_repository.db_connection,
+        verification.db,
         "transaction",
         lambda: transaction,
     )
-    monkeypatch.setattr(
-        verification_repository.db_connection, "fetch_one", fake_fetch_one
-    )
-    monkeypatch.setattr(verification_repository.db_connection, "execute", fake_execute)
+    monkeypatch.setattr(verification.db, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(verification.db, "execute", fake_execute)
 
     updated = asyncio.run(
         PostgresVerificationRepository().apply(
@@ -386,13 +383,11 @@ def test_claim_ready_is_bounded_and_uses_skip_locked_with_lease_fencing(
         return [(*_row(status=VerificationStatus.EXPIRING, version=2), 3)]
 
     monkeypatch.setattr(
-        verification_repository.db_connection,
+        verification.db,
         "transaction",
         lambda: transaction,
     )
-    monkeypatch.setattr(
-        verification_repository.db_connection, "fetch_all", fake_fetch_all
-    )
+    monkeypatch.setattr(verification.db, "fetch_all", fake_fetch_all)
     claims = asyncio.run(
         PostgresVerificationRepository().claim_ready(
             now=NOW,
@@ -432,7 +427,7 @@ def test_complete_retry_and_recovery_all_require_or_preserve_fencing(
         calls.append((sql, params))
         return 1
 
-    monkeypatch.setattr(verification_repository.db_connection, "execute", fake_execute)
+    monkeypatch.setattr(verification.db, "execute", fake_execute)
     claim = VerificationClaim(
         task=_task(status=VerificationStatus.PASSING, version=2),
         token="11111111-1111-4111-8111-111111111111",
