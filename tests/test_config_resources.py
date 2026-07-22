@@ -68,6 +68,7 @@ def test_system_prompt_defines_persona_and_runtime_contract() -> None:
     assert "current explicit statement overrides" in resources.system_prompt
     assert "empty retrieval result does not prove" in resources.system_prompt
     assert "Call `search_memory`" in resources.system_prompt
+    assert "Call `search_memory_by_time`" in resources.system_prompt
     assert "Call `get_current_time`" in resources.system_prompt
     assert "IANA time zone" in resources.system_prompt
     assert (

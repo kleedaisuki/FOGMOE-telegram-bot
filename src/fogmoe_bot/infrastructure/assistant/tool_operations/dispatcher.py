@@ -3,6 +3,7 @@
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.application.assistant.tool_runtime import ToolEffectRequest
+from fogmoe_bot.application.assistant.temporal_memory import TemporalMemoryReader
 from fogmoe_bot.application.memory.ports import WorkingMemoryReader
 from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.domain.conversation.payloads import JsonValue
@@ -21,6 +22,7 @@ from .memory import search_memory
 from .outbound import finalize_downstream_effect
 from .parsing import optional_text, required_connection, required_text
 from .schedule import execute_schedule
+from .temporal_memory import search_memory_by_time
 from .time import get_current_time
 
 
@@ -36,6 +38,7 @@ class AssistantToolOperationDispatcher:
         stickers: StickerCatalogReader,
         outbox: StandaloneOutboxWriter,
         memory: WorkingMemoryReader,
+        temporal_memory: TemporalMemoryReader,
         groups: GroupContextReader,
         time: TimeService,
     ) -> None:
@@ -47,6 +50,7 @@ class AssistantToolOperationDispatcher:
         self._stickers = stickers
         self._outbox = outbox
         self._memory = memory
+        self._temporal_memory = temporal_memory
         self._groups = groups
         self._time = time
 
@@ -92,6 +96,12 @@ class AssistantToolOperationDispatcher:
                 return await fetch_group_context(request, groups=self._groups)
             case "search_memory":
                 return await search_memory(request, memory=self._memory)
+            case "search_memory_by_time":
+                return await search_memory_by_time(
+                    request,
+                    memory=self._temporal_memory,
+                    time=self._time,
+                )
             case "user_diary":
                 return await execute_diary(request, connection=connection)
             case "schedule_ai_message":

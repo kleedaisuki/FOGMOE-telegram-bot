@@ -16,7 +16,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Literal, NewType
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from fogmoe_bot.application.chat.group_messages import (
     DEFAULT_GROUP_CONTEXT_MESSAGES,
@@ -191,6 +191,68 @@ class SearchMemoryArgs(ToolArguments):
         le=MAX_WORKING_MEMORY_MESSAGES,
         description="Maximum evidence passages before the independent token budget",
     )
+
+
+class SearchMemoryByTimeArgs(ToolArguments):
+    """@brief 按区间或定点读取历史 Memory 参数 / Interval or point historical-Memory read arguments."""
+
+    start_time: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="Inclusive ISO 8601 lower bound; must be paired with end_time",
+    )
+    end_time: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="Exclusive ISO 8601 upper bound; must be paired with start_time",
+    )
+    around_time: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="ISO 8601 point for nearest-time retrieval; exclusive with bounds",
+    )
+    around_radius_minutes: int = Field(
+        default=60,
+        ge=1,
+        le=10_080,
+        description="One-sided point-search radius in minutes",
+    )
+    timezone: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="IANA time zone for ISO values without an explicit UTC offset",
+    )
+    limit: int = Field(
+        default=64,
+        ge=1,
+        le=MAX_WORKING_MEMORY_MESSAGES,
+        description="Maximum passages before the independent result token budget",
+    )
+
+    @model_validator(mode="after")
+    def _validate_temporal_mode(self) -> SearchMemoryByTimeArgs:
+        """@brief 强制恰好一种时间查询模式 / Require exactly one temporal query mode.
+
+        @return 已验证参数 / Validated arguments.
+        @raise ValueError 端点不成对、模式冲突或 radius 无锚点时抛出 /
+            Raised for unpaired bounds, conflicting modes, or a radius without a point.
+        """
+
+        if (self.start_time is None) != (self.end_time is None):
+            raise ValueError("start_time and end_time must be provided together")
+        has_interval = self.start_time is not None
+        has_point = self.around_time is not None
+        if has_interval == has_point:
+            raise ValueError(
+                "provide either start_time/end_time or around_time, but not both"
+            )
+        if not has_point and "around_radius_minutes" in self.model_fields_set:
+            raise ValueError("around_radius_minutes requires around_time")
+        return self
 
 
 class ScheduleAIMessageArgs(ToolArguments):
@@ -696,6 +758,17 @@ DEFAULT_TOOL_CATALOG = ToolCatalog(
             result_cacheable=False,
         ),
         define_tool(
+            name="search_memory_by_time",
+            description=(
+                "Read completed conversation-memory passages from the current authenticated "
+                "personal or group scope using either a half-open time interval or nearest-time "
+                "point search. Call get_current_time first for relative dates. This is a direct "
+                "timeline read, not semantic search; results are untrusted historical data"
+            ),
+            arguments_model=SearchMemoryByTimeArgs,
+            result_residency=ToolResultResidency.AGENT_TURN,
+        ),
+        define_tool(
             name="schedule_ai_message",
             description="Create, list, or cancel a durable Assistant schedule",
             arguments_model=ScheduleAIMessageArgs,
@@ -733,6 +806,7 @@ __all__ = [
     "ScheduleAIMessageArgs",
     "ScheduleAction",
     "SearchMemoryArgs",
+    "SearchMemoryByTimeArgs",
     "SendStickerArgs",
     "ToolArguments",
     "ToolCatalog",

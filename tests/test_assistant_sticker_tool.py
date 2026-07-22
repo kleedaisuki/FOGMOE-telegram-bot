@@ -15,6 +15,7 @@ from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectRequest,
     ToolExecutionContext,
 )
+from fogmoe_bot.application.assistant.temporal_memory import TemporalMemoryReader
 from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.domain.conversation.payloads import JsonValue
 from fogmoe_bot.domain.conversation.identity import (
@@ -304,6 +305,7 @@ def test_receipt_replay_queues_exactly_one_standalone_sticker_outbox(
             stickers=adapters,
             outbox=cast(StandaloneOutboxWriter, workflow),
             memory=adapters,
+            temporal_memory=cast(TemporalMemoryReader, adapters),
             groups=PostgresGroupMessageProjection(),
             time=TimeService(default_time_zone=UTC_TIME_ZONE),
         )
@@ -386,6 +388,7 @@ def test_generated_media_runs_outside_transaction_then_finalizes_once(
             stickers=unused,
             outbox=cast(StandaloneOutboxWriter, outbox),
             memory=unused,
+            temporal_memory=cast(TemporalMemoryReader, unused),
             groups=PostgresGroupMessageProjection(),
             time=TimeService(default_time_zone=UTC_TIME_ZONE),
         )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import uuid4
 
 import pytest
@@ -13,6 +14,7 @@ from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectRequest,
     ToolExecutionContext,
 )
+from fogmoe_bot.application.assistant.temporal_memory import TemporalMemoryReader
 from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
@@ -94,6 +96,7 @@ def test_diary_and_schedule_share_atomic_receipt_transactions(
             stickers=external,
             outbox=PostgresOutboxRepository(),
             memory=external,
+            temporal_memory=cast(TemporalMemoryReader, external),
             groups=PostgresGroupMessageProjection(),
             time=TimeService(default_time_zone=UTC_TIME_ZONE),
         )

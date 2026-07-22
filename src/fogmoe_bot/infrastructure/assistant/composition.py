@@ -70,6 +70,9 @@ from fogmoe_bot.infrastructure.database.retrieval import (
     PostgresEpisodicSource,
     PostgresRetrievalStore,
 )
+from fogmoe_bot.infrastructure.database.temporal_memory import (
+    PostgresTemporalMemoryReader,
+)
 from fogmoe_bot.infrastructure.database.user_profile.source import (
     PostgresProfileEvidenceSource,
 )
@@ -238,6 +241,10 @@ def build_durable_assistant(
         ),
         outbox=PostgresOutboxRepository(),
         memory=working_memory,
+        temporal_memory=PostgresTemporalMemoryReader(
+            corpus_id=EPISODIC_CORPUS_ID,
+            format_version=embedding_space.passage_format_version,
+        ),
         groups=PostgresGroupMessageProjection(),
         time=TimeService(
             default_time_zone=TimeZoneId(assistant_settings.time.default_timezone)
