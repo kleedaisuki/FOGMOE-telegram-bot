@@ -1,10 +1,10 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0061_rebuild_assistant_scheduling
--- Alembic head: 0061_rebuild_assistant_scheduling
+-- Source migrations: 0001_initial through 0062_retire_identity_mirrors_and_legacy_media
+-- Alembic head: 0062_retire_identity_mirrors_and_legacy_media
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
--- (including the initial stake_reward_pool row and user-plan backfill) and the
+-- (including the initial stake_reward_pool row and retired user-plan backfill) and the
 -- dynamically maintained infra.alembic_version row.
 
 CREATE SCHEMA IF NOT EXISTS identity;
@@ -540,15 +540,8 @@ CREATE TABLE identity.users (
   provider TEXT NOT NULL DEFAULT 'telegram'
     CHECK (provider IN ('telegram','local','web')),
   name TEXT NOT NULL,
-  coins BIGINT NOT NULL DEFAULT 0,
   permission INT DEFAULT 0,
-  info VARCHAR(500) DEFAULT NULL,
-  coins_paid BIGINT NOT NULL DEFAULT 0,
-  user_plan VARCHAR(10) NOT NULL DEFAULT 'free',
-  CONSTRAINT identity_users_coins_projection_nonnegative_ck CHECK (coins >= 0),
-  CONSTRAINT identity_users_coins_paid_projection_nonnegative_ck CHECK (
-    coins_paid >= 0
-  )
+  info VARCHAR(500) DEFAULT NULL
 );
 
 CREATE TABLE bank.accounts (
@@ -723,12 +716,6 @@ AS $$
 DECLARE
   -- @brief 进入账本投影前的事务本地上下文 / Transaction-local context before entering the ledger projection.
   previous_apply_context TEXT;
-  -- @brief 受影响账户的逻辑范围 / Logical scope of the affected account.
-  affected_scope TEXT;
-  -- @brief 受影响用户账户的所有者 / Owner of the affected user account.
-  affected_owner_id BIGINT;
-  -- @brief 受影响用户账户的钱包类别 / Token bucket of the affected user account.
-  affected_bucket TEXT;
 BEGIN
   previous_apply_context := current_setting('bank.ledger_posting_apply', TRUE);
   PERFORM set_config('bank.ledger_posting_apply', 'on', TRUE);
@@ -755,26 +742,6 @@ BEGIN
       USING ERRCODE = '40001';
   END IF;
 
-  -- Legacy integer columns are a guarded read projection of the Bank ledger.
-  SELECT account_scope, owner_id, token_bucket
-    INTO affected_scope, affected_owner_id, affected_bucket
-  FROM bank.accounts
-  WHERE account_key = NEW.account_key;
-  IF affected_scope = 'user' AND affected_owner_id IS NOT NULL THEN
-    IF affected_bucket = 'free' THEN
-      UPDATE identity.users AS users
-      SET coins = balances.balance
-      FROM bank.account_balances AS balances
-      WHERE balances.account_key = NEW.account_key
-        AND users.id = affected_owner_id;
-    ELSIF affected_bucket = 'paid' THEN
-      UPDATE identity.users AS users
-      SET coins_paid = balances.balance
-      FROM bank.account_balances AS balances
-      WHERE balances.account_key = NEW.account_key
-        AND users.id = affected_owner_id;
-    END IF;
-  END IF;
   PERFORM set_config(
     'bank.ledger_posting_apply',
     COALESCE(previous_apply_context, 'off'),
@@ -785,10 +752,9 @@ END;
 $$;
 
 COMMENT ON FUNCTION bank.apply_ledger_posting_balance() IS
-  '@brief 在账本过账触发器内安全更新余额投影 / Safely update balance projections inside the ledger-posting trigger.
+  '@brief 在账本过账触发器内只更新 Bank 余额投影 / Update only the Bank balance projection inside the ledger-posting trigger.
 @return NEW，保留账本过账行 / NEW to retain the ledger posting.
-@note 先零初始化再更新，避免 PostgreSQL 在 UPSERT 冲突仲裁前把借记误判为负插入 /
-      Zero initialization before UPDATE avoids PostgreSQL misclassifying a debit as a negative insert before UPSERT conflict arbitration.';
+@note identity 不再保存任何金额镜像 / Identity no longer stores any monetary mirror.';
 
 CREATE TRIGGER bank_ledger_postings_apply_balance_tr
 AFTER INSERT ON bank.ledger_postings
@@ -862,49 +828,6 @@ COMMENT ON FUNCTION bank.guard_account_balance_mutation() IS
 CREATE TRIGGER bank_account_balances_authorize_mutation_tr
 BEFORE INSERT OR UPDATE OR DELETE ON bank.account_balances
 FOR EACH ROW EXECUTE FUNCTION bank.guard_account_balance_mutation();
-
--- /**
---  * @brief 仅允许账本投影触发器更新旧余额镜像 / Allow legacy balance mirrors to be updated only by the ledger-projection trigger.
---  * @param OLD 更新前 identity 用户行 / Identity user row before update.
---  * @param NEW 待插入或更新的 identity 用户行 / Identity user row to insert or update.
---  * @return NEW，保留合法的零初始化或账本投影 / NEW, retaining legal zero initialization or ledger projection.
---  * @note pg_trigger_depth 与 transaction-local 标志共同防止应用 SQL 伪造投影写入 /
---  *       pg_trigger_depth and the transaction-local flag jointly prevent application SQL from forging a projection write.
---  */
-CREATE FUNCTION bank.guard_identity_user_money_projection()
-RETURNS TRIGGER
-LANGUAGE plpgsql
-AS $$
-BEGIN
-  IF TG_OP = 'INSERT' THEN
-    IF NEW.coins = 0 AND NEW.coins_paid = 0 THEN
-      RETURN NEW;
-    END IF;
-  ELSIF TG_OP = 'UPDATE' THEN
-    IF NEW.coins = OLD.coins AND NEW.coins_paid = OLD.coins_paid THEN
-      RETURN NEW;
-    END IF;
-    IF current_setting('bank.ledger_posting_apply', TRUE) = 'on'
-      AND pg_trigger_depth() > 1 THEN
-      RETURN NEW;
-    END IF;
-  END IF;
-
-  RAISE EXCEPTION
-    'identity.users coins are bank-ledger projections; post a balanced bank entry instead'
-    USING ERRCODE = '55000';
-  RETURN NULL;
-END;
-$$;
-
-COMMENT ON FUNCTION bank.guard_identity_user_money_projection() IS
-  '@brief 守卫 identity.users 的金币投影 / Guard identity.users token projections.
-@return NEW，保留零初始化或账本触发器投影 / NEW, retaining zero initialization or ledger-trigger projection.
-@note 直接金币写入必须改为 bank.ledger_entries 加平衡 postings / Direct token writes must become bank.ledger_entries plus balanced postings.';
-
-CREATE TRIGGER identity_users_money_projection_tr
-BEFORE INSERT OR UPDATE OF coins, coins_paid ON identity.users
-FOR EACH ROW EXECUTE FUNCTION bank.guard_identity_user_money_projection();
 
 CREATE FUNCTION bank.forbid_ledger_mutation()
 RETURNS TRIGGER
@@ -1391,44 +1314,6 @@ CREATE INDEX admin_announcement_recipients_expired_idx
     (lease_expires_at, announcement_id, recipient_kind, chat_id)
   WHERE status = 'processing';
 
-CREATE TABLE media.picture_offers (
-  offer_id UUID PRIMARY KEY,
-  source_id TEXT NOT NULL CHECK (char_length(btrim(source_id)) BETWEEN 1 AND 255),
-  sample_url TEXT,
-  file_url TEXT,
-  tags TEXT NOT NULL DEFAULT '',
-  width INTEGER CHECK (width IS NULL OR width > 0),
-  height INTEGER CHECK (height IS NULL OR height > 0),
-  file_size BIGINT CHECK (file_size IS NULL OR file_size > 0),
-  score INTEGER,
-  rating TEXT NOT NULL CHECK (rating IN ('safe', 'nsfw')),
-  requester_id BIGINT NOT NULL
-    REFERENCES identity.users(id) ON DELETE RESTRICT,
-  expires_at TIMESTAMPTZ NOT NULL,
-  state TEXT NOT NULL CHECK (
-    state IN ('preview_pending', 'available', 'charged', 'delivered', 'refunded')
-  ),
-  charged_user_id BIGINT
-    REFERENCES identity.users(id) ON DELETE RESTRICT,
-  claim_expires_at TIMESTAMPTZ,
-  preview_cost SMALLINT NOT NULL CHECK (preview_cost > 0),
-  hd_cost SMALLINT CHECK (hd_cost IS NULL OR hd_cost > 0),
-  preview_confirm_by TIMESTAMPTZ NOT NULL,
-  preview_refunded BOOLEAN NOT NULL DEFAULT FALSE,
-  hd_refunded BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CHECK (sample_url IS NOT NULL OR file_url IS NOT NULL),
-  CHECK (state <> 'charged' OR charged_user_id IS NOT NULL),
-  CHECK (state NOT IN ('charged', 'delivered') OR hd_cost IS NOT NULL),
-  CHECK (claim_expires_at IS NULL OR state = 'charged')
-);
-
-CREATE INDEX picture_offers_recovery_idx
-  ON media.picture_offers (state, preview_confirm_by, claim_expires_at, expires_at);
-CREATE INDEX picture_offers_requester_created_idx
-  ON media.picture_offers (requester_id, created_at DESC);
-
 CREATE TABLE media.music_sessions (
   search_id UUID PRIMARY KEY,
   requester_id BIGINT NOT NULL
@@ -1445,26 +1330,6 @@ CREATE INDEX music_sessions_expiry_idx
   ON media.music_sessions (expires_at);
 CREATE INDEX music_sessions_requester_created_idx
   ON media.music_sessions (requester_id, created_at DESC);
-
-CREATE TABLE media.picture_request_receipts (
-  idempotency_key VARCHAR(200) PRIMARY KEY
-    CHECK (char_length(btrim(idempotency_key)) BETWEEN 1 AND 200),
-  requester_id BIGINT NOT NULL
-    REFERENCES identity.users(id) ON DELETE RESTRICT,
-  rating TEXT NOT NULL CHECK (rating IN ('safe', 'nsfw')),
-  request_fingerprint CHAR(64) NOT NULL CHECK (
-    request_fingerprint ~ '^[0-9a-f]{64}$'
-  ),
-  offer_id UUID NOT NULL UNIQUE,
-  outbound_message_id UUID NOT NULL UNIQUE
-    REFERENCES conversation.outbound_messages(message_id) ON DELETE RESTRICT,
-  result JSONB NOT NULL CHECK (jsonb_typeof(result) = 'object'),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX picture_request_receipts_requester_created_idx
-  ON media.picture_request_receipts
-    (requester_id, created_at DESC, idempotency_key);
 
 CREATE TABLE identity.web_password (
   user_id BIGINT NOT NULL PRIMARY KEY,
@@ -1928,16 +1793,6 @@ CREATE TABLE game.user_omikuji (
     fortune IN ('大吉', '中吉', '小吉', '末吉', '凶', '大凶')
   ),
   PRIMARY KEY (user_id, fortune_date)
-);
-
-CREATE TABLE game.migration_0027_omikuji_repairs (
-  user_id BIGINT NOT NULL,
-  fortune_date DATE NOT NULL,
-  fortune VARCHAR(10) NOT NULL,
-  captured_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (user_id, fortune_date),
-  FOREIGN KEY (user_id, fortune_date)
-    REFERENCES game.user_omikuji(user_id, fortune_date) ON DELETE CASCADE
 );
 
 CREATE TABLE game.game_receipts (

@@ -16,7 +16,6 @@ class UserAccount:
     @param coins_paid 付费硬币余额 / Paid coin balance.
     @param info 用户个人信息 / User personal information.
     @param name 用户名 / User name.
-    @param user_plan 用户套餐 / User plan.
     @note 这是读取时刻的不可变快照，不代表事务外的最新状态 / This is an immutable read snapshot, not a live value outside the transaction.
     """
 
@@ -26,7 +25,6 @@ class UserAccount:
     coins_paid: int
     info: str
     name: str = ""
-    user_plan: str = "free"
 
     @property
     def total_coins(self) -> int:
@@ -45,7 +43,6 @@ class UserIdentityContext:
     @param user_id Telegram 用户 ID / Telegram user ID.
     @param permission 用户权限等级 / User permission level.
     @param info 用户个人信息 / User personal information.
-    @param user_plan 历史兼容套餐标签 / Historical compatibility plan label.
     @note Assistant acceptance 使用此对象，以避免读取任何余额投影 / Assistant acceptance uses this object to avoid reading any balance projection.
     """
 
@@ -57,10 +54,6 @@ class UserIdentityContext:
 
     info: str
     """@brief 个人信息 / Personal information."""
-
-    user_plan: str
-    """@brief 兼容套餐标签 / Compatibility plan label."""
-
 
 def _coerce_user_account(row: Sequence[object] | None) -> UserAccount | None:
     """@brief 将数据库行转换为账户快照 / Convert a database row into an account snapshot.
@@ -78,7 +71,6 @@ def _coerce_user_account(row: Sequence[object] | None) -> UserAccount | None:
         coins_paid=int(str(row[3] or 0)),
         info="" if row[4] is None else str(row[4]),
         name="" if row[5] is None else str(row[5]),
-        user_plan=str(row[6] or "free"),
     )
 
 
@@ -101,7 +93,7 @@ async def fetch_user_account(
     row = await db_connection.fetch_one(
         "SELECT users.id, users.permission, "
         "COALESCE(free_balance.balance, 0), "
-        "COALESCE(paid_balance.balance, 0), users.info, users.name, users.user_plan "
+        "COALESCE(paid_balance.balance, 0), users.info, users.name "
         "FROM identity.users AS users "
         "LEFT JOIN bank.account_balances AS free_balance "
         "ON free_balance.account_key = 'user:' || users.id::TEXT || ':free' "
@@ -132,7 +124,7 @@ async def fetch_user_identity_context(
 
     lock_clause = " FOR UPDATE" if for_update else ""
     row = await db_connection.fetch_one(
-        "SELECT id, permission, info, user_plan "
+        "SELECT id, permission, info "
         f"FROM identity.users WHERE id = %s{lock_clause}",
         (user_id,),
         connection=connection,
@@ -143,51 +135,4 @@ async def fetch_user_identity_context(
         user_id=int(str(row[0])),
         permission=int(str(row[1] or 0)),
         info="" if row[2] is None else str(row[2]),
-        user_plan=str(row[3] or "free"),
-    )
-
-
-async def add_free_coins(
-    user_id: int,
-    coins: int,
-    *,
-    connection: AsyncConnection | None = None,
-) -> None:
-    """@brief 拒绝已退役的直接免费金币写入 / Reject a retired direct free-token mutation.
-
-    @param user_id Telegram 用户 ID / Telegram user ID.
-    @param coins 增加数量 / Amount to add.
-    @param connection 可选数据库连接 / Optional database connection.
-    @return 永不返回 / Never returns.
-    @raise RuntimeError 必须改用 BankOperations / Raised because callers must use BankOperations.
-    """
-
-    del user_id, coins, connection
-    raise RuntimeError(
-        "Direct identity token mutation is retired; use BankOperations instead"
-    )
-
-
-async def set_coin_balances_and_plan(
-    user_id: int,
-    coins: int,
-    coins_paid: int,
-    user_plan: str,
-    *,
-    connection: AsyncConnection | None = None,
-) -> None:
-    """@brief 拒绝已退役的直接余额设置 / Reject a retired direct balance assignment.
-
-    @param user_id Telegram 用户 ID / Telegram user ID.
-    @param coins 免费硬币余额 / Free coin balance.
-    @param coins_paid 付费硬币余额 / Paid coin balance.
-    @param user_plan 用户计划值 / User plan value.
-    @param connection 可选数据库连接 / Optional database connection.
-    @return 永不返回 / Never returns.
-    @raise RuntimeError 必须改用 BankOperations / Raised because callers must use BankOperations.
-    """
-
-    del user_id, coins, coins_paid, user_plan, connection
-    raise RuntimeError(
-        "Direct identity token mutation is retired; use BankOperations instead"
     )

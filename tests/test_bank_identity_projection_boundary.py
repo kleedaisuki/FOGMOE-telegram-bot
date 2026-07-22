@@ -29,19 +29,23 @@ def test_identity_projection_migration_archives_legacy_billing_before_later_reti
         / "src/fogmoe_dbctl/migrations/versions/0054_bank_identity_projection_boundary.py"
     ).read_text(encoding="utf-8")
 
-    projection_statements = (
+    historical_projection_statements = (
         "identity_users_coins_projection_nonnegative_ck",
         "identity_users_coins_paid_projection_nonnegative_ck",
         "CREATE FUNCTION bank.guard_identity_user_money_projection()",
         "CREATE TRIGGER identity_users_money_projection_tr",
-        "current_setting('bank.ledger_posting_apply', TRUE) = 'on'",
-        "pg_trigger_depth() > 1",
     )
     archive_statements = (
         "CREATE FUNCTION bank.forbid_legacy_assistant_billing_mutation()",
         "CREATE TRIGGER assistant_billing_reservations_retired_tr",
     )
-    for statement in projection_statements:
+    for statement in historical_projection_statements:
+        assert statement in migration
+        assert statement not in snapshot
+    for statement in (
+        "current_setting('bank.ledger_posting_apply', TRUE) = 'on'",
+        "pg_trigger_depth() > 1",
+    ):
         assert statement in migration
         assert statement in snapshot
     for statement in archive_statements:

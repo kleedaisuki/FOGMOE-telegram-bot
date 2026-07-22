@@ -12,6 +12,7 @@ from fogmoe_bot.application.scheduling.occurrence import (
     occurrence_key,
     prepare_scheduled_occurrence,
 )
+from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.conversation.identity import ConversationId, DeliveryStreamId
 from fogmoe_bot.domain.scheduling.assistant_schedule import (
     OneShot,
@@ -59,7 +60,7 @@ def _user() -> DurableAssistantUser:
         username="klee",
         display_name="Klee",
         coins=19,
-        plan="paid",
+        plan=AccountPlan.PAID,
         permission=1,
         profile=_profile(),
         personal_info="CS PhD student",

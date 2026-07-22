@@ -26,6 +26,9 @@ from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.user_profile.models import UserProfileSnapshot
 from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
 from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database.account_plan import (
+    TransactionalAccountPlanResolver,
+)
 from fogmoe_bot.infrastructure.database.repositories import (
     conversation_repository,
     user_repository,
@@ -58,16 +61,21 @@ class PostgresAssistantTurnAcceptanceUoW:
     def __init__(
         self,
         workflow_repository: PostgresTurnRepository,
+        *,
+        plans: TransactionalAccountPlanResolver,
         profiles: TransactionalProfileReader | None = None,
     ) -> None:
         """@brief 注入 connection-bound workflow 与 Profile 读取 / Inject connection-bound workflow and Profile reading.
 
         @param workflow_repository Conversation workflow adapter / Conversation workflow adapter.
+        @param plans 当前事务中的账户方案解析器 / Account-plan resolver in the current transaction.
         @param profiles acceptance transaction 内的 Profile reader / Profile reader inside the acceptance transaction.
         """
 
         self._workflow_repository = workflow_repository
         """@brief 同事务 acceptance primitive / Same-transaction acceptance primitive."""
+        self._plans = plans
+        """@brief 实时管理员与订阅方案解析 / Live administrator and subscription plan resolution."""
         self._profiles = profiles or PostgresUserProfileStore()
         """@brief acceptance-pinned Profile reader / acceptance-pinned Profile reader."""
 
@@ -126,7 +134,10 @@ class PostgresAssistantTurnAcceptanceUoW:
             )
             account_context = AssistantAccountContext(
                 coins=0,
-                plan=identity_context.user_plan,
+                plan=await self._plans.resolve(
+                    request.user_id,
+                    connection=connection,
+                ),
                 permission=identity_context.permission,
                 profile=profile,
                 personal_info=(

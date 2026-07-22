@@ -22,6 +22,7 @@ from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
 from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
+from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -56,7 +57,7 @@ class AssistantAccountContext:
     """
 
     coins: int
-    plan: str
+    plan: AccountPlan
     permission: int
     profile: UserProfileSnapshot | None
     personal_info: str
@@ -70,8 +71,8 @@ class AssistantAccountContext:
 
         if isinstance(self.coins, bool) or self.coins != 0:
             raise ValueError("Assistant account coins are retired and must be zero")
-        if not self.plan.strip():
-            raise ValueError("Assistant account plan cannot be blank")
+        if not isinstance(self.plan, AccountPlan):
+            raise TypeError("Assistant account plan must be an AccountPlan")
         if isinstance(self.permission, bool) or not isinstance(self.permission, int):
             raise TypeError("Assistant account permission must be an integer")
         if not isinstance(self.diary_exists, bool):

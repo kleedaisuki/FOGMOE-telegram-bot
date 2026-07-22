@@ -15,6 +15,7 @@ from fogmoe_bot.application.conversation.assistant_ingress import (
     AssistantTurnRequest,
     AssistantUserNotRegistered,
 )
+from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
@@ -445,7 +446,7 @@ def test_request_contains_strict_adapter_metadata_and_normalized_user_content() 
     command = request.to_accept_turn(
         AssistantAccountContext(
             coins=0,
-            plan="paid",
+            plan=AccountPlan.PAID,
             permission=1,
             profile=None,
             personal_info="",
@@ -531,7 +532,7 @@ def test_group_request_rejects_private_state_before_durable_serialization() -> N
         request.to_accept_turn(
             AssistantAccountContext(
                 coins=0,
-                plan="paid",
+                plan=AccountPlan.PAID,
                 permission=1,
                 profile=None,
                 personal_info="private",

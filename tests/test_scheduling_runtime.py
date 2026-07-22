@@ -8,6 +8,7 @@ from uuid import UUID
 from fogmoe_bot.application.assistant.inference_command import DurableAssistantUser
 from fogmoe_bot.application.conversation.workflow import PreparedTurnAcceptance
 from fogmoe_bot.application.scheduling.worker import ScheduleWorker
+from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.conversation.identity import ConversationId, DeliveryStreamId
 from fogmoe_bot.domain.scheduling.assistant_schedule import (
     FixedInterval,
@@ -50,7 +51,7 @@ def _user() -> DurableAssistantUser:
         username="klee",
         display_name="Klee",
         coins=0,
-        plan="free",
+        plan=AccountPlan.FREE,
         permission=0,
         profile=None,
         personal_info="",

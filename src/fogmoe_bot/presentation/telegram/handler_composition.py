@@ -51,12 +51,14 @@ from fogmoe_bot.application.personal_rpg.service import (
     PersonalRpgService,
 )
 from fogmoe_bot.application.town.service import TOWN_SERVICE_DATA_KEY, TownService
+from fogmoe_bot.domain.accounts.plan import AccountPlanPolicy
 from fogmoe_bot.infrastructure.billing.payment_events import (
     DenyUnconfiguredPaymentEventVerifier,
 )
 from fogmoe_bot.infrastructure.database.account_operations import (
     PostgresAccountOperations,
 )
+from fogmoe_bot.infrastructure.database.account_plan import PostgresAccountPlanResolver
 from fogmoe_bot.infrastructure.database.banking import PostgresBankOperations
 from fogmoe_bot.infrastructure.database.billing import PostgresBillingOperations
 from fogmoe_bot.infrastructure.database.chance import PostgresChanceRoundOperations
@@ -266,10 +268,14 @@ def create_account_service(
     @return 注入 PostgreSQL receipts 的服务 / Service backed by PostgreSQL receipts.
     """
 
+    plans = PostgresAccountPlanResolver(
+        AccountPlanPolicy(administrator_id=identity.administrator.user_id)
+    )
+    # @brief 由实时订阅与显式管理员身份推导方案 /
+    # Derive plans from live subscriptions and explicit administrator identity.
     return AccountService(
-        PostgresAccountOperations(),
+        PostgresAccountOperations(plans),
         initial_coins=economy.new_user_bonus_coins,
-        admin_user_id=identity.administrator.user_id,
     )
 
 

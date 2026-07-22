@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.application.conversation.workflow import PreparedTurnAcceptance
 from fogmoe_bot.application.assistant.inference_command import DurableAssistantUser
+from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.application.scheduling.assistant_ports import ScheduleDefinition
 from fogmoe_bot.application.scheduling.occurrence import prepare_scheduled_occurrence
 from fogmoe_bot.domain.conversation.identity import ConversationId, DeliveryStreamId
@@ -653,8 +654,8 @@ def test_real_postgres_claim_and_turn_acceptance_advance_one_cursor() -> None:
             async with db_connection.transaction() as connection:
                 await db_connection.execute(
                     "INSERT INTO identity.users "
-                    "(id, tg_uid, provider, name, coins, coins_paid, user_plan) "
-                    "VALUES (%s, %s, 'telegram', %s, 0, 0, 'free')",
+                    "(id, tg_uid, provider, name) "
+                    "VALUES (%s, %s, 'telegram', %s)",
                     (user_id, user_id, f"schedule_{suffix}"),
                     connection=connection,
                 )
@@ -678,7 +679,7 @@ def test_real_postgres_claim_and_turn_acceptance_advance_one_cursor() -> None:
                     username=None,
                     display_name="Schedule Contract",
                     coins=0,
-                    plan="free",
+                    plan=AccountPlan.FREE,
                     permission=0,
                 ),
                 observed_at=observed_at,

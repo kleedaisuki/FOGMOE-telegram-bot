@@ -12,11 +12,13 @@ from fogmoe_bot.application.accounts.operations import (
     PersonalInfoCommand,
     RegisterAccount,
 )
+from fogmoe_bot.domain.accounts.plan import AccountPlanPolicy
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.account_operations import (
     PostgresAccountOperations,
 )
+from fogmoe_bot.infrastructure.database.account_plan import PostgresAccountPlanResolver
 from postgres_test_support import configure_bot_database
 
 
@@ -61,12 +63,13 @@ def test_real_postgres_registration_and_personal_info_have_stable_receipts(
         suffix = uuid4().hex
         register_key = f"pg-account:register:{suffix}"
         info_key = f"pg-account:info:{suffix}"
-        operations = PostgresAccountOperations()
+        operations = PostgresAccountOperations(
+            PostgresAccountPlanResolver(AccountPlanPolicy(administrator_id=1))
+        )
         command = RegisterAccount(
             user_id=user_id,
             username=f"account_{suffix}",
             initial_coins=20,
-            admin_user_id=1,
             idempotency_key=register_key,
         )
         try:
@@ -80,7 +83,7 @@ def test_real_postgres_registration_and_personal_info_have_stable_receipts(
 
             async with db_connection.transaction() as connection:
                 await db_connection.execute(
-                    "UPDATE identity.users SET coins = coins + 5 WHERE id = %s",
+                    "UPDATE identity.users SET permission = permission + 5 WHERE id = %s",
                     (user_id,),
                     connection=connection,
                 )
@@ -92,7 +95,6 @@ def test_real_postgres_registration_and_personal_info_have_stable_receipts(
                 user_id=user_id,
                 username=f"changed_{suffix}",
                 initial_coins=20,
-                admin_user_id=1,
                 idempotency_key=register_key,
             )
             with pytest.raises(ValueError, match="changed semantics"):
@@ -118,7 +120,7 @@ def test_real_postgres_registration_and_personal_info_have_stable_receipts(
 
             async with db_connection.connect() as connection:
                 row = await db_connection.fetch_one(
-                    "SELECT name, coins, info FROM identity.users WHERE id = %s",
+                    "SELECT name, permission, info FROM identity.users WHERE id = %s",
                     (user_id,),
                     connection=connection,
                 )

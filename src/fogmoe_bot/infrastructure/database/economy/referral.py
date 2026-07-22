@@ -49,8 +49,8 @@ class PostgresReferralOperations(ReferralOperations):
             if referrer is None:
                 return ReferralResult(EconomyCode.REFERRER_NOT_FOUND)
             created = await db_connection.execute(
-                "INSERT INTO identity.users (id, tg_uid, provider, name, coins) "
-                "VALUES (%s, %s, 'telegram', %s, 0) ON CONFLICT (id) DO NOTHING",
+                "INSERT INTO identity.users (id, tg_uid, provider, name) "
+                "VALUES (%s, %s, 'telegram', %s) ON CONFLICT (id) DO NOTHING",
                 (
                     command.invited_user_id,
                     command.invited_user_id,

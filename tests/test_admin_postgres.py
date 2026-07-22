@@ -82,9 +82,9 @@ def test_admin_announcement_snapshot_is_concurrent_replayable_and_fenced() -> No
         try:
             await db_connection.execute(
                 "INSERT INTO identity.users "
-                "(id, tg_uid, provider, name, coins, coins_paid, user_plan) "
-                "VALUES (%s, %s, 'telegram', 'admin-pg-a', 0, 0, 'free'), "
-                "(%s, %s, 'telegram', 'admin-pg-b', 0, 0, 'free')",
+                "(id, tg_uid, provider, name) "
+                "VALUES (%s, %s, 'telegram', 'admin-pg-a'), "
+                "(%s, %s, 'telegram', 'admin-pg-b')",
                 (users[0], users[0], users[1], users[1]),
             )
             await db_connection.execute(

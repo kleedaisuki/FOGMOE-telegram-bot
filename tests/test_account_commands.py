@@ -22,6 +22,7 @@ from fogmoe_bot.domain.conversation.identity import (
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
+from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.presentation.telegram.account_handlers import (
     AccountTelegramCommandHandler,
 )
@@ -61,7 +62,7 @@ class RecordingAccountOperations:
                 user_id=command.user_id,
                 username=command.username,
                 permission=0,
-                plan="free",
+                plan=AccountPlan.FREE,
                 free_coins=command.initial_coins,
                 paid_coins=0,
             )
@@ -110,7 +111,7 @@ def _service(operations: RecordingAccountOperations) -> AccountService:
     @return account service / Account service.
     """
 
-    return AccountService(operations, initial_coins=20, admin_user_id=1)
+    return AccountService(operations, initial_coins=20)
 
 
 def _update(update_id: int) -> InboundUpdate:
@@ -170,7 +171,6 @@ def test_account_service_normalizes_configuration_into_command() -> None:
     command = operations.registrations[0]
     assert command.username == "klee"
     assert command.initial_coins == 20
-    assert command.admin_user_id == 1
     assert result.profile.total_coins == 20
 
 

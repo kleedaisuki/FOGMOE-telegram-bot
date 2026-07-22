@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
+from fogmoe_bot.domain.accounts.plan import AccountPlan
+
 
 ACCOUNT_SERVICE_DATA_KEY = "fogmoe.account.service"
 """@brief runtime capability 中账户服务键 / Account-service key in runtime capabilities."""
@@ -33,7 +35,7 @@ class AccountProfile:
     user_id: int
     username: str
     permission: int
-    plan: str
+    plan: AccountPlan
     free_coins: int
     paid_coins: int
 
@@ -54,14 +56,12 @@ class RegisterAccount:
     @param user_id Telegram 用户 ID / Telegram user ID.
     @param username 规范 username / Normalized username.
     @param initial_coins 新账户奖励 / New-account bonus.
-    @param admin_user_id 管理员 identity / Administrator identity.
     @param idempotency_key 来源 Update 幂等键 / Source-Update idempotency key.
     """
 
     user_id: int
     username: str
     initial_coins: int
-    admin_user_id: int
     idempotency_key: str
 
 
@@ -134,23 +134,18 @@ class AccountService:
         operations: AccountOperations,
         *,
         initial_coins: int,
-        admin_user_id: int,
     ) -> None:
         """@brief 注入原子端口与产品配置 / Inject atomic operations and product configuration.
 
         @param operations 账户持久化端口 / Account-persistence port.
         @param initial_coins 新账户奖励 / New-account bonus.
-        @param admin_user_id 管理员 ID / Administrator ID.
         @raise ValueError 配置非法 / Invalid configuration.
         """
 
         if initial_coins < 0:
             raise ValueError("initial_coins cannot be negative")
-        if admin_user_id <= 0:
-            raise ValueError("admin_user_id must be positive")
         self._operations = operations
         self._initial_coins = initial_coins
-        self._admin_user_id = admin_user_id
 
     async def register(
         self,
@@ -176,7 +171,6 @@ class AccountService:
                 user_id=user_id,
                 username=normalized,
                 initial_coins=self._initial_coins,
-                admin_user_id=self._admin_user_id,
                 idempotency_key=idempotency_key,
             )
         )

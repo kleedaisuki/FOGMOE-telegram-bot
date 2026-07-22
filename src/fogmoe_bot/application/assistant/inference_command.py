@@ -16,6 +16,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -117,7 +118,7 @@ class DurableAssistantUser(_StrictFrozenModel):
     username: str | None = Field(default=None, min_length=1, max_length=64)
     display_name: str = Field(min_length=1, max_length=256)
     coins: int = Field(ge=0)
-    plan: str = Field(min_length=1, max_length=32)
+    plan: AccountPlan
     permission: int
     profile: DurableUserProfile | None = None
     personal_info: str = Field(default="", max_length=500)

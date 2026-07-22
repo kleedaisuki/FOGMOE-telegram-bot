@@ -158,8 +158,8 @@ def test_diary_and_schedule_share_atomic_receipt_transactions(
             async with db_connection.transaction() as connection:
                 await db_connection.execute(
                     "INSERT INTO identity.users "
-                    "(id, tg_uid, provider, name, coins, coins_paid, user_plan) "
-                    "VALUES (%s, %s, 'telegram', %s, 0, 0, 'free')",
+                    "(id, tg_uid, provider, name) "
+                    "VALUES (%s, %s, 'telegram', %s)",
                     (user_id, user_id, f"atomic_{suffix}"),
                     connection=connection,
                 )
@@ -197,11 +197,11 @@ def test_diary_and_schedule_share_atomic_receipt_transactions(
             )
             assert schedule_row is not None
             assert tuple(schedule_row) == ("pending", "contract test", "say hello")
-            account_row = await db_connection.fetch_one(
-                "SELECT coins FROM identity.users WHERE id = %s",
+            bank_entries = await db_connection.fetch_one(
+                "SELECT count(*) FROM bank.ledger_entries WHERE actor_id = %s",
                 (user_id,),
             )
-            assert account_row is not None and account_row[0] == 0
+            assert bank_entries is not None and bank_entries[0] == 0
             receipts = await db_connection.fetch_all(
                 "SELECT status, attempt_count FROM assistant.tool_effect_receipts "
                 "WHERE turn_id = CAST(%s AS UUID) ORDER BY invocation_id",

@@ -75,6 +75,7 @@ from fogmoe_bot.application.scheduling.worker import ScheduleWorker
 from fogmoe_bot.application.telegram import DurableGroupAdministratorAuthorization
 from fogmoe_bot.application.town.service import TOWN_SERVICE_DATA_KEY, TownService
 from fogmoe_bot.application.observability.runtime_metrics import RuntimeMetricsService
+from fogmoe_bot.domain.accounts.plan import AccountPlanPolicy
 from fogmoe_bot.infrastructure.blocking import (
     AsyncBlockingBulkhead,
     BlockingBulkheadLifecycle,
@@ -87,6 +88,7 @@ from fogmoe_bot.infrastructure.admin.stats import PostgresAdminStatsProjection
 from fogmoe_bot.infrastructure.assistant.composition import build_durable_assistant
 from fogmoe_bot.infrastructure.crypto.binance_monitor import BinanceBtcPatternSource
 from fogmoe_bot.infrastructure.database import db
+from fogmoe_bot.infrastructure.database.account_plan import PostgresAccountPlanResolver
 from fogmoe_bot.infrastructure.database.standalone_outbound import (
     PostgresStandaloneOutboundCapability,
 )
@@ -192,6 +194,7 @@ class _RuntimePrimitives:
     inference: PostgresInferenceRepository
     outbox_repository: PostgresOutboxRepository
     outbound: PostgresStandaloneOutboundCapability
+    account_plans: PostgresAccountPlanResolver
     acceptance: PostgresAssistantTurnAcceptanceUoW
     inference_limits: InferenceRuntimeLimits
     admin_service: AdminService
@@ -257,6 +260,9 @@ def _compose_primitives(
         telemetry=observability.telemetry,
     )
     admin_operations = PostgresAdminAnnouncementOperations()
+    account_plans = PostgresAccountPlanResolver(
+        AccountPlanPolicy(administrator_id=identity.administrator.user_id)
+    )
     return _RuntimePrimitives(
         execution=execution,
         inbox=PostgresInboxRepository(),
@@ -264,7 +270,11 @@ def _compose_primitives(
         inference=PostgresInferenceRepository(outbox=outbox_repository),
         outbox_repository=outbox_repository,
         outbound=outbound,
-        acceptance=PostgresAssistantTurnAcceptanceUoW(turns),
+        account_plans=account_plans,
+        acceptance=PostgresAssistantTurnAcceptanceUoW(
+            turns,
+            plans=account_plans,
+        ),
         inference_limits=InferenceRuntimeLimits(
             provider_timeout=timedelta(
                 seconds=inference_runtime.provider_timeout_seconds
@@ -522,7 +532,7 @@ def _compose_services(
     scheduling = ScheduleWorker(
         queue=PostgresScheduleQueue(),
         acceptance=PostgresScheduledOccurrenceAcceptance(primitives.turns),
-        profiles=PostgresScheduledAssistantProfileReader(),
+        profiles=PostgresScheduledAssistantProfileReader(primitives.account_plans),
         poll_interval=runtime.scheduling.poll_interval_seconds,
         worker_count=runtime.scheduling.worker_count,
         lease_for=timedelta(seconds=runtime.scheduling.lease_seconds),

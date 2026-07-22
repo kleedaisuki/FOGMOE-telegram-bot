@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
+from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.user_profile.models import UserProfileSnapshot
 
 
@@ -23,7 +24,7 @@ class UserState:
     """
 
     coins: int
-    plan: str
+    plan: AccountPlan
     permission: int
     profile: UserProfileSnapshot | None = None
     personal_info: str = ""

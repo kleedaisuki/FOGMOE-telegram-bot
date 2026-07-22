@@ -10,6 +10,9 @@ from fogmoe_bot.application.conversation.assistant_ingress import (
     normalize_assistant_personal_info,
 )
 from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database.account_plan import (
+    TransactionalAccountPlanResolver,
+)
 from fogmoe_bot.infrastructure.database.repositories import (
     conversation_repository,
     user_repository,
@@ -20,12 +23,19 @@ from fogmoe_bot.infrastructure.database.user_profile.store import PostgresUserPr
 class PostgresScheduledAssistantProfileReader:
     """@brief 在一个只读快照中装配定时回合用户上下文 / Assemble scheduled-turn user context in one read snapshot."""
 
-    def __init__(self, profiles: PostgresUserProfileStore | None = None) -> None:
-        """@brief 注入 User Profile reader / Inject a User Profile reader.
+    def __init__(
+        self,
+        plans: TransactionalAccountPlanResolver,
+        profiles: PostgresUserProfileStore | None = None,
+    ) -> None:
+        """@brief 注入方案与 User Profile reader / Inject plan and User Profile readers.
 
+        @param plans 当前事务中的账户方案解析器 / Account-plan resolver in the current transaction.
         @param profiles PostgreSQL Profile store / PostgreSQL Profile store.
         """
 
+        self._plans = plans
+        """@brief 实时管理员与订阅方案解析 / Live administrator and subscription plan resolution."""
         self._profiles = profiles or PostgresUserProfileStore()
 
     async def read(self, user_id: int) -> DurableAssistantUser | None:
@@ -49,6 +59,7 @@ class PostgresScheduledAssistantProfileReader:
                 user_id,
                 connection=connection,
             )
+            plan = await self._plans.resolve(user_id, connection=connection)
 
         display_name = account.name.strip()[:256] or f"user-{user_id}"
         username_candidate = account.name.strip()
@@ -58,7 +69,7 @@ class PostgresScheduledAssistantProfileReader:
             username=username,
             display_name=display_name,
             coins=account.total_coins,
-            plan=account.user_plan,
+            plan=plan,
             permission=account.permission,
             profile=(
                 DurableUserProfile.from_snapshot(profile)

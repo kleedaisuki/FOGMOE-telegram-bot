@@ -35,6 +35,7 @@ from fogmoe_bot.application.conversation.inference_worker import (
     RetryableInferenceError,
 )
 from fogmoe_bot.domain.context import ContextState
+from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -142,7 +143,7 @@ def _private_command_with_profile(
             username="klee",
             display_name="Klee",
             coins=0,
-            plan="free",
+            plan=AccountPlan.FREE,
             permission=0,
             profile=profile,
             personal_info="",
@@ -657,8 +658,13 @@ def test_command_model_is_frozen_and_validates_cross_field_scope() -> None:
     """@brief Command 冻结且拒绝不一致 group scope / Command is frozen and rejects inconsistent group scope."""
 
     turn_id = TurnId.new()
+    strict_python_request = _request(turn_id)
+    strict_python_request["user"] = {
+        **strict_python_request["user"],  # type: ignore[dict-item]
+        "plan": AccountPlan.FREE,
+    }
     command = DurableAssistantInferenceCommand.model_validate(
-        _request(turn_id),
+        strict_python_request,
         strict=True,
     )
     with pytest.raises(ValidationError):

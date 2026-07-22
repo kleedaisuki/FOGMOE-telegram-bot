@@ -40,8 +40,8 @@ def test_projection_replay_edit_order_and_context_window_are_canonical() -> None
         try:
             await db_connection.execute(
                 "INSERT INTO identity.users "
-                "(id, tg_uid, provider, name, coins, coins_paid, user_plan) "
-                "VALUES (%s, %s, 'telegram', %s, 0, 0, 'free')",
+                "(id, tg_uid, provider, name) "
+                "VALUES (%s, %s, 'telegram', %s)",
                 (user_id, user_id, f"group-projection-{uuid4().hex}"),
             )
             original = GroupMessageObservation(

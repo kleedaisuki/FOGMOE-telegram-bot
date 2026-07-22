@@ -19,6 +19,7 @@ from fogmoe_bot.application.accounts.operations import (
     PersonalInfoResult,
     RegisterAccount,
 )
+from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.banking.ledger import (
     LedgerAccount,
     LedgerEntry,
@@ -26,6 +27,9 @@ from fogmoe_bot.domain.banking.ledger import (
 )
 from fogmoe_bot.domain.banking.money import SystemAccountKind, TokenAmount, TokenBucket
 from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database.account_plan import (
+    TransactionalAccountPlanResolver,
+)
 from fogmoe_bot.infrastructure.database.banking import (
     append_bank_entry,
     ensure_bank_user_wallets,
@@ -35,6 +39,17 @@ from fogmoe_bot.infrastructure.database.banking import (
 
 class PostgresAccountOperations(AccountOperations):
     """@brief 以身份回执与银行账本执行账户命令 / Execute account commands with identity receipts and the bank ledger."""
+
+    def __init__(self, plans: TransactionalAccountPlanResolver) -> None:
+        """@brief 注入同事务方案解析器 / Inject the transaction-bound plan resolver.
+
+        @param plans 由管理员策略与 Billing 订阅推导方案的端口 /
+            Port deriving plans from administrator policy and Billing subscriptions.
+        @return None / None.
+        """
+
+        self._plans = plans
+        """@brief 当前事务中的方案事实解析 / Plan-fact resolution in the current transaction."""
 
     async def register(
         self,
@@ -50,14 +65,13 @@ class PostgresAccountOperations(AccountOperations):
         async with db_connection.transaction() as connection:
             inserted = await db_connection.execute(
                 "INSERT INTO identity.users "
-                "(id, tg_uid, provider, name, coins, coins_paid, user_plan) "
-                "VALUES (%s, %s, 'telegram', %s, 0, 0, %s) "
+                "(id, tg_uid, provider, name) "
+                "VALUES (%s, %s, 'telegram', %s) "
                 "ON CONFLICT DO NOTHING",
                 (
                     command.user_id,
                     command.user_id,
                     command.username,
-                    "admin" if command.user_id == command.admin_user_id else "free",
                 ),
                 connection=connection,
             )
@@ -94,15 +108,14 @@ class PostgresAccountOperations(AccountOperations):
                     ),
                     connection,
                 )
-            plan = _plan(
+            plan = await self._plans.resolve(
                 command.user_id,
-                cast(str, row[2]),
-                command.admin_user_id,
+                connection=connection,
             )
             await db_connection.execute(
                 "UPDATE identity.users SET tg_uid = %s, provider = 'telegram', "
-                "name = %s, user_plan = %s WHERE id = %s",
-                (command.user_id, command.username, plan, command.user_id),
+                "name = %s WHERE id = %s",
+                (command.user_id, command.username, command.user_id),
                 connection=connection,
             )
             overview = await load_bank_overview(command.user_id, connection)
@@ -121,7 +134,6 @@ class PostgresAccountOperations(AccountOperations):
                 {
                     **_profile_mapping(profile),
                     "requested_initial_coins": command.initial_coins,
-                    "requested_admin_user_id": command.admin_user_id,
                 },
                 connection,
             )
@@ -204,7 +216,7 @@ async def _read_profile(
     """
 
     row = await db_connection.fetch_one(
-        "SELECT id, permission, user_plan, name "
+        "SELECT id, permission, name "
         "FROM identity.users WHERE id = %s",
         (user_id,),
         connection=connection,
@@ -275,20 +287,6 @@ async def _save_receipt(
     )
 
 
-def _plan(user_id: int, current_plan: str, admin_user_id: int) -> str:
-    """@brief 解析账户 plan / Resolve an account plan.
-
-    @param user_id 用户 ID / User ID.
-    @param current_plan 当前已结算套餐 / Current settled plan.
-    @param admin_user_id 管理员 ID / Administrator ID.
-    @return admin/paid/free / admin/paid/free.
-    """
-
-    if user_id == admin_user_id:
-        return "admin"
-    return current_plan
-
-
 def _profile_mapping(profile: AccountProfile) -> dict[str, object]:
     """@brief 序列化账户快照 / Serialize an account snapshot.
 
@@ -300,7 +298,7 @@ def _profile_mapping(profile: AccountProfile) -> dict[str, object]:
         "user_id": profile.user_id,
         "username": profile.username,
         "permission": profile.permission,
-        "plan": profile.plan,
+        "plan": profile.plan.value,
         "free_coins": profile.free_coins,
         "paid_coins": profile.paid_coins,
     }
@@ -317,7 +315,7 @@ def _profile_from_mapping(value: Mapping[str, Any]) -> AccountProfile:
         user_id=int(value["user_id"]),
         username=str(value["username"]),
         permission=int(value["permission"]),
-        plan=str(value["plan"]),
+        plan=AccountPlan(str(value["plan"])),
         free_coins=int(value["free_coins"]),
         paid_coins=int(value["paid_coins"]),
     )
@@ -338,7 +336,6 @@ def _validate_registration_semantics(
         int(value.get("user_id", -1)) != command.user_id
         or str(value.get("username", "")) != command.username
         or int(value.get("requested_initial_coins", -1)) != command.initial_coins
-        or int(value.get("requested_admin_user_id", -1)) != command.admin_user_id
     ):
         raise ValueError("Account-registration idempotency key changed semantics")
 

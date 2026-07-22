@@ -21,11 +21,13 @@ from fogmoe_bot.domain.conversation.identity import (
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
+from fogmoe_bot.domain.accounts.plan import AccountPlanPolicy
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.assistant_turn_acceptance import (
     PostgresAssistantTurnAcceptanceUoW,
 )
+from fogmoe_bot.infrastructure.database.account_plan import PostgresAccountPlanResolver
 from fogmoe_bot.infrastructure.database.conversation_workflow.inbox import (
     PostgresInboxRepository,
 )
@@ -97,23 +99,28 @@ def test_translation_turn_and_activity_replay_atomically_without_billing(
             async with db_connection.transaction() as connection:
                 await db_connection.execute(
                     "INSERT INTO identity.users "
-                    "(id, tg_uid, provider, name, coins, coins_paid, user_plan) "
-                    "VALUES (%s, %s, 'telegram', %s, 5, 0, 'free')",
+                    "(id, tg_uid, provider, name) "
+                    "VALUES (%s, %s, 'telegram', %s)",
                     (user_id, user_id, f"translation_{suffix}"),
                     connection=connection,
                 )
             assert await inbox.add_inbound(inbound) is True
-            acceptance = PostgresAssistantTurnAcceptanceUoW(turns)
+            acceptance = PostgresAssistantTurnAcceptanceUoW(
+                turns,
+                plans=PostgresAccountPlanResolver(
+                    AccountPlanPolicy(administrator_id=1)
+                ),
+            )
             first = await acceptance.accept(request, accepted_at=now)
             replay = await acceptance.accept(request, accepted_at=now)
 
             assert isinstance(first, AssistantTurnAccepted) and not first.replayed
             assert isinstance(replay, AssistantTurnAccepted) and replay.replayed
-            account = await db_connection.fetch_one(
-                "SELECT coins, coins_paid FROM identity.users WHERE id = %s",
+            ledger_entries = await db_connection.fetch_one(
+                "SELECT count(*) FROM bank.ledger_entries WHERE actor_id = %s",
                 (user_id,),
             )
-            assert account is not None and tuple(account) == (5, 0)
+            assert ledger_entries is not None and ledger_entries[0] == 0
             facts = await db_connection.fetch_one(
                 "SELECT turn.state, message.content, activity.request "
                 "FROM conversation.conversation_turns AS turn "

@@ -15,6 +15,7 @@ from fogmoe_bot.application.conversation.assistant_ingress import (
     AssistantUserNotRegistered,
 )
 from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
+from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
@@ -153,6 +154,33 @@ class NullProfileReader:
         return None
 
 
+class FixedPlanResolver:
+    """@brief 返回固定封闭方案的同事务替身 / Transaction-bound double returning a fixed closed plan."""
+
+    def __init__(self, plan: AccountPlan = AccountPlan.PAID) -> None:
+        """@brief 初始化方案与调用记录 / Initialize the plan and call log.
+
+        @param plan 每次返回的账户方案 / Account plan returned for every call.
+        @return None / None.
+        """
+
+        self.plan = plan
+        """@brief 固定账户方案 / Fixed account plan."""
+        self.calls: list[tuple[int, object]] = []
+        """@brief user/connection 调用记录 / User/connection call records."""
+
+    async def resolve(self, user_id: int, *, connection: object) -> AccountPlan:
+        """@brief 记录调用并返回固定方案 / Record the call and return the fixed plan.
+
+        @param user_id 待分类用户 / User to classify.
+        @param connection 当前伪事务 / Current fake transaction.
+        @return 固定方案 / Fixed plan.
+        """
+
+        self.calls.append((user_id, connection))
+        return self.plan
+
+
 def _request(*, update_id: int = 100) -> AssistantTurnRequest:
     """@brief 构造私聊 Assistant 请求 / Build a private Assistant request.
 
@@ -208,7 +236,6 @@ def _identity_context() -> UserIdentityContext:
         user_id=42,
         permission=1,
         info="CS student",
-        user_plan="paid",
     )
 
 
@@ -234,6 +261,7 @@ def test_direct_acceptance_reads_identity_only_and_never_touches_balances(
         transaction = RecordingTransaction()
         workflow = FakeWorkflowRepository()
         profiles = NullProfileReader()
+        plans = FixedPlanResolver()
         sql_calls: list[str] = []
         identity_calls: list[tuple[int, object, bool]] = []
 
@@ -303,11 +331,6 @@ def test_direct_acceptance_reads_identity_only_and_never_touches_balances(
             forbidden_balance_access,
         )
         monkeypatch.setattr(
-            assistant_turn_acceptance.user_repository,
-            "set_coin_balances_and_plan",
-            forbidden_balance_access,
-        )
-        monkeypatch.setattr(
             assistant_turn_acceptance.conversation_repository,
             "user_diary_exists",
             fake_diary,
@@ -315,12 +338,14 @@ def test_direct_acceptance_reads_identity_only_and_never_touches_balances(
 
         result = await PostgresAssistantTurnAcceptanceUoW(
             workflow,  # type: ignore[arg-type]
+            plans=plans,  # type: ignore[arg-type]
             profiles=profiles,  # type: ignore[arg-type]
         ).accept(_request(), accepted_at=NOW)
 
         assert isinstance(result, AssistantTurnAccepted)
         assert not result.replayed
         assert identity_calls == [(42, transaction.connection, True)]
+        assert plans.calls == [(42, transaction.connection)]
         assert profiles.calls == [(42, transaction.connection)]
         assert all("coins" not in sql.casefold() for sql in sql_calls)
         assert workflow.calls[0][0] is transaction.connection
@@ -349,6 +374,7 @@ def test_group_acceptance_does_not_read_private_profile_or_diary(
         transaction = RecordingTransaction()
         workflow = FakeWorkflowRepository()
         profiles = NullProfileReader()
+        plans = FixedPlanResolver()
 
         async def fake_fetch_one(
             sql: str,
@@ -401,6 +427,7 @@ def test_group_acceptance_does_not_read_private_profile_or_diary(
 
         result = await PostgresAssistantTurnAcceptanceUoW(
             workflow,  # type: ignore[arg-type]
+            plans=plans,  # type: ignore[arg-type]
             profiles=profiles,  # type: ignore[arg-type]
         ).accept(_group_request(), accepted_at=NOW)
 
@@ -471,6 +498,7 @@ def test_replay_returns_before_identity_lookup(
 
         result = await PostgresAssistantTurnAcceptanceUoW(
             workflow,  # type: ignore[arg-type]
+            plans=FixedPlanResolver(),  # type: ignore[arg-type]
         ).accept(_request(), accepted_at=NOW)
 
         assert isinstance(result, AssistantTurnAccepted)
@@ -531,6 +559,7 @@ def test_missing_identity_is_a_business_rejection(
 
         result = await PostgresAssistantTurnAcceptanceUoW(
             workflow,  # type: ignore[arg-type]
+            plans=FixedPlanResolver(),  # type: ignore[arg-type]
         ).accept(_request(), accepted_at=NOW)
 
         assert isinstance(result, AssistantUserNotRegistered)
@@ -611,6 +640,7 @@ def test_partial_acceptance_receipt_still_rolls_back(
         with pytest.raises(IdempotencyConflictError, match="partial durable effect"):
             await PostgresAssistantTurnAcceptanceUoW(
                 workflow,  # type: ignore[arg-type]
+                plans=FixedPlanResolver(),  # type: ignore[arg-type]
             ).accept(_request(), accepted_at=NOW)
         assert transaction.exit_exception is IdempotencyConflictError
 

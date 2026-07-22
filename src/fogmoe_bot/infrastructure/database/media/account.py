@@ -1,12 +1,11 @@
 """@brief 媒体账户只读准入 / Read-only media-account admission.
 
-历史实现会在每次媒体 profile 查询时修复图片超时并直接写入
-``identity.users.coins``。``/music`` 也共享这个 profile 端口，因此那条隐式修复会令一个
-无金币功能的公开命令绕过银行账本。图片扣费迁移期间，这个端口严格只读。
-/ The historical implementation repaired expired picture offers and directly wrote
-``identity.users.coins`` during every media-profile read.  Because ``/music`` shares this
-port, that implicit repair let a public non-money command bypass the bank ledger.  During the
-picture-charge migration this port is strictly read-only.
+历史实现会在每次媒体 profile 查询时推进图片扣退款状态；``/music`` 也共享这个端口，
+因此一个无货币语义的公开命令曾可触发经济副作用。该状态机退役后，本端口严格只读。
+/ The historical implementation advanced picture charge/refund state during each media-profile
+read. Because ``/music`` shares this port, a public command with no monetary semantics could
+trigger an economic side effect. After retiring that state machine, this port is strictly
+read-only.
 """
 
 from dataclasses import dataclass

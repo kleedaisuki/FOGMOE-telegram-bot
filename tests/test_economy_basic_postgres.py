@@ -15,6 +15,8 @@ from fogmoe_bot.application.economy.community import (
     LeaderboardCommand,
 )
 from fogmoe_bot.application.economy.rewards import LotteryCommand
+from fogmoe_bot.domain.banking.ledger import LedgerAccount, LedgerReason
+from fogmoe_bot.domain.banking.money import SystemAccountKind, TokenAmount, TokenBucket
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.economy.community import (
@@ -22,6 +24,10 @@ from fogmoe_bot.infrastructure.database.economy.community import (
 )
 from fogmoe_bot.infrastructure.database.economy.rewards import (
     PostgresRewardOperations,
+)
+from fogmoe_bot.infrastructure.database.banking import (
+    load_bank_overview,
+    post_bank_transfer,
 )
 from postgres_test_support import configure_bot_database
 
@@ -77,9 +83,9 @@ def test_real_postgres_lottery_and_gift_replay_without_double_credit(
             async with db_connection.transaction() as connection:
                 await db_connection.execute(
                     "INSERT INTO identity.users "
-                    "(id, tg_uid, provider, name, coins, coins_paid, user_plan) "
-                    "VALUES (%s, %s, 'telegram', %s, 100, 0, 'free'), "
-                    "(%s, %s, 'telegram', %s, 0, 0, 'free')",
+                    "(id, tg_uid, provider, name) "
+                    "VALUES (%s, %s, 'telegram', %s), "
+                    "(%s, %s, 'telegram', %s)",
                     (
                         sender_id,
                         sender_id,
@@ -88,6 +94,17 @@ def test_real_postgres_lottery_and_gift_replay_without_double_credit(
                         recipient_id,
                         recipient_name,
                     ),
+                    connection=connection,
+                )
+                await post_bank_transfer(
+                    namespace="test-economy-seed",
+                    source_idempotency_key=f"{suffix}:initial",
+                    reason=LedgerReason.BANK_ISSUANCE,
+                    source=LedgerAccount.system(SystemAccountKind.ISSUANCE),
+                    destination=LedgerAccount.user(sender_id, TokenBucket.FREE),
+                    amount=TokenAmount(100),
+                    created_at=now,
+                    actor_id=None,
                     connection=connection,
                 )
 
@@ -144,9 +161,15 @@ def test_real_postgres_lottery_and_gift_replay_without_double_credit(
             leaderboard = await community.leaderboard(leaderboard_command)
             assert all(isinstance(entry.coins, int) for entry in leaderboard.entries)
             async with db_connection.transaction() as connection:
-                await db_connection.execute(
-                    "UPDATE identity.users SET coins = coins + 100 WHERE id = %s",
-                    (recipient_id,),
+                await post_bank_transfer(
+                    namespace="test-economy-seed",
+                    source_idempotency_key=f"{suffix}:later",
+                    reason=LedgerReason.BANK_ISSUANCE,
+                    source=LedgerAccount.system(SystemAccountKind.ISSUANCE),
+                    destination=LedgerAccount.user(recipient_id, TokenBucket.FREE),
+                    amount=TokenAmount(100),
+                    created_at=now + timedelta(seconds=1),
+                    actor_id=None,
                     connection=connection,
                 )
             leaderboard_replay = await community.leaderboard(leaderboard_command)
@@ -154,18 +177,10 @@ def test_real_postgres_lottery_and_gift_replay_without_double_credit(
             assert leaderboard_replay.entries == leaderboard.entries
 
             async with db_connection.connect() as connection:
-                sender_balance = await db_connection.fetch_one(
-                    "SELECT coins + coins_paid FROM identity.users WHERE id = %s",
-                    (sender_id,),
-                    connection=connection,
-                )
-                recipient_balance = await db_connection.fetch_one(
-                    "SELECT coins + coins_paid FROM identity.users WHERE id = %s",
-                    (recipient_id,),
-                    connection=connection,
-                )
-                assert sender_balance is not None and sender_balance[0] == 95
-                assert recipient_balance is not None and recipient_balance[0] == 110
+                sender_balance = await load_bank_overview(sender_id, connection)
+                recipient_balance = await load_bank_overview(recipient_id, connection)
+                assert sender_balance.total == 95
+                assert recipient_balance.total == 110
         finally:
             async with db_connection.transaction() as connection:
                 await db_connection.execute(

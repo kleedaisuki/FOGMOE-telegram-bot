@@ -42,8 +42,8 @@ def test_music_session_survives_adapter_restart_and_upsert() -> None:
         repository = PostgresMusicSessionRepository()
         try:
             await db_connection.execute(
-                "INSERT INTO identity.users (id, tg_uid, name, coins) "
-                "VALUES (%s, %s, %s, 100)",
+                "INSERT INTO identity.users (id, tg_uid, name) "
+                "VALUES (%s, %s, %s)",
                 (int(requester), int(requester), f"music-test-{requester}"),
             )
             await repository.save(session)
