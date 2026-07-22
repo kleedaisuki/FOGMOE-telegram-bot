@@ -13,6 +13,7 @@ from fogmoe_bot.application.context_window.worker import (
     RetryableCompactionError,
 )
 from fogmoe_bot.application.runtime import AdaptivePollingPolicy
+from fogmoe_bot.domain.assistant.messages import text_message
 from fogmoe_bot.domain.context_window.budget import TokenCount
 from fogmoe_bot.domain.context_window.compaction import (
     Compaction,
@@ -26,6 +27,7 @@ from fogmoe_bot.domain.conversation.identity import (
     LeaseToken,
     TurnId,
 )
+from fogmoe_bot.domain.conversation.message import MessageRole
 
 NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)
 """@brief 确定性测试时钟 / Deterministic test clock."""
@@ -327,8 +329,8 @@ def _claim(*, attempt_count: int = 1) -> Compaction:
         predecessor_compaction_id=None,
         projection_version=1,
         source_snapshot=(
-            {"role": "user", "content": "remember this"},
-            {"role": "assistant", "content": "I will"},
+            text_message(MessageRole.USER, "remember this").to_json(),
+            text_message(MessageRole.ASSISTANT, "I will").to_json(),
         ),
         source_row_count=2,
         source_token_count=TokenCount(8),

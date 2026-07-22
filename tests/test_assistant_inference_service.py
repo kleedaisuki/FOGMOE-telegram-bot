@@ -1,43 +1,112 @@
+"""@brief 自包含 route 的 Assistant 推理服务测试 / Tests for Assistant inference with self-contained routes."""
+
+from __future__ import annotations
+
 import asyncio
+from collections.abc import Callable
+from typing import Any
 from uuid import uuid4
 
+import pytest
+
 from fogmoe_bot.application.assistant.agent_loop import AgentResponse
+from fogmoe_bot.application.assistant.errors import (
+    AssistantInferenceUnavailableError,
+    ProviderFailure,
+    ProviderFailureKind,
+    SafetyBlockError,
+)
 from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
 from fogmoe_bot.application.runtime import FailureCircuit, FailureCircuitPolicy
-from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
+from fogmoe_bot.domain.assistant.messages import (
+    CanonicalMessage,
+    ImagePart,
+    TextPart,
+    UrlImageSource,
+)
+from fogmoe_bot.domain.assistant.routing.models import (
+    ProviderAuth,
+    ProviderRoute,
+    RouteModel,
+)
 from fogmoe_bot.domain.context import ContextState, ConversationScope, UserState
+from fogmoe_bot.domain.conversation.message import MessageRole
 
 
 def _route(
-    service_name: str,
+    route_id: str,
     *,
-    model: str = "model",
+    models: tuple[RouteModel, ...] | None = None,
+    supports_tools: bool = True,
+    safety_block_is_terminal: bool = False,
 ) -> ProviderRoute:
+    """@brief 构造测试用自包含 OpenAI-style route / Build a self-contained OpenAI-style test route.
+
+    @param route_id circuit 与 telemetry route ID / Route ID for circuit and telemetry.
+    @param models 同 provider 模型 fallback 链 / Same-provider model fallback chain.
+    @param supports_tools 是否支持 tools / Whether tools are supported.
+    @param safety_block_is_terminal safety block 是否终止 fallback / Whether a safety block terminates fallback.
+    @return 有效 provider route / Valid provider route.
+    """
+
     return ProviderRoute(
-        service_name=service_name,
-        provider_name=service_name,
-        display_name=service_name,
-        models=(model,),
-        completion_kwargs={},
+        route_id=route_id,
+        provider_id=route_id,
+        provider_label=route_id,
+        style="openai",
+        endpoint=f"https://{route_id}.example.test/v1/chat/completions",
+        auth=ProviderAuth(),
+        models=models or (RouteModel("model", accepts_images=True),),
+        supports_tools=supports_tools,
+        safety_block_is_terminal=safety_block_is_terminal,
     )
 
 
-def _service(*, order, profiles, runner, text_only_patterns=()):
+def _service(
+    *,
+    routes: tuple[ProviderRoute, ...],
+    runner: Callable[..., AgentResponse],
+) -> AssistantInferenceService:
+    """@brief 构造带记录 fake Agent 的推理服务 / Build an inference service with a recording fake Agent.
+
+    @param routes 有序 route fallback 链 / Ordered route fallback chain.
+    @param runner 注入的模型行为 / Injected model behavior.
+    @return 已配置 inference service / Configured inference service.
+    """
+
     class _AgentLoop:
-        async def run(self, context, config, *, tool_context=None):
+        """@brief 将 AgentExecutionConfig 转交给测试函数 / Forward AgentExecutionConfig to a test function."""
+
+        async def run(
+            self,
+            context: ContextState,
+            config: Any,
+            *,
+            tool_context: object | None = None,
+        ) -> AgentResponse:
+            """@brief 运行记录的测试行为 / Run the recorded test behavior.
+
+            @param context 模型上下文 / Model context.
+            @param config 路由执行配置 / Route execution configuration.
+            @param tool_context 可选工具身份 / Optional tool identity.
+            @return 测试 runner 的 response / Response from the test runner.
+            """
+
             return runner(
-                config.provider,
+                config.route.provider_id,
                 config.model,
                 context.messages,
-                provider_name=config.provider_name,
+                route=config.route,
+                provider_name=config.route.provider_label,
                 skip_tools=config.skip_tools,
-                completion_options=config.completion_options,
+                allow_tools=config.allow_tools,
+                timeout_seconds=config.timeout_seconds,
+                request_meta=config.request_meta,
                 tool_context=tool_context,
             )
 
     return AssistantInferenceService(
-        service_order=order,
-        profiles=profiles,
+        routes=routes,
         circuit=FailureCircuit[str](
             FailureCircuitPolicy(
                 failure_threshold=3,
@@ -45,7 +114,6 @@ def _service(*, order, profiles, runner, text_only_patterns=()):
                 cooldown_seconds=1800,
             )
         ),
-        text_only_model_patterns=text_only_patterns,
         working_memory_limit=4,
         working_memory_max_tokens=8192,
         working_memory_enabled=True,
@@ -53,7 +121,18 @@ def _service(*, order, profiles, runner, text_only_patterns=()):
     )
 
 
-def _context(messages, *, text_fallback_messages=None):
+def _context(
+    messages: list[CanonicalMessage],
+    *,
+    text_fallback_messages: list[CanonicalMessage] | None = None,
+) -> ContextState:
+    """@brief 构造最小 Assistant 上下文 / Build a minimal Assistant context.
+
+    @param messages 原始模型消息 / Original model messages.
+    @param text_fallback_messages 预生成的纯文本 fallback / Pre-generated text-only fallback.
+    @return 可供推理的上下文 / Context ready for inference.
+    """
+
     return ContextState(
         context_id=uuid4(),
         scope=ConversationScope(user_id=123),
@@ -69,30 +148,43 @@ def _context(messages, *, text_fallback_messages=None):
     )
 
 
-def test_inference_retries_image_messages_as_text_after_all_routes_fail():
-    image_messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "describe this image"},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": "https://example.test/a.png"},
-                },
-            ],
-        }
-    ]
-    calls = []
+def _user_message(*parts: TextPart | ImagePart) -> CanonicalMessage:
+    """@brief 构造规范用户消息 / Build a canonical user message.
 
-    def runner(provider, model, messages, **kwargs):
+    @param parts 保序的文本或图像 parts / Ordered text or image parts.
+    @return 规范 V2 用户消息 / Canonical V2 user message.
+    """
+
+    return CanonicalMessage(MessageRole.USER, parts)
+
+
+def test_inference_retries_image_messages_as_text_after_all_routes_fail() -> None:
+    """@brief 图像 route 均失败后以纯文本重试 / Retry image messages as text after all image routes fail."""
+
+    image_messages = [
+        _user_message(
+            TextPart("describe this image"),
+            ImagePart(UrlImageSource("https://example.test/a.png")),
+        )
+    ]
+    calls: list[object] = []
+
+    def runner(provider: str, model: str, messages: object, **_: object) -> AgentResponse:
+        """@brief 首次调用失败、第二次成功 / Fail once, then succeed.
+
+        @param provider provider ID / Provider ID.
+        @param model 模型名 / Model name.
+        @param messages 传给模型的消息 / Messages passed to the model.
+        @return 成功 response 或抛出错误 / Successful response or an error.
+        """
+
+        del provider, model
         calls.append(messages)
         if len(calls) == 1:
             raise RuntimeError("provider failed")
         return AgentResponse("text fallback response", [])
 
-    service = _service(
-        order=("openai",), profiles={"openai": _route("openai")}, runner=runner
-    )
+    service = _service(routes=(_route("openai"),), runner=runner)
 
     response = asyncio.run(service.infer(_context(image_messages)))
 
@@ -100,35 +192,43 @@ def test_inference_retries_image_messages_as_text_after_all_routes_fail():
     assert response.events == []
     assert calls == [
         image_messages,
-        [{"role": "user", "content": "describe this image"}],
+        [_user_message(TextPart("describe this image"))],
     ]
 
 
-def test_text_only_route_uses_vision_text_fallback_messages():
+def test_text_only_route_uses_vision_text_fallback_messages() -> None:
+    """@brief accepts_images=false 的模型使用文本 fallback / A non-image model uses the text fallback."""
+
     image_messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "runtime message without description"},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": "https://example.test/a.png"},
-                },
-            ],
-        }
+        _user_message(
+            TextPart("runtime message without description"),
+            ImagePart(UrlImageSource("https://example.test/a.png")),
+        )
     ]
-    text_fallback_messages = [{"role": "user", "content": "a cat on a desk"}]
-    calls = []
+    text_fallback_messages = [_user_message(TextPart("a cat on a desk"))]
+    calls: list[object] = []
 
-    def runner(provider, model, messages, **kwargs):
+    def runner(provider: str, model: str, messages: object, **_: object) -> AgentResponse:
+        """@brief 记录消息并成功 / Record messages and succeed.
+
+        @param provider provider ID / Provider ID.
+        @param model 模型名 / Model name.
+        @param messages 传给模型的消息 / Messages passed to the model.
+        @return 固定成功 response / Fixed successful response.
+        """
+
+        del provider, model
         calls.append(messages)
         return AgentResponse("ok", [])
 
     service = _service(
-        order=("siliconflow",),
-        profiles={"siliconflow": _route("siliconflow", model="vendor/text-small")},
+        routes=(
+            _route(
+                "siliconflow",
+                models=(RouteModel("vendor/text-small", accepts_images=False),),
+            ),
+        ),
         runner=runner,
-        text_only_patterns=("vendor/text-*",),
     )
 
     response = asyncio.run(
@@ -141,27 +241,34 @@ def test_text_only_route_uses_vision_text_fallback_messages():
     assert calls == [text_fallback_messages]
 
 
-def test_vision_capable_route_keeps_multimodal_messages():
-    image_messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": "https://example.test/a.png"},
-                }
-            ],
-        }
-    ]
-    calls = []
+def test_vision_capable_route_keeps_multimodal_messages() -> None:
+    """@brief accepts_images=true 的模型保留多模态消息 / An image-capable model keeps multimodal messages."""
 
-    def runner(provider, model, messages, **kwargs):
+    image_messages = [
+        _user_message(ImagePart(UrlImageSource("https://example.test/a.png")))
+    ]
+    calls: list[object] = []
+
+    def runner(provider: str, model: str, messages: object, **_: object) -> AgentResponse:
+        """@brief 记录多模态消息并成功 / Record multimodal messages and succeed.
+
+        @param provider provider ID / Provider ID.
+        @param model 模型名 / Model name.
+        @param messages 传给模型的消息 / Messages passed to the model.
+        @return 固定成功 response / Fixed successful response.
+        """
+
+        del provider, model
         calls.append(messages)
         return AgentResponse("ok", [])
 
     service = _service(
-        order=("openai",),
-        profiles={"openai": _route("openai", model="gpt-4o")},
+        routes=(
+            _route(
+                "openai",
+                models=(RouteModel("gpt-4o", accepts_images=True),),
+            ),
+        ),
         runner=runner,
     )
 
@@ -171,36 +278,38 @@ def test_vision_capable_route_keeps_multimodal_messages():
     assert calls == [image_messages]
 
 
-def test_image_messages_prioritize_the_vision_model_within_one_route():
-    image_messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": "https://example.test/a.png"},
-                }
-            ],
-        }
-    ]
-    calls = []
+def test_image_messages_prioritize_the_image_capable_model_within_one_route() -> None:
+    """@brief 图像消息优先同 route 内 accepts_images 模型 / Image messages prioritize an accepts_images model in the same route."""
 
-    def runner(provider, model, messages, **kwargs):
+    image_messages = [
+        _user_message(ImagePart(UrlImageSource("https://example.test/a.png")))
+    ]
+    calls: list[tuple[str, object]] = []
+
+    def runner(provider: str, model: str, messages: object, **_: object) -> AgentResponse:
+        """@brief 记录候选模型并成功 / Record the candidate model and succeed.
+
+        @param provider provider ID / Provider ID.
+        @param model 模型名 / Model name.
+        @param messages 传给模型的消息 / Messages passed to the model.
+        @return 固定成功 response / Fixed successful response.
+        """
+
+        del provider
         calls.append((model, messages))
         return AgentResponse("ok", [])
 
-    route = ProviderRoute(
-        service_name="openrouter",
-        provider_name="openrouter",
-        display_name="OpenRouter",
-        models=("deepseek-text", "qwen-vision"),
-        completion_kwargs={},
-    )
     service = _service(
-        order=("openrouter",),
-        profiles={"openrouter": route},
+        routes=(
+            _route(
+                "openrouter",
+                models=(
+                    RouteModel("deepseek-text", accepts_images=False),
+                    RouteModel("qwen-vision", accepts_images=True),
+                ),
+            ),
+        ),
         runner=runner,
-        text_only_patterns=("deepseek-*",),
     )
 
     response = asyncio.run(service.infer(_context(image_messages)))
@@ -209,26 +318,99 @@ def test_image_messages_prioritize_the_vision_model_within_one_route():
     assert calls == [("qwen-vision", image_messages)]
 
 
-def test_open_circuit_skips_to_next_route(monkeypatch):
-    calls = []
+def test_open_circuit_skips_to_next_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """@brief 已打开的 route circuit 直接跳至下一个 route / An open route circuit skips directly to the next route.
 
-    def runner(provider, model, messages, **kwargs):
+    @param monkeypatch pytest monkeypatch fixture / Pytest monkeypatch fixture.
+    """
+
+    calls: list[str] = []
+
+    def runner(provider: str, model: str, messages: object, **_: object) -> AgentResponse:
+        """@brief 记录 provider 并成功 / Record the provider and succeed.
+
+        @param provider provider ID / Provider ID.
+        @param model 模型名 / Model name.
+        @param messages 传给模型的消息 / Messages passed to the model.
+        @return 固定成功 response / Fixed successful response.
+        """
+
+        del model, messages
         calls.append(provider)
         return AgentResponse("ok", [])
 
     service = _service(
-        order=("gemini", "siliconflow"),
-        profiles={"gemini": _route("gemini"), "siliconflow": _route("siliconflow")},
+        routes=(_route("gemini"), _route("siliconflow")),
         runner=runner,
     )
     acquire = service.circuit.try_acquire
     monkeypatch.setattr(
         service.circuit,
         "try_acquire",
-        lambda name: None if name == "gemini" else acquire(name),
+        lambda route_id: None if route_id == "gemini" else acquire(route_id),
     )
 
     response = asyncio.run(service.infer(_context([])))
     assert response.text == "ok"
     assert response.events == []
     assert calls == ["siliconflow"]
+
+
+def test_terminal_safety_block_does_not_bypass_to_a_later_route() -> None:
+    """@brief terminal safety block 不会被后续 route 绕过 / A terminal safety block is not bypassed by later routes."""
+
+    calls: list[str] = []
+
+    def runner(provider: str, model: str, messages: object, **_: object) -> AgentResponse:
+        """@brief 抛出 safety block / Raise a safety block.
+
+        @param provider provider ID / Provider ID.
+        @param model 模型名 / Model name.
+        @param messages 传给模型的消息 / Messages passed to the model.
+        @return 永不返回 / Never returns.
+        """
+
+        del model, messages
+        calls.append(provider)
+        raise RuntimeError("safety block")
+
+    service = _service(
+        routes=(
+            _route("safe", safety_block_is_terminal=True),
+            _route("fallback"),
+        ),
+        runner=runner,
+    )
+
+    with pytest.raises(SafetyBlockError):
+        asyncio.run(service.infer(_context([])))
+    assert calls == ["safe"]
+
+
+def test_service_preserves_typed_provider_failure_after_model_exhaustion() -> None:
+    """@brief 同 route 模型耗尽后保留 typed provider failure / Preserve a typed provider failure after same-route model exhaustion."""
+
+    failure = ProviderFailure(
+        kind=ProviderFailureKind.RATE_LIMITED,
+        status=429,
+        message="LLM provider HTTP 429",
+    )
+
+    def runner(_: str, __: str, ___: object, **____: object) -> AgentResponse:
+        """@brief 使唯一模型返回同一 typed failure / Make the only model return the same typed failure.
+
+        @param _ 未使用 provider ID / Unused provider ID.
+        @param __ 未使用模型名 / Unused model name.
+        @param ___ 未使用消息 / Unused messages.
+        @param ____ 未使用附加参数 / Unused extra arguments.
+        @return 永不返回 / Never returns.
+        @raise ProviderFailure 固定 typed provider failure / Fixed typed provider failure.
+        """
+
+        raise failure
+
+    service = _service(routes=(_route("openrouter"),), runner=runner)
+
+    with pytest.raises(AssistantInferenceUnavailableError) as captured:
+        asyncio.run(service.infer(_context([])))
+    assert captured.value.last_error is failure

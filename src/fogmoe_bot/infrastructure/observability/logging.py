@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
+from types import TracebackType
 from typing import cast
 
 from fogmoe_bot.application.observability.telemetry import Telemetry
@@ -32,6 +33,9 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)((?:api[_-]?key|token|password|secret)\s*[:=]\s*)[^\s,;]+"),
 )
 """@brief 日志输出前的凭据模式 / Credential patterns applied before log output."""
+
+type _ExceptionInfo = tuple[type[BaseException], BaseException, TracebackType | None]
+"""@brief 已验证的 logging exception tuple / Validated logging exception tuple."""
 
 
 class ContextQueueHandler(QueueHandler):
@@ -58,14 +62,9 @@ class ContextQueueHandler(QueueHandler):
         @return 可跨线程记录 / Cross-thread-safe record.
         """
 
-        exception_type: str | None = None
-        exception_message: str | None = None
-        exception_stack: str | None = None
-        if record.exc_info is not None:
-            error_type = record.exc_info[0]
-            exception_type = error_type.__name__ if error_type is not None else None
-            exception_message = str(record.exc_info[1])
-            exception_stack = logging.Formatter().formatException(record.exc_info)
+        exception_type, exception_message, exception_stack = _exception_details(
+            record.exc_info
+        )
         prepared = cast(logging.LogRecord, super().prepare(record))
         prepared.fogmoe_trace_context = self._telemetry.current_context
         prepared.fogmoe_telemetry_attributes = self._telemetry.current_attributes
@@ -141,12 +140,12 @@ class TelemetryLogHandler(logging.Handler):
             if isinstance(captured_stack, str):
                 exception_stack = _redact(captured_stack)
             elif record.exc_info is not None:
-                error_type = record.exc_info[0]
-                exception_type = error_type.__name__ if error_type is not None else None
-                exception_message = _redact(str(record.exc_info[1]))
-                exception_stack = _redact(
-                    logging.Formatter().formatException(record.exc_info)
+                raw_type, raw_message, raw_stack = _exception_details(record.exc_info)
+                exception_type = raw_type
+                exception_message = (
+                    _redact(raw_message) if raw_message is not None else None
                 )
+                exception_stack = _redact(raw_stack) if raw_stack is not None else None
             raw_attributes = getattr(record, "telemetry_attributes", {})
             correlation_value = getattr(record, "fogmoe_telemetry_attributes", {})
             correlation_attributes = (
@@ -197,6 +196,44 @@ def _severity(level: int) -> Severity:
     return Severity.TRACE
 
 
+def _exception_details(
+    exc_info: object,
+) -> tuple[str | None, str | None, str | None]:
+    """@brief 安全提取已解析的 logging 异常信息 / Safely extract a resolved logging exception.
+
+    ``logging`` 允许调用方传入 ``exc_info=False``。该值会原样留在
+    ``LogRecord``，不是 ``sys.exc_info()`` 返回的三元组；队列 handler 在格式化之前读取
+    它时必须把它视为“无异常”，否则一次可预期的网络重试会反过来触发 logging error。/
+    ``logging`` permits callers to pass ``exc_info=False``. The value remains on the
+    ``LogRecord`` rather than becoming a ``sys.exc_info()`` tuple, so queue handlers
+    must treat it as no exception before formatting.
+
+    @param exc_info LogRecord 的未可信 exc_info 字段 / Untrusted LogRecord exc_info field.
+    @return 异常类型、消息与栈；无有效异常时均为 None /
+        Exception type, message, and stack; all None without a valid exception.
+    """
+
+    if not isinstance(exc_info, tuple) or len(exc_info) != 3:
+        return None, None, None
+    error_type, error_value, error_traceback = exc_info
+    if (
+        not isinstance(error_type, type)
+        or not issubclass(error_type, BaseException)
+        or not isinstance(error_value, BaseException)
+        or (
+            error_traceback is not None
+            and not isinstance(error_traceback, TracebackType)
+        )
+    ):
+        return None, None, None
+    normalized: _ExceptionInfo = (error_type, error_value, error_traceback)
+    return (
+        error_type.__name__,
+        str(error_value),
+        logging.Formatter().formatException(normalized),
+    )
+
+
 def _redact(value: str) -> str:
     """@brief 删除常见凭据值并限制大小 / Remove common credential values and bound size."""
 
@@ -232,39 +269,6 @@ def current_log_file_path() -> Path:
     if _CURRENT_LOG_FILE_PATH is None:
         raise RuntimeError("Logging has not been configured")
     return _CURRENT_LOG_FILE_PATH
-
-
-def prepare_litellm_logging() -> None:
-    """@brief 在导入 LiteLLM 前禁止其私有 stdout handler / Prevent LiteLLM private stdout handlers before import.
-
-    @return None / None.
-    @note LiteLLM 在 import 时读取 ``LITELLM_LOG`` 并可能注册私有 stdout handler。
-        import 完成后 ``configure_litellm_logging`` 会删除私有 handler、让运行期日志
-        继承唯一的 ``LOG_LEVEL`` 并进入项目统一管道。/
-        LiteLLM reads ``LITELLM_LOG`` during import and may register private stdout handlers.
-        After import, ``configure_litellm_logging`` removes private handlers and routes runtime
-        logs at the sole ``LOG_LEVEL`` through the project pipeline.
-    """
-
-    os.environ["LITELLM_LOG"] = "ERROR"
-
-
-def configure_litellm_logging(settings: LoggingSettings) -> None:
-    """@brief 让 LiteLLM 继承根日志级别并传播到统一管道 / Inherit the root log level and route LiteLLM through the unified pipeline.
-
-    @param settings 已验证的日志设置 / Validated logging settings.
-    @return None / None.
-    """
-
-    level = _resolve_log_level(settings.level)
-    for logger_name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
-        third_party_logger = logging.getLogger(logger_name)
-        for handler in tuple(third_party_logger.handlers):
-            third_party_logger.removeHandler(handler)
-            handler.close()
-        third_party_logger.setLevel(level)
-        third_party_logger.propagate = True
-        third_party_logger.disabled = False
 
 
 def configure_logging(
@@ -353,9 +357,7 @@ __all__ = [
     "ContextQueueHandler",
     "DrainingQueueListener",
     "TelemetryLogHandler",
-    "configure_litellm_logging",
     "configure_logging",
     "current_log_file_path",
-    "prepare_litellm_logging",
     "shutdown_logging",
 ]

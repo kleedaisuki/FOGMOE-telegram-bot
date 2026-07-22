@@ -13,6 +13,7 @@ from fogmoe_bot.application.context_window.projection import (
     ContextWindowRequest,
     checkpoint_summary_message,
 )
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage, text_message
 from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
 from fogmoe_bot.domain.context_window.compaction import (
     Compaction,
@@ -47,14 +48,14 @@ GROUP_CONVERSATION = ConversationId("assistant-group:-1007:thread:23")
 class _CharacterCounter:
     """@brief 可预测字符 token counter / Predictable character token counter."""
 
-    def count_messages(self, messages: Sequence[JsonObject]) -> TokenCount:
+    def count_messages(self, messages: Sequence[CanonicalMessage]) -> TokenCount:
         """@brief 每个 content 字符计一 token / Count one token per content character.
 
         @return token count / Token count.
         """
 
         return TokenCount(
-            sum(max(1, len(str(message.get("content", "")))) for message in messages)
+            sum(max(1, len(message.text)) for message in messages)
         )
 
 
@@ -150,7 +151,7 @@ def _message(
     *,
     excluded: bool = False,
     conversation_id: ConversationId = CONVERSATION,
-    model_message: JsonObject | None = None,
+    model_message: CanonicalMessage | None = None,
 ) -> ConversationMessage:
     """@brief 构造 append-only user message / Build an append-only user message.
 
@@ -159,15 +160,22 @@ def _message(
     @param text 原始用户文本 / Raw user text.
     @param excluded 是否排除于 Assistant history / Whether to exclude from Assistant history.
     @param conversation_id 会话边界 / Conversation boundary.
-    @param model_message 可选 speaker-aware 模型消息 / Optional speaker-aware model message.
+    @param model_message 可选 speaker-aware canonical 消息 /
+        Optional speaker-aware canonical message.
     @return 已分配序号的消息 / Sequenced message.
     """
 
-    content: JsonObject = {"text": text}
+    canonical_message = model_message or text_message(
+        MessageRole.USER,
+        text,
+        include_in_context=not excluded,
+    )
+    content: JsonObject = {
+        "text": text,
+        "model_message": canonical_message.to_json(),
+    }
     if excluded:
         content["exclude_from_assistant"] = True
-    if model_message is not None:
-        content["model_message"] = model_message
     return ConversationMessage(
         MessageDraft(
             message_id=ConversationMessageId.new(),
@@ -199,7 +207,7 @@ def _request(
         conversation_id=conversation_id,
         owner_user_id=7,
         through_turn_id=turn_id,
-        base_messages=({"role": "system", "content": "S"},),
+        base_messages=(text_message(MessageRole.SYSTEM, "S"),),
         reserved_tokens=TokenCount(0),
         requested_at=NOW + timedelta(seconds=1),
     )
@@ -221,14 +229,14 @@ def test_group_topic_projection_preserves_every_speaker_in_one_shared_context() 
                 first_turn,
                 "red",
                 conversation_id=GROUP_CONVERSATION,
-                model_message={"role": "user", "content": first_rendered},
+                model_message=text_message(MessageRole.USER, first_rendered),
             ),
             _message(
                 2,
                 second_turn,
                 "blue",
                 conversation_id=GROUP_CONVERSATION,
-                model_message={"role": "user", "content": second_rendered},
+                model_message=text_message(MessageRole.USER, second_rendered),
             ),
         )
         persistence = _Persistence(
@@ -252,8 +260,8 @@ def test_group_topic_projection_preserves_every_speaker_in_one_shared_context() 
 
         assert isinstance(result, ContextWindowReady)
         assert result.messages == (
-            {"role": "user", "content": first_rendered},
-            {"role": "user", "content": second_rendered},
+            text_message(MessageRole.USER, first_rendered),
+            text_message(MessageRole.USER, second_rendered),
         )
         assert result.anchor_messages == (messages[1],)
 
@@ -407,8 +415,8 @@ def test_history_cache_reuses_committed_prefix_and_reads_only_new_delta() -> Non
 
         assert isinstance(second_result, ContextWindowReady)
         assert second_result.messages == (
-            {"role": "user", "content": "first"},
-            {"role": "user", "content": "second"},
+            text_message(MessageRole.USER, "first"),
+            text_message(MessageRole.USER, "second"),
         )
         assert persistence.pages[-1] == (1, 2, 256)
 
@@ -451,7 +459,9 @@ def test_two_large_rows_trigger_a_frozen_fenced_segment() -> None:
         assert len(persistence.enqueued) == 1
         draft = persistence.enqueued[0]
         assert (draft.from_sequence, draft.through_sequence) == (1, 1)
-        assert draft.source_snapshot == ({"role": "user", "content": "a" * 12},)
+        assert draft.source_snapshot == (
+            text_message(MessageRole.USER, "a" * 12).to_json(),
+        )
         assert draft.anchor_turn_id == current_turn
 
     asyncio.run(scenario())
@@ -474,7 +484,7 @@ def test_completed_checkpoint_builds_summary_plus_recent_tail() -> None:
             anchor_turn_id=old_anchor,
             predecessor_compaction_id=None,
             projection_version=1,
-            source_snapshot=({"role": "user", "content": "old"},),
+            source_snapshot=(text_message(MessageRole.USER, "old").to_json(),),
             source_row_count=2,
             source_token_count=TokenCount(3),
             created_at=NOW,
@@ -519,7 +529,7 @@ def test_completed_checkpoint_builds_summary_plus_recent_tail() -> None:
 
         assert isinstance(result, ContextWindowReady)
         assert result.checkpoint_summary == "remember old fact"
-        assert [message["content"] for message in result.messages] == [
+        assert [message.text for message in result.messages] == [
             "recent",
             "current",
         ]
@@ -545,7 +555,7 @@ def test_next_compaction_snapshot_contains_the_prior_cumulative_memory() -> None
             anchor_turn_id=old_anchor,
             predecessor_compaction_id=None,
             projection_version=1,
-            source_snapshot=({"role": "user", "content": "old"},),
+            source_snapshot=(text_message(MessageRole.USER, "old").to_json(),),
             source_row_count=1,
             source_token_count=TokenCount(3),
             created_at=NOW,
@@ -598,8 +608,10 @@ def test_next_compaction_snapshot_contains_the_prior_cumulative_memory() -> None
         assert draft.predecessor_compaction_id == checkpoint.compaction_id
         assert draft.source_snapshot[0] == checkpoint_summary_message(
             "remember old fact"
+        ).to_json()
+        assert draft.source_snapshot[1:] == (
+            text_message(MessageRole.USER, "x" * 100).to_json(),
         )
-        assert draft.source_snapshot[1:] == ({"role": "user", "content": "x" * 100},)
 
     asyncio.run(scenario())
 
@@ -635,8 +647,8 @@ def test_history_isolation_reads_only_the_anchor_turn_and_never_compacts() -> No
             owner_user_id=7,
             through_turn_id=current_turn,
             base_messages=(
-                {"role": "system", "content": "translate"},
-                {"role": "user", "content": "translate me"},
+                text_message(MessageRole.SYSTEM, "translate"),
+                text_message(MessageRole.USER, "translate me"),
             ),
             reserved_tokens=TokenCount(0),
             requested_at=NOW,
@@ -684,7 +696,7 @@ def test_excluded_translation_payload_is_removed_before_token_budgeting() -> Non
         result = await projector.project(_request(current_turn))
 
         assert isinstance(result, ContextWindowReady)
-        assert result.messages == ({"role": "user", "content": "current"},)
+        assert result.messages == (text_message(MessageRole.USER, "current"),)
         assert persistence.enqueued == []
 
     asyncio.run(scenario())

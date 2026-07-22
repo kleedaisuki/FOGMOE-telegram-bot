@@ -22,7 +22,7 @@ from pydantic import (
 from fogmoe_config.jsonc import JsoncDecodeError, JSONValue, load_jsonc
 
 #: @brief 当前支持的根配置契约版本 / Root configuration contract version supported by this package.
-SCHEMA_VERSION: Final[int] = 1
+SCHEMA_VERSION: Final[int] = 2
 
 
 #: @brief 正整数数据库配置 / Positive database configuration integer.

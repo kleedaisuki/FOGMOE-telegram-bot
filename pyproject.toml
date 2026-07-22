@@ -14,7 +14,6 @@ dependencies = [
     "SQLAlchemy>=2.0",
     "asyncpg",
     "alembic",
-    "litellm>=1.80.5",
     "pydantic>=2.12,<3",
     "binance-futures-connector",
     "aiohttp",

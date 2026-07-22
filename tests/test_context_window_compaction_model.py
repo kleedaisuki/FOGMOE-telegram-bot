@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from fogmoe_bot.domain.assistant.messages import text_message
 from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
 from fogmoe_bot.domain.context_window.compaction import (
     Compaction,
@@ -17,6 +18,7 @@ from fogmoe_bot.domain.conversation.identity import (
     LeaseToken,
     TurnId,
 )
+from fogmoe_bot.domain.conversation.message import MessageRole
 
 NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)
 """@brief 确定性测试时钟 / Deterministic test clock."""
@@ -38,8 +40,8 @@ def _draft() -> CompactionPlan:
         predecessor_compaction_id=None,
         projection_version=1,
         source_snapshot=(
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "world"},
+            text_message(MessageRole.USER, "hello").to_json(),
+            text_message(MessageRole.ASSISTANT, "world").to_json(),
         ),
         source_row_count=4,
         source_token_count=TokenCount(12),
@@ -96,7 +98,15 @@ def test_compaction_identity_and_digest_are_stable_and_source_drift_fails() -> N
             anchor_turn_id=TurnId.new(),
             predecessor_compaction_id=None,
             projection_version=1,
-            source_snapshot=({"role": "user", "content": float("nan")},),
+            source_snapshot=(
+                {
+                    "schema_version": 2,
+                    "role": "user",
+                    "parts": [{"type": "text", "text": "invalid"}],
+                    "policy": {"include_in_context": True},
+                    "meta": {"non_finite": float("nan")},
+                },
+            ),
             source_row_count=1,
             source_token_count=TokenCount(1),
             created_at=NOW,

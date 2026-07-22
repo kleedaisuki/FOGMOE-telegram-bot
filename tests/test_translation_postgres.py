@@ -17,11 +17,13 @@ from fogmoe_bot.application.conversation.translation_ingress import (
     TranslationTurnRequest,
 )
 from fogmoe_bot.domain.accounts.plan import AccountPlanPolicy
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage, text_message
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
     UpdateId,
 )
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.account_plan import PostgresAccountPlanResolver
@@ -134,6 +136,11 @@ def test_translation_turn_and_activity_replay_atomically_without_billing(
             assert facts is not None
             assert facts[0] == "waiting_inference"
             assert facts[1]["exclude_from_assistant"] is True
+            model_message = facts[1]["model_message"]
+            assert isinstance(model_message, dict)
+            canonical_message = CanonicalMessage.from_json(model_message)
+            assert canonical_message.role is MessageRole.USER
+            assert canonical_message.policy.include_in_context is False
             assert "coin_cost" not in facts[1]
             assert facts[2]["task_kind"] == "translation"
             assert facts[2]["translation_input"] == "x" * 501
@@ -158,7 +165,13 @@ def test_translation_turn_and_activity_replay_atomically_without_billing(
                 request,
                 update_id=later_inbound.update_id,
                 message_id=78,
-                user_content={"text": "ordinary follow-up"},
+                user_content={
+                    "text": "ordinary follow-up",
+                    "model_message": text_message(
+                        MessageRole.USER,
+                        "ordinary follow-up",
+                    ).to_json(),
+                },
                 task_kind="assistant",
                 translation_input=None,
             )

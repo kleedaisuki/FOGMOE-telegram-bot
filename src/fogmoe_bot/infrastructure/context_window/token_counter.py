@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage
 from fogmoe_bot.domain.context.token_estimator import estimate_message_tokens
 from fogmoe_bot.domain.context_window.budget import TokenCount
-from fogmoe_bot.domain.conversation.payloads import JsonObject
 
 
 class ConservativeHistoryTokenCounter:
@@ -23,10 +23,10 @@ class ConservativeHistoryTokenCounter:
             raise ValueError("History token guard_ratio must be at least one")
         self._guard_ratio = guard_ratio
 
-    def count_messages(self, messages: Sequence[JsonObject]) -> TokenCount:
+    def count_messages(self, messages: Sequence[CanonicalMessage]) -> TokenCount:
         """@brief 估算包含 tool-call payload 的完整消息 token / Estimate complete messages including tool-call payloads.
 
-        @param messages provider-neutral messages / Provider-neutral messages.
+        @param messages canonical V2 messages / Canonical V2 messages.
         @return 有保护系数的 token 数 / Guarded token count.
         """
 

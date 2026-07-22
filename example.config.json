@@ -4,7 +4,7 @@
 // 本文件只使用标准 JSON 的双引号、对象和数组；额外语法仅为 // 注释，且刻意不使用尾逗号。
 {
   // 配置文档版本；升级程序会据此识别兼容的配置形状。
-  "schema_version": 1,
+  "schema_version": 2,
 
   // 人员与权限身份，而非 Telegram 传输参数。
   "identity": {
@@ -167,196 +167,114 @@
     }
   },
 
-  // 大语言模型（LLM）路由与各 provider 的连接、模型配置。
+  // 大语言模型（LLM）连接与 task-local 路由。provider 是可扩展数据，不是代码中的固定枚举。
   "ai": {
-    // 任务到 provider 的路由规则。
+    // 可增删的 provider 数组；endpoint 必须是完整请求 URL，client 不会再自动拼接路径。
+    "providers": [
+      {
+        // 任意稳定、机器可读的 ID；route 通过它引用 provider。
+        "id": "openrouter",
+        "label": "OpenRouter",
+        "style": "openai",
+        "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+        "auth": {
+          "api_key": null,
+          "header": "Authorization",
+          "prefix": "Bearer "
+        },
+        // 除认证与协议 header 外，原样附加到每个请求的 headers。
+        "headers": {}
+      },
+      {
+        // 原生 Anthropic Messages API 示例；未被 route 引用时不会发请求。
+        "id": "anthropic",
+        "label": "Anthropic",
+        "style": "anthropic",
+        "endpoint": "https://api.anthropic.com/v1/messages",
+        "api_version": "2023-06-01",
+        "auth": {
+          "api_key": null,
+          "header": "x-api-key",
+          "prefix": ""
+        },
+        "headers": {}
+      }
+    ],
+    // 所有任务统一为有序 routes；同一 route 的 models 是同 provider fallback 链。
     "routing": {
-      // 对话任务的 provider 顺序和图像兼容策略。
       "chat": {
-        // 按优先级尝试的 provider 名称；数组替代旧 CSV 字符串。
-        "provider_order": [
-          "gemini",
-          "zai",
-          "siliconflow"
-        ],
-        // 命中这些 shell-style 模式的模型只接收纯文本历史。
-        "text_only_models": [
-          "deepseek-ai/DeepSeek-V4-Flash"
+        "routes": [
+          {
+            "provider": "openrouter",
+            "models": [
+              {
+                "name": "anthropic/claude-sonnet-4.5",
+                "accepts_images": true
+              }
+            ],
+            "supports_tools": true,
+            "strict_tools": false,
+            "disabled_tools": [],
+            // true 时 safety block 不允许通过后续 route 绕过；默认 false。
+            "safety_block_is_terminal": false,
+            // OpenAI-style provider 可传任意 string-to-string metadata；未配置时保持空对象。
+            "meta": {}
+          }
         ]
       },
-      // 上下文摘要任务的 provider 链。
       "summary": {
-        // 首选摘要 provider。
-        "provider": "gemini",
-        // 首选 provider 失败时的可选回退 provider。
-        "fallback_provider": null
+        "routes": [
+          {
+            "provider": "openrouter",
+            "models": [
+              {
+                "name": "openai/gpt-4o-mini",
+                "accepts_images": false
+              }
+            ],
+            "supports_tools": false,
+            "strict_tools": false,
+            "disabled_tools": [],
+            "safety_block_is_terminal": false,
+            "meta": {}
+          }
+        ]
       },
-      // 用户画像 dreaming 任务的 provider 链。
       "dreaming": {
-        // 首选 dreaming provider。
-        "provider": "gemini",
-        // 首选 provider 失败时的可选回退 provider。
-        "fallback_provider": null
+        "routes": [
+          {
+            "provider": "openrouter",
+            "models": [
+              {
+                "name": "openai/gpt-4o-mini",
+                "accepts_images": false
+              }
+            ],
+            "supports_tools": false,
+            "strict_tools": false,
+            "disabled_tools": [],
+            "safety_block_is_terminal": false,
+            "meta": {}
+          }
+        ]
       },
-      // 翻译任务的 provider 链。
       "translation": {
-        // 首选翻译 provider。
-        "provider": "zai",
-        // 首选 provider 失败时的可选回退 provider。
-        "fallback_provider": null
-      }
-    },
-    // 每个 provider 的私钥、端点和任务模型；未启用的 provider 可整段保留。
-    "providers": {
-      // OpenAI 或兼容 OpenAI API 的服务。
-      "openai": {
-        // OpenAI API 密钥；兼容端点若无需密钥仍可保持 null。
-        "api_key": null,
-        // 可选 OpenAI-compatible 基础 URL；null 表示官方默认端点。
-        "api_base": null,
-        // 各 AI 任务使用的 OpenAI 模型。
-        "models": {
-          // 主对话模型。
-          "chat": "gpt-4o",
-          // 对话模型失败时的同 provider 回退模型；null 表示不配置。
-          "chat_fallback": null,
-          // 处理含图片消息时优先尝试的视觉模型；null 表示不配置独立视觉模型。
-          "vision": null,
-          // 上下文摘要模型。
-          "summary": "gpt-4o-mini",
-          // 摘要模型失败时的同 provider 回退模型；null 表示不配置。
-          "summary_fallback": null,
-          // 用户画像 dreaming 模型。
-          "dreaming": "gpt-4o-mini",
-          // 翻译模型。
-          "translation": "gpt-4o-mini"
-        }
-      },
-      // OpenRouter 聚合网关。
-      "openrouter": {
-        // OpenRouter API 密钥。
-        "api_key": null,
-        // OpenRouter 的 OpenAI-compatible 基础 URL。
-        "api_base": "https://openrouter.ai/api/v1",
-        // 各 AI 任务使用的 OpenRouter 模型。
-        "models": {
-          // 主对话模型。
-          "chat": "anthropic/claude-sonnet-4.5",
-          // 对话模型失败时的同 provider 回退模型；null 表示不配置。
-          "chat_fallback": null,
-          // 处理含图片消息时优先尝试的视觉模型；null 表示沿用 chat 模型。
-          "vision": null,
-          // 上下文摘要模型。
-          "summary": "openai/gpt-4o-mini",
-          // 摘要模型失败时的同 provider 回退模型；null 表示不配置。
-          "summary_fallback": null,
-          // 用户画像 dreaming 模型。
-          "dreaming": "openai/gpt-4o-mini",
-          // 翻译模型。
-          "translation": "openai/gpt-4o-mini"
-        }
-      },
-      // Google Gemini。
-      "gemini": {
-        // Gemini API 密钥。
-        "api_key": null,
-        // 可选 Gemini 基础 URL；null 表示 Google AI Studio 原生端点。
-        "api_base": null,
-        // api_base 是否是 OpenAI-compatible Gemini 代理。
-        "openai_compatible": false,
-        // 各 AI 任务使用的 Gemini 模型。
-        "models": {
-          // 主对话模型。
-          "chat": "gemini-3.5-flash",
-          // 对话模型失败时的同 provider 回退模型。
-          "chat_fallback": "gemini-2.5-flash-lite",
-          // 处理含图片消息时优先尝试的 Gemini 模型；null 表示沿用 chat 模型。
-          "vision": null,
-          // 上下文摘要模型。
-          "summary": "gemini-3-flash-preview",
-          // 摘要模型失败时的同 provider 回退模型。
-          "summary_fallback": "gemini-2.5-flash-lite",
-          // 用户画像 dreaming 模型；null 时复用 summary 模型。
-          "dreaming": null,
-          // 翻译模型；null 时该 provider 不参与翻译。
-          "translation": null
-        }
-      },
-      // Azure OpenAI；deployment 与模型名可相同。
-      "azure": {
-        // Azure OpenAI API 密钥。
-        "api_key": null,
-        // Azure 资源端点，例如 https://example.openai.azure.com/。
-        "endpoint": null,
-        // Azure OpenAI API 版本。
-        "api_version": "2024-12-01-preview",
-        // Azure deployment 名称。
-        "deployment": null,
-        // 各 AI 任务使用的 Azure deployment 名称。
-        "models": {
-          // 主对话 deployment。
-          "chat": null,
-          // 对话 deployment 失败时的同 provider 回退 deployment。
-          "chat_fallback": null,
-          // 处理含图片消息时优先尝试的 Azure deployment。
-          "vision": null,
-          // 上下文摘要 deployment。
-          "summary": null,
-          // 摘要 deployment 失败时的同 provider 回退 deployment。
-          "summary_fallback": null,
-          // 用户画像 dreaming deployment。
-          "dreaming": null,
-          // 翻译 deployment。
-          "translation": null
-        }
-      },
-      // SiliconFlow 的 OpenAI-compatible API。
-      "siliconflow": {
-        // SiliconFlow API 密钥。
-        "api_key": null,
-        // SiliconFlow API 基础 URL。
-        "api_base": "https://api.siliconflow.cn/v1",
-        // 各 AI 任务使用的 SiliconFlow 模型。
-        "models": {
-          // 主对话模型。
-          "chat": "deepseek-ai/DeepSeek-V4-Flash",
-          // 对话模型失败时的同 provider 回退模型；null 表示不配置。
-          "chat_fallback": null,
-          // 处理含图片消息时优先尝试的视觉模型；null 表示沿用 chat 模型。
-          "vision": null,
-          // 上下文摘要模型。
-          "summary": "deepseek-ai/DeepSeek-V4-Flash",
-          // 摘要模型失败时的同 provider 回退模型；null 表示不配置。
-          "summary_fallback": null,
-          // 用户画像 dreaming 模型；null 时复用 summary 模型。
-          "dreaming": null,
-          // 翻译模型。
-          "translation": "deepseek-ai/DeepSeek-V4-Flash"
-        }
-      },
-      // Z.ai（原智谱）在 LiteLLM 中使用 zai provider。
-      "zai": {
-        // Z.ai API 密钥。
-        "api_key": null,
-        // Z.ai API 基础 URL。
-        "api_base": "https://open.bigmodel.cn/api/paas/v4",
-        // 各 AI 任务使用的 Z.ai 模型。
-        "models": {
-          // 主对话模型。
-          "chat": "glm-4.7-flash",
-          // 对话模型失败时的同 provider 回退模型；null 表示不配置。
-          "chat_fallback": null,
-          // 处理含图片消息时优先尝试的视觉模型；null 表示沿用 chat 模型。
-          "vision": null,
-          // 上下文摘要模型。
-          "summary": null,
-          // 摘要模型失败时的同 provider 回退模型；null 表示不配置。
-          "summary_fallback": null,
-          // 用户画像 dreaming 模型；null 时复用 summary 模型。
-          "dreaming": null,
-          // 翻译模型。
-          "translation": "glm-4.7-flash"
-        }
+        "routes": [
+          {
+            "provider": "openrouter",
+            "models": [
+              {
+                "name": "openai/gpt-4o-mini",
+                "accepts_images": false
+              }
+            ],
+            "supports_tools": false,
+            "strict_tools": false,
+            "disabled_tools": [],
+            "safety_block_is_terminal": false,
+            "meta": {}
+          }
+        ]
       }
     }
   },

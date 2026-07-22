@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0067_close_schema_creator_and_default_gaps
--- Alembic head: 0067_close_schema_creator_and_default_gaps
+-- Source migrations: 0001_initial through 0068_canonical_assistant_messages
+-- Alembic head: 0068_canonical_assistant_messages
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and retired user-plan backfill) and the

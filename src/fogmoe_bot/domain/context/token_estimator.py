@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
+
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage
 
 DEFAULT_GUARD_RATIO = 1.15
 DEFAULT_MESSAGE_OVERHEAD = 4.0
@@ -23,13 +25,20 @@ def estimate_tokens(
 
 
 def estimate_message_tokens(
-    messages: Iterable[Mapping[str, object]],
+    messages: Iterable[CanonicalMessage],
     *,
     guard_ratio: float | None = DEFAULT_GUARD_RATIO,
     per_message_overhead: float = DEFAULT_MESSAGE_OVERHEAD,
     include_tool_calls: bool = True,
 ) -> int:
-    """Estimate tokens for a list of chat messages."""
+    """@brief 估算 canonical 消息列表的 token / Estimate tokens for canonical messages.
+
+    @param messages canonical V2 消息 / Canonical V2 messages.
+    @param guard_ratio 保守保护系数 / Conservative guard ratio.
+    @param per_message_overhead 协议每消息开销 / Per-message protocol overhead.
+    @param include_tool_calls 是否统计工具 part / Whether to count tool parts.
+    @return 保护后 token 估计 / Guarded token estimate.
+    """
     total = estimate_message_tokens_raw(
         messages,
         per_message_overhead=per_message_overhead,
@@ -40,27 +49,35 @@ def estimate_message_tokens(
 
 
 def estimate_message_tokens_raw(
-    messages: Iterable[Mapping[str, object]],
+    messages: Iterable[CanonicalMessage],
     *,
     per_message_overhead: float = DEFAULT_MESSAGE_OVERHEAD,
     include_tool_calls: bool = True,
 ) -> float:
-    """Estimate tokens for a list of chat messages without guard or rounding."""
+    """@brief 估算未保护的 canonical 消息 token / Estimate unguarded canonical-message tokens.
+
+    @param messages canonical V2 消息 / Canonical V2 messages.
+    @param per_message_overhead 协议每消息开销 / Per-message protocol overhead.
+    @param include_tool_calls 是否统计工具 part / Whether to count tool parts.
+    @return 未取整 token 估计 / Unrounded token estimate.
+    """
     total = 0.0
     for message in messages:
         total += per_message_overhead
-        content = message.get("content")
-        if content:
-            total += estimate_tokens_raw(str(content))
-
-        if include_tool_calls:
-            tool_calls = message.get("tool_calls")
-            if tool_calls:
-                try:
-                    tool_payload = json.dumps(tool_calls, ensure_ascii=False)
-                except TypeError:
-                    tool_payload = str(tool_calls)
-                total += estimate_tokens_raw(tool_payload)
+        parts_value = message.to_json()["parts"]
+        if not isinstance(parts_value, list):
+            raise AssertionError("Canonical message parts must serialize as an array")
+        parts = parts_value
+        if not include_tool_calls:
+            parts = [
+                part
+                for part in parts
+                if isinstance(part, dict)
+                and part.get("type") not in {"tool_call", "tool_result"}
+            ]
+        total += estimate_tokens_raw(
+            json.dumps(parts, ensure_ascii=False, separators=(",", ":"))
+        )
     return total
 
 

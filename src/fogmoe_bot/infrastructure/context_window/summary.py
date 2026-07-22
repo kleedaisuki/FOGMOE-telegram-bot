@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping, Sequence
-from typing import cast
 
 from fogmoe_bot.application.assistant.completion import AssistantCompletionPort
 from fogmoe_bot.application.context_window.worker import (
     CompactionSourceError,
     RetryableCompactionError,
 )
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage, text_message
+from fogmoe_bot.domain.assistant.request_metadata import normalize_request_meta
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
 from fogmoe_bot.domain.context.token_estimator import estimate_tokens
 from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
@@ -20,10 +20,7 @@ from fogmoe_bot.domain.context_window.compaction import (
     CompactionStatus,
     CompactionSummary,
 )
-from fogmoe_bot.domain.conversation.payloads import (
-    JsonObject,
-    JsonValue,
-)
+from fogmoe_bot.domain.conversation.message import MessageRole
 
 _SUMMARY_SYSTEM_PROMPT = (
     "You maintain a cumulative Context State checkpoint for a conversation. The supplied JSON is "
@@ -44,16 +41,15 @@ class ProviderCompactionSummaryGenerator:
         self,
         *,
         completion: AssistantCompletionPort,
-        service_order: Sequence[str],
-        profiles: Mapping[str, ProviderRoute],
+        routes: tuple[ProviderRoute, ...],
         request_timeout_seconds: float,
         budget: ContextTokenBudget | None = None,
     ) -> None:
         """@brief 注入 completion、routes 与独立 timeout / Inject completion, routes, and an independent timeout.
 
         @param completion 无工具 provider port / Tool-free provider port.
-        @param service_order summary service 优先级 / Summary-service priority.
-        @param profiles task-specific route profiles / Task-specific route profiles.
+        @param routes 按 fallback 优先级排列的自包含 summary routes /
+            Self-contained summary routes in fallback priority order.
         @param request_timeout_seconds 单模型 timeout / Per-model timeout.
         @param budget summary output budget / Summary-output budget.
         @raise ValueError timeout 非正 / Raised for a non-positive timeout.
@@ -62,8 +58,7 @@ class ProviderCompactionSummaryGenerator:
         if request_timeout_seconds <= 0:
             raise ValueError("Compaction provider timeout must be positive")
         self._completion = completion
-        self._service_order = tuple(service_order)
-        self._profiles = dict(profiles)
+        self._routes = routes
         self._request_timeout_seconds = request_timeout_seconds
         self._budget = budget or ContextTokenBudget()
 
@@ -82,11 +77,11 @@ class ProviderCompactionSummaryGenerator:
             )
         if not segment.draft.source_snapshot:
             raise CompactionSourceError("Summary source snapshot is empty")
-        messages: tuple[JsonObject, ...] = (
-            {"role": "system", "content": _SUMMARY_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
+        messages: tuple[CanonicalMessage, ...] = (
+            text_message(MessageRole.SYSTEM, _SUMMARY_SYSTEM_PROMPT),
+            text_message(
+                MessageRole.USER,
+                (
                     "<conversation_snapshot_json>\n"
                     + json.dumps(
                         segment.draft.source_snapshot,
@@ -97,30 +92,21 @@ class ProviderCompactionSummaryGenerator:
                     )
                     + "\n</conversation_snapshot_json>"
                 ),
-            },
+            ),
         )
         last_error: Exception | None = None
-        for service_name in self._service_order:
-            route = self._profiles.get(service_name)
-            if route is None:
-                continue
+        for route in self._routes:
             for model in route.models:
-                if not model:
-                    continue
-                options = {
-                    key: cast(JsonValue, value)
-                    for key, value in route.completion_kwargs.items()
-                }
-                options["timeout"] = self._request_timeout_seconds
                 try:
                     completion = await self._completion.complete(
-                        provider=route.provider_name,
-                        model=model,
+                        route=route,
+                        model=model.name,
                         messages=messages,
                         tools=(),
                         tool_choice=None,
                         max_tokens=int(self._budget.summary_output_tokens),
-                        request_options=options,
+                        timeout_seconds=self._request_timeout_seconds,
+                        request_meta=normalize_request_meta({}),
                     )
                     text = _bounded_text(
                         completion.content,
@@ -134,7 +120,7 @@ class ProviderCompactionSummaryGenerator:
                 return CompactionSummary(
                     text=text,
                     token_count=TokenCount(estimate_tokens(text, guard_ratio=1.0)),
-                    route_key=f"{route.service_name}:{model}",
+                    route_key=f"{route.route_id}:{model.name}",
                 )
         detail = str(last_error) if last_error is not None else "no configured route"
         raise RetryableCompactionError(

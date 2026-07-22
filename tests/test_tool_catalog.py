@@ -16,7 +16,7 @@ from fogmoe_bot.application.assistant.tools.catalog import (
     ValidatedToolInvocation,
     define_tool,
 )
-from fogmoe_bot.infrastructure.llm.tool_serialization import serialize_tool_definition
+from fogmoe_bot.infrastructure.llm.messages import thaw_tool_schema
 
 
 class _EchoArgs(ToolArguments):
@@ -43,10 +43,8 @@ def test_schema_is_generated_and_catalog_executes_no_handler() -> None:
     value_schema = properties["value"]
     assert isinstance(value_schema, Mapping)
     assert value_schema["minLength"] == 2
-    serialized = serialize_tool_definition(definition)
-    function = serialized["function"]
-    assert isinstance(function, Mapping)
-    assert function["name"] == "echo"
+    serialized = thaw_tool_schema(definition)
+    assert serialized["properties"] == properties
     result = ToolCatalog((definition,)).validate("echo", {"value": "Klee"})
     assert isinstance(result, ValidatedToolInvocation)
     assert result.mutating is False

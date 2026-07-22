@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from html import escape
-from typing import cast
 
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage, text_message
 from fogmoe_bot.domain.context.token_estimator import estimate_message_tokens
-from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.memory.models import (
     WorkingMemory,
     WorkingMemoryAvailability,
@@ -30,12 +30,12 @@ def render_working_memory(
     working_memory: WorkingMemory,
     *,
     maximum_tokens: int = 16_384,
-) -> JsonObject:
+) -> CanonicalMessage:
     """@brief 把 WorkingMemory 渲染为显式 system 数据块 / Render WorkingMemory as an explicit system data block.
 
     @param working_memory 本次 Query 的工作记忆 / Working memory for this query.
     @param maximum_tokens 独立注入预算 / Independent injection budget.
-    @return provider-neutral system message / Provider-neutral system message.
+    @return canonical V2 system message / Canonical V2 system message.
     """
 
     if isinstance(maximum_tokens, bool) or maximum_tokens < 256:
@@ -61,11 +61,11 @@ def render_working_memory(
 
 def _render_selected(
     selected: Sequence[tuple[WorkingMemoryMessage, str, bool]],
-) -> JsonObject:
+) -> CanonicalMessage:
     """@brief 渲染已预算的 Memory 数据 / Render budgeted Memory data.
 
     @param selected 消息、内容与截断标记 / Message, content, and truncation marker.
-    @return system message / System message.
+    @return canonical system message / Canonical system message.
     """
 
     lines = [
@@ -89,7 +89,7 @@ def _render_selected(
             )
         )
     lines.append("</working_memory>")
-    return {"role": "system", "content": "\n".join(lines)}
+    return text_message(MessageRole.SYSTEM, "\n".join(lines))
 
 
 def _rendered_tokens(
@@ -132,28 +132,28 @@ def _largest_fitting_prefix(
 
 
 def compose_model_messages(
-    context_messages: Sequence[Mapping[str, object]],
+    context_messages: Sequence[CanonicalMessage],
     working_memory: WorkingMemory,
     *,
     maximum_tokens: int = 16_384,
-) -> tuple[JsonObject, ...]:
+) -> tuple[CanonicalMessage, ...]:
     """@brief 将独立 ContextState 与 WorkingMemory 一并投影为模型输入 / Project independent ContextState and WorkingMemory into model input.
 
-    @param context_messages ContextState 当前消息 / Current ContextState messages.
+    @param context_messages ContextState 当前 canonical 消息 / Current canonical ContextState messages.
     @param working_memory 本次新检索的 WorkingMemory / Fresh WorkingMemory for this query.
     @param maximum_tokens WorkingMemory 独立 token 预算 / Independent WorkingMemory token budget.
     @return 可用时注入一次、不可用时不注入的消息序列 /
         Messages containing WorkingMemory once when available and none when unavailable.
     """
 
-    messages = tuple(cast(JsonObject, dict(message)) for message in context_messages)
+    messages = tuple(context_messages)
     if working_memory.availability is WorkingMemoryAvailability.UNAVAILABLE:
         return messages
     memory_message = render_working_memory(
         working_memory,
         maximum_tokens=maximum_tokens,
     )
-    if messages and messages[0].get("role") == "system":
+    if messages and messages[0].role is MessageRole.SYSTEM:
         return (messages[0], memory_message, *messages[1:])
     return (memory_message, *messages)
 

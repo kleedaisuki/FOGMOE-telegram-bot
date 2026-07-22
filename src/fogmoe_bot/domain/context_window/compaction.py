@@ -11,6 +11,7 @@ from enum import StrEnum
 from typing import Self, cast
 from uuid import UUID, uuid5
 
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage, CanonicalMessageError
 from fogmoe_bot.domain.context_window.budget import TokenCount
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -180,6 +181,7 @@ class CompactionPlan:
         if _DIGEST_PATTERN.fullmatch(self.source_digest) is None:
             raise ValueError("Compaction source digest must be lowercase SHA-256")
         snapshot = _copy_snapshot(self.source_snapshot)
+        _validate_canonical_snapshot(snapshot)
         digest = compaction_source_digest(snapshot)
         if self.source_digest != digest:
             raise ValueError("Compaction source digest does not match its snapshot")
@@ -613,6 +615,28 @@ def _copy_snapshot(snapshot: tuple[JsonObject, ...]) -> tuple[JsonObject, ...]:
     ):
         raise TypeError("Compaction source snapshot must contain only JSON objects")
     return tuple(cast(JsonObject, item) for item in decoded)
+
+
+def _validate_canonical_snapshot(snapshot: tuple[JsonObject, ...]) -> None:
+    """@brief 拒绝未迁移的 compaction 历史快照 / Reject an unmigrated compaction-history snapshot.
+
+    @param snapshot 已隔离的 snapshot JSON / Isolated snapshot JSON.
+    @return None / None.
+    @raise ValueError 任一元素不是严格 Canonical Message V2 时抛出 /
+        Raised when any element is not strict Canonical Message V2.
+    @note ``projection_version`` 标识压缩算法，而不是消息编码版本；历史 v1
+        compaction 可以合法地承载迁移后的 V2 消息。/ ``projection_version`` identifies
+        the compaction algorithm, not the message encoding; a historical v1 compaction may
+        legitimately carry migrated V2 messages.
+    """
+
+    for index, message in enumerate(snapshot):
+        try:
+            CanonicalMessage.from_json(message)
+        except CanonicalMessageError as error:
+            raise ValueError(
+                f"Compaction source_snapshot[{index}] must be canonical V2: {error}"
+            ) from error
 
 
 def _required_error(error: str) -> str:

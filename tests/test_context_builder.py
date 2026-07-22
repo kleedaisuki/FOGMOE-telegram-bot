@@ -19,6 +19,14 @@ from fogmoe_bot.domain.context import (
     render_scheduled_task,
     render_user_state,
 )
+from fogmoe_bot.domain.assistant.messages import (
+    CanonicalMessage,
+    ImagePart,
+    TextPart,
+    UrlImageSource,
+    text_message,
+)
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.user_profile.models import (
     ProfileClaim,
     ProfileClaimKind,
@@ -141,18 +149,24 @@ def test_context_tools_render_user_state_and_tool_context():
     }
 
 
-def test_context_state_builds_model_messages_with_runtime_replacements():
+def test_context_state_builds_model_messages_with_runtime_replacements() -> None:
+    """@brief 用 canonical V2 替换持久化图片占位文本 / Replace persisted image placeholder with canonical V2.
+
+    @return None / None.
+    """
+
     persisted_content = "<message>[photo]</message>"
-    runtime_message = {
-        "role": "user",
-        "content": [
-            {"type": "text", "text": "<message>[photo]</message>"},
-            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
-        ],
-    }
+    persisted_message = text_message(MessageRole.USER, persisted_content)
+    runtime_message = CanonicalMessage(
+        MessageRole.USER,
+        (
+            TextPart(persisted_content),
+            ImagePart(UrlImageSource("data:image/jpeg;base64,abc")),
+        ),
+    )
     history = [
-        {"role": "user", "content": "older"},
-        {"role": "user", "content": persisted_content},
+        text_message(MessageRole.USER, "older"),
+        persisted_message,
     ]
 
     user_state = UserState(
@@ -173,7 +187,7 @@ def test_context_state_builds_model_messages_with_runtime_replacements():
         user_state=user_state,
         runtime_replacements=[
             RuntimeMessageReplacement(
-                persisted_content=persisted_content,
+                persisted_message=persisted_message,
                 runtime_message=runtime_message,
             )
         ],
@@ -181,17 +195,17 @@ def test_context_state_builds_model_messages_with_runtime_replacements():
     )
 
     assert context_state.messages == [
-        {
-            "role": "system",
-            "content": "base system policy\n\n"
+        text_message(
+            MessageRole.SYSTEM,
+            "base system policy\n\n"
             '<conversation_scope kind="group" shared="true" group_id="-100" '
             'thread_id="0" current_user_id="42" />\n\n'
             '<user_identity trust="trusted_platform_metadata" display_name="Klee" '
             'username="klee" user_id="42" />\n'
             '<user_state coins="7" user_plan="paid" permission="2" '
             'permission_label="Premium" diary_exists="false" />',
-        },
-        {"role": "user", "content": "older"},
+        ),
+        text_message(MessageRole.USER, "older"),
         runtime_message,
     ]
     assert context_state.text_fallback_messages == [
@@ -227,10 +241,15 @@ def test_group_context_rejects_private_profile_state() -> None:
         )
 
 
-def test_context_tools_ignore_empty_runtime_replacement():
+def test_context_tools_ignore_empty_runtime_replacement() -> None:
+    """@brief 空运行时替换不会制造无效 canonical 消息 / Empty replacement creates no invalid canonical message.
+
+    @return None / None.
+    """
+
     assert (
         create_runtime_replacement(
-            persisted_content="persisted",
+            persisted_message=text_message(MessageRole.USER, "persisted"),
             runtime_message=None,
         )
         is None

@@ -15,8 +15,10 @@ from fogmoe_bot.application.conversation.telegram_identity import (
     GROUP_CHAT_TYPES,
     TelegramConversationAddress,
 )
+from fogmoe_bot.domain.assistant.messages import text_message
 from fogmoe_bot.domain.context import ChatMessageContext, render_chat_message
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 
 from .delivery import delivery_stream_for_chat
@@ -231,26 +233,28 @@ class ParsedTelegramAssistantMessage:
             "source": source,
             "media": self.media.to_json() if self.media is not None else None,
         }
+        model_text = self.text
         if self.chat_type in GROUP_CHAT_TYPES:
-            user_content["model_message"] = {
-                "role": "user",
-                "content": render_chat_message(
-                    ChatMessageContext(
-                        chat_type=self.chat_type,
-                        chat_title=self.chat_title,
-                        timestamp=datetime.fromtimestamp(
-                            self.message_date,
-                            tz=UTC,
-                        ).isoformat(),
-                        user_name=self.display_name,
-                        username=self.username,
-                        user_id=self.user_id,
-                        message_text=self.text,
-                        message_id=self.message_id,
-                        message_thread_id=self.message_thread_id,
-                    )
-                ),
-            }
+            model_text = render_chat_message(
+                ChatMessageContext(
+                    chat_type=self.chat_type,
+                    chat_title=self.chat_title,
+                    timestamp=datetime.fromtimestamp(
+                        self.message_date,
+                        tz=UTC,
+                    ).isoformat(),
+                    user_name=self.display_name,
+                    username=self.username,
+                    user_id=self.user_id,
+                    message_text=self.text,
+                    message_id=self.message_id,
+                    message_thread_id=self.message_thread_id,
+                )
+            )
+        user_content["model_message"] = text_message(
+            MessageRole.USER,
+            model_text,
+        ).to_json()
         is_group = self.chat_type in GROUP_CHAT_TYPES
         return AssistantTurnRequest(
             update_id=inbound.update_id,

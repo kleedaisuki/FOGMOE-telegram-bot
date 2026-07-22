@@ -131,6 +131,8 @@ celerybeat.pid
 .env.*.local
 # Operator-owned JSONC configuration; keep example.config.json versioned.
 config.json
+# Local schema-migration rollback copies; they contain the same operator secrets as config.json.
+.*.schema-v*.bak
 .venv
 env/
 venv/

@@ -1,7 +1,7 @@
 """@brief Provider compaction summary adapter tests / Provider compaction summary adapter tests."""
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -11,7 +11,13 @@ from fogmoe_bot.application.assistant.tools.catalog import ToolDefinition
 from fogmoe_bot.application.context_window.worker import (
     RetryableCompactionError,
 )
-from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage, text_message
+from fogmoe_bot.domain.assistant.request_metadata import RequestMeta
+from fogmoe_bot.domain.assistant.routing.models import (
+    ProviderAuth,
+    ProviderRoute,
+    RouteModel,
+)
 from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
 from fogmoe_bot.domain.context_window.compaction import (
     Compaction,
@@ -22,10 +28,8 @@ from fogmoe_bot.domain.conversation.identity import (
     LeaseToken,
     TurnId,
 )
-from fogmoe_bot.domain.conversation.payloads import (
-    JsonObject,
-    JsonValue,
-)
+from fogmoe_bot.domain.conversation.message import MessageRole
+from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.infrastructure.context_window.summary import (
     ProviderCompactionSummaryGenerator,
 )
@@ -43,30 +47,34 @@ class _Completion:
         self.failures = failures
         self.content = content
         self.calls: list[
-            tuple[str, str, Sequence[JsonObject], Sequence[ToolDefinition], int]
+            tuple[
+                ProviderRoute,
+                str,
+                Sequence[CanonicalMessage],
+                Sequence[ToolDefinition],
+                int,
+            ]
         ] = []
 
     async def complete(
         self,
         *,
-        provider: str,
+        route: ProviderRoute,
         model: str,
-        messages: Sequence[JsonObject],
+        messages: Sequence[CanonicalMessage],
         tools: Sequence[ToolDefinition],
         tool_choice: str | JsonObject | None,
         max_tokens: int,
-        request_options: Mapping[str, JsonValue],
+        timeout_seconds: float | None,
+        request_meta: RequestMeta,
     ) -> AssistantCompletion:
         """@brief 记录无工具请求并返回或失败 / Record the tool-free request and return or fail."""
 
-        del tool_choice, request_options
-        self.calls.append((provider, model, messages, tools, max_tokens))
-        if provider in self.failures:
-            raise RuntimeError(f"{provider} unavailable")
-        return AssistantCompletion(
-            self.content,
-            {"role": "assistant", "content": self.content},
-        )
+        del tool_choice, timeout_seconds, request_meta
+        self.calls.append((route, model, messages, tools, max_tokens))
+        if route.provider_id in self.failures:
+            raise RuntimeError(f"{route.provider_id} unavailable")
+        return AssistantCompletion(text_message(MessageRole.ASSISTANT, self.content))
 
 
 def _claim() -> Compaction:
@@ -82,8 +90,8 @@ def _claim() -> Compaction:
         predecessor_compaction_id=None,
         projection_version=1,
         source_snapshot=(
-            {"role": "system", "content": "prior cumulative memory"},
-            {"role": "user", "content": "new delta"},
+            text_message(MessageRole.SYSTEM, "prior cumulative memory").to_json(),
+            text_message(MessageRole.USER, "new delta").to_json(),
         ),
         source_row_count=2,
         source_token_count=TokenCount(10),
@@ -100,11 +108,14 @@ def _route(name: str) -> ProviderRoute:
     """@brief 构造单模型 summary route / Build a single-model summary route."""
 
     return ProviderRoute(
-        service_name=name,
-        provider_name=name,
-        display_name=name,
-        models=(f"{name}-summary",),
-        completion_kwargs={},
+        route_id=name,
+        provider_id=name,
+        provider_label=name,
+        style="openai",
+        endpoint=f"https://{name}.example.test/v1/chat/completions",
+        auth=ProviderAuth(),
+        models=(RouteModel(f"{name}-summary"),),
+        supports_tools=False,
     )
 
 
@@ -117,8 +128,7 @@ def test_summary_routes_without_tools_and_bounds_provider_output() -> None:
         completion = _Completion(failures={"first"}, content="a" * 100)
         generator = ProviderCompactionSummaryGenerator(
             completion=completion,
-            service_order=("first", "second"),
-            profiles={"first": _route("first"), "second": _route("second")},
+            routes=(_route("first"), _route("second")),
             request_timeout_seconds=5,
             budget=ContextTokenBudget(
                 warning_tokens=TokenCount(100),
@@ -132,14 +142,14 @@ def test_summary_routes_without_tools_and_bounds_provider_output() -> None:
 
         assert summary.route_key == "second:second-summary"
         assert int(summary.token_count) <= 10
-        assert [call[0] for call in completion.calls] == ["first", "second"]
+        assert [call[0].provider_id for call in completion.calls] == ["first", "second"]
         assert all(call[3] == () for call in completion.calls)
         assert all(call[4] == 10 for call in completion.calls)
         provider_messages = completion.calls[-1][2]
         assert len(provider_messages) == 2
-        assert provider_messages[0]["role"] == "system"
-        assert "<conversation_snapshot_json>" in str(provider_messages[1]["content"])
-        assert "prior cumulative memory" in str(provider_messages[1]["content"])
+        assert provider_messages[0].role is MessageRole.SYSTEM
+        assert "<conversation_snapshot_json>" in provider_messages[1].text
+        assert "prior cumulative memory" in provider_messages[1].text
 
     asyncio.run(scenario())
 
@@ -150,8 +160,7 @@ def test_provider_value_errors_remain_retryable_worker_failures() -> None:
     completion = _Completion(failures={"only"}, content="unused")
     generator = ProviderCompactionSummaryGenerator(
         completion=completion,
-        service_order=("only",),
-        profiles={"only": _route("only")},
+        routes=(_route("only"),),
         request_timeout_seconds=5,
     )
 

@@ -41,26 +41,54 @@ def test_example_config_is_accepted_by_each_configuration_boundary() -> None:
     assert bot.database.application.username == dbctl.application.username
 
 
-def test_example_config_explicitly_declares_every_owned_default() -> None:
-    """@brief 模板逐字段固定三个 reader 的实际默认值 / Template pins every reader's actual default.
+def test_example_config_explicitly_declares_every_non_ai_default() -> None:
+    """@brief 模板逐字段固定非 AI 默认值，并显式展示 AI 连接 / Template pins every non-AI default and explicitly demonstrates AI connections.
 
     @return None / None.
-    @note 比较原始投影而非已验证实例，以便模板遗漏一个带默认值的字段时也能失败。/
-        Compare raw projections rather than validated instances so omitting a field with
-        a model default still fails the contract test.
+    @note AI 默认值刻意为空，避免在代码中隐含某个商业 provider；模板的 AI 区块是
+        可审阅的运营示例而非默认回填。非 AI 区域仍比较原始投影而非已验证实例，以便
+        模板遗漏一个带默认值的字段时失败。/
+        AI defaults are intentionally empty to avoid implicit commercial providers in code; the
+        template's AI section is an auditable operating example rather than a default fill. The
+        non-AI areas still compare raw projections so omissions of defaulted fields fail.
     """
 
     document = load_jsonc(EXAMPLE_CONFIG_PATH)
 
-    assert bot_config._bot_payload(document) == bot_config.BotSettings().model_dump(
-        mode="json"
-    )
+    bot_payload = bot_config._bot_payload(document)
+    bot_defaults = bot_config.BotSettings().model_dump(mode="json")
+    bot_defaults["ai"] = bot_payload["ai"]
+    assert bot_payload == bot_defaults
     assert dbctl_config._dbctl_payload(
         document
     ) == dbctl_config.DbctlSettings().model_dump(mode="json")
     assert dashboard_config._dashboard_payload(
         document
     ) == dashboard_config.DashboardSettings().model_dump(mode="json")
+
+
+def test_ai_defaults_are_empty_but_the_template_declares_both_wire_styles() -> None:
+    """@brief 代码不默认 provider，模板同时展示 OpenAI/Anthropic style / Code defaults no provider while the template demonstrates both OpenAI and Anthropic styles.
+
+    @return None / None.
+    """
+
+    defaults = bot_config.AiSettings()
+    document = load_jsonc(EXAMPLE_CONFIG_PATH)
+    ai = bot_config._bot_payload(document)["ai"]
+
+    assert defaults.providers == ()
+    assert defaults.routing.chat.routes == ()
+    assert defaults.routing.summary.routes == ()
+    assert defaults.routing.dreaming.routes == ()
+    assert defaults.routing.translation.routes == ()
+    assert isinstance(ai, dict)
+    providers = ai["providers"]
+    assert isinstance(providers, list)
+    assert {provider["style"] for provider in providers if isinstance(provider, dict)} == {
+        "openai",
+        "anthropic",
+    }
 
 
 @pytest.mark.parametrize("reader,error_type", READERS)
@@ -83,7 +111,7 @@ def test_readers_reject_non_integer_schema_versions(
     invalid_config = tmp_path / "config.json"
     invalid_config.write_text(
         EXAMPLE_CONFIG_PATH.read_text(encoding="utf-8").replace(
-            '"schema_version": 1,',
+            '"schema_version": 2,',
             f'"schema_version": {version},',
             1,
         ),
@@ -110,7 +138,7 @@ def test_readers_map_jsonc_errors_to_their_boundary_error(
 
     invalid_config = tmp_path / "config.json"
     invalid_config.write_text(
-        '{"schema_version": 1, "schema_version": 1}',
+        '{"schema_version": 2, "schema_version": 2}',
         encoding="utf-8",
     )
 

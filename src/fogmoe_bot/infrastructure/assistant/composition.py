@@ -45,8 +45,7 @@ from fogmoe_bot.infrastructure.assistant.generated_media import (
     RequestsGeneratedMediaTools,
 )
 from fogmoe_bot.infrastructure.assistant.routing_config import (
-    build_provider_profiles,
-    configured_service_order,
+    build_provider_routes,
 )
 from fogmoe_bot.infrastructure.assistant.sticker_catalog import (
     TelegramStickerCatalogReader,
@@ -84,10 +83,7 @@ from fogmoe_bot.infrastructure.database.user_profile.source import (
 from fogmoe_bot.infrastructure.database.user_profile.store import (
     PostgresUserProfileStore,
 )
-from fogmoe_bot.infrastructure.llm.assistant_completion import (
-    LiteLLMAssistantCompletion,
-)
-from fogmoe_bot.infrastructure.llm.litellm_client import LiteLLMChatClient
+from fogmoe_bot.infrastructure.llm.provider_completion import ProviderCompletionClient
 from fogmoe_bot.infrastructure.media.file_artifact_store import FileArtifactStore
 from fogmoe_bot.infrastructure.media.file_rate_limiter import FileSlidingWindowLimiter
 from fogmoe_bot.infrastructure.retrieval import OpenAICompatibleEmbeddings
@@ -104,6 +100,7 @@ class DurableAssistantComposition:
     @param retrieval durable episodic-retrieval worker / Durable episodic-retrieval worker.
     @param dreaming durable User Profile consolidation worker / Durable User Profile consolidation worker.
     @param embedding_client 共享 embedding HTTP client 与生命周期 / Shared embedding HTTP client and lifecycle.
+    @param llm_client 共享原生 LLM HTTP client 与生命周期 / Shared native LLM HTTP client and lifecycle.
     @param artifacts outbox delivery 共享 artifact store / Artifact store shared with outbox delivery.
     @param blocking_bulkheads 由顶层运行时关停的阻塞 SDK 隔舱 /
         Blocking SDK bulkheads closed by the top-level runtime.
@@ -114,6 +111,7 @@ class DurableAssistantComposition:
     retrieval: RetrievalWorker
     dreaming: DreamingWorker
     embedding_client: OpenAICompatibleEmbeddings
+    llm_client: ProviderCompletionClient
     artifacts: FileArtifactStore
     blocking_bulkheads: tuple[AsyncBlockingBulkhead, ...]
 
@@ -233,12 +231,6 @@ def build_durable_assistant(
         call_timeout=max(60.0, float(sticker_timeout_seconds * 4)),
         task_name="assistant-sticker-catalog",
     )
-    provider_bulkhead = AsyncBlockingBulkhead(
-        capacity=4,
-        queue_timeout=5.0,
-        call_timeout=120.0,
-        task_name="assistant-provider-completion",
-    )
     generated_media = RequestsGeneratedMediaTools(
         settings=generated_settings,
         artifacts=artifacts,
@@ -273,11 +265,7 @@ def build_durable_assistant(
         scheduling=SchedulingService(),
     )
     store = PostgresAssistantToolStore(operations=operations)
-    completion = LiteLLMAssistantCompletion(
-        bulkhead=provider_bulkhead,
-        telemetry=telemetry,
-        client=LiteLLMChatClient(providers=settings.ai.providers),
-    )
+    completion = ProviderCompletionClient(telemetry=telemetry)
     agent = AgentLoop(
         runtime=AgentRuntime(
             catalog=DEFAULT_TOOL_CATALOG,
@@ -296,20 +284,16 @@ def build_durable_assistant(
         )
     )
     service = AssistantInferenceService(
-        service_order=configured_service_order(settings.ai),
-        profiles=build_provider_profiles(settings.ai),
+        routes=build_provider_routes(settings.ai, "chat"),
         circuit=circuit,
-        text_only_model_patterns=settings.ai.routing.chat.text_only_models,
         working_memory_limit=assistant_settings.working_memory.result_limit,
         working_memory_max_tokens=assistant_settings.working_memory.reserved_tokens,
         working_memory_enabled=True,
         agent_loop=agent,
     )
     translation_service = AssistantInferenceService(
-        service_order=configured_service_order(settings.ai, "translation"),
-        profiles=build_provider_profiles(settings.ai, "translation"),
+        routes=build_provider_routes(settings.ai, "translation"),
         circuit=circuit,
-        text_only_model_patterns=settings.ai.routing.chat.text_only_models,
         working_memory_limit=assistant_settings.working_memory.result_limit,
         working_memory_max_tokens=assistant_settings.working_memory.reserved_tokens,
         working_memory_enabled=False,
@@ -320,8 +304,7 @@ def build_durable_assistant(
         persistence=context_window_store,
         generator=ProviderCompactionSummaryGenerator(
             completion=completion,
-            service_order=configured_service_order(settings.ai, "summary"),
-            profiles=build_provider_profiles(settings.ai, "summary"),
+            routes=build_provider_routes(settings.ai, "summary"),
             request_timeout_seconds=compaction_runtime.provider_timeout_seconds,
             budget=budget,
         ),
@@ -340,8 +323,7 @@ def build_durable_assistant(
         store=profile_store,
         model=ProviderDreamingModel(
             completion=completion,
-            service_order=configured_service_order(settings.ai, "dreaming"),
-            profiles=build_provider_profiles(settings.ai, "dreaming"),
+            routes=build_provider_routes(settings.ai, "dreaming"),
             request_timeout_seconds=dreaming_runtime.provider_timeout_seconds,
             telemetry=telemetry,
         ),
@@ -385,12 +367,12 @@ def build_durable_assistant(
         retrieval=retrieval,
         dreaming=dreaming,
         embedding_client=embedding_client,
+        llm_client=completion,
         artifacts=artifacts,
         blocking_bulkheads=(
             external_bulkhead,
             media_bulkhead,
             sticker_bulkhead,
-            provider_bulkhead,
         ),
     )
 
@@ -416,18 +398,13 @@ def _retrieval_api_key(settings: BotSettings) -> str:
 
     @param settings 已验证的 Bot 设置 / Validated Bot settings.
     @return 非空 embedding API key / Non-empty embedding API key.
-    @raise RuntimeError embedding 与 OpenRouter 均未提供密钥时抛出 /
-        Raised when neither embedding nor OpenRouter provides a key.
+    @raise RuntimeError 未配置专用 embedding 密钥时抛出 /
+        Raised when the dedicated embedding key is not configured.
     """
 
-    key = reveal_secret(
-        settings.assistant.retrieval.embedding.api_key
-    ) or reveal_secret(settings.ai.providers.openrouter.api_key)
+    key = reveal_secret(settings.assistant.retrieval.embedding.api_key)
     if not key:
-        raise RuntimeError(
-            "assistant.retrieval.embedding.api_key or ai.providers.openrouter.api_key "
-            "is required"
-        )
+        raise RuntimeError("assistant.retrieval.embedding.api_key is required")
     return key
 
 
@@ -436,16 +413,12 @@ def _image_api_token(settings: BotSettings) -> str:
 
     @param settings 已验证的 Bot 设置 / Validated Bot settings.
     @return 图片 API 令牌；未配置时为空字符串 / Image API token, or an empty string when unset.
-    @note 选择 OpenRouter 图片模型时，未单独给出令牌会复用 OpenRouter 密钥。/
-        When an OpenRouter image model is selected, its key is reused if no dedicated token exists.
+    @note 图片服务不会复用任何聊天 provider 的密钥；停用或未配置时返回空字符串。/
+        The image service never reuses a chat-provider key; it returns an empty string when
+        disabled or unconfigured.
     """
 
-    dedicated = reveal_secret(settings.integrations.image_generation.api_token)
-    if dedicated:
-        return dedicated
-    if settings.integrations.image_generation.model:
-        return reveal_secret(settings.ai.providers.openrouter.api_key) or ""
-    return ""
+    return reveal_secret(settings.integrations.image_generation.api_token) or ""
 
 
 def _retrieval_space(settings: AssistantSettings) -> EmbeddingSpace:

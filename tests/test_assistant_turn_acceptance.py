@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace, TracebackType
 from typing import Any
@@ -15,6 +16,7 @@ from fogmoe_bot.application.conversation.assistant_ingress import (
     AssistantUserNotRegistered,
 )
 from fogmoe_bot.domain.accounts.plan import AccountPlan
+from fogmoe_bot.domain.assistant.messages import text_message
 from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -23,6 +25,7 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnSource,
     UpdateId,
 )
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.infrastructure.database import assistant_turn_acceptance
 from fogmoe_bot.infrastructure.database.assistant_turn_acceptance import (
     PostgresAssistantTurnAcceptanceUoW,
@@ -200,7 +203,10 @@ def _request(*, update_id: int = 100) -> AssistantTurnRequest:
         message_id=7 + update_id,
         message_thread_id=None,
         delivery_stream_id=DeliveryStreamId("telegram:primary:chat:42:thread:0"),
-        user_content={"text": "hello"},
+        user_content={
+            "text": "hello",
+            "model_message": text_message(MessageRole.USER, "hello").to_json(),
+        },
     )
 
 
@@ -222,7 +228,13 @@ def _group_request() -> AssistantTurnRequest:
         message_id=108,
         message_thread_id=23,
         delivery_stream_id=DeliveryStreamId("telegram:primary:chat:-1001:thread:23"),
-        user_content={"text": "hello group"},
+        user_content={
+            "text": "hello group",
+            "model_message": text_message(
+                MessageRole.USER,
+                "hello group",
+            ).to_json(),
+        },
     )
 
 
@@ -245,6 +257,19 @@ def test_assistant_turn_request_has_no_coin_price_compatibility_field() -> None:
     request = _request()
     assert not hasattr(request, "coin_cost")
     assert "coin_cost" not in request.user_content
+
+
+def test_assistant_turn_request_rejects_legacy_wire_model_message() -> None:
+    """@brief Assistant 入口拒绝未迁移的 OpenAI wire message / Assistant ingress rejects an unmigrated OpenAI wire message."""
+
+    with pytest.raises(ValueError, match="canonical V2"):
+        replace(
+            _request(),
+            user_content={
+                "text": "hello",
+                "model_message": {"role": "user", "content": "hello"},
+            },
+        )
 
 
 def test_direct_acceptance_reads_identity_only_and_never_touches_balances(

@@ -1,7 +1,6 @@
 """@brief 异步日志基础设施测试 / Asynchronous logging infrastructure tests."""
 
 import logging
-import os
 import re
 
 from observability_testkit import make_telemetry
@@ -33,43 +32,6 @@ def test_configure_logging_uses_timestamped_file_and_queue_consumer(tmp_path):
 
     assert re.fullmatch(r"tgbot_\d{8}T\d{6}[+-]\d{4}_\d+\.log", log_path.name)
     assert "queued log record" in log_path.read_text(encoding="utf-8")
-
-
-def test_configure_litellm_logging_removes_private_handlers():
-    """@brief LiteLLM 删除私有 handler 并继承根等级 / LiteLLM removes private handlers and inherits the root level."""
-    litellm_logger = logging.getLogger("LiteLLM")
-    original_handlers = list(litellm_logger.handlers)
-    original_level = litellm_logger.level
-    original_propagate = litellm_logger.propagate
-    original_disabled = litellm_logger.disabled
-    private_handler = logging.StreamHandler()
-    litellm_logger.addHandler(private_handler)
-    settings = LoggingSettings(level="WARNING")
-
-    try:
-        bot_logging.configure_litellm_logging(settings)
-
-        assert litellm_logger.handlers == []
-        assert litellm_logger.level == logging.WARNING
-        assert litellm_logger.propagate is True
-        assert litellm_logger.disabled is False
-    finally:
-        litellm_logger.handlers.clear()
-        for handler in original_handlers:
-            litellm_logger.addHandler(handler)
-        litellm_logger.setLevel(original_level)
-        litellm_logger.propagate = original_propagate
-        litellm_logger.disabled = original_disabled
-
-
-def test_prepare_litellm_logging_silences_import_time_stdout(monkeypatch):
-    """@brief LiteLLM import 环境禁止私有 stdout handler / LiteLLM import environment silences private stdout handlers."""
-
-    monkeypatch.delenv("LITELLM_LOG", raising=False)
-
-    bot_logging.prepare_litellm_logging()
-
-    assert os.environ["LITELLM_LOG"] == "ERROR"
 
 
 def test_shutdown_sentinel_waits_for_queue_capacity() -> None:

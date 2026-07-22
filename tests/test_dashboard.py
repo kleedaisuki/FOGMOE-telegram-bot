@@ -188,7 +188,7 @@ def test_dashboard_reads_its_jsonc_projection_and_builds_typed_client(
         """
         {
           // Dashboard 只消费这些语义字段。
-          "schema_version": 1,
+          "schema_version": 2,
           "database": {
             "endpoint": {
               "host": "analytics.internal",

@@ -12,7 +12,6 @@ the transactional outbox.
 from __future__ import annotations
 
 import base64
-import json
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import Protocol, cast
@@ -37,6 +36,15 @@ from fogmoe_bot.application.conversation.inference_worker import (
     RetryableInferenceError,
 )
 from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
+from fogmoe_bot.domain.assistant.messages import (
+    CanonicalMessage,
+    CanonicalMessageError,
+    FrozenJsonValue,
+    ToolCallPart,
+    ToolResultPart,
+    text_message,
+)
+from fogmoe_bot.domain.assistant.request_metadata import RequestMeta
 from fogmoe_bot.domain.context import (
     ContextState,
     ConversationScope,
@@ -61,6 +69,8 @@ from .agent_loop import AgentResponse
 from .errors import (
     AssistantInferenceUnavailableError,
     PartialAgentResponseError,
+    ProviderFailure,
+    ProviderFailureKind,
     SafetyBlockError,
 )
 from .inference_command import (
@@ -108,6 +118,7 @@ class AssistantInference(Protocol):
         *,
         allow_tools: bool = True,
         request_timeout: float | None = None,
+        request_meta: RequestMeta | None = None,
         tool_context: ToolExecutionContext | None = None,
     ) -> AgentResponse:
         """@brief 执行 provider fallback 推理 / Run provider-fallback inference.
@@ -115,6 +126,8 @@ class AssistantInference(Protocol):
         @param context_state 新建的本回合上下文 / Fresh context for this Turn.
         @param allow_tools 是否允许工具 / Whether tools are allowed.
         @param request_timeout provider 请求超时秒数 / Provider request timeout in seconds.
+        @param request_meta 调用方显式请求 metadata；缺省为空 /
+            Explicit caller request metadata; defaults to empty.
         @param tool_context durable 工具身份 / Durable tool identity.
         @return Agent 响应 / Agent response.
         """
@@ -181,10 +194,7 @@ class DurableAssistantInferenceAdapter:
                     conversation_id=command.typed_conversation_id,
                     owner_user_id=command.user.user_id,
                     through_turn_id=command.typed_turn_id,
-                    base_messages=tuple(
-                        cast(JsonObject, dict(message))
-                        for message in base_context.messages
-                    ),
+                    base_messages=tuple(base_context.messages),
                     reserved_tokens=self._history_reserved_tokens,
                     requested_at=self._clock.now(),
                     include_history=command.task_kind != "translation",
@@ -222,6 +232,7 @@ class DurableAssistantInferenceAdapter:
                 context_state,
                 allow_tools=command.allow_tools and not is_translation,
                 request_timeout=self._provider_timeout.total_seconds(),
+                request_meta=command.meta,
                 tool_context=(
                     None
                     if is_translation
@@ -332,8 +343,8 @@ class DurableAssistantInferenceAdapter:
                 scope=scope,
                 user_state=user_state,
                 messages=[
-                    {"role": "system", "content": self._translation_system_prompt},
-                    {"role": "user", "content": translation_input},
+                    text_message(MessageRole.SYSTEM, self._translation_system_prompt),
+                    text_message(MessageRole.USER, translation_input),
                 ],
                 tool_context={},
                 text_fallback_messages=None,
@@ -367,11 +378,11 @@ class DurableAssistantInferenceAdapter:
         base_context.current_user_text = _anchor_user_text(projection)
         if command.task_kind == "translation":
             return base_context
-        history: list[JsonObject] = []
+        history: list[CanonicalMessage] = []
         if projection.checkpoint_summary is not None:
             history.append(checkpoint_summary_message(projection.checkpoint_summary))
-        history.extend(dict(message) for message in projection.messages)
-        base_context.messages.extend(cast(list[dict[str, object]], history))
+        history.extend(projection.messages)
+        base_context.messages.extend(history)
         return base_context
 
     @staticmethod
@@ -461,19 +472,15 @@ class DurableAssistantInferenceAdapter:
                 "Assistant output exceeds the single-message Telegram limit"
             )
 
-        history_messages = [
-            _json_object(message)
-            for message in (
-                response.history_messages
-                if response.history_messages
-                else context_state.messages[committed_count:]
-            )
-            if isinstance(message, Mapping)
-        ]
+        history_messages = list(
+            response.history_messages
+            if response.history_messages
+            else context_state.messages[committed_count:]
+        )
         if not history_messages:
             history_messages = _events_to_history(response.events)
         if final_text and not _history_ends_with_text(history_messages, final_text):
-            history_messages.append({"role": "assistant", "content": final_text})
+            history_messages.append(text_message(MessageRole.ASSISTANT, final_text))
 
         runtime_events = [
             _sanitize_runtime_event(event)
@@ -481,10 +488,13 @@ class DurableAssistantInferenceAdapter:
             if event.get("ephemeral") is not True
         ]
         assistant_content: JsonObject = {
-            "schema_version": 1,
+            "schema_version": 2,
+            "history_format": "canonical-v2",
             "task_kind": command.task_kind,
             "text": delivery_text,
-            "history_messages": cast(list[JsonValue], history_messages),
+            "history_messages": cast(
+                list[JsonValue], [message.to_json() for message in history_messages]
+            ),
             "runtime_events": cast(list[JsonValue], runtime_events),
         }
         if command.task_kind == "translation":
@@ -550,62 +560,61 @@ def _sanitize_runtime_event(event: Mapping[str, object]) -> JsonObject:
     return {key: _json_value(event[key]) for key in allowed_keys if key in event}
 
 
-def _events_to_history(events: Sequence[Mapping[str, object]]) -> list[JsonObject]:
-    """@brief 将事件回退投影为 provider history / Project events into provider history as a fallback.
+def _events_to_history(events: Sequence[Mapping[str, object]]) -> list[CanonicalMessage]:
+    """@brief 将事件回退投影为 canonical history / Project events into canonical history as a fallback.
 
     @param events 有序 Runtime events / Ordered Runtime events.
-    @return 可持久化模型消息 / Persistable model messages.
+    @return 可持久化 canonical V2 消息 / Persistable canonical V2 messages.
     """
 
-    result: list[JsonObject] = []
+    result: list[CanonicalMessage] = []
     for index, event in enumerate(events):
         event_type = event.get("type")
         if event_type == "assistant_visible":
             content = event.get("content")
             if isinstance(content, str) and content.strip():
-                result.append({"role": "assistant", "content": content})
+                result.append(text_message(MessageRole.ASSISTANT, content))
             continue
         if event_type == "assistant_tool_call":
             assistant_message = event.get("assistant_message")
             if isinstance(assistant_message, Mapping):
-                result.append(
-                    _json_object(cast(Mapping[str, object], assistant_message))
-                )
-                continue
+                try:
+                    result.append(CanonicalMessage.from_json(assistant_message))
+                    continue
+                except CanonicalMessageError:
+                    pass
             tool_call_id = str(event.get("tool_call_id") or f"durable_{index}")
             result.append(
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": tool_call_id,
-                            "type": "function",
-                            "function": {
-                                "name": str(event.get("tool_name") or "unknown"),
-                                "arguments": json.dumps(
-                                    _json_value(event.get("arguments")),
-                                    ensure_ascii=False,
-                                ),
-                            },
-                        }
-                    ],
-                }
+                CanonicalMessage(
+                    MessageRole.ASSISTANT,
+                    (
+                        ToolCallPart(
+                            tool_call_id,
+                            str(event.get("tool_name") or "unknown"),
+                            cast(
+                                FrozenJsonValue,
+                                _json_value(event.get("arguments")),
+                            ),
+                        ),
+                    ),
+                )
             )
             continue
         if event_type == "tool_result":
             result.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": str(
-                        event.get("tool_call_id") or f"durable_{index}"
+                CanonicalMessage(
+                    MessageRole.TOOL,
+                    (
+                        ToolResultPart(
+                            str(event.get("tool_call_id") or f"durable_{index}"),
+                            str(event.get("tool_name") or "unknown"),
+                            cast(
+                                FrozenJsonValue,
+                                _json_value(event.get("result")),
+                            ),
+                        ),
                     ),
-                    "name": str(event.get("tool_name") or "unknown"),
-                    "content": json.dumps(
-                        _json_value(event.get("result")),
-                        ensure_ascii=False,
-                    ),
-                }
+                )
             )
     return result
 
@@ -658,7 +667,7 @@ def _delivery_text_parts(values: Sequence[str]) -> list[str]:
     return parts
 
 
-def _last_assistant_texts(messages: Sequence[Mapping[str, object]]) -> list[str]:
+def _last_assistant_texts(messages: Sequence[CanonicalMessage]) -> list[str]:
     """@brief 从新增模型消息中读取最后 Assistant 文本 / Read the last Assistant text from new model messages.
 
     @param messages 新增模型消息 / Newly produced model messages.
@@ -666,11 +675,10 @@ def _last_assistant_texts(messages: Sequence[Mapping[str, object]]) -> list[str]
     """
 
     for message in reversed(messages):
-        if message.get("role") != "assistant":
+        if message.role is not MessageRole.ASSISTANT:
             continue
-        content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            return [content.strip()]
+        if message.text.strip():
+            return [message.text.strip()]
     return []
 
 
@@ -734,7 +742,7 @@ def _profile_from_command(
 
 
 def _history_ends_with_text(
-    messages: Sequence[Mapping[str, object]], text: str
+    messages: Sequence[CanonicalMessage], text: str
 ) -> bool:
     """@brief 判断历史末尾是否已有最终文本 / Check whether history already ends with final text.
 
@@ -745,8 +753,8 @@ def _history_ends_with_text(
 
     return bool(
         messages
-        and messages[-1].get("role") == "assistant"
-        and messages[-1].get("content") == text
+        and messages[-1].role is MessageRole.ASSISTANT
+        and messages[-1].text == text
     )
 
 
@@ -784,6 +792,63 @@ def _json_object(value: Mapping[str, object]) -> JsonObject:
     return {str(key): _json_value(item) for key, item in value.items()}
 
 
+def _classify_provider_failure(error: ProviderFailure) -> InferenceError:
+    """@brief 将 completion-port failure 映射为 durable taxonomy / Map a completion-port failure into durable taxonomy.
+
+    @param error 已分类的 completion-port failure / Classified completion-port failure.
+    @return 可重试或永久错误 / Retryable or permanent error.
+    @note 此函数只依赖 application failure contract；它不导入 infrastructure adapter /
+        This function depends only on the application failure contract and imports no infrastructure adapter.
+    """
+
+    detail = str(error).strip() or error.kind.value
+    match error.kind:
+        case ProviderFailureKind.RATE_LIMITED:
+            return RetryableInferenceError(
+                detail,
+                category=InferenceErrorCategory.RATE_LIMIT,
+                retry_after=error.retry_after,
+            )
+        case ProviderFailureKind.TIMEOUT:
+            return RetryableInferenceError(
+                detail,
+                category=InferenceErrorCategory.TIMEOUT,
+                retry_after=error.retry_after,
+            )
+        case ProviderFailureKind.TRANSPORT:
+            return RetryableInferenceError(
+                detail,
+                category=InferenceErrorCategory.NETWORK,
+                retry_after=error.retry_after,
+            )
+        case ProviderFailureKind.SERVER:
+            return RetryableInferenceError(
+                detail,
+                category=InferenceErrorCategory.PROVIDER_UNAVAILABLE,
+                retry_after=error.retry_after,
+            )
+        case ProviderFailureKind.REJECTED:
+            if error.status == 401:
+                return PermanentInferenceError(
+                    detail,
+                    category=InferenceErrorCategory.AUTHENTICATION,
+                )
+            if error.status == 403:
+                return PermanentInferenceError(
+                    detail,
+                    category=InferenceErrorCategory.PERMISSION,
+                )
+            return PermanentInferenceError(
+                detail,
+                category=InferenceErrorCategory.INVALID_REQUEST,
+            )
+        case ProviderFailureKind.CONTRACT:
+            return PermanentInferenceError(
+                detail,
+                category=InferenceErrorCategory.INVALID_REQUEST,
+            )
+
+
 def _classify_unavailable(
     error: AssistantInferenceUnavailableError,
 ) -> InferenceError:
@@ -794,6 +859,8 @@ def _classify_unavailable(
     """
 
     cause = error.last_error
+    if isinstance(cause, ProviderFailure):
+        return _classify_provider_failure(cause)
     cause_name = cause.__class__.__name__.lower() if cause is not None else ""
     detail = str(cause or error).strip() or error.__class__.__name__
     if "rate" in cause_name and "limit" in cause_name:

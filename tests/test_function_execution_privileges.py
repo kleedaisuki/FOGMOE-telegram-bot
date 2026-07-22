@@ -63,7 +63,7 @@ def test_schema_snapshot_never_exposes_security_definer_routines_to_public() -> 
 
     snapshot = _SNAPSHOT_PATH.read_text(encoding="utf-8")
 
-    assert "-- Alembic head: 0067_close_schema_creator_and_default_gaps" in snapshot
+    assert "-- Alembic head: 0068_canonical_assistant_messages" in snapshot
     assert (
         "ALTER DEFAULT PRIVILEGES\n  REVOKE EXECUTE ON ROUTINES FROM PUBLIC" in snapshot
     )

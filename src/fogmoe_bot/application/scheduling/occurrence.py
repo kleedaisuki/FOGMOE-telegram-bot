@@ -15,8 +15,10 @@ from fogmoe_bot.application.conversation.workflow import (
     ConversationWorkflow,
     PreparedTurnAcceptance,
 )
+from fogmoe_bot.domain.assistant.messages import text_message
 from fogmoe_bot.domain.context import ScheduledTaskContext, render_scheduled_task
 from fogmoe_bot.domain.conversation.identity import TurnId, TurnSource
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.observability.trace import TraceContext
 from fogmoe_bot.domain.scheduling.assistant_schedule import ScheduledAssistantTurn
@@ -87,6 +89,10 @@ def prepare_scheduled_occurrence(
             "schedule_id": schedule.schedule_id,
             "scheduled_for": _instant_text(scheduled_for),
         },
+        "model_message": text_message(
+            MessageRole.USER,
+            scheduled_text,
+        ).to_json(),
     }
     inference_request = DurableAssistantInferenceCommand(
         schema_version=ASSISTANT_INFERENCE_SCHEMA_VERSION,

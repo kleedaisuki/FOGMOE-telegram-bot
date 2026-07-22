@@ -15,7 +15,13 @@ from fogmoe_bot.application.observability.telemetry import Telemetry, TelemetryB
 from fogmoe_bot.application.runtime import AdaptivePollingPolicy, UtcClock
 from fogmoe_bot.application.user_profile.ports import DreamClaim, DreamResult
 from fogmoe_bot.application.user_profile.worker import DreamingWorker
-from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
+from fogmoe_bot.domain.assistant.messages import text_message
+from fogmoe_bot.domain.assistant.routing.models import (
+    ProviderAuth,
+    ProviderRoute,
+    RouteModel,
+)
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.user_profile.models import (
     DeleteProfileClaim,
     DreamId,
@@ -157,8 +163,7 @@ class _Completion:
 
         self.messages = kwargs["messages"]
         return AssistantCompletion(
-            self._content,
-            {"role": "assistant", "content": self._content},
+            text_message(MessageRole.ASSISTANT, self._content)
         )
 
 
@@ -177,16 +182,18 @@ def test_provider_dreaming_model_requires_strict_json_and_preserves_route_proven
         )
         model = ProviderDreamingModel(
             completion=completion,
-            service_order=("test",),
-            profiles={
-                "test": ProviderRoute(
-                    service_name="test",
-                    provider_name="openai",
-                    display_name="Test",
-                    models=("profile-model",),
-                    completion_kwargs={},
-                )
-            },
+            routes=(
+                ProviderRoute(
+                    route_id="test",
+                    provider_id="openai",
+                    provider_label="Test",
+                    style="openai",
+                    endpoint="https://api.example.test/v1/chat/completions",
+                    auth=ProviderAuth(),
+                    models=(RouteModel("profile-model"),),
+                    supports_tools=False,
+                ),
+            ),
             request_timeout_seconds=10,
             telemetry=Telemetry(TelemetryBuffer(32)),
         )

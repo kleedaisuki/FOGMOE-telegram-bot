@@ -28,11 +28,13 @@ from fogmoe_bot.application.conversation.telegram_identity import (
     TelegramConversationAddress,
 )
 from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
+from fogmoe_bot.domain.assistant.messages import text_message
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
     UpdateId,
 )
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.observability.trace import TraceContext
@@ -180,6 +182,11 @@ class TranslationTurnRequest:
                 "message_id": self.target.message_id,
             },
         }
+        user_content["model_message"] = text_message(
+            MessageRole.USER,
+            self.text,
+            include_in_context=False,
+        ).to_json()
         return AssistantTurnRequest(
             update_id=self.target.update_id,
             conversation_id=self.target.conversation_id,

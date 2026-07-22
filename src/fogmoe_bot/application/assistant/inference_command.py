@@ -20,6 +20,11 @@ from fogmoe_bot.application.conversation.telegram_identity import (
     TelegramConversationAddress,
 )
 from fogmoe_bot.domain.accounts.plan import AccountPlan
+from fogmoe_bot.domain.assistant.request_metadata import (
+    RequestMetaError,
+    normalize_request_meta,
+    request_meta_to_json,
+)
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     TurnId,
@@ -177,6 +182,7 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
     @param allow_tools 当前 Turn 是否具有工具 capability / Whether this Turn has tool capability.
     @param allowed_tools 可选 Turn 级工具 allowlist；None 表示完整目录 /
         Optional turn-level tool allowlist; None means the complete catalog.
+    @param meta 用户定义、显式可映射的请求 metadata / User-defined, explicitly mappable request metadata.
     """
 
     schema_version: Literal[2] = ASSISTANT_INFERENCE_SCHEMA_VERSION
@@ -195,6 +201,22 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
     disable_web_page_preview: bool = True
     allow_tools: bool = True
     allowed_tools: tuple[str, ...] | None = Field(default=None, max_length=32)
+    meta: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("meta")
+    @classmethod
+    def validate_meta(cls, value: dict[str, str]) -> dict[str, str]:
+        """@brief 校验受限请求 metadata / Validate bounded request metadata.
+
+        @param value 候选 string mapping / Candidate string mapping.
+        @return 独立且可 JSON 序列化的 mapping / Independent JSON-serializable mapping.
+        @raise ValueError metadata 越界时抛出 / Raised when metadata violates its boundary.
+        """
+
+        try:
+            return request_meta_to_json(normalize_request_meta(value))
+        except RequestMetaError as error:
+            raise ValueError(str(error)) from error
 
     @field_validator("allowed_tools")
     @classmethod

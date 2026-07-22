@@ -19,9 +19,17 @@ from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCapability,
     StandaloneOutboundCommand,
 )
-from fogmoe_bot.application.conversation.workflow import AcceptConversationTurn
+from fogmoe_bot.application.conversation.workflow import (
+    AcceptConversationTurn,
+    normalize_user_content_model_message,
+)
 from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
 from fogmoe_bot.domain.accounts.plan import AccountPlan
+from fogmoe_bot.domain.assistant.request_metadata import (
+    RequestMeta,
+    normalize_request_meta,
+    request_meta_to_json,
+)
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
@@ -93,9 +101,11 @@ class AssistantTurnRequest:
     @param message_id 来源消息 ID / Source message ID.
     @param message_thread_id 可选话题 ID / Optional topic ID.
     @param delivery_stream_id 有序投递流 / Ordered delivery stream.
-    @param user_content 规范化用户消息 / Normalized user message.
+    @param user_content 含 canonical V2 ``model_message`` 的规范化用户消息 /
+        Normalized user message carrying a canonical V2 ``model_message``.
     @param task_kind 推理任务种类 / Inference task kind.
     @param translation_input 翻译活动的隔离输入 / Isolated translation input.
+    @param meta 用户定义的请求 metadata；默认空对象 / User-defined request metadata; defaults to an empty object.
     """
 
     update_id: UpdateId
@@ -113,6 +123,7 @@ class AssistantTurnRequest:
     trace_context: TraceContext = field(default_factory=TraceContext.new_root)
     task_kind: AssistantTaskKind = "assistant"
     translation_input: str | None = None
+    meta: RequestMeta = field(default_factory=lambda: normalize_request_meta({}))
 
     def __post_init__(self) -> None:
         """@brief 校验请求身份与 JSON / Validate request identity and JSON.
@@ -157,7 +168,12 @@ class AssistantTurnRequest:
         object.__setattr__(self, "display_name", self.display_name.strip())
         if self.username is not None:
             object.__setattr__(self, "username", self.username.strip())
-        object.__setattr__(self, "user_content", dict(self.user_content))
+        object.__setattr__(
+            self,
+            "user_content",
+            normalize_user_content_model_message(self.user_content),
+        )
+        object.__setattr__(self, "meta", normalize_request_meta(self.meta))
         if not isinstance(self.trace_context, TraceContext):
             raise TypeError("Assistant request requires a TraceContext")
 
@@ -221,6 +237,7 @@ class AssistantTurnRequest:
             disable_notification=False,
             protect_content=False,
             disable_web_page_preview=False,
+            meta=request_meta_to_json(self.meta),
         ).to_json()
         return AcceptConversationTurn(
             source=source,

@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Protocol, cast
@@ -17,7 +17,6 @@ from fogmoe_bot.application.assistant.completion import (
     AgentCheckpointConflictError,
     AgentStepCheckpoint,
     AssistantCompletion,
-    CompletionToolCall,
 )
 from fogmoe_bot.application.assistant.tool_runtime import (
     PersistedToolResult,
@@ -25,11 +24,12 @@ from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectConflictError,
     ToolEffectRequest,
 )
-from fogmoe_bot.domain.conversation.identity import TurnId
-from fogmoe_bot.domain.conversation.payloads import (
-    JsonObject,
-    JsonValue,
+from fogmoe_bot.domain.assistant.messages import (
+    CanonicalMessage,
+    CanonicalMessageError,
 )
+from fogmoe_bot.domain.conversation.identity import TurnId
+from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
 from fogmoe_bot.infrastructure.database import db
 
 logger = logging.getLogger(__name__)
@@ -521,60 +521,45 @@ def _checkpoint(
 
 
 def _encode_completion(completion: AssistantCompletion) -> JsonObject:
-    """@brief 序列化完成 / Serialize a completion.
+    """@brief 序列化规范 V2 完成 / Serialize a canonical V2 completion.
 
     @param completion 完成 / Completion.
-    @return JSON 对象 / JSON object.
+    @return 不重复工具调用的 V2 JSON 对象 / V2 JSON object without duplicate tool calls.
     """
 
     return {
-        "content": completion.content,
-        "message": completion.message,
-        "tool_calls": [
-            {
-                "provider_call_id": call.provider_call_id,
-                "name": call.name,
-                "arguments": call.arguments,
-            }
-            for call in completion.tool_calls
-        ],
+        "schema_version": 2,
+        "message": completion.message.to_json(),
     }
 
 
 def _decode_completion(raw: object) -> AssistantCompletion:
-    """@brief 严格解码完成 / Strictly decode a completion.
+    """@brief 严格解码规范 V2 完成 / Strictly decode a canonical V2 completion.
 
     @param raw JSONB 值 / JSONB value.
-    @return 完成 / Completion.
+    @return 从 message parts 派生工具调用的完成 / Completion with tool calls derived from message parts.
+    @raise RuntimeError checkpoint 不是规范 V2 载荷时抛出 / Raised when the checkpoint is not canonical V2.
     """
 
     value = _json_value(raw)
     if not isinstance(value, dict):
         raise RuntimeError("Tool checkpoint response must be an object")
-    content = value.get("content")
-    message = value.get("message")
-    calls = value.get("tool_calls")
-    if (
-        not isinstance(content, str)
-        or not isinstance(message, dict)
-        or not isinstance(calls, list)
-    ):
-        raise RuntimeError("Tool checkpoint response has invalid fields")
-    parsed_calls: list[CompletionToolCall] = []
-    for call in calls:
-        if not isinstance(call, dict) or not isinstance(call.get("name"), str):
-            raise RuntimeError("Tool checkpoint call is invalid")
-        call_id = call.get("provider_call_id")
-        if call_id is not None and not isinstance(call_id, str):
-            raise RuntimeError("Tool checkpoint call ID is invalid")
-        parsed_calls.append(
-            CompletionToolCall(
-                provider_call_id=call_id,
-                name=cast(str, call["name"]),
-                arguments=call.get("arguments"),
-            )
+    expected = {"schema_version", "message"}
+    if set(value) != expected or value.get("schema_version") != 2:
+        raise RuntimeError("Tool checkpoint response must be canonical V2")
+    raw_message = value.get("message")
+    if not isinstance(raw_message, Mapping):
+        raise RuntimeError("Tool checkpoint response message must be an object")
+    try:
+        message = CanonicalMessage.from_json(
+            cast(Mapping[str, object], raw_message)
         )
-    return AssistantCompletion(content, message, tuple(parsed_calls))
+    except CanonicalMessageError as error:
+        raise RuntimeError("Tool checkpoint response message is invalid") from error
+    try:
+        return AssistantCompletion(message=message)
+    except ValueError as error:
+        raise RuntimeError("Tool checkpoint completion is invalid") from error
 
 
 def _json_value(raw: object) -> JsonValue:

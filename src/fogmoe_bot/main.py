@@ -17,9 +17,7 @@ from fogmoe_bot.infrastructure.observability.composition import (
     build_observability,
 )
 from fogmoe_bot.infrastructure.observability.logging import (
-    configure_litellm_logging,
     configure_logging,
-    prepare_litellm_logging,
     shutdown_logging,
 )
 from fogmoe_bot.resources import BotResources, load_resources
@@ -69,7 +67,6 @@ def run(
 
     from fogmoe_bot.presentation.telegram.bot_app import run as run_application
 
-    configure_litellm_logging(settings.logging)
     run_application(
         observability,
         settings=settings,
@@ -96,13 +93,7 @@ def main() -> None:
         settings.logging, resources.log_directory, observability.telemetry
     )
     try:
-        prepare_litellm_logging()
-        from fogmoe_bot.infrastructure.llm.litellm_client import (
-            configure_litellm_transport,
-        )
-
         configure_proxy_environment(settings.network)
-        configure_litellm_transport(settings.network)
         run(settings=settings, resources=resources, observability=observability)
     finally:
         shutdown_logging()

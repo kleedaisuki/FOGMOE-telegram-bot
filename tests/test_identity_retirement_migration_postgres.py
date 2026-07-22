@@ -539,6 +539,104 @@ def _assert_failed_0062_is_atomic(
     )
 
 
+def _seed_legacy_0068_messages(
+    cluster: _EphemeralPostgres,
+    settings: DbctlSettings,
+    *,
+    invalid_tool_arguments: bool,
+) -> None:
+    """@brief 写入 0068 前仍可被旧投影读取的 legacy Conversation row / Seed legacy Conversation rows still readable by the pre-0068 projection.
+
+    @param cluster 临时集群 / Ephemeral cluster.
+    @param settings 目标数据库设置 / Target database settings.
+    @param invalid_tool_arguments 是否写入数组型 tool arguments 失败样本 / Whether to write an array-valued tool-arguments failure fixture.
+    @return None / None.
+    """
+
+    if invalid_tool_arguments:
+        _maintenance_sql(
+            cluster,
+            settings,
+            """
+            INSERT INTO conversation.conversation_turns (
+              turn_id, conversation_id, state, source_kind, source_key,
+              created_at, updated_at, completed_at
+            ) VALUES (
+              '81000000-0000-4000-8000-000000000001',
+              'canonical-v2:invalid-tool-arguments',
+              'delivered', 'scheduled.prompt', 'canonical-v2:invalid-tool-arguments',
+              CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            );
+            INSERT INTO conversation.conversation_messages (
+              message_id, conversation_id, sequence, turn_id, role, content,
+              idempotency_key, created_at
+            ) VALUES (
+              '82000000-0000-4000-8000-000000000001',
+              'canonical-v2:invalid-tool-arguments', 1,
+              '81000000-0000-4000-8000-000000000001', 'assistant',
+              '{"history_messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"call-invalid","type":"function","function":{"name":"lookup","arguments":"[]"}}]}]}'::JSONB,
+              'canonical-v2:invalid-tool-arguments:message', CURRENT_TIMESTAMP
+            );
+            """,
+        )
+        return
+
+    _maintenance_sql(
+        cluster,
+        settings,
+        """
+        INSERT INTO conversation.conversation_turns (
+          turn_id, conversation_id, state, source_kind, source_key,
+          created_at, updated_at, completed_at
+        ) VALUES (
+          '81000000-0000-4000-8000-000000000002',
+          'canonical-v2:legacy-projectable',
+          'delivered', 'scheduled.prompt', 'canonical-v2:legacy-projectable',
+          CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        );
+        INSERT INTO conversation.conversation_messages (
+          message_id, conversation_id, sequence, turn_id, role, content,
+          idempotency_key, created_at
+        ) VALUES
+          (
+            '82000000-0000-4000-8000-000000000002',
+            'canonical-v2:legacy-projectable', 1,
+            '81000000-0000-4000-8000-000000000002', 'user',
+            '{"text":"legacy user text","content_kind":"plain","metadata":{"marker":"retained"}}'::JSONB,
+            'canonical-v2:legacy-projectable:text', CURRENT_TIMESTAMP
+          ),
+          (
+            '82000000-0000-4000-8000-000000000003',
+            'canonical-v2:legacy-projectable', 2,
+            '81000000-0000-4000-8000-000000000002', 'user',
+            '{"kind":"opaque","opaque":{"answer":42}}'::JSONB,
+            'canonical-v2:legacy-projectable:opaque', CURRENT_TIMESTAMP
+          ),
+          (
+            '82000000-0000-4000-8000-000000000004',
+            'canonical-v2:legacy-projectable', 3,
+            '81000000-0000-4000-8000-000000000002', 'user',
+            '{"role":"user","content":"embedded legacy user text","metadata":{"marker":"embedded"}}'::JSONB,
+            'canonical-v2:legacy-projectable:embedded', CURRENT_TIMESTAMP
+          ),
+          (
+            '82000000-0000-4000-8000-000000000005',
+            'canonical-v2:legacy-projectable', 4,
+            '81000000-0000-4000-8000-000000000002', 'assistant',
+            '{"text":"legacy assistant text","task_kind":"assistant"}'::JSONB,
+            'canonical-v2:legacy-projectable:assistant', CURRENT_TIMESTAMP
+          ),
+          (
+            '82000000-0000-4000-8000-000000000006',
+            'canonical-v2:legacy-projectable', 5,
+            '81000000-0000-4000-8000-000000000002', 'tool',
+            '{"tool_call_id":"call-tool","name":"lookup","content":"{\\"answer\\":42}"}'::JSONB,
+            'canonical-v2:legacy-projectable:tool', CURRENT_TIMESTAMP
+          );
+        """,
+    )
+
+
 def test_0062_business_data_matrix_and_fresh_head_are_transactional() -> None:
     """@brief 在临时 PostgreSQL 中验证 0062 业务矩阵与 fresh head / Verify the 0062 business matrix and fresh head in ephemeral PostgreSQL.
 
@@ -657,7 +755,7 @@ def test_0062_business_data_matrix_and_fresh_head_are_transactional() -> None:
         )
         assert (
             _scalar(cluster, success, "SELECT version_num FROM infra.alembic_version;")
-            == "0067_close_schema_creator_and_default_gaps"
+            == "0068_canonical_assistant_messages"
         )
         assert (
             _scalar(
@@ -737,7 +835,7 @@ def test_0062_business_data_matrix_and_fresh_head_are_transactional() -> None:
         )
         assert (
             _scalar(cluster, fresh, "SELECT version_num FROM infra.alembic_version;")
-            == "0067_close_schema_creator_and_default_gaps"
+            == "0068_canonical_assistant_messages"
         )
         assert (
             _scalar(
@@ -746,4 +844,208 @@ def test_0062_business_data_matrix_and_fresh_head_are_transactional() -> None:
                 "SELECT count(*) FROM identity.users;",
             )
             == "0"
+        )
+
+
+def test_0068_converts_legacy_projectable_rows_and_rejects_non_object_tools() -> None:
+    """@brief 在临时 PostgreSQL 验证 0068 的 fallback 与 tool 参数闭合性 / Verify 0068 fallback conversion and object-only tool arguments in ephemeral PostgreSQL.
+
+    @return None / None.
+    @note 测试只使用私有临时集群；成功样本验证 raw durable row 变为 canonical V2，失败样本验证迁移原子回滚。/
+        The test uses only a private ephemeral cluster; the success fixture verifies raw durable rows become canonical V2, and the failure fixture verifies atomic rollback.
+    """
+
+    with _postgres_cluster() as cluster:
+        template_database = "fogmoe_test_0067_canonical_template"
+        template = _bootstrap_database(cluster, template_database)
+        migration_execution.run_alembic(
+            settings=template,
+            revision="0067_close_schema_creator_and_default_gaps",
+            dry_run=False,
+        )
+
+        success = _clone_database(
+            cluster,
+            template=template_database,
+            database="fogmoe_test_0068_canonical_success",
+        )
+        _seed_legacy_0068_messages(
+            cluster,
+            success,
+            invalid_tool_arguments=False,
+        )
+        migration_execution.run_alembic(
+            settings=success,
+            revision="0068_canonical_assistant_messages",
+            dry_run=False,
+        )
+
+        assert (
+            _scalar(
+                cluster,
+                success,
+                "SELECT version_num FROM infra.alembic_version;",
+            )
+            == "0068_canonical_assistant_messages"
+        )
+        assert (
+            _scalar(
+                cluster,
+                success,
+                """
+                SELECT count(*)
+                FROM conversation.conversation_messages
+                WHERE conversation_id = 'canonical-v2:legacy-projectable'
+                  AND content #>> '{model_message,schema_version}' = '2'
+                  AND content #>> '{model_message,policy,include_in_context}' = 'true'
+                  AND content #> '{model_message,meta}' = '{}'::JSONB
+                  AND content ->> 'history_format' = 'canonical-v2';
+                """,
+            )
+            == "5"
+        )
+        assert (
+            _scalar(
+                cluster,
+                success,
+                """
+                SELECT content #>> '{model_message,parts,0,text}'
+                FROM conversation.conversation_messages
+                WHERE message_id = '82000000-0000-4000-8000-000000000002';
+                """,
+            )
+            == "legacy user text"
+        )
+        assert (
+            _scalar(
+                cluster,
+                success,
+                """
+                SELECT (
+                  (content #>> '{model_message,parts,0,text}')::JSONB =
+                  '{"kind":"opaque","opaque":{"answer":42}}'::JSONB
+                  AND content @> '{"kind":"opaque","opaque":{"answer":42}}'::JSONB
+                )::INT
+                FROM conversation.conversation_messages
+                WHERE message_id = '82000000-0000-4000-8000-000000000003';
+                """,
+            )
+            == "1"
+        )
+        assert (
+            _scalar(
+                cluster,
+                success,
+                """
+                SELECT content #>> '{model_message,parts,0,text}'
+                FROM conversation.conversation_messages
+                WHERE message_id = '82000000-0000-4000-8000-000000000004';
+                """,
+            )
+            == "embedded legacy user text"
+        )
+        assert (
+            _scalar(
+                cluster,
+                success,
+                """
+                SELECT (content #>> '{model_message,role}') || ':' ||
+                  (content #>> '{model_message,parts,0,text}')
+                FROM conversation.conversation_messages
+                WHERE message_id = '82000000-0000-4000-8000-000000000005';
+                """,
+            )
+            == "assistant:legacy assistant text"
+        )
+        assert (
+            _scalar(
+                cluster,
+                success,
+                """
+                SELECT (content #>> '{model_message,role}') || ':' ||
+                  (content #>> '{model_message,parts,0,type}') || ':' ||
+                  (content #>> '{model_message,parts,0,result,answer}')
+                FROM conversation.conversation_messages
+                WHERE message_id = '82000000-0000-4000-8000-000000000006';
+                """,
+            )
+            == "tool:tool_result:42"
+        )
+
+        invalid = _clone_database(
+            cluster,
+            template=template_database,
+            database="fogmoe_test_0068_canonical_invalid_tool",
+        )
+        _seed_legacy_0068_messages(
+            cluster,
+            invalid,
+            invalid_tool_arguments=True,
+        )
+        with pytest.raises(DBAPIError, match="must decode to a JSON object"):
+            migration_execution.run_alembic(
+                settings=invalid,
+                revision="0068_canonical_assistant_messages",
+                dry_run=False,
+            )
+        assert (
+            _scalar(
+                cluster,
+                invalid,
+                "SELECT version_num FROM infra.alembic_version;",
+            )
+            == "0067_close_schema_creator_and_default_gaps"
+        )
+        assert (
+            _scalar(
+                cluster,
+                invalid,
+                """
+                SELECT content #>> '{history_messages,0,tool_calls,0,function,arguments}'
+                FROM conversation.conversation_messages
+                WHERE message_id = '82000000-0000-4000-8000-000000000001';
+                """,
+            )
+            == "[]"
+        )
+        _maintenance_sql(
+            cluster,
+            invalid,
+            """
+            UPDATE conversation.conversation_messages
+            SET content = jsonb_set(
+              content,
+              '{history_messages,0,tool_calls,0,function,arguments}',
+              '[]'::JSONB
+            )
+            WHERE message_id = '82000000-0000-4000-8000-000000000001';
+            """,
+        )
+        with pytest.raises(DBAPIError, match="must decode to a JSON object"):
+            migration_execution.run_alembic(
+                settings=invalid,
+                revision="0068_canonical_assistant_messages",
+                dry_run=False,
+            )
+        assert (
+            _scalar(
+                cluster,
+                invalid,
+                "SELECT version_num FROM infra.alembic_version;",
+            )
+            == "0067_close_schema_creator_and_default_gaps"
+        )
+        assert (
+            _scalar(
+                cluster,
+                invalid,
+                """
+                SELECT jsonb_typeof(
+                  content #> '{history_messages,0,tool_calls,0,function,arguments}'
+                )
+                FROM conversation.conversation_messages
+                WHERE message_id = '82000000-0000-4000-8000-000000000001';
+                """,
+            )
+            == "array"
         )

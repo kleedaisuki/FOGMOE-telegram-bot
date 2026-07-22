@@ -227,7 +227,7 @@ def test_gui_factory_reads_root_jsonc_configuration(
         """
         {
           /* GUI 与 CLI 共用同一用户配置文件。 */
-          "schema_version": 1,
+          "schema_version": 2,
           "database": {
             "endpoint": {"host": "db.example", "port": 6432, "name": "fogmoe"},
             "reporting": {"username": "dashboard", "password": "secret"}

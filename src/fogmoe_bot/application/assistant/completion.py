@@ -1,54 +1,110 @@
-"""@brief Provider-neutral Assistant completion ports / Provider-neutral Assistant 完成端口."""
+"""@brief Provider-neutral Assistant completion ports / Provider-neutral Assistant 完成端口.
+
+业务层只交换规范消息 V2（Canonical Message V2）。具体 provider 的 JSON wire payload
+只能停留在基础设施 adapter 内；这使 checkpoint、工具执行和历史投影不再依赖某一种
+兼容协议。/
+The business layer exchanges only Canonical Message V2. Provider-specific JSON wire payloads
+remain inside infrastructure adapters, so checkpoints, tool execution, and history projection no
+longer depend on a compatibility protocol.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage, ToolCallPart
+from fogmoe_bot.domain.assistant.request_metadata import RequestMeta
+from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
 from fogmoe_bot.domain.conversation.identity import TurnId
-from fogmoe_bot.domain.conversation.payloads import (
-    JsonObject,
-    JsonValue,
-)
+from fogmoe_bot.domain.conversation.message import MessageRole
+from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
 
 from .tools.catalog import ToolDefinition
 
 
 @dataclass(frozen=True, slots=True)
 class CompletionToolCall:
-    """@brief 一个已归一化工具调用 / One normalized tool call.
+    """@brief 从 canonical Assistant 消息派生的工具调用 / Tool call derived from a canonical Assistant message.
 
-    @param provider_call_id Provider correlation ID / Provider correlation identifier.
+    @param provider_call_id 跨协议非空调用 ID / Non-empty cross-protocol call identifier.
     @param name 工具名称 / Tool name.
-    @param arguments Provider 解码前或解码后的参数 / Raw or decoded provider arguments.
+    @param arguments 已解析 JSON 参数 / Parsed JSON arguments.
     """
 
-    provider_call_id: str | None
+    provider_call_id: str
     name: str
     arguments: JsonValue
 
-
-@dataclass(frozen=True, slots=True)
-class AssistantCompletion:
-    """@brief 一个 provider-neutral Assistant message / One provider-neutral Assistant message.
-
-    @param content 文本内容 / Text content.
-    @param message 可安全持久化的完整消息 / Complete persistable message.
-    @param tool_calls 已归一化调用 / Normalized calls.
-    """
-
-    content: str
-    message: JsonObject
-    tool_calls: tuple[CompletionToolCall, ...] = ()
-
     def __post_init__(self) -> None:
-        """@brief 隔离可变消息 / Isolate the mutable message.
+        """@brief 校验不可歧义的调用身份 / Validate unambiguous call identity.
 
         @return None / None.
         """
 
-        object.__setattr__(self, "message", dict(self.message))
+        if not isinstance(self.provider_call_id, str) or not self.provider_call_id.strip():
+            raise ValueError("provider_call_id cannot be blank")
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("tool call name cannot be blank")
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantCompletion:
+    """@brief 一个规范的 Assistant 完成 / One canonical Assistant completion.
+
+    @param message provider 已解析的 canonical V2 Assistant 消息 / Provider-decoded canonical V2 Assistant message.
+    """
+
+    message: CanonicalMessage
+
+    def __post_init__(self) -> None:
+        """@brief 限制 completion 为 Assistant 消息 / Restrict a completion to an Assistant message.
+
+        @return None / None.
+        """
+
+        if not isinstance(self.message, CanonicalMessage):
+            raise TypeError("AssistantCompletion.message must be CanonicalMessage")
+        if self.message.role is not MessageRole.ASSISTANT:
+            raise ValueError("AssistantCompletion.message must have assistant role")
+        call_ids = [
+            part.call_id
+            for part in self.message.parts
+            if isinstance(part, ToolCallPart)
+        ]
+        if len(set(call_ids)) != len(call_ids):
+            raise ValueError("AssistantCompletion tool call identifiers must be unique")
+
+    @property
+    def content(self) -> str:
+        """@brief 读取 Assistant 文本部分 / Read Assistant text parts.
+
+        @return 拼接后的可展示文本 / Concatenated displayable text.
+        """
+
+        return self.message.text
+
+    @property
+    def tool_calls(self) -> tuple[CompletionToolCall, ...]:
+        """@brief 从 canonical parts 派生工具调用 / Derive tool calls from canonical parts.
+
+        @return 按消息顺序排列的工具调用 / Tool calls in message order.
+        """
+
+        calls: list[CompletionToolCall] = []
+        for part in self.message.parts:
+            if not isinstance(part, ToolCallPart):
+                continue
+            raw_arguments = part.to_json()["arguments"]
+            calls.append(
+                CompletionToolCall(
+                    provider_call_id=part.call_id,
+                    name=part.name,
+                    arguments=raw_arguments,
+                )
+            )
+        return tuple(calls)
 
 
 class AssistantCompletionPort(Protocol):
@@ -57,24 +113,27 @@ class AssistantCompletionPort(Protocol):
     async def complete(
         self,
         *,
-        provider: str,
+        route: ProviderRoute,
         model: str,
-        messages: Sequence[JsonObject],
+        messages: Sequence[CanonicalMessage],
         tools: Sequence[ToolDefinition],
         tool_choice: str | JsonObject | None,
         max_tokens: int,
-        request_options: Mapping[str, JsonValue],
+        timeout_seconds: float | None,
+        request_meta: RequestMeta,
     ) -> AssistantCompletion:
         """@brief 请求一次模型完成 / Request one model completion.
 
-        @param provider provider 名称 / Provider name.
-        @param model 模型名称 / Model name.
-        @param messages 规范历史 / Canonical history.
+        @param route 自包含 provider route / Self-contained provider route.
+        @param model route 选中的模型 / Model selected within the route.
+        @param messages 规范 V2 历史 / Canonical V2 history.
         @param tools 可用 typed tools / Available typed tools.
         @param tool_choice Provider-neutral 选择策略 / Provider-neutral selection policy.
         @param max_tokens 输出上限 / Output-token limit.
-        @param request_options 有界 route 选项 / Bounded route options.
-        @return 归一化完成 / Normalized completion.
+        @param timeout_seconds 本次请求总 deadline / Per-request total deadline.
+        @param request_meta 调用方显式 metadata；adapter 按 route style 映射 /
+            Explicit caller metadata, mapped by the adapter according to route style.
+        @return 规范完成 / Canonical completion.
         """
 
         ...
@@ -87,7 +146,7 @@ class AgentStepCheckpoint:
     @param turn_id Turn ID / Turn identifier.
     @param step_no 模型 step 序号 / Model-step number.
     @param request_hash 输入摘要 / Input digest.
-    @param route_key provider/model 稳定键 / Stable provider/model key.
+    @param route_key route/model 稳定键 / Stable route/model key.
     @param completion 规范完成 / Canonical completion.
     """
 

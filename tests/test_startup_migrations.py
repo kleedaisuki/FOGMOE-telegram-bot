@@ -51,11 +51,6 @@ def test_main_starts_bot_without_database_migrations(
     )
     monkeypatch.setattr(
         bot_main,
-        "prepare_litellm_logging",
-        lambda: calls.append("litellm-logging"),
-    )
-    monkeypatch.setattr(
-        bot_main,
         "configure_proxy_environment",
         lambda settings: calls.append("network"),
     )
@@ -67,4 +62,4 @@ def test_main_starts_bot_without_database_migrations(
 
     bot_main.main()
 
-    assert calls == ["database", "logging", "litellm-logging", "network", "bot"]
+    assert calls == ["database", "logging", "network", "bot"]

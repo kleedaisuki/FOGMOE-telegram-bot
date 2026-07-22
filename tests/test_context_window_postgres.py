@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 from postgres_test_support import configure_bot_database
 
+from fogmoe_bot.domain.assistant.messages import text_message
 from fogmoe_bot.domain.context_window.budget import TokenCount
 from fogmoe_bot.domain.context_window.compaction import (
     CompactionPlan,
@@ -21,6 +22,7 @@ from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     TurnId,
 )
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.context_window import (
     PostgresContextWindowStore,
@@ -103,7 +105,15 @@ async def _insert_fixture(
                     str(conversation_id),
                     sequence,
                     str(turn_id),
-                    json.dumps({"text": content}),
+                    json.dumps(
+                        {
+                            "text": content,
+                            "model_message": text_message(
+                                MessageRole.USER,
+                                content,
+                            ).to_json(),
+                        }
+                    ),
                     f"retention:{source_suffix}:message:{sequence}",
                     now + timedelta(microseconds=sequence),
                 ),
@@ -190,16 +200,16 @@ def test_real_postgres_enqueue_and_fencing(
                 predecessor_compaction_id=None,
                 projection_version=1,
                 source_snapshot=(
-                    {
-                        "role": "user",
-                        "content": {
-                            "text": "one",
+                    text_message(
+                        MessageRole.USER,
+                        "one",
+                        meta={
                             "large_float": 1e20,
                             "small_float": 0.000001,
                             "integral_float": 1.0,
                         },
-                    },
-                    {"role": "user", "content": "two"},
+                    ).to_json(),
+                    text_message(MessageRole.USER, "two").to_json(),
                 ),
                 source_row_count=2,
                 source_token_count=TokenCount(2),

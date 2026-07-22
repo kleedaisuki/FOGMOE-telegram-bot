@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Final, Literal, TypeAlias, cast
-from urllib.parse import quote_plus
+from typing import Annotated, Final, Literal, TypeAlias
+from urllib.parse import quote_plus, urlsplit
 
 from pydantic import (
     BaseModel,
@@ -26,20 +26,11 @@ from fogmoe_bot.domain.temporal import TimeZoneId
 from fogmoe_config.jsonc import JsoncDecodeError, JSONValue, load_jsonc
 
 #: @brief 当前支持的根配置契约版本 / Root configuration contract version supported by this package.
-SCHEMA_VERSION: Final[int] = 1
+SCHEMA_VERSION: Final[int] = 2
 #: @brief Compose 强制终止前允许的最大运行时排空秒数 / Maximum runtime drain seconds before Compose escalation.
 MAX_SHUTDOWN_GRACE_SECONDS: Final[int] = 190
 
 
-#: @brief AI provider 的受限名称 / Closed set of AI provider names.
-ProviderName: TypeAlias = Literal[
-    "openai",
-    "openrouter",
-    "siliconflow",
-    "gemini",
-    "zai",
-    "azure",
-]
 #: @brief 配置允许的日志级别 / Allowed logging levels.
 LogLevel: TypeAlias = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 #: @brief 正整数配置值 / Positive configuration integer.
@@ -67,13 +58,6 @@ StringTuple: TypeAlias = Annotated[
     tuple[str, ...],
     BeforeValidator(_json_array_to_tuple),
 ]
-#: @brief 来自 JSON 数组的不可变 provider 序列 / Immutable provider sequence decoded from a JSON array.
-ProviderTuple: TypeAlias = Annotated[
-    tuple[ProviderName, ...],
-    BeforeValidator(_json_array_to_tuple),
-]
-
-
 class ConfigurationError(ValueError):
     """@brief Bot 配置语义错误 / Bot configuration semantic error.
 
@@ -401,229 +385,384 @@ class RuntimeSettings(_FrozenSettings):
     dreaming: DreamingRuntimeSettings = Field(default_factory=DreamingRuntimeSettings)
 
 
-class ProviderModels(_FrozenSettings):
-    """@brief 单个 provider 的任务模型目录 / Task-model catalog for one provider."""
-
-    chat: str | None = None
-    chat_fallback: str | None = None
-    vision: str | None = None
-    summary: str | None = None
-    summary_fallback: str | None = None
-    dreaming: str | None = None
-    translation: str | None = None
-
-    def for_task(
-        self, task: Literal["chat", "summary", "dreaming", "translation"]
-    ) -> tuple[str, ...]:
-        """@brief 返回任务的主/回退模型链 / Return primary and fallback model chain for a task.
-
-        @param task 推理任务 / Inference task.
-        @return 去除空值与重复项后的模型元组 / Tuple of non-empty, deduplicated models.
-        """
-
-        values: tuple[str | None, ...]
-        match task:
-            case "chat":
-                primary, fallback = self.chat, self.chat_fallback
-                values = (primary, fallback, self.vision)
-            case "summary":
-                primary, fallback = self.summary, self.summary_fallback
-                values = (primary, fallback)
-            case "dreaming":
-                primary, fallback = self.dreaming or self.summary, None
-                values = (primary, fallback)
-            case "translation":
-                primary, fallback = self.translation, None
-                values = (primary, fallback)
-        configured = tuple(value for value in values if value)
-        return tuple(dict.fromkeys(configured))
+AiTaskName: TypeAlias = Literal["chat", "summary", "dreaming", "translation"]
+"""@brief 受支持的 AI 任务名称 / Supported AI task names."""
 
 
-class OpenAICompatibleProviderSettings(_FrozenSettings):
-    """@brief OpenAI-compatible provider 设置 / OpenAI-compatible provider settings."""
+def _non_blank(value: str, *, field_name: str) -> str:
+    """@brief 规范化非空配置字符串 / Normalize a non-blank configuration string.
+
+    @param value 原始配置值 / Raw configuration value.
+    @param field_name 报错中使用的字段名 / Field name used in validation errors.
+    @return 去除首尾空白的值 / Value with surrounding whitespace removed.
+    @raise ValueError 值为空时抛出 / Raised when the value is blank.
+    """
+
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{field_name} must not be blank")
+    return normalized
+
+
+class ProviderAuthSettings(_FrozenSettings):
+    """@brief Provider API 密钥认证规则 / Provider API-key authentication rule.
+
+    ``header`` 与 ``prefix`` 使 Bearer、x-api-key 等认证成为配置数据，而不是
+    provider 名称分支。/
+    ``header`` and ``prefix`` keep Bearer, x-api-key, and similar authentication as
+    configuration data rather than provider-name branches.
+    """
 
     api_key: SecretStr | None = None
-    api_base: str | None = None
-    models: ProviderModels = Field(default_factory=ProviderModels)
+    header: str = "Authorization"
+    prefix: str = "Bearer "
 
-
-class GeminiProviderSettings(OpenAICompatibleProviderSettings):
-    """@brief Gemini provider 设置 / Gemini provider settings."""
-
-    openai_compatible: bool = False
-
-
-class AzureProviderSettings(_FrozenSettings):
-    """@brief Azure OpenAI provider 设置 / Azure OpenAI provider settings."""
-
-    api_key: SecretStr | None = None
-    endpoint: str | None = None
-    api_version: str | None = None
-    deployment: str | None = None
-    models: ProviderModels = Field(default_factory=ProviderModels)
-
-
-class AiProvidersSettings(_FrozenSettings):
-    """@brief 所有 AI provider 凭据与模型 / Credentials and models for all AI providers."""
-
-    openai: OpenAICompatibleProviderSettings = Field(
-        default_factory=lambda: OpenAICompatibleProviderSettings(
-            models=ProviderModels(
-                chat="gpt-4o",
-                summary="gpt-4o-mini",
-                dreaming="gpt-4o-mini",
-                translation="gpt-4o-mini",
-            )
-        )
-    )
-    openrouter: OpenAICompatibleProviderSettings = Field(
-        default_factory=lambda: OpenAICompatibleProviderSettings(
-            api_base="https://openrouter.ai/api/v1",
-            models=ProviderModels(
-                chat="anthropic/claude-sonnet-4.5",
-                summary="openai/gpt-4o-mini",
-                dreaming="openai/gpt-4o-mini",
-                translation="openai/gpt-4o-mini",
-            ),
-        )
-    )
-    siliconflow: OpenAICompatibleProviderSettings = Field(
-        default_factory=lambda: OpenAICompatibleProviderSettings(
-            api_base="https://api.siliconflow.cn/v1",
-            models=ProviderModels(
-                chat="deepseek-ai/DeepSeek-V4-Flash",
-                summary="deepseek-ai/DeepSeek-V4-Flash",
-                translation="deepseek-ai/DeepSeek-V4-Flash",
-            ),
-        )
-    )
-    gemini: GeminiProviderSettings = Field(
-        default_factory=lambda: GeminiProviderSettings(
-            models=ProviderModels(
-                chat="gemini-3.5-flash",
-                chat_fallback="gemini-2.5-flash-lite",
-                summary="gemini-3-flash-preview",
-                summary_fallback="gemini-2.5-flash-lite",
-            )
-        )
-    )
-    zai: OpenAICompatibleProviderSettings = Field(
-        default_factory=lambda: OpenAICompatibleProviderSettings(
-            api_base="https://open.bigmodel.cn/api/paas/v4",
-            models=ProviderModels(
-                chat="glm-4.7-flash",
-                translation="glm-4.7-flash",
-            ),
-        )
-    )
-    azure: AzureProviderSettings = Field(
-        default_factory=lambda: AzureProviderSettings(api_version="2024-12-01-preview")
-    )
-
-    def for_name(
-        self, provider: ProviderName
-    ) -> OpenAICompatibleProviderSettings | AzureProviderSettings:
-        """@brief 获取指定 provider 的设置 / Get settings for a named provider.
-
-        @param provider 受支持的 provider 名称 / Supported provider name.
-        @return 对应 provider 的不可变设置 / Corresponding immutable provider settings.
-        """
-
-        match provider:
-            case "openai":
-                return self.openai
-            case "openrouter":
-                return self.openrouter
-            case "siliconflow":
-                return self.siliconflow
-            case "gemini":
-                return self.gemini
-            case "zai":
-                return self.zai
-            case "azure":
-                return self.azure
-
-
-class AiTaskRouteSettings(_FrozenSettings):
-    """@brief 单个后台 AI 任务的路由 / Route for one background AI task."""
-
-    provider: ProviderName | None = None
-    fallback_provider: ProviderName | None = None
-
-    def ordered_providers(self) -> ProviderTuple:
-        """@brief 返回去重后的 provider 顺序 / Return deduplicated provider order.
-
-        @return 主 provider 后接回退 provider / Primary provider followed by fallback provider.
-        """
-
-        values = tuple(
-            value for value in (self.provider, self.fallback_provider) if value
-        )
-        return cast(ProviderTuple, tuple(dict.fromkeys(values)))
-
-
-class AiChatRouteSettings(_FrozenSettings):
-    """@brief 主聊天 AI 路由 / Primary chat AI route."""
-
-    provider_order: ProviderTuple = ("gemini", "zai", "siliconflow")
-    text_only_models: StringTuple = ("deepseek-ai/DeepSeek-V4-Flash",)
-
-    @field_validator("provider_order")
+    @field_validator("header")
     @classmethod
-    def _reject_duplicate_providers(cls, value: ProviderTuple) -> ProviderTuple:
-        """@brief 拒绝重复 provider / Reject duplicate providers.
+    def _validate_header(cls, value: str) -> str:
+        """@brief 校验 HTTP header 名 / Validate an HTTP header name.
 
-        @param value provider 顺序 / Provider order.
-        @return 已验证顺序 / Validated order.
-        @raise ValueError 出现重复 provider 时抛出 / Raised when a provider repeats.
+        @param value 原始 header 名 / Raw header name.
+        @return 规范 header 名 / Normalized header name.
+        @raise ValueError header 含控制字符时抛出 / Raised when the header has control characters.
         """
 
-        if len(set(value)) != len(value):
-            raise ValueError("provider_order must not contain duplicates")
+        normalized = _non_blank(value, field_name="auth.header")
+        if any(character in normalized for character in "\r\n:"):
+            raise ValueError("auth.header must be a single HTTP header name")
+        return normalized
+
+    @field_validator("prefix")
+    @classmethod
+    def _validate_prefix(cls, value: str) -> str:
+        """@brief 拒绝 header injection 前缀 / Reject header-injection prefixes.
+
+        @param value 原始认证前缀 / Raw authentication prefix.
+        @return 原样前缀 / Original prefix.
+        @raise ValueError 含 CR/LF 时抛出 / Raised when CR/LF is present.
+        """
+
+        if "\r" in value or "\n" in value:
+            raise ValueError("auth.prefix must not contain CR or LF")
         return value
 
 
-class AiRoutingSettings(_FrozenSettings):
-    """@brief AI 任务路由配置 / AI task-routing configuration."""
+class _ProviderSettings(_FrozenSettings):
+    """@brief 两种 wire style 共用的 provider 连接设置 / Provider connection settings shared by both wire styles."""
 
-    chat: AiChatRouteSettings = Field(default_factory=AiChatRouteSettings)
-    summary: AiTaskRouteSettings = Field(
-        default_factory=lambda: AiTaskRouteSettings(provider="gemini")
-    )
-    dreaming: AiTaskRouteSettings = Field(
-        default_factory=lambda: AiTaskRouteSettings(provider="gemini")
-    )
-    translation: AiTaskRouteSettings = Field(
-        default_factory=lambda: AiTaskRouteSettings(provider="zai")
-    )
+    id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    label: str = Field(min_length=1, max_length=120)
+    endpoint: str = Field(min_length=1, max_length=2_048)
+    auth: ProviderAuthSettings = Field(default_factory=ProviderAuthSettings)
+    headers: Mapping[str, str] = Field(default_factory=dict)
 
-    def for_task(
-        self,
-        task: Literal["chat", "summary", "dreaming", "translation"],
-    ) -> ProviderTuple:
-        """@brief 返回指定任务的 provider 顺序 / Return provider order for a task.
+    @field_validator("id", "label")
+    @classmethod
+    def _validate_identity(cls, value: str, info: object) -> str:
+        """@brief 规范化 provider 标识与显示名 / Normalize provider ID and display label.
 
-        @param task 推理任务 / Inference task.
-        @return 已验证、不可变的 provider 顺序 / Validated immutable provider order.
+        @param value 原始字段值 / Raw field value.
+        @param info Pydantic field 上下文 / Pydantic field context.
+        @return 规范后的值 / Normalized value.
         """
 
-        if task == "chat":
-            return self.chat.provider_order
+        field_name = getattr(info, "field_name", "provider field")
+        return _non_blank(value, field_name=str(field_name))
+
+    @field_validator("endpoint")
+    @classmethod
+    def _validate_complete_endpoint(cls, value: str) -> str:
+        """@brief 校验完整 HTTP 请求 endpoint / Validate a complete HTTP request endpoint.
+
+        @param value 原始 URL / Raw URL.
+        @return 规范 URL / Normalized URL.
+        @raise ValueError URL 不是完整 HTTP 请求地址时抛出 /
+            Raised when the URL is not a complete HTTP request endpoint.
+        @note endpoint 必须带路径，例如 ``/v1/chat/completions``；客户端不得拼接 provider-specific 路径。/
+            The endpoint must carry a path such as ``/v1/chat/completions``; clients must not
+            append provider-specific paths.
+        """
+
+        normalized = _non_blank(value, field_name="endpoint")
+        parts = urlsplit(normalized)
+        if (
+            parts.scheme not in {"http", "https"}
+            or not parts.netloc
+            or parts.path in {"", "/"}
+            or parts.query
+            or parts.fragment
+        ):
+            raise ValueError(
+                "endpoint must be a complete http(s) request URL without query or fragment"
+            )
+        return normalized
+
+    @field_validator("headers")
+    @classmethod
+    def _validate_headers(cls, value: Mapping[str, str]) -> Mapping[str, str]:
+        """@brief 校验用户自定义 HTTP headers / Validate user-defined HTTP headers.
+
+        @param value 原始 headers 映射 / Raw headers mapping.
+        @return 去除名称空白后的 headers / Headers with normalized names.
+        @raise ValueError header 名或值不安全时抛出 / Raised for unsafe header names or values.
+        """
+
+        normalized: dict[str, str] = {}
+        for name, header_value in value.items():
+            clean_name = _non_blank(name, field_name="headers key")
+            if any(character in clean_name for character in "\r\n:"):
+                raise ValueError("headers keys must be single HTTP header names")
+            if "\r" in header_value or "\n" in header_value:
+                raise ValueError("headers values must not contain CR or LF")
+            if clean_name.casefold() in {
+                "authorization",
+                "x-api-key",
+                "anthropic-version",
+            }:
+                raise ValueError(
+                    "authentication and protocol headers must use provider auth/style fields"
+                )
+            normalized[clean_name] = header_value
+        return normalized
+
+
+class OpenAIProviderSettings(_ProviderSettings):
+    """@brief OpenAI-style completion endpoint 设置 / OpenAI-style completion endpoint settings."""
+
+    style: Literal["openai"]
+
+
+class AnthropicProviderSettings(_ProviderSettings):
+    """@brief Anthropic Messages-style endpoint 设置 / Anthropic Messages-style endpoint settings."""
+
+    style: Literal["anthropic"]
+    api_version: str = Field(min_length=1, max_length=128)
+
+    @field_validator("api_version")
+    @classmethod
+    def _validate_api_version(cls, value: str) -> str:
+        """@brief 校验 Anthropic API 版本 / Validate the Anthropic API version.
+
+        @param value 原始版本字符串 / Raw version string.
+        @return 规范版本字符串 / Normalized version string.
+        """
+
+        return _non_blank(value, field_name="api_version")
+
+
+AiProviderSettings: TypeAlias = Annotated[
+    OpenAIProviderSettings | AnthropicProviderSettings,
+    Field(discriminator="style"),
+]
+"""@brief 按 wire style 判别的 provider 联合 / Provider union discriminated by wire style."""
+
+#: @brief JSON 数组解码的不可变 provider 列表 / Immutable provider list decoded from a JSON array.
+AiProviderSettingsTuple: TypeAlias = Annotated[
+    tuple[AiProviderSettings, ...],
+    BeforeValidator(_json_array_to_tuple),
+]
+
+
+class AiRouteModelSettings(_FrozenSettings):
+    """@brief 一个 route 内可回退模型 / One fallback-capable model inside a route."""
+
+    name: str = Field(min_length=1, max_length=512)
+    accepts_images: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        """@brief 规范化模型名 / Normalize a model name.
+
+        @param value 原始模型名 / Raw model name.
+        @return 规范模型名 / Normalized model name.
+        """
+
+        return _non_blank(value, field_name="models.name")
+
+
+#: @brief JSON 数组解码的不可变 route 模型列表 / Immutable route-model list decoded from a JSON array.
+AiRouteModelTuple: TypeAlias = Annotated[
+    tuple[AiRouteModelSettings, ...],
+    BeforeValidator(_json_array_to_tuple),
+]
+#: @brief JSON 数组解码的不可变工具名列表 / Immutable tool-name list decoded from a JSON array.
+ToolNameTuple: TypeAlias = Annotated[
+    tuple[str, ...],
+    BeforeValidator(_json_array_to_tuple),
+]
+
+
+class AiRouteSettings(_FrozenSettings):
+    """@brief 一个任务候选路由 / One candidate route for an AI task.
+
+    route 把模型 fallback、能力和 protocol metadata 放在同一个配置节点，因而没有
+    ``provider_order`` 与独立 model catalog 之间的隐式 join。/
+    A route colocates model fallback, capabilities, and protocol metadata, so there is no
+    implicit join between ``provider_order`` and a separate model catalog.
+    """
+
+    provider: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    models: AiRouteModelTuple = ()
+    supports_tools: bool = True
+    strict_tools: bool = False
+    disabled_tools: ToolNameTuple = ()
+    safety_block_is_terminal: bool = False
+    meta: Mapping[str, str] = Field(default_factory=dict)
+
+    @field_validator("provider")
+    @classmethod
+    def _validate_provider(cls, value: str) -> str:
+        """@brief 规范化 provider 引用 / Normalize a provider reference.
+
+        @param value 原始 provider ID / Raw provider ID.
+        @return 规范 provider ID / Normalized provider ID.
+        """
+
+        return _non_blank(value, field_name="route.provider")
+
+    @field_validator("disabled_tools")
+    @classmethod
+    def _validate_disabled_tools(cls, value: ToolNameTuple) -> ToolNameTuple:
+        """@brief 校验禁用工具列表 / Validate disabled tool names.
+
+        @param value 原始工具名序列 / Raw tool-name sequence.
+        @return 去重后的工具名序列 / Deduplicated tool-name sequence.
+        @raise ValueError 工具名为空时抛出 / Raised when a tool name is blank.
+        """
+
+        normalized = tuple(
+            _non_blank(tool, field_name="disabled_tools item") for tool in value
+        )
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("disabled_tools must not contain duplicates")
+        return normalized
+
+    @field_validator("meta")
+    @classmethod
+    def _validate_meta(cls, value: Mapping[str, str]) -> Mapping[str, str]:
+        """@brief 校验 protocol metadata 的基础安全性 / Validate basic protocol-metadata safety.
+
+        @param value 原始 metadata 映射 / Raw metadata mapping.
+        @return 规范 metadata 映射 / Normalized metadata mapping.
+        @raise ValueError key 或 value 含 CR/LF 时抛出 / Raised when a key or value contains CR/LF.
+        """
+
+        normalized: dict[str, str] = {}
+        for key, item in value.items():
+            clean_key = _non_blank(key, field_name="meta key")
+            if "\r" in clean_key or "\n" in clean_key:
+                raise ValueError("meta keys must not contain CR or LF")
+            if "\r" in item or "\n" in item:
+                raise ValueError("meta values must not contain CR or LF")
+            normalized[clean_key] = item
+        return normalized
+
+
+#: @brief JSON 数组解码的不可变任务 route 列表 / Immutable task-route list decoded from a JSON array.
+AiRouteTuple: TypeAlias = Annotated[
+    tuple[AiRouteSettings, ...],
+    BeforeValidator(_json_array_to_tuple),
+]
+
+
+class AiTaskRoutingSettings(_FrozenSettings):
+    """@brief 一个 AI 任务的有序路由集 / Ordered route set for one AI task."""
+
+    routes: AiRouteTuple = ()
+
+
+class AiRoutingSettings(_FrozenSettings):
+    """@brief 四类 AI 任务的统一路由配置 / Uniform route configuration for four AI tasks."""
+
+    chat: AiTaskRoutingSettings = Field(default_factory=AiTaskRoutingSettings)
+    summary: AiTaskRoutingSettings = Field(default_factory=AiTaskRoutingSettings)
+    dreaming: AiTaskRoutingSettings = Field(default_factory=AiTaskRoutingSettings)
+    translation: AiTaskRoutingSettings = Field(default_factory=AiTaskRoutingSettings)
+
+    def for_task(self, task: AiTaskName) -> AiTaskRoutingSettings:
+        """@brief 返回指定任务的 route 集 / Return the route set for one task.
+
+        @param task 推理任务 / Inference task.
+        @return 对应的不可变 route 集 / Corresponding immutable route set.
+        """
+
         match task:
+            case "chat":
+                return self.chat
             case "summary":
-                return self.summary.ordered_providers()
+                return self.summary
             case "dreaming":
-                order = self.dreaming.ordered_providers()
-                return order or self.summary.ordered_providers()
+                return self.dreaming
             case "translation":
-                return self.translation.ordered_providers()
+                return self.translation
 
 
 class AiSettings(_FrozenSettings):
-    """@brief AI provider、模型和路由设置 / AI provider, model, and routing settings."""
+    """@brief Provider 连接和任务 route 设置 / Provider connection and task-route settings.
 
+    默认值故意不隐含任一商业 provider 或模型；部署配置必须明确声明它实际要调用的
+    endpoint 与 routes。/
+    Defaults intentionally imply no commercial provider or model; deployment configuration must
+    explicitly declare the endpoint and routes it will call.
+    """
+
+    providers: AiProviderSettingsTuple = ()
     routing: AiRoutingSettings = Field(default_factory=AiRoutingSettings)
-    providers: AiProvidersSettings = Field(default_factory=AiProvidersSettings)
+
+    @model_validator(mode="after")
+    def _validate_graph(self) -> AiSettings:
+        """@brief 校验 provider 与 route 的完整配置图 / Validate the complete provider-and-route configuration graph.
+
+        @return 已验证的 AI 设置 / Validated AI settings.
+        @raise ValueError provider ID 重复、route 引用缺失或能力契约非法时抛出 /
+            Raised for duplicate provider IDs, missing route references, or invalid capability contracts.
+        """
+
+        provider_by_id: dict[str, AiProviderSettings] = {}
+        for provider in self.providers:
+            if provider.id in provider_by_id:
+                raise ValueError(f"ai.providers contains duplicate provider id {provider.id!r}")
+            provider_by_id[provider.id] = provider
+        for task in ("chat", "summary", "dreaming", "translation"):
+            task_routes = self.routing.for_task(task)
+            for index, route in enumerate(task_routes.routes):
+                location = f"ai.routing.{task}.routes[{index}]"
+                referenced_provider = provider_by_id.get(route.provider)
+                if referenced_provider is None:
+                    raise ValueError(
+                        f"{location}.provider references unknown provider {route.provider!r}"
+                    )
+                if not route.models:
+                    raise ValueError(f"{location}.models must contain at least one model")
+                model_names = tuple(model.name for model in route.models)
+                if len(set(model_names)) != len(model_names):
+                    raise ValueError(f"{location}.models must not contain duplicate names")
+                if route.strict_tools and not route.supports_tools:
+                    raise ValueError(
+                        f"{location}.strict_tools requires supports_tools to be true"
+                    )
+                if (
+                    referenced_provider.style == "anthropic"
+                    and set(route.meta) - {"user_id"}
+                ):
+                    raise ValueError(
+                        f"{location}.meta only supports user_id for anthropic routes"
+                    )
+        return self
+
+    def provider_for(self, provider_id: str) -> AiProviderSettings:
+        """@brief 按动态 ID 查找 provider / Look up a provider by dynamic ID.
+
+        @param provider_id route 引用的 provider ID / Provider ID referenced by a route.
+        @return 已验证 provider / Validated provider.
+        @raise KeyError ID 未注册时抛出 / Raised when the ID is not registered.
+        """
+
+        for provider in self.providers:
+            if provider.id == provider_id:
+                return provider
+        raise KeyError(provider_id)
 
 
 class ContextWindowSettings(_FrozenSettings):
@@ -1016,12 +1155,18 @@ def _require_schema_version(document: Mapping[str, JSONValue]) -> None:
 
 __all__ = [
     "AdministratorSettings",
-    "AiProvidersSettings",
+    "AiProviderSettings",
+    "AiProviderSettingsTuple",
+    "AiRouteModelSettings",
+    "AiRouteSettings",
+    "AiRouteTuple",
+    "AiRoutingSettings",
     "AiSettings",
-    "AiTaskRouteSettings",
+    "AiTaskName",
+    "AiTaskRoutingSettings",
     "ApplicationDatabaseSettings",
     "AssistantSettings",
-    "AzureProviderSettings",
+    "AnthropicProviderSettings",
     "BotDatabaseSettings",
     "BotSettings",
     "ConfigurationError",
@@ -1033,9 +1178,9 @@ __all__ = [
     "LoggingSettings",
     "MAX_SHUTDOWN_GRACE_SECONDS",
     "NetworkSettings",
+    "OpenAIProviderSettings",
     "ObservabilitySettings",
-    "ProviderModels",
-    "ProviderName",
+    "ProviderAuthSettings",
     "RuntimeSettings",
     "SCHEMA_VERSION",
     "TelegramSettings",

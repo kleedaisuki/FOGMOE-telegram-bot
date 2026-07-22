@@ -1,208 +1,137 @@
-"""@brief 类型化 AI 设置到 provider route 的映射 / Map typed AI settings to provider routes."""
+"""@brief 类型化 AI 设置到自包含 route 的映射 / Map typed AI settings to self-contained routes."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Literal, TypeAlias, cast
 
-from fogmoe_bot.config import AiSettings, ProviderName
-from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
-from fogmoe_bot.infrastructure.llm.litellm_models import normalize_provider
+from fogmoe_bot.config import (
+    AiRouteModelSettings,
+    AiSettings,
+    AiTaskName,
+    AnthropicProviderSettings,
+    reveal_secret,
+)
+from fogmoe_bot.domain.assistant.routing.models import (
+    ProviderAuth,
+    ProviderRoute,
+    RouteModel,
+)
 
 #: @brief Assistant 支持的推理任务 / Inference tasks supported by the Assistant.
 TaskName: TypeAlias = Literal["chat", "summary", "dreaming", "translation"]
-#: @brief 所有配置 provider 的稳定构造顺序 / Stable construction order for configured providers.
-_SERVICE_NAMES: tuple[ProviderName, ...] = (
-    "openai",
-    "openrouter",
-    "gemini",
-    "azure",
-    "siliconflow",
-    "zai",
-)
-#: @brief 面向日志的稳定 provider 显示名 / Stable provider display names for logs.
-_DISPLAY_NAMES: dict[ProviderName, str] = {
-    "openai": "OpenAI",
-    "openrouter": "OpenRouter",
-    "gemini": "Gemini",
-    "azure": "Azure",
-    "siliconflow": "SiliconFlow",
-    "zai": "Z.ai",
-}
 
 
-def get_provider_order_for_task(
-    settings: AiSettings,
-    task: TaskName | str,
-) -> tuple[ProviderName, ...]:
-    """@brief 读取任务的 provider 优先级 / Read a task's provider priority.
-
-    @param settings 已验证的 AI 设置 / Validated AI settings.
-    @param task chat、summary、dreaming 或 translation / Chat, summary, dreaming, or translation.
-    @return 规范且不可变的 provider 顺序 / Normalized immutable provider order.
-    @raise RuntimeError 任务不受支持时抛出 / Raised when the task is unsupported.
-    """
-
-    return settings.routing.for_task(_normalize_task(task))
-
-
-def provider_model_for_task(
-    settings: AiSettings,
-    provider: ProviderName | str,
-    task: TaskName | str,
-) -> str | None:
-    """@brief 返回 provider 的任务主模型 / Return a provider's primary model for a task.
-
-    @param settings 已验证的 AI 设置 / Validated AI settings.
-    @param provider provider 名称 / Provider name.
-    @param task 推理任务 / Inference task.
-    @return 主模型；未配置时为 None / Primary model, or None when unset.
-    """
-
-    models = settings.providers.for_name(normalize_provider(provider)).models
-    task_name = _normalize_task(task)
-    match task_name:
-        case "chat":
-            return models.chat
-        case "summary":
-            return models.summary
-        case "dreaming":
-            return models.dreaming or models.summary
-        case "translation":
-            return models.translation
-
-
-def provider_fallback_model_for_task(
-    settings: AiSettings,
-    provider: ProviderName | str,
-    task: TaskName | str,
-) -> str | None:
-    """@brief 返回 provider 的同 provider 回退模型 / Return a provider's intra-provider fallback model.
-
-    @param settings 已验证的 AI 设置 / Validated AI settings.
-    @param provider provider 名称 / Provider name.
-    @param task 推理任务 / Inference task.
-    @return 回退模型；该任务无回退时为 None / Fallback model, or None when the task has none.
-    """
-
-    models = settings.providers.for_name(normalize_provider(provider)).models
-    match _normalize_task(task):
-        case "chat":
-            return models.chat_fallback
-        case "summary":
-            return models.summary_fallback
-        case "dreaming" | "translation":
-            return None
-
-
-def get_models_for_task(
-    settings: AiSettings,
-    provider: ProviderName | str,
-    task: TaskName | str,
-) -> tuple[str, ...]:
-    """@brief 返回 provider/task 模型尝试链 / Return a provider/task model attempt chain.
-
-    @param settings 已验证的 AI 设置 / Validated AI settings.
-    @param provider provider 名称 / Provider name.
-    @param task 推理任务 / Inference task.
-    @return 去重、保序的模型链 / Deduplicated model chain preserving order.
-    @note chat 链会在主/回退模型后附加独立 vision 模型；推理层会在含图消息时优先它。/
-        The chat chain appends an independent vision model after primary/fallback models; the
-        inference layer prioritizes it for image-bearing messages.
-    """
-
-    models = settings.providers.for_name(normalize_provider(provider)).models
-    return models.for_task(_normalize_task(task))
-
-
-def completion_kwargs_for_task(
-    settings: AiSettings,
-    provider: ProviderName | str,
-    task: TaskName | str,
-) -> dict[str, object]:
-    """@brief 构造 provider/task 的补充 completion 参数 / Build extra completion arguments for a provider/task.
-
-    @param settings 已验证的 AI 设置 / Validated AI settings.
-    @param provider provider 名称 / Provider name.
-    @param task 推理任务 / Inference task.
-    @return provider-neutral completion 参数 / Provider-neutral completion arguments.
-    """
-
-    provider_name = normalize_provider(provider)
-    task_name = _normalize_task(task)
-    if (
-        provider_name == "gemini"
-        and not settings.providers.gemini.openai_compatible
-        and task_name != "translation"
-    ):
-        return {"reasoning_effort": "high"}
-    return {}
-
-
-def build_provider_profiles(
+def build_provider_routes(
     settings: AiSettings,
     task: TaskName | str = "chat",
-) -> dict[str, ProviderRoute]:
-    """@brief 构造任务特定的 provider routes / Build task-specific provider routes.
+) -> tuple[ProviderRoute, ...]:
+    """@brief 构造一个任务的有序自包含 provider routes / Build ordered self-contained provider routes for one task.
 
     @param settings 已验证的 AI 设置 / Validated AI settings.
     @param task 推理任务 / Inference task.
-    @return provider 到不可变 route 的映射 / Mapping from provider to immutable route.
+    @return 按 operator 配置顺序的 route 元组 / Route tuple in operator-configured order.
+    @raise RuntimeError 任务名称未知时抛出 / Raised when the task name is unknown.
+    @note 同一 route 中的 ``models`` 是同 provider fallback 链；路由之间的顺序是
+        provider/endpoint fallback 链。/
+        ``models`` within a route are a same-provider fallback chain; route order is the
+        provider/endpoint fallback chain.
     """
 
     task_name = _normalize_task(task)
-    return {
-        service_name: ProviderRoute(
-            service_name=service_name,
-            provider_name=service_name,
-            display_name=_DISPLAY_NAMES[service_name],
-            models=get_models_for_task(settings, service_name, task_name),
-            completion_kwargs=completion_kwargs_for_task(
-                settings,
-                service_name,
-                task_name,
-            ),
-            skip_tools=("web_search", "web_browser") if service_name == "zai" else (),
-            safety_block_on_error=service_name == "gemini",
+    task_routes = settings.routing.for_task(task_name).routes
+    return tuple(
+        _to_provider_route(
+            task=task_name,
+            ordinal=ordinal,
+            settings=settings,
+            provider_id=route.provider,
+            models=route.models,
+            supports_tools=route.supports_tools,
+            strict_tools=route.strict_tools,
+            disabled_tools=route.disabled_tools,
+            safety_block_is_terminal=route.safety_block_is_terminal,
+            meta=route.meta,
         )
-        for service_name in _SERVICE_NAMES
-    }
+        for ordinal, route in enumerate(task_routes)
+    )
 
 
-def configured_service_order(
+def _to_provider_route(
+    *,
+    task: TaskName,
+    ordinal: int,
     settings: AiSettings,
-    task: TaskName | str = "chat",
-) -> tuple[ProviderName, ...]:
-    """@brief 返回任务的已配置服务优先级 / Return configured service priority for a task.
+    provider_id: str,
+    models: tuple[AiRouteModelSettings, ...],
+    supports_tools: bool,
+    strict_tools: bool,
+    disabled_tools: tuple[str, ...],
+    safety_block_is_terminal: bool,
+    meta: Mapping[str, str],
+) -> ProviderRoute:
+    """@brief 将一个已验证配置 route 投影为领域 route / Project one validated config route into a domain route.
 
-    @param settings 已验证的 AI 设置 / Validated AI settings.
-    @param task 推理任务 / Inference task.
-    @return 已配置服务的不可变优先级 / Immutable priority of configured services.
+    @param task 归属任务 / Owning task.
+    @param ordinal 任务内配置序号 / Configured ordinal inside the task.
+    @param settings 完整 AI 设置 / Complete AI settings.
+    @param provider_id provider 引用 / Provider reference.
+    @param models 已验证模型列表 / Validated model list.
+    @param supports_tools 是否支持 tools / Whether tools are supported.
+    @param strict_tools 是否严格工具 schema / Whether tool schemas are strict.
+    @param disabled_tools 禁用工具 / Disabled tools.
+    @param safety_block_is_terminal safety block 是否终止 fallback / Whether a safety block terminates fallback.
+    @param meta 用户配置 metadata / Operator-configured metadata.
+    @return 自包含领域 route / Self-contained domain route.
     """
 
-    return get_provider_order_for_task(settings, task)
+    # AiSettings graph validator proves every provider reference and model shape before this
+    # infrastructure projection runs.
+    provider = settings.provider_for(provider_id)
+    return ProviderRoute(
+        route_id=f"{task}:{ordinal}:{provider.id}",
+        provider_id=provider.id,
+        provider_label=provider.label,
+        style=provider.style,
+        endpoint=provider.endpoint,
+        auth=ProviderAuth(
+            api_key=reveal_secret(provider.auth.api_key),
+            header=provider.auth.header,
+            prefix=provider.auth.prefix,
+        ),
+        headers=provider.headers,
+        api_version=(
+            provider.api_version
+            if isinstance(provider, AnthropicProviderSettings)
+            else None
+        ),
+        models=tuple(
+            RouteModel(
+                name=model.name,
+                accepts_images=model.accepts_images,
+            )
+            for model in models
+        ),
+        supports_tools=supports_tools,
+        strict_tools=strict_tools,
+        disabled_tools=disabled_tools,
+        safety_block_is_terminal=safety_block_is_terminal,
+        meta=meta,
+    )
 
 
-def _normalize_task(task: TaskName | str) -> TaskName:
+def _normalize_task(task: TaskName | str) -> AiTaskName:
     """@brief 验证任务名称 / Validate an inference task name.
 
-    @param task 外部传入的任务名称 / Task name supplied by a caller.
-    @return 受支持的规范任务名称 / Supported normalized task name.
+    @param task 外部传入任务名 / Task name supplied by a caller.
+    @return 受支持的规范任务名 / Supported normalized task name.
     @raise RuntimeError 任务不受支持时抛出 / Raised when the task is unsupported.
     """
 
     normalized = task.strip().casefold()
     if normalized not in {"chat", "summary", "dreaming", "translation"}:
         raise RuntimeError(f"Unsupported AI task: {task}")
-    return cast(TaskName, normalized)
+    return cast(AiTaskName, normalized)
 
 
-__all__ = [
-    "TaskName",
-    "build_provider_profiles",
-    "completion_kwargs_for_task",
-    "configured_service_order",
-    "get_models_for_task",
-    "get_provider_order_for_task",
-    "provider_fallback_model_for_task",
-    "provider_model_for_task",
-]
+__all__ = ["TaskName", "build_provider_routes"]

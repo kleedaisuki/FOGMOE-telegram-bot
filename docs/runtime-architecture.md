@@ -236,7 +236,7 @@ durable ingress guards
 | 类别 | 当前路径 | Event-loop 影响 |
 |---|---|---|
 | 同步 `requests` | `application/assistant/tools/{code,http,image,sticker,voice}_tools.py` | 当前通常随整个 agent loop 进入 assistant executor；仍缺少 tool-kind 独立容量，且 application 绑定 transport |
-| 同步 LiteLLM completion | `infrastructure/llm/litellm_client.py`，由 `application/assistant/agent_loop.py` 调用 | 整个 agent turn 占用一条 blocking worker，provider 慢调用会挤压所有同步工具 |
+| 原生异步 LLM completion | `infrastructure/llm/provider_completion.py`，经 `aiohttp` 由 `application/assistant/agent_loop.py` 调用 | 不占 blocking worker；每条 route 使用显式 deadline、共享 session 与 durable fallback |
 | 同步 Binance SDK + `time.sleep` retry | `infrastructure/crypto/biance_api.py` | monitor 主检查被 offload；`bot_monitoring.delayed_check_result()` 却直接在 async function 调 `check_result()`，会阻塞主 loop |
 | sync→async DB bridge | `accounts/service.py`、assistant memory/schedule/user tools、summary、group history 曾调用旧 `run_sync()` bridge | worker 用 `run_coroutine_threadsafe(...).result()` 等待 event loop；形成隐藏的跨线程同步依赖 |
 | sync→async Telegram bridge | `application/telegram/assistant_visible_sender.py` | inference worker 同步等待主 loop 发送消息；投递延迟占住 LLM worker |
@@ -432,7 +432,7 @@ src/
 │       │   ├── outbox_delivery.py
 │       │   ├── monitor_notification.py
 │       │   └── telegram_utils.py
-│       ├── llm/                     # LiteLLM/provider adapters
+│       ├── llm/                     # OpenAI-style / Anthropic-style provider adapters
 │       ├── http/media/              # picture/music HTTP adapters
 │       ├── network/proxy.py         # shared proxy/session policy
 │       ├── media/                   # ArtifactStore/download/transcode adapters
@@ -446,7 +446,7 @@ src/
 
 | 来源 | 可以依赖 | 禁止依赖 |
 |---|---|---|
-| `domain` | stdlib；同 bounded context（限界上下文）内 domain | application、presentation、infrastructure、Telegram、SQLAlchemy、requests、LiteLLM、全局 config |
+| `domain` | stdlib；同 bounded context（限界上下文）内 domain | application、presentation、infrastructure、Telegram、SQLAlchemy、requests/aiohttp、全局 config |
 | `application` | domain；application runtime；port | Telegram `Update/Context`、SQL 文本、SQLAlchemy concrete type、requests/aiohttp concrete client、infrastructure singleton |
 | `presentation` | application command/result；必要的 domain ID；Telegram SDK | repository、SQL、LLM SDK、业务 transaction |
 | `infrastructure` | domain model/port；application port 与边界 DTO；stdlib；外部 SDK | presentation；application use-case service 的具体实现（adapter 不能反向回调 workflow） |
@@ -848,7 +848,7 @@ Telegram `sendMessage` 没有通用 idempotency key。若请求在服务端成�
 | `presentation/telegram/assistant_route.py` | `assistant_primary_route.py` + `assistant_update_models.py` + `assistant_update_parser.py` | route 编排、typed mapping 与 PTB JSON parser 分离；无兼容 facade |
 | `infrastructure/llm/*` | provider adapters/serialization | config translation 在 composition/application boundary |
 | `infrastructure/telegram/telegram_utils.py` | 仅保留 Telegram transport 的 retry/backoff、Markdown fallback、chunk/partial-send 原语 | 每个 fallback 步骤是可独立测试的私有函数；业务文案不进 infrastructure |
-| `infrastructure/network/proxy.py` | 保留为共享 transport policy | requests/aiohttp/LiteLLM 共用代理校验与 session factory；不向 domain/application 暴露 client |
+| `infrastructure/network/proxy.py` | 保留为共享 transport policy | requests/aiohttp 共用代理校验与 session factory；不向 domain/application 暴露 client |
 | ~~`infrastructure/crypto/biance_api.py`~~ | 已替换为 `infrastructure/crypto/binance_monitor.py` | 修正拼写；同步 SDK 仅在 `to_thread` adapter 边界；严格解析返回值 |
 | `infrastructure/logging/bot_logging.py` | 保留为进程日志资源 | 有界 drop-on-full producer；满队列 shutdown sentinel 不丢失并排空 consumer |
 | `infrastructure/moderation/*` | 保留为 domain port adapter | cache 由显式实例和 lifecycle 所有 |
@@ -932,7 +932,7 @@ Telegram `sendMessage` 没有通用 idempotency key。若请求在服务端成�
 ### 13.1 静态结构
 
 - [x] `domain` 对 application/presentation/infrastructure 的项目内导入数为 0。
-- [x] `domain` 第三方 import allow-list 不含 Telegram、SQLAlchemy、requests/aiohttp、LiteLLM、E2B、Pydantic model parsing。
+- [x] `domain` 第三方 import allow-list 不含 Telegram、SQLAlchemy、requests/aiohttp、E2B、Pydantic model parsing。
 - [x] `application` 不 import Telegram `Update/Context/Handler`、SQLAlchemy concrete type、raw HTTP client。
 - [x] `infrastructure` 可实现 application port，但不 import presentation，也不反向调用 application service。
 - [x] presentation 只有 `bot_app.py`、`handler_composition.py`、`moderation_composition.py` 可实例化 infrastructure adapter。

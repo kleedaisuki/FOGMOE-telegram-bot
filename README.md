@@ -19,7 +19,7 @@
 ## ✨ 功能特性
 
 ### 🤖 AI 智能聊天
-- **多模型支持**：通过 LiteLLM 集成 OpenAI、OpenRouter、Google Gemini、Azure OpenAI、智谱 AI
+- **多模型支持**：原生支持 OpenAI-style（含 OpenRouter）与 Anthropic-style 协议；每个 endpoint、认证和模型 fallback 都由配置显式声明
 - **个性化对话**：可爱、中二、傲娇的"雾萌娘"人设
 - **上下文记忆**：支持长期对话记忆和个性化印象
 - **好感度系统**：根据互动调整回复风格
@@ -88,28 +88,57 @@ nano config.json
 [`example.config.json`](example.config.json)；README 只展示最常用的 AI 路由片段，避免成为
 第二份会漂移的配置规范。
 
-AI 调用统一通过 LiteLLM SDK。provider 和模型位于 `ai` 下，路由策略与 provider 凭据分开：
+AI 调用只经过原生 OpenAI-style 或 Anthropic-style HTTP adapter。provider 是配置数据；route
+同时声明模型链、工具能力和可选 `meta`，不会再由代码猜测 provider 或拼接 endpoint：
 
 ```jsonc
 {
   "ai": {
+    "providers": [
+      {
+        "id": "openrouter",
+        "label": "OpenRouter",
+        "style": "openai",
+        "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+        "auth": {"api_key": "替换为真实密钥", "header": "Authorization", "prefix": "Bearer "},
+        "headers": {}
+      }
+    ],
     "routing": {
-      // 按顺序尝试聊天 provider。
       "chat": {
-        "provider_order": ["openai", "openrouter", "siliconflow"]
-      },
-      "summary": { "provider": "openai" },
-      "translation": { "provider": "openai" }
-    },
-    "providers": {
-      "openai": {
-        "api_key": "替换为真实密钥",
-        "models": { "chat": "gpt-4o" }
+        "routes": [{
+          "provider": "openrouter",
+          "models": [{"name": "openai/gpt-4o-mini", "accepts_images": false}],
+          "supports_tools": true,
+          "strict_tools": false,
+          "disabled_tools": [],
+          "safety_block_is_terminal": false,
+          "meta": {}
+        }]
       }
     }
   }
 }
 ```
+
+调用方也可以在 `AssistantTurnRequest(..., meta={...})` 中附带自己的字符串 metadata；
+缺省为 `{}`，会随 durable inference request 一起保存，但不会进入模型提示词。单次请求最多
+16 对，key 最长 64 字符、value 最长 512 字符；OpenAI-style 会发送为 `metadata`。为防止
+调用方伪造运营归因，route 配置里的同名 `meta` 始终覆盖调用方值；Anthropic-style 仅接受
+`user_id`。
+
+如果部署仍在使用旧的 `schema_version: 1` 配置，并且四类活动 AI 路由都只指向
+OpenRouter，可先预检再迁移：
+
+```bash
+uv run python tools/migrate_config_v1_to_v2.py ./config.json --dry-run
+uv run python tools/migrate_config_v1_to_v2.py ./config.json
+```
+
+工具会把 OpenRouter 迁为完整的 OpenAI-style `/chat/completions` endpoint，映射聊天、视觉、
+摘要、dreaming 和翻译模型；只改根 `schema_version` 与 `ai`，原子写入前调用配置 reader
+验证，并创建被 Git 忽略的本地 v1 回滚副本。它不会回显密钥；若有任一活动路由不是
+OpenRouter，会 fail closed，要求先手工完成该 provider 的显式协议配置。
 
 ### 数据库设置
 
@@ -125,6 +154,10 @@ fogmoe-dbctl export-csv --table conversation.conversation_messages --output ./co
 ```
 数据库迁移由 `fogmoe-dbctl` 显式管理，机器人启动时不会自动迁移外部数据库。
 CLI 的分层结构和子命令扩展约定见 [`docs/dbctl.md`](docs/dbctl.md)。
+
+`0068_canonical_assistant_messages` 是不可逆的数据迁移：执行前先备份数据库并停止 bot/worker，
+确认 inference activity、tool effect 与 context-window compaction 均已进入终态。迁移会对这三类
+未排空的工作 fail closed，避免旧 JSON 在新运行时重新投放；完成后再启动新版本。
 
 ### 可观测性
 
@@ -307,11 +340,9 @@ source .venv/bin/activate
 ### 使用的主要技术
 
 - [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) - Telegram Bot API 封装
-- [LiteLLM](https://github.com/BerriAI/litellm) - 统一 AI provider 调用层
-- [OpenAI](https://openai.com/) - AI 服务
-- [Google Gemini](https://ai.google.dev/) - AI 聊天模型
-- [Azure OpenAI](https://azure.microsoft.com/en-us/products/ai-services/openai-service) - AI 服务
-- [智谱 AI](https://open.bigmodel.cn/) - 中文 AI 模型
+- [aiohttp](https://docs.aiohttp.org/) - 原生异步 LLM HTTP 调用层
+- [OpenAI API](https://platform.openai.com/docs/api-reference/chat) - OpenAI-style 协议参考
+- [Anthropic Messages API](https://docs.anthropic.com/en/api/messages) - Anthropic-style 协议参考
 - [PostgreSQL](https://www.postgresql.org/) - 数据库
 
 ### 核心代码分层

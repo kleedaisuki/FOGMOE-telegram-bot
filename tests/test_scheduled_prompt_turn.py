@@ -13,7 +13,9 @@ from fogmoe_bot.application.scheduling.occurrence import (
     prepare_scheduled_occurrence,
 )
 from fogmoe_bot.domain.accounts.plan import AccountPlan
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage
 from fogmoe_bot.domain.conversation.identity import ConversationId, DeliveryStreamId
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.scheduling.assistant_schedule import (
     OneShot,
     ScheduledAssistantTurn,
@@ -200,6 +202,11 @@ def test_private_occurrence_preserves_target_and_private_profile() -> None:
         "scheduled_for": "2026-07-11T11:30:00Z",
     }
     assert "Send the reminder" in str(prepared.message.content["text"])
+    model_message = prepared.message.content["model_message"]
+    assert isinstance(model_message, dict)
+    canonical_message = CanonicalMessage.from_json(model_message)
+    assert canonical_message.role is MessageRole.USER
+    assert canonical_message.text == prepared.message.content["text"]
 
 
 def test_group_occurrence_preserves_topic_but_removes_private_context() -> None:

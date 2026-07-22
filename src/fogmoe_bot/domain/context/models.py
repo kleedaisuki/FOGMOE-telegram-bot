@@ -5,6 +5,7 @@ from datetime import datetime
 from uuid import UUID
 
 from fogmoe_bot.domain.accounts.plan import AccountPlan
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage
 from fogmoe_bot.domain.user_profile.models import UserProfileSnapshot
 
 
@@ -164,14 +165,15 @@ class ConversationScope:
 class RuntimeMessageReplacement:
     """@brief 运行时消息替换 / Runtime message replacement.
 
-    @param persisted_content 持久化历史中的文本内容 / Text content persisted in history.
-    @param runtime_message 发给模型的运行时消息 / Runtime message sent to the model.
-    @note 用于图片等多模态消息：数据库保存可读文本，模型调用可替换为多模态 payload。
-    / Used for multimodal messages: the database stores readable text while model calls may use multimodal payloads.
+    @param persisted_message 持久化历史中的规范消息 / Canonical message persisted in history.
+    @param runtime_message 发给模型的规范消息 / Canonical message sent to the model.
+    @note 用于图片等多模态消息：数据库保存可读文本，模型调用可替换为带 image part 的
+        canonical message。/ Used for multimodal messages: the database stores readable text
+        while model calls may replace it with a canonical message carrying an image part.
     """
 
-    persisted_content: str
-    runtime_message: dict[str, object]
+    persisted_message: CanonicalMessage
+    runtime_message: CanonicalMessage
 
 
 @dataclass(slots=True)
@@ -181,18 +183,20 @@ class ContextState:
     @param context_id ContextState 实体标识 / ContextState entity identifier.
     @param scope 本次回合的会话作用域 / Conversation scope for this turn.
     @param user_state 本次回合可见的用户状态 / User state visible to this turn.
-    @param messages 已提交或当前回合临时的模型消息链 / Committed or in-turn model message chain.
+    @param messages 已提交或当前回合临时的 canonical V2 消息链 /
+        Committed or in-turn canonical V2 message chain.
     @param tool_context 传给 Agent 工具的显式作用域 / Explicit scope passed to Agent tools.
-    @param text_fallback_messages 纯文本模型的降级消息链 / Text-only fallback message chain.
+    @param text_fallback_messages 纯文本模型的 canonical 降级消息链 /
+        Canonical fallback message chain for text-only models.
     @param current_user_text 当前 Turn 未改写的用户文本 / Unrewritten user text for the current Turn.
     """
 
     context_id: UUID
     scope: ConversationScope
     user_state: UserState
-    messages: list[dict[str, object]]
+    messages: list[CanonicalMessage]
     tool_context: dict[str, object]
-    text_fallback_messages: list[dict[str, object]] | None = None
+    text_fallback_messages: list[CanonicalMessage] | None = None
     current_user_text: str | None = None
 
     def __post_init__(self) -> None:
@@ -206,3 +210,15 @@ class ContextState:
             raise ValueError("ContextState context_id cannot be nil")
         if self.current_user_text is not None and not self.current_user_text.strip():
             raise ValueError("ContextState current_user_text cannot be blank")
+        if not all(isinstance(message, CanonicalMessage) for message in self.messages):
+            raise TypeError("ContextState messages must be canonical V2 messages")
+        if self.text_fallback_messages is not None and not all(
+            isinstance(message, CanonicalMessage)
+            for message in self.text_fallback_messages
+        ):
+            raise TypeError(
+                "ContextState text_fallback_messages must be canonical V2 messages"
+            )
+        self.messages = list(self.messages)
+        if self.text_fallback_messages is not None:
+            self.text_fallback_messages = list(self.text_fallback_messages)

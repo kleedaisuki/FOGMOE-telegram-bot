@@ -126,24 +126,6 @@ def create_aiohttp_session(**kwargs: Any) -> aiohttp.ClientSession:
     return aiohttp.ClientSession(proxy=proxy_url, **session_kwargs)
 
 
-def configure_litellm_proxy(litellm_module: Any, settings: NetworkSettings) -> None:
-    """@brief 配置 LiteLLM 使用已注入的统一代理 / Configure LiteLLM to use the injected unified proxy.
-
-    @param litellm_module 已导入的 LiteLLM 模块 / Imported LiteLLM module.
-    @param settings 已解析的出站网络设置 / Parsed outbound network settings.
-    @return None / None.
-    @note 应在启动组合根调用一次；该函数不写环境变量，也不读取配置 / Call
-        once from the startup composition root; this function neither writes environment variables
-        nor reads configuration. SOCKS 走 HTTPX transport，以支持 ``socksio`` /
-        SOCKS uses the HTTPX transport to support ``socksio``.
-    """
-
-    if outbound_proxy_url(settings) is None:
-        return
-    litellm_module.use_aiohttp_transport = False
-    litellm_module.disable_aiohttp_transport = True
-
-
 def _environment_proxy_url() -> str | None:
     """@brief 从已注入的标准环境恢复代理 / Recover a proxy from the injected standard environment.
 

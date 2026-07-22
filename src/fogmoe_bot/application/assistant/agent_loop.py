@@ -1,17 +1,20 @@
 """@brief 可恢复的异步 Agent 状态机 / Resumable asynchronous Agent state machine.
 
-每个 provider response 在执行其 tool calls 前 checkpoint。重启后相同 Turn 从 checkpoint
-恢复，再由 effect receipt 重放每个工具结果，因此不会重新规划已发生的 mutation。/
-Every provider response is checkpointed before its tool calls execute. After restart the same Turn
-resumes from that checkpoint and replays every result through effect receipts, so already-applied
-mutations are never replanned.
+每一个 provider response 都会在工具副作用之前形成 checkpoint。重启后同一 Turn 读取
+该 checkpoint，再通过 effect receipt 重放工具结果，因此不会重规划已经发生的 mutation。
+本模块只使用 canonical message V2；OpenAI 或 Anthropic wire JSON 不会穿过这里。/
+Every provider response is checkpointed before tool effects. On restart, the same Turn reads the
+checkpoint and replays each tool result through effect receipts, so already-applied mutations are
+never replanned. This module uses only canonical message V2; OpenAI or Anthropic wire JSON never
+crosses this boundary.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -21,11 +24,22 @@ from fogmoe_bot.application.memory.ports import (
 )
 from fogmoe_bot.application.memory.rendering import compose_model_messages
 from fogmoe_bot.application.observability.telemetry import Telemetry
-from fogmoe_bot.domain.context import ContextState
-from fogmoe_bot.domain.conversation.payloads import (
-    JsonObject,
-    JsonValue,
+from fogmoe_bot.domain.assistant.messages import (
+    CanonicalMessage,
+    FrozenJsonValue,
+    TextPart,
+    ToolCallPart,
+    ToolResultPart,
 )
+from fogmoe_bot.domain.assistant.request_metadata import (
+    RequestMeta,
+    normalize_request_meta,
+    request_meta_to_json,
+)
+from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
+from fogmoe_bot.domain.context import ContextState
+from fogmoe_bot.domain.conversation.message import MessageRole
+from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
 from fogmoe_bot.domain.memory.models import (
     MAX_WORKING_MEMORY_MESSAGES,
     GroupMemoryScope,
@@ -60,42 +74,65 @@ class AgentResponse:
     @param text 最终文本 / Final text.
     @param events receipt-backed 事件 / Receipt-backed events.
     @param context_state 已更新 attempt-local 上下文 / Updated attempt-local context.
-    @param history_messages 可进入未来 Conversation 的新增消息 / New messages allowed into future Conversation context.
+    @param history_messages 可进入未来 Conversation 的新增 canonical 消息 /
+        New canonical messages allowed into future Conversation context.
     """
 
     text: str
     events: Sequence[RuntimeEvent]
     context_state: ContextState | None = None
-    history_messages: Sequence[JsonObject] = ()
+    history_messages: Sequence[CanonicalMessage] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class AgentExecutionConfig:
-    """@brief Agent 状态机配置 / Agent-state-machine configuration."""
+    """@brief Agent 状态机的单次 route/model 配置 / One route/model configuration for the Agent state machine.
 
-    provider: str
+    @param route 自包含的 provider route / Self-contained provider route.
+    @param model route 内选中的模型 / Model selected inside the route.
+    @param tool_choice provider-neutral 工具选择 / Provider-neutral tool choice.
+    @param max_tokens 输出 token 上限 / Output-token limit.
+    @param max_iterations 允许的有工具模型 step 数 / Number of tool-enabled model steps allowed.
+    @param skip_tools 本 route 禁用的目录工具 / Catalog tools disabled by this route.
+    @param allow_tools 本 Turn 是否暴露工具 / Whether tools are exposed in this Turn.
+    @param timeout_seconds 单次 completion 总 deadline / Total deadline for one completion.
+    @param request_meta 调用方明确附加的 metadata / Explicit caller metadata.
+    @param working_memory_limit 每次检索的消息数上限 / Max retrieved messages per query.
+    @param working_memory_max_tokens 注入 Memory token 上限 / Working-memory injection token ceiling.
+    @param working_memory_enabled 是否注入 WorkingMemory / Whether WorkingMemory is injected.
+    """
+
+    route: ProviderRoute
     model: str
-    provider_name: str = "AI"
     tool_choice: str | JsonObject | None = "auto"
     max_tokens: int = 4096
     max_iterations: int = 10
     skip_tools: frozenset[str] = field(default_factory=frozenset)
     allow_tools: bool = True
-    completion_options: Mapping[str, JsonValue] = field(default_factory=dict)
+    timeout_seconds: float | None = None
+    request_meta: RequestMeta = field(default_factory=lambda: normalize_request_meta({}))
     working_memory_limit: int = 64
     working_memory_max_tokens: int = 16_384
     working_memory_enabled: bool = True
 
     def __post_init__(self) -> None:
-        """@brief 校验显式容量 / Validate explicit bounds.
+        """@brief 校验显式容量、route 与请求边界 / Validate explicit bounds, route, and request boundary.
 
         @return None / None.
         """
 
-        if not self.provider.strip() or not self.model.strip():
-            raise ValueError("provider and model cannot be empty")
+        if not isinstance(self.route, ProviderRoute):
+            raise TypeError("route must be ProviderRoute")
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ValueError("model cannot be empty")
         if self.max_tokens < 1 or self.max_iterations < 1:
             raise ValueError("max_tokens and max_iterations must be positive")
+        if self.timeout_seconds is not None and (
+            isinstance(self.timeout_seconds, bool)
+            or not math.isfinite(self.timeout_seconds)
+            or self.timeout_seconds <= 0.0
+        ):
+            raise ValueError("timeout_seconds must be a positive finite number")
         if not 1 <= self.working_memory_limit <= MAX_WORKING_MEMORY_MESSAGES:
             raise ValueError(
                 "working_memory_limit must be between 1 and "
@@ -103,17 +140,29 @@ class AgentExecutionConfig:
             )
         if self.working_memory_max_tokens < 256:
             raise ValueError("working_memory_max_tokens must be at least 256")
+        object.__setattr__(self, "model", self.model.strip())
+        object.__setattr__(self, "request_meta", normalize_request_meta(self.request_meta))
 
 
 @dataclass(slots=True)
 class AgentExecutionState:
-    """@brief 单 attempt 的可重建执行状态 / Rebuildable execution state for one attempt."""
+    """@brief 单 attempt 的可重建执行状态 / Rebuildable execution state for one attempt.
+
+    @param context 当前 attempt-local ContextState / Current attempt-local ContextState.
+    @param config 当前 route/model 配置 / Current route/model configuration.
+    @param base_messages attempt 开始前的 canonical 消息 / Canonical messages at attempt start.
+    @param messages 含瞬时工具交换的当前模型历史 / Current model history including transient tool exchanges.
+    @param persistable_messages 可进入下一轮 Conversation 的新增消息 /
+        New messages eligible for the next Conversation context.
+    @param events 已形成的 durable runtime events / Durable runtime events already formed.
+    @param step 当前 provider step 序号 / Current provider-step ordinal.
+    """
 
     context: ContextState
     config: AgentExecutionConfig
-    base_messages: tuple[JsonObject, ...]
-    messages: list[JsonObject]
-    persistable_messages: list[JsonObject] = field(default_factory=list)
+    base_messages: tuple[CanonicalMessage, ...]
+    messages: list[CanonicalMessage]
+    persistable_messages: list[CanonicalMessage] = field(default_factory=list)
     events: list[RuntimeEvent] = field(default_factory=list)
     step: int = 0
 
@@ -130,7 +179,7 @@ class AgentExecutionState:
         @return 新状态 / New state.
         """
 
-        messages = tuple(_message(value) for value in context.messages)
+        messages = tuple(context.messages)
         return cls(
             context=context,
             config=config,
@@ -156,7 +205,8 @@ class AgentLoop:
         @param runtime 无状态工具协调器 / Stateless tool coordinator.
         @param completion 异步 provider port / Async provider port.
         @param checkpoints durable step store / Durable step store.
-        @param memory 每次模型 Query fresh retrieve 的 WorkingMemory / WorkingMemory freshly retrieved for each model query.
+        @param memory 每次模型 Query fresh retrieve 的 WorkingMemory /
+            WorkingMemory freshly retrieved for each model query.
         @param telemetry 进程 typed telemetry / Process typed telemetry.
         @return None / None.
         """
@@ -179,7 +229,8 @@ class AgentLoop:
 
         @param context attempt-local 规范上下文 / Attempt-local canonical context.
         @param config route 配置 / Route configuration.
-        @param tool_context durable 工具身份；禁用工具时可省略 / Durable tool identity; optional when tools are disabled.
+        @param tool_context durable 工具身份；禁用工具时可省略 /
+            Durable tool identity; optional when tools are disabled.
         @param state 测试用可选状态 / Optional state for tests.
         @return 最终响应 / Final response.
         """
@@ -193,15 +244,15 @@ class AgentLoop:
             raise ValueError("tool_context is required when WorkingMemory is enabled")
         while current.step < config.max_iterations:
             completion = await self._complete_step(
-                current, tool_context=tool_context, expose_tools=config.allow_tools
+                current,
+                tool_context=tool_context,
+                expose_tools=config.allow_tools,
             )
             if not completion.tool_calls:
                 return _final_response(current, completion)
             if not config.allow_tools:
-                raise ValueError(
-                    "provider returned tool calls while tools were disabled"
-                )
-            current.messages.append(dict(completion.message))
+                raise ValueError("provider returned tool calls while tools were disabled")
+            current.messages.append(completion.message)
             await self._execute_calls(
                 current,
                 completion=completion,
@@ -210,8 +261,12 @@ class AgentLoop:
             current.step += 1
 
         completion = await self._complete_step(
-            current, tool_context=tool_context, expose_tools=False
+            current,
+            tool_context=tool_context,
+            expose_tools=False,
         )
+        if completion.tool_calls:
+            raise ValueError("provider returned tool calls after the tool iteration limit")
         return _final_response(current, completion)
 
     async def _complete_step(
@@ -229,7 +284,7 @@ class AgentLoop:
         @return 规范完成 / Canonical completion.
         """
 
-        route_key = f"{state.config.provider}:{state.config.model}"
+        route_key = _route_key(state.config)
         allowed_tools = None if tool_context is None else tool_context.allowed_tools
         request_hash = _completion_request_hash(
             state,
@@ -237,15 +292,16 @@ class AgentLoop:
             allowed_tools=allowed_tools,
         )
         if tool_context is not None:
-            existing = await self._checkpoints.load_step(
-                tool_context.turn_id, state.step
-            )
+            existing = await self._checkpoints.load_step(tool_context.turn_id, state.step)
             if existing is not None:
                 _validate_checkpoint(
-                    existing, request_hash=request_hash, route_key=route_key
+                    existing,
+                    request_hash=request_hash,
+                    route_key=route_key,
                 )
                 return existing.completion
-        model_messages: tuple[JsonObject, ...] = tuple(state.messages)
+
+        model_messages: tuple[CanonicalMessage, ...] = tuple(state.messages)
         if state.config.working_memory_enabled:
             memory_context = cast(ToolExecutionContext, tool_context)
             with self._telemetry.span(
@@ -266,16 +322,19 @@ class AgentLoop:
                     )
                 )
                 memory_span.set_attribute(
-                    "memory.result.count", len(working_memory.messages)
+                    "memory.result.count",
+                    len(working_memory.messages),
                 )
                 memory_span.set_attribute(
-                    "memory.availability", working_memory.availability.value
+                    "memory.availability",
+                    working_memory.availability.value,
                 )
             model_messages = compose_model_messages(
                 state.messages,
                 working_memory,
                 maximum_tokens=state.config.working_memory_max_tokens,
             )
+
         definitions = (
             tuple(
                 definition
@@ -288,13 +347,14 @@ class AgentLoop:
         )
         try:
             completion = await self._completion.complete(
-                provider=state.config.provider,
+                route=state.config.route,
                 model=state.config.model,
                 messages=model_messages,
                 tools=definitions,
                 tool_choice=(state.config.tool_choice if expose_tools else None),
                 max_tokens=state.config.max_tokens,
-                request_options=state.config.completion_options,
+                timeout_seconds=state.config.timeout_seconds,
+                request_meta=state.config.request_meta,
             )
         except Exception as error:
             if state.step > 0 or state.events:
@@ -333,7 +393,7 @@ class AgentLoop:
         results: list[ToolRuntimeResult] = []
         for ordinal, call in enumerate(completion.tool_calls):
             if call.name in state.config.skip_tools:
-                continue
+                raise ValueError(f"provider called a route-disabled tool: {call.name}")
             with self._telemetry.span(
                 "agent.tool.execute",
                 kind=SpanKind.INTERNAL,
@@ -351,7 +411,7 @@ class AgentLoop:
                         ordinal=ordinal,
                         provider_call_id=call.provider_call_id,
                         tool_name=call.name,
-                        raw_arguments=_parse_arguments(call.arguments),
+                        raw_arguments=call.arguments,
                     )
                 except Exception:
                     self._telemetry.counter(
@@ -372,7 +432,10 @@ class AgentLoop:
                     },
                 )
             self._append_call(
-                state, completion=completion, result=result, first=ordinal == 0
+                state,
+                completion=completion,
+                result=result,
+                first=ordinal == 0,
             )
             results.append(result)
         _append_persistable_tool_exchange(
@@ -389,7 +452,7 @@ class AgentLoop:
         result: ToolRuntimeResult,
         first: bool,
     ) -> None:
-        """@brief 追加事件与 provider tool message / Append events and a provider tool message.
+        """@brief 追加事件与 canonical tool message / Append events and a canonical tool message.
 
         @param state 当前状态 / Current state.
         @param completion 调用来源消息 / Source message.
@@ -406,7 +469,7 @@ class AgentLoop:
             "invocation_id": result.invocation_id,
         }
         if first:
-            call_event["assistant_message"] = dict(completion.message)
+            call_event["assistant_message"] = completion.message.to_json()
         if result.validation_error is not None:
             call_event["validation_error"] = result.validation_error
         ephemeral = result.result_residency is ToolResultResidency.AGENT_TURN
@@ -414,14 +477,17 @@ class AgentLoop:
             call_event["ephemeral"] = True
         state.events.append(call_event)
         state.messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": result.provider_call_id,
-                "name": result.name,
-                "content": json.dumps(
-                    result.public_result, ensure_ascii=False, separators=(",", ":")
+            CanonicalMessage(
+                MessageRole.TOOL,
+                (
+                    ToolResultPart(
+                        result.provider_call_id,
+                        result.name,
+                        cast(FrozenJsonValue, result.public_result),
+                        is_error=result.validation_error is not None,
+                    ),
                 ),
-            }
+            )
         )
         result_event: ToolResultEvent = {
             "type": "tool_result",
@@ -452,21 +518,63 @@ def _completion_request_hash(
     @return SHA-256 / SHA-256.
     """
 
-    payload = {
-        "messages": state.messages,
-        "provider": state.config.provider,
+    payload: JsonObject = {
+        "messages": [message.to_json() for message in state.messages],
+        "route": _route_fingerprint(state.config.route),
         "model": state.config.model,
         "max_tokens": state.config.max_tokens,
         "tool_choice": state.config.tool_choice if expose_tools else None,
         "expose_tools": expose_tools,
-        "skip_tools": sorted(state.config.skip_tools),
-        "allowed_tools": None if allowed_tools is None else sorted(allowed_tools),
-        "options": dict(state.config.completion_options),
+        "skip_tools": cast(list[JsonValue], sorted(state.config.skip_tools)),
+        "allowed_tools": (
+            None
+            if allowed_tools is None
+            else cast(list[JsonValue], sorted(allowed_tools))
+        ),
+        "timeout_seconds": state.config.timeout_seconds,
+        "request_meta": cast(
+            JsonObject,
+            request_meta_to_json(state.config.request_meta),
+        ),
     }
     canonical = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _route_fingerprint(route: ProviderRoute) -> JsonObject:
+    """@brief 生成不含认证秘密的 route 摘要输入 / Build a route digest input without auth secrets.
+
+    @param route 自包含 provider route / Self-contained provider route.
+    @return 可稳定 JSON 序列化的 route 投影 / Stably JSON-serializable route projection.
+    """
+
+    return {
+        "route_id": route.route_id,
+        "provider_id": route.provider_id,
+        "style": route.style,
+        "endpoint": route.endpoint,
+        "headers": dict(route.headers),
+        "api_version": route.api_version,
+        "supports_tools": route.supports_tools,
+        "strict_tools": route.strict_tools,
+        "disabled_tools": list(route.disabled_tools),
+        "meta": dict(route.meta),
+    }
+
+
+def _route_key(config: AgentExecutionConfig) -> str:
+    """@brief 生成 checkpoint 的稳定 route/model 键 / Build the stable route/model key for a checkpoint.
+
+    @param config Agent route/model 配置 / Agent route/model configuration.
+    @return route/model 键 / Route/model key.
+    """
+
+    return f"{config.route.route_id}:{config.model}"
 
 
 def _validate_checkpoint(
@@ -489,54 +597,23 @@ def _validate_checkpoint(
         )
 
 
-def _parse_arguments(value: JsonValue) -> object:
-    """@brief 解码 provider arguments / Decode provider arguments.
-
-    @param value JSON 字符串或树 / JSON string or tree.
-    @return 参数对象 / Argument object.
-    """
-
-    if isinstance(value, str):
-        try:
-            decoded: object = json.loads(value or "{}")
-        except json.JSONDecodeError:
-            return {}
-        return decoded
-    return value
-
-
-def _message(value: Mapping[str, object]) -> JsonObject:
-    """@brief 校验 ContextState message 为 JSON / Validate a ContextState message as JSON.
-
-    @param value 原始消息 / Raw message.
-    @return 独立 JSON 对象 / Independent JSON object.
-    """
-
-    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
-    decoded = json.loads(encoded)
-    if not isinstance(decoded, dict):
-        raise TypeError("Assistant message must be a JSON object")
-    return cast(JsonObject, decoded)
-
-
 def _final_response(
-    state: AgentExecutionState, completion: AssistantCompletion
+    state: AgentExecutionState,
+    completion: AssistantCompletion,
 ) -> AgentResponse:
-    """@brief 提交最终 Assistant message / Commit the final Assistant message.
+    """@brief 提交最终 canonical Assistant message / Commit the final canonical Assistant message.
 
-    @param state 当前状态 / Current state.
+    @param state 当前执行状态 / Current execution state.
     @param completion 无 tool calls 的完成 / Completion without tool calls.
     @return Agent response / Agent response.
     """
 
-    final_message = dict(completion.message)
-    state.messages.append(final_message)
-    state.persistable_messages.append(final_message)
-    context_messages = [
+    state.messages.append(completion.message)
+    state.persistable_messages.append(completion.message)
+    state.context.messages = [
         *state.base_messages,
         *state.persistable_messages,
     ]
-    state.context.messages = cast(list[dict[str, object]], context_messages)
     return AgentResponse(
         completion.content,
         tuple(state.events),
@@ -573,22 +650,8 @@ def _current_query(context: ContextState) -> str:
     if context.current_user_text is not None:
         return context.current_user_text.strip()
     for message in reversed(context.messages):
-        if message.get("role") != "user":
-            continue
-        content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-        if isinstance(content, list):
-            parts = [
-                str(part.get("text")).strip()
-                for part in content
-                if isinstance(part, Mapping)
-                and part.get("type") == "text"
-                and isinstance(part.get("text"), str)
-                and str(part.get("text")).strip()
-            ]
-            if parts:
-                return "\n".join(parts)
+        if message.role is MessageRole.USER and message.text.strip():
+            return message.text.strip()
     raise ValueError("ContextState has no current user query for WorkingMemory")
 
 
@@ -612,34 +675,36 @@ def _append_persistable_tool_exchange(
         if result.result_residency is ToolResultResidency.CONVERSATION
     )
     persistent_ids = {result.provider_call_id for result in persistent}
-    message = dict(completion.message)
-    calls = message.get("tool_calls")
-    if isinstance(calls, list):
-        persistent_calls: list[JsonValue] = [
-            cast(JsonValue, dict(call))
-            for call in calls
-            if isinstance(call, Mapping) and call.get("id") in persistent_ids
-        ]
-        if persistent_calls:
-            message["tool_calls"] = persistent_calls
-        else:
-            message.pop("tool_calls", None)
-    content = message.get("content")
-    has_content = isinstance(content, str) and bool(content.strip())
-    if persistent or has_content:
-        state.persistable_messages.append(message)
+    retained_parts = tuple(
+        part
+        for part in completion.message.parts
+        if (
+            (isinstance(part, TextPart) and part.text.strip())
+            or (isinstance(part, ToolCallPart) and part.call_id in persistent_ids)
+        )
+    )
+    if retained_parts:
+        state.persistable_messages.append(
+            CanonicalMessage(
+                MessageRole.ASSISTANT,
+                retained_parts,
+                completion.message.policy,
+                completion.message.meta,
+            )
+        )
     for result in persistent:
         state.persistable_messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": result.provider_call_id,
-                "name": result.name,
-                "content": json.dumps(
-                    result.public_result,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
+            CanonicalMessage(
+                MessageRole.TOOL,
+                (
+                    ToolResultPart(
+                        result.provider_call_id,
+                        result.name,
+                        cast(FrozenJsonValue, result.public_result),
+                        is_error=result.validation_error is not None,
+                    ),
                 ),
-            }
+            )
         )
 
 

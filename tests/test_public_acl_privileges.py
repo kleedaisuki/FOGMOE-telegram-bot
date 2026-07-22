@@ -120,11 +120,11 @@ def test_grant_convergence_revokes_public_and_restores_only_application_types() 
 
 
 def test_schema_snapshot_records_the_public_boundary_head() -> None:
-    """@brief snapshot 记录 0067 head 与完整 ACL 证明 / The snapshot records the 0067 head and complete ACL proof."""
+    """@brief snapshot 记录当前 head 与完整 ACL 证明 / The snapshot records the current head and complete ACL proof."""
 
     snapshot = _SNAPSHOT_PATH.read_text(encoding="utf-8")
 
-    assert "-- Alembic head: 0067_close_schema_creator_and_default_gaps" in snapshot
+    assert "-- Alembic head: 0068_canonical_assistant_messages" in snapshot
     assert "REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC" in snapshot
     assert "REVOKE ALL PRIVILEGES ON TYPES FROM PUBLIC" in snapshot
     assert "fogmoe_snapshot_public_acl" in snapshot

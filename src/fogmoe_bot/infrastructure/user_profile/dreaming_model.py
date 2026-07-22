@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping, Sequence
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
@@ -16,8 +15,10 @@ from fogmoe_bot.application.user_profile.ports import (
     DreamResult,
     RetryableDreamingError,
 )
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage, text_message
+from fogmoe_bot.domain.assistant.request_metadata import normalize_request_meta
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
-from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.observability.signals import SpanKind
 from fogmoe_bot.domain.user_profile.models import (
     DeleteProfileClaim,
@@ -105,8 +106,7 @@ class ProviderDreamingModel:
         self,
         *,
         completion: AssistantCompletionPort,
-        service_order: Sequence[str],
-        profiles: Mapping[str, ProviderRoute],
+        routes: tuple[ProviderRoute, ...],
         request_timeout_seconds: float,
         telemetry: Telemetry,
         max_output_tokens: int = 3_000,
@@ -114,8 +114,8 @@ class ProviderDreamingModel:
         """@brief 注入 completion、routes 与独立预算 / Inject completion, routes, and independent budgets.
 
         @param completion 无工具 completion port / Tool-free completion port.
-        @param service_order Dreaming route 优先级 / Dreaming route priority.
-        @param profiles route profiles / Route profiles.
+        @param routes 按 fallback 优先级排列的自包含 Dreaming routes /
+            Self-contained Dreaming routes in fallback priority order.
         @param request_timeout_seconds 单模型 timeout / Per-model timeout.
         @param telemetry typed telemetry / Typed telemetry.
         @param max_output_tokens 最大 JSON 输出 / Maximum JSON output.
@@ -127,8 +127,7 @@ class ProviderDreamingModel:
         if not 256 <= max_output_tokens <= 8_192:
             raise ValueError("Dreaming output tokens must be between 256 and 8192")
         self._completion = completion
-        self._service_order = tuple(service_order)
-        self._profiles = dict(profiles)
+        self._routes = routes
         self._request_timeout_seconds = request_timeout_seconds
         self._telemetry = telemetry
         self._max_output_tokens = max_output_tokens
@@ -141,50 +140,37 @@ class ProviderDreamingModel:
         @raise RetryableDreamingError 所有 routes 失败 / All routes failed.
         """
 
-        messages: tuple[JsonObject, ...] = (
-            {"role": "system", "content": _DREAMING_SYSTEM_PROMPT},
-            {"role": "user", "content": _render_claim(claim)},
+        messages: tuple[CanonicalMessage, ...] = (
+            text_message(MessageRole.SYSTEM, _DREAMING_SYSTEM_PROMPT),
+            text_message(MessageRole.USER, _render_claim(claim)),
         )
         last_error: Exception | None = None
-        for service_name in self._service_order:
-            route = self._profiles.get(service_name)
-            if route is None:
-                continue
+        for route in self._routes:
             for model in route.models:
-                if not model:
-                    continue
-                options = {
-                    key: cast(JsonValue, value)
-                    for key, value in route.completion_kwargs.items()
-                }
-                options["timeout"] = self._request_timeout_seconds
-                options["response_format"] = cast(
-                    JsonValue,
-                    {"type": "json_object"},
-                )
                 try:
                     with self._telemetry.span(
                         "user_profile.model.request",
                         kind=SpanKind.CLIENT,
                         attributes={
-                            "gen_ai.provider.name": route.provider_name,
-                            "gen_ai.request.model": model,
+                            "gen_ai.provider.name": route.provider_id,
+                            "gen_ai.request.model": model.name,
                             "user_profile.evidence.count": len(claim.evidence),
                         },
                     ):
                         completion = await self._completion.complete(
-                            provider=route.provider_name,
-                            model=model,
+                            route=route,
+                            model=model.name,
                             messages=messages,
                             tools=(),
                             tool_choice=None,
                             max_tokens=self._max_output_tokens,
-                            request_options=options,
+                            timeout_seconds=self._request_timeout_seconds,
+                            request_meta=normalize_request_meta({}),
                         )
                     envelope = _parse_envelope(completion.content)
                     return DreamResult(
                         patch=_to_domain_patch(envelope),
-                        route_key=f"{route.service_name}:{model}",
+                        route_key=f"{route.route_id}:{model.name}",
                         prompt_version=DREAMING_PROMPT_VERSION,
                     )
                 except asyncio.CancelledError:

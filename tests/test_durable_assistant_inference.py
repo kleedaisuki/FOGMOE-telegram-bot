@@ -11,7 +11,12 @@ from fogmoe_bot.application.assistant.durable_inference import (
     TRANSLATION_SYSTEM_PROMPT,
     DurableAssistantInferenceAdapter,
 )
-from fogmoe_bot.application.assistant.errors import AssistantInferenceUnavailableError
+from fogmoe_bot.application.assistant.errors import (
+    AssistantInferenceUnavailableError,
+    ProviderContractError,
+    ProviderFailure,
+    ProviderFailureKind,
+)
 from fogmoe_bot.application.assistant.inference_command import (
     DurableAssistantInferenceCommand,
     DurableAssistantScope,
@@ -36,6 +41,13 @@ from fogmoe_bot.application.conversation.inference_worker import (
     RetryableInferenceError,
 )
 from fogmoe_bot.domain.accounts.plan import AccountPlan
+from fogmoe_bot.domain.assistant.messages import (
+    CanonicalMessage,
+    ToolCallPart,
+    ToolResultPart,
+    text_message,
+)
+from fogmoe_bot.domain.assistant.request_metadata import RequestMeta
 from fogmoe_bot.domain.context import ContextState
 from fogmoe_bot.domain.context_window.budget import TokenCount
 from fogmoe_bot.domain.context_window.compaction import CompactionId
@@ -169,6 +181,20 @@ def _message(
     @return 规范消息 / Canonical message.
     """
 
+    normalized_content = dict(content)
+    if (
+        "history_messages" not in normalized_content
+        and "model_message" not in normalized_content
+    ):
+        text = normalized_content.get("text")
+        if not isinstance(text, str):
+            raise TypeError("test conversation message requires text")
+        normalized_content["model_message"] = text_message(
+            role,
+            text,
+            include_in_context=normalized_content.get("exclude_from_assistant")
+            is not True,
+        ).to_json()
     return ConversationMessage(
         draft=MessageDraft(
             message_id=ConversationMessageId.for_turn(
@@ -179,7 +205,7 @@ def _message(
             turn_id=turn_id,
             source_update_id=(UpdateId(sequence) if role is MessageRole.USER else None),
             role=role,
-            content=content,
+            content=normalized_content,
             idempotency_key=f"test:{sequence}:{role.value}",
             created_at=NOW + timedelta(seconds=sequence),
         ),
@@ -260,38 +286,39 @@ class _Inference:
         *,
         allow_tools: bool = True,
         request_timeout: float | None = None,
+        request_meta: RequestMeta | None = None,
         tool_context: object | None = None,
     ) -> AgentResponse:
-        """@brief 记录纯推理调用 / Record the pure inference call."""
+        """@brief 记录纯推理调用 / Record the pure inference call.
+
+        @param context_state 本回合 canonical 上下文 / Canonical context for this turn.
+        @param allow_tools 是否允许工具 / Whether tools are enabled.
+        @param request_timeout 单调用超时 / Per-call timeout.
+        @param request_meta 显式请求 metadata / Explicit request metadata.
+        @param tool_context 工具授权上下文 / Tool authorization context.
+        @return 固定 Agent 响应 / Fixed Agent response.
+        """
 
         self.context = context_state
         self.kwargs = {
             "allow_tools": allow_tools,
             "request_timeout": request_timeout,
+            "request_meta": dict(request_meta or {}),
             "tool_context": tool_context,
         }
         if isinstance(self.result, Exception):
             raise self.result
         context_state.messages.extend(
             [
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "call-1",
-                            "type": "function",
-                            "function": {"name": "search", "arguments": "{}"},
-                        }
-                    ],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": "call-1",
-                    "name": "search",
-                    "content": '{"answer":42}',
-                },
-                {"role": "assistant", "content": self.result.text},
+                CanonicalMessage(
+                    MessageRole.ASSISTANT,
+                    (ToolCallPart("call-1", "search", {}),),
+                ),
+                CanonicalMessage(
+                    MessageRole.TOOL,
+                    (ToolResultPart("call-1", "search", {"answer": 42}),),
+                ),
+                text_message(MessageRole.ASSISTANT, self.result.text),
             ]
         )
         return AgentResponse(
@@ -395,19 +422,19 @@ def test_adapter_reads_cutoff_history_and_returns_ordered_durable_outbox_intents
         assert history.calls[0].include_history is True
         assert inference.context is not None
         system_message = inference.context.messages[0]
-        assert system_message["role"] == "system"
-        assert isinstance(system_message["content"], str)
+        assert system_message.role is MessageRole.SYSTEM
         assert (
             '<user_identity trust="trusted_platform_metadata" display_name="Klee" '
             'username="klee" user_id="7" />'
-        ) in system_message["content"]
+        ) in system_message.text
         assert inference.context.messages[1:3] == [
-            {"role": "assistant", "content": "previous"},
-            {"role": "user", "content": "hello"},
+            text_message(MessageRole.ASSISTANT, "previous"),
+            text_message(MessageRole.USER, "hello"),
         ]
         assert inference.kwargs == {
             "allow_tools": True,
             "request_timeout": 20.0,
+            "request_meta": {},
             "tool_context": inference.kwargs["tool_context"],
         }
         assert inference.kwargs["tool_context"] is not None
@@ -505,12 +532,13 @@ def test_translation_uses_dedicated_prompt_without_tools_and_marks_output_exclud
         assert history.calls[0].include_history is False
         assert translation_inference.context is not None
         assert translation_inference.context.messages[:2] == [
-            {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
-            {"role": "user", "content": "你好"},
+            text_message(MessageRole.SYSTEM, TRANSLATION_SYSTEM_PROMPT),
+            text_message(MessageRole.USER, "你好"),
         ]
         assert translation_inference.kwargs == {
             "allow_tools": False,
             "request_timeout": 20.0,
+            "request_meta": {},
             "tool_context": None,
         }
         assert result.assistant_content["task_kind"] == "translation"
@@ -609,7 +637,11 @@ def test_future_assistant_projection_ignores_translation_input_and_output() -> N
                         "text": "secret output",
                         "exclude_from_assistant": True,
                         "history_messages": [
-                            {"role": "assistant", "content": "secret output"}
+                            text_message(
+                                MessageRole.ASSISTANT,
+                                "secret output",
+                                include_in_context=False,
+                            ).to_json()
                         ],
                     },
                 ),
@@ -627,8 +659,8 @@ def test_future_assistant_projection_ignores_translation_input_and_output() -> N
 
         assert inference.context is not None
         assert inference.context.messages[1:3] == [
-            {"role": "assistant", "content": "ordinary"},
-            {"role": "user", "content": "current"},
+            text_message(MessageRole.ASSISTANT, "ordinary"),
+            text_message(MessageRole.USER, "current"),
         ]
         assert "secret" not in str(inference.context.messages)
 
@@ -807,3 +839,107 @@ def test_provider_exhaustion_maps_to_worker_taxonomy(
         captured.value, (RetryableInferenceError, PermanentInferenceError)
     )
     assert captured.value.category is category
+
+
+@pytest.mark.parametrize(
+    ("cause", "expected_type", "category", "retry_after"),
+    (
+        (
+            ProviderFailure(
+                kind=ProviderFailureKind.REJECTED,
+                status=401,
+                message="LLM provider HTTP 401",
+            ),
+            PermanentInferenceError,
+            InferenceErrorCategory.AUTHENTICATION,
+            None,
+        ),
+        (
+            ProviderFailure(
+                kind=ProviderFailureKind.REJECTED,
+                status=403,
+                message="LLM provider HTTP 403",
+            ),
+            PermanentInferenceError,
+            InferenceErrorCategory.PERMISSION,
+            None,
+        ),
+        (
+            ProviderFailure(
+                kind=ProviderFailureKind.RATE_LIMITED,
+                status=429,
+                retry_after=timedelta(seconds=17),
+                message="LLM provider HTTP 429",
+            ),
+            RetryableInferenceError,
+            InferenceErrorCategory.RATE_LIMIT,
+            timedelta(seconds=17),
+        ),
+        (
+            ProviderFailure(
+                kind=ProviderFailureKind.SERVER,
+                status=503,
+                message="LLM provider HTTP 503",
+            ),
+            RetryableInferenceError,
+            InferenceErrorCategory.PROVIDER_UNAVAILABLE,
+            None,
+        ),
+        (
+            ProviderFailure(
+                kind=ProviderFailureKind.TIMEOUT,
+                message="LLM provider HTTP 504",
+            ),
+            RetryableInferenceError,
+            InferenceErrorCategory.TIMEOUT,
+            None,
+        ),
+        (
+            ProviderFailure(
+                kind=ProviderFailureKind.TRANSPORT,
+                message="LLM provider transport failed: ClientConnectorError",
+            ),
+            RetryableInferenceError,
+            InferenceErrorCategory.NETWORK,
+            None,
+        ),
+        (
+            ProviderContractError("LLM request violated the provider contract"),
+            PermanentInferenceError,
+            InferenceErrorCategory.INVALID_REQUEST,
+            None,
+        ),
+    ),
+)
+def test_native_provider_failures_map_to_worker_taxonomy(
+    cause: ProviderFailure,
+    expected_type: type[Exception],
+    category: InferenceErrorCategory,
+    retry_after: timedelta | None,
+) -> None:
+    """@brief 原生 provider failure 按 kind/status 映射 durable taxonomy / Native provider failures map by kind/status into durable taxonomy.
+
+    @param cause application completion port 的 typed failure / Typed failure from the application completion port.
+    @param expected_type 预期 worker 错误类型 / Expected worker error type.
+    @param category 预期稳定 worker 分类 / Expected stable worker category.
+    @param retry_after 预期 Provider 退避延迟 / Expected provider backoff delay.
+    """
+
+    turn_id = TurnId.new()
+    current = _message(
+        sequence=1,
+        turn_id=turn_id,
+        role=MessageRole.USER,
+        content={"text": "hello"},
+    )
+    error = AssistantInferenceUnavailableError("all failed", last_error=cause)
+    with pytest.raises(expected_type) as captured:
+        asyncio.run(
+            _adapter(_History((current,)), _Inference(error)).infer(_request(turn_id))
+        )
+    assert isinstance(
+        captured.value, (RetryableInferenceError, PermanentInferenceError)
+    )
+    assert captured.value.category is category
+    if isinstance(captured.value, RetryableInferenceError):
+        assert captured.value.retry_after == retry_after

@@ -11,8 +11,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from collections.abc import Mapping
 from typing import Protocol
 
+from fogmoe_bot.domain.assistant.messages import (
+    CanonicalMessage,
+    CanonicalMessageError,
+)
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     ConversationMessageId,
@@ -61,7 +66,8 @@ class AcceptConversationTurn:
 
     @param source Telegram、调度或其他 durable 来源 / Telegram, scheduling, or another durable source.
     @param conversation_id 长期会话 identity / Long-lived conversation identity.
-    @param user_content 入口已规范化的用户内容 / User content normalized by ingress.
+    @param user_content 含 canonical V2 ``model_message`` 的入口用户内容 /
+        Ingress user content carrying a canonical V2 ``model_message``.
     @param inference_request provider-neutral 推理请求 / Provider-neutral inference request.
     @param received_at listener 首次观察时间 / Time first observed by the listener.
     @param accepted_at 应用接受时间 / Application acceptance time.
@@ -90,10 +96,40 @@ class AcceptConversationTurn:
             raise ValueError("accepted_at cannot precede received_at")
         object.__setattr__(self, "received_at", received_at)
         object.__setattr__(self, "accepted_at", accepted_at)
-        object.__setattr__(self, "user_content", dict(self.user_content))
+        object.__setattr__(
+            self,
+            "user_content",
+            normalize_user_content_model_message(self.user_content),
+        )
         object.__setattr__(self, "inference_request", dict(self.inference_request))
         if not isinstance(self.trace_context, TraceContext):
             raise TypeError("Conversation acceptance requires a TraceContext")
+
+
+def normalize_user_content_model_message(content: JsonObject) -> JsonObject:
+    """@brief 严格验证并规范化入口的 canonical user message / Strictly validate and normalize an ingress canonical user message.
+
+    @param content 将被持久化的用户内容 envelope / User-content envelope to be persisted.
+    @return 含 canonical V2 ``model_message`` 的独立 envelope / Independent envelope with a canonical V2 ``model_message``.
+    @raise ValueError 模型消息缺失、不是 V2，或角色不是 user 时抛出 /
+        Raised when the model message is missing, not V2, or not a user role.
+    @note 此边界故意不升级旧 OpenAI wire JSON；历史数据只能经显式数据库迁移进入 V2。/
+        This boundary intentionally does not upgrade legacy OpenAI wire JSON; historical data
+        can enter V2 only through the explicit database migration.
+    """
+
+    raw_message = content.get("model_message")
+    if not isinstance(raw_message, Mapping):
+        raise ValueError("Conversation ingress requires a canonical V2 model_message")
+    try:
+        message = CanonicalMessage.from_json(raw_message)
+    except CanonicalMessageError as error:
+        raise ValueError("Conversation ingress model_message must be canonical V2") from error
+    if message.role is not MessageRole.USER:
+        raise ValueError("Conversation ingress model_message must have the user role")
+    normalized = dict(content)
+    normalized["model_message"] = message.to_json()
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,4 +245,5 @@ __all__ = [
     "ConversationWorkflow",
     "PreparedTurnAcceptance",
     "TurnWorkflowPersistence",
+    "normalize_user_content_model_message",
 ]

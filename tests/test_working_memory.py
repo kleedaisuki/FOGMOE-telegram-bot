@@ -19,6 +19,8 @@ from fogmoe_bot.application.retrieval import (
     SemanticRecallUnavailableError,
 )
 from fogmoe_bot.domain.context.token_estimator import estimate_message_tokens
+from fogmoe_bot.domain.assistant.messages import text_message
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.memory import (
     GroupMemoryScope,
     PersonalMemoryScope,
@@ -67,19 +69,19 @@ def test_working_memory_projection_is_single_untrusted_and_hard_bounded() -> Non
     )
     rendered = render_working_memory(memory, maximum_tokens=512)
     assert estimate_message_tokens((rendered,)) <= 512
-    assert 'trust="untrusted_historical_data"' in rendered["content"]
-    assert 'truncated="true"' in rendered["content"]
+    assert 'trust="untrusted_historical_data"' in rendered.text
+    assert 'truncated="true"' in rendered.text
 
     projected = compose_model_messages(
         (
-            {"role": "system", "content": "policy"},
-            {"role": "user", "content": "以前讨论过什么？"},
+            text_message(MessageRole.SYSTEM, "policy"),
+            text_message(MessageRole.USER, "以前讨论过什么？"),
         ),
         memory,
         maximum_tokens=512,
     )
-    assert projected[0] == {"role": "system", "content": "policy"}
-    assert sum("<working_memory" in str(item.get("content")) for item in projected) == 1
+    assert projected[0] == text_message(MessageRole.SYSTEM, "policy")
+    assert sum("<working_memory" in item.text for item in projected) == 1
 
 
 def test_working_memory_count_cap_is_high_but_finite() -> None:
@@ -115,15 +117,15 @@ def test_available_empty_is_distinct_from_unavailable_empty() -> None:
     assert available.availability is WorkingMemoryAvailability.AVAILABLE
     assert unavailable.availability is WorkingMemoryAvailability.UNAVAILABLE
     available_projection = compose_model_messages(
-        ({"role": "user", "content": "query"},), available
+        (text_message(MessageRole.USER, "query"),), available
     )
     assert any(
-        "<working_memory" in str(message.get("content"))
+        "<working_memory" in message.text
         for message in available_projection
     )
     assert compose_model_messages(
-        ({"role": "user", "content": "query"},), unavailable
-    ) == ({"role": "user", "content": "query"},)
+        (text_message(MessageRole.USER, "query"),), unavailable
+    ) == (text_message(MessageRole.USER, "query"),)
     with pytest.raises(ValueError, match="cannot be rendered"):
         render_working_memory(unavailable)
     with pytest.raises(ValueError, match="cannot contain messages"):

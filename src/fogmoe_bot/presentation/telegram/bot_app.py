@@ -602,6 +602,11 @@ def _compose_services(
             shutdown_phase=25,
         ),
         ServiceBinding(
+            "llm-http-client",
+            assistant.llm_client,
+            shutdown_phase=25,
+        ),
+        ServiceBinding(
             "embedding-http-client",
             assistant.embedding_client,
             shutdown_phase=25,

@@ -41,7 +41,6 @@ def test_application_depends_on_ports_not_adapters_or_transport_sdks() -> None:
         "sqlalchemy",
         "aiohttp",
         "requests",
-        "litellm",
         "e2b",
     )
     violations: list[str] = []

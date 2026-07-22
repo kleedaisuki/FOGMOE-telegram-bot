@@ -21,11 +21,13 @@ from fogmoe_bot.application.conversation.translation_ingress import (
     TranslationReplyTarget,
     TranslationTurnRequest,
 )
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
     UpdateId,
 )
+from fogmoe_bot.domain.conversation.message import MessageRole
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定测试时刻 / Fixed test instant."""
@@ -144,6 +146,12 @@ def test_translation_builds_a_no_charge_history_isolated_assistant_request() -> 
     assert request.task_kind == "translation"
     assert request.translation_input == "hello"
     assert request.user_content["exclude_from_assistant"] is True
+    model_message = request.user_content["model_message"]
+    assert isinstance(model_message, dict)
+    canonical_message = CanonicalMessage.from_json(model_message)
+    assert canonical_message.role is MessageRole.USER
+    assert canonical_message.text == "hello"
+    assert canonical_message.policy.include_in_context is False
 
 
 def test_translation_supports_private_and_group_topic_addresses() -> None:

@@ -3,10 +3,13 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from fogmoe_bot.application.conversation.workflow import (
     AcceptConversationTurn,
     ConversationWorkflow,
 )
+from fogmoe_bot.domain.assistant.messages import text_message
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     InferenceActivityId,
@@ -15,7 +18,7 @@ from fogmoe_bot.domain.conversation.identity import (
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inference import InferenceActivityDraft
-from fogmoe_bot.domain.conversation.message import MessageDraft
+from fogmoe_bot.domain.conversation.message import MessageDraft, MessageRole
 from fogmoe_bot.domain.conversation.turn import ConversationTurn
 
 NOW = datetime(2026, 7, 11, 10, tzinfo=timezone.utc)
@@ -68,7 +71,14 @@ def test_accept_builds_stable_turn_message_and_activity_identities() -> None:
         command = AcceptConversationTurn(
             source=source,
             conversation_id=ConversationId("assistant-user:7"),
-            user_content={"text": "hello", "chat_id": 7},
+            user_content={
+                "text": "hello",
+                "chat_id": 7,
+                "model_message": text_message(
+                    MessageRole.USER,
+                    "hello",
+                ).to_json(),
+            },
             inference_request={"prompt": "hello", "profile": "assistant"},
             received_at=NOW,
             accepted_at=NOW + timedelta(milliseconds=1),
@@ -96,7 +106,10 @@ def test_accept_rejects_time_travel_before_repository_call() -> None:
         AcceptConversationTurn(
             source=TurnSource.telegram(UpdateId(1)),
             conversation_id=ConversationId("assistant-user:7"),
-            user_content={"text": "hello"},
+            user_content={
+                "text": "hello",
+                "model_message": text_message(MessageRole.USER, "hello").to_json(),
+            },
             inference_request={"prompt": "hello"},
             received_at=NOW,
             accepted_at=NOW - timedelta(seconds=1),
@@ -105,3 +118,20 @@ def test_accept_rejects_time_travel_before_repository_call() -> None:
         assert "cannot precede" in str(error)
     else:
         raise AssertionError("time-travel acceptance was not rejected")
+
+
+def test_accept_rejects_legacy_openai_wire_model_message() -> None:
+    """@brief Conversation ingress 不接受旧 OpenAI wire message / Conversation ingress rejects legacy OpenAI wire messages."""
+
+    with pytest.raises(ValueError, match="canonical V2"):
+        AcceptConversationTurn(
+            source=TurnSource.telegram(UpdateId(2)),
+            conversation_id=ConversationId("assistant-user:7"),
+            user_content={
+                "text": "hello",
+                "model_message": {"role": "user", "content": "hello"},
+            },
+            inference_request={"prompt": "hello"},
+            received_at=NOW,
+            accepted_at=NOW,
+        )

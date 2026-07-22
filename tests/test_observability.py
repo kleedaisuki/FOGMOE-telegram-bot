@@ -318,6 +318,50 @@ def test_queue_handler_captures_producer_correlation_before_cross_thread_deliver
     assert prepared.fogmoe_telemetry_attributes["fogmoe.turn.id"] == "turn-1"
 
 
+def test_log_handlers_treat_false_exc_info_as_no_exception() -> None:
+    """@brief 显式 ``exc_info=False`` 不得让队列日志二次失败 / Explicit ``exc_info=False`` must not make queued logging fail again."""
+
+    import queue
+
+    queue_buffer = TelemetryBuffer(8)
+    queue_telemetry = Telemetry(queue_buffer)
+    records: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=1)
+    queue_handler = ContextQueueHandler(records, queue_telemetry)
+    queue_handler.emit(
+        logging.LogRecord(
+            "fogmoe.test",
+            logging.WARNING,
+            __file__,
+            1,
+            "expected transient network retry",
+            (),
+            False,
+        )
+    )
+    prepared = records.get_nowait()
+    assert prepared.fogmoe_exception_type is None
+    assert prepared.fogmoe_exception_message is None
+    assert prepared.fogmoe_exception_stack is None
+
+    sink_buffer = TelemetryBuffer(8)
+    sink_telemetry = Telemetry(sink_buffer)
+    TelemetryLogHandler(sink_telemetry).emit(
+        logging.LogRecord(
+            "fogmoe.test",
+            logging.WARNING,
+            __file__,
+            1,
+            "expected transient network retry",
+            (),
+            False,
+        )
+    )
+    log = next(signal for signal in sink_buffer.drain(8) if isinstance(signal, LogSignal))
+    assert log.exception_type is None
+    assert log.exception_message is None
+    assert log.exception_stack is None
+
+
 class _FlakySink:
     """@brief 首次失败后成功的 sink / Sink succeeding after its first failure."""
 

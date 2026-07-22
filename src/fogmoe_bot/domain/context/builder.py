@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from uuid import UUID
+
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage, text_message
+from fogmoe_bot.domain.conversation.message import MessageRole
 
 from .formatting import (
     format_metadata_attrs,
@@ -137,19 +140,19 @@ def render_scheduled_task(context: ScheduledTaskContext) -> str:
 
 def create_runtime_replacement(
     *,
-    persisted_content: str,
-    runtime_message: dict[str, object] | None,
+    persisted_message: CanonicalMessage,
+    runtime_message: CanonicalMessage | None,
 ) -> RuntimeMessageReplacement | None:
     """@brief 创建运行时消息替换 / Create a runtime message replacement.
 
-    @param persisted_content 持久化内容 / Persisted content.
-    @param runtime_message 运行时消息 / Runtime message.
+    @param persisted_message 持久化 canonical 消息 / Persisted canonical message.
+    @param runtime_message 运行时 canonical 消息 / Runtime canonical message.
     @return 替换对象；运行时消息为空时返回 None / Replacement or None.
     """
     if runtime_message is None:
         return None
     return RuntimeMessageReplacement(
-        persisted_content=persisted_content,
+        persisted_message=persisted_message,
         runtime_message=runtime_message,
     )
 
@@ -158,21 +161,22 @@ def build_context_state(
     *,
     context_id: UUID,
     system_prompt: str,
-    history_messages: Iterable[Mapping[str, object]],
+    history_messages: Iterable[CanonicalMessage],
     scope: ConversationScope,
     user_state: UserState,
     runtime_replacements: Iterable[RuntimeMessageReplacement] | None = None,
-    text_fallback_messages: Iterable[Mapping[str, object]] | None = None,
+    text_fallback_messages: Iterable[CanonicalMessage] | None = None,
 ) -> ContextState:
     """@brief 构造 Agent 上下文状态 / Build Agent context state.
 
     @param context_id ContextState 实体标识 / ContextState entity identifier.
     @param system_prompt 静态系统策略 / Static system policy.
-    @param history_messages 当前会话历史 / Current conversation history.
+    @param history_messages 当前 canonical V2 会话历史 / Current canonical V2 conversation history.
     @param scope 对话作用域 / Conversation scope.
     @param user_state 本回合用户状态 / User state for this turn.
     @param runtime_replacements 运行时消息替换 / Runtime message replacements.
-    @param text_fallback_messages 纯文本降级历史 / Text-only fallback history.
+    @param text_fallback_messages canonical 纯文本降级历史 /
+        Canonical text-only fallback history.
     @return 可直接交给 AgentLoop 的领域上下文快照 / Domain context snapshot ready for AgentLoop.
     @raise ValueError 群聊携带私人 Profile 状态 / A group scope carries private Profile state.
     """
@@ -184,30 +188,23 @@ def build_context_state(
         raise ValueError(
             "Group ContextState cannot contain private User Profile, personal_info, or diary state"
         )
-    history = [
-        dict(message) for message in history_messages if isinstance(message, Mapping)
-    ]
+    history = list(history_messages)
     query_history = _apply_runtime_replacements(
         history, list(runtime_replacements or [])
     )
-    system_message: dict[str, object] = {
-        "role": "system",
-        "content": compose_system_prompt(
+    system_message = text_message(
+        MessageRole.SYSTEM,
+        compose_system_prompt(
             system_prompt=system_prompt,
             user_state_prompt=join_prompt_sections(
                 render_conversation_scope(scope),
                 render_user_state(user_state),
             ),
         ),
-    }
-    fallback: list[dict[str, object]] | None = None
+    )
+    fallback: list[CanonicalMessage] | None = None
     if text_fallback_messages is not None:
-        fallback_history = [
-            dict(message)
-            for message in text_fallback_messages
-            if isinstance(message, Mapping)
-        ]
-        fallback = [dict(system_message), *fallback_history]
+        fallback = [system_message, *text_fallback_messages]
 
     return ContextState(
         context_id=context_id,
@@ -235,12 +232,12 @@ def build_tool_context(scope: ConversationScope) -> dict[str, object]:
 
 
 def _apply_runtime_replacements(
-    messages: list[dict[str, object]],
+    messages: list[CanonicalMessage],
     replacements: list[RuntimeMessageReplacement],
-) -> list[dict[str, object]]:
+) -> list[CanonicalMessage]:
     """@brief 应用运行时消息替换 / Apply runtime message replacements.
 
-    @param messages 历史消息 / History messages.
+    @param messages canonical 历史消息 / Canonical history messages.
     @param replacements 替换列表 / Replacement list.
     @return 模型消息链 / Model message chain.
     """
@@ -252,11 +249,8 @@ def _apply_runtime_replacements(
     for replacement in reversed(replacements):
         for index in range(search_end, -1, -1):
             message = messages_for_model[index]
-            if (
-                message.get("role") == "user"
-                and message.get("content") == replacement.persisted_content
-            ):
-                messages_for_model[index] = dict(replacement.runtime_message)
+            if message == replacement.persisted_message:
+                messages_for_model[index] = replacement.runtime_message
                 search_end = index - 1
                 break
     return messages_for_model

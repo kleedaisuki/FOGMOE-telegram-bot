@@ -23,10 +23,12 @@ from fogmoe_bot.application.conversation.telegram_identity import (
     TelegramConversationAddress,
 )
 from fogmoe_bot.domain.accounts.plan import AccountPlan
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     UpdateId,
 )
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from fogmoe_bot.domain.conversation.payloads import (
     JsonObject,
@@ -472,9 +474,11 @@ def test_request_contains_strict_adapter_metadata_and_normalized_user_content() 
         "translation_input",
         "allow_tools",
         "allowed_tools",
+        "meta",
     }
     assert command.inference_request["task_kind"] == "assistant"
     assert command.inference_request["translation_input"] is None
+    assert command.inference_request["meta"] == {}
     assert command.inference_request["delivery_stream_id"] == (
         "telegram:primary:chat:-1001:thread:9"
     )
@@ -502,8 +506,10 @@ def test_request_contains_strict_adapter_metadata_and_normalized_user_content() 
     }
     model_message = command.user_content["model_message"]
     assert isinstance(model_message, dict)
+    canonical_message = CanonicalMessage.from_json(model_message)
+    assert canonical_message.role is MessageRole.USER
     assert 'user="Klee Spark" username="@klee" user_id="42" thread_id="9"' in str(
-        model_message["content"]
+        canonical_message.text
     )
     assert command.user_content["reply"] == {
         "message_id": 6,
@@ -513,6 +519,20 @@ def test_request_contains_strict_adapter_metadata_and_normalized_user_content() 
         "text": "previous",
         "emoji": None,
     }
+
+
+def test_private_request_persists_a_canonical_v2_user_message() -> None:
+    """@brief 私聊入口也持久化 canonical V2 user message / Private ingress also persists a canonical V2 user message."""
+
+    inbound = _inbound(_message_payload(text="private canonical input"))
+    request = parse_telegram_assistant_update(inbound).to_request(inbound)
+
+    model_message = request.user_content["model_message"]
+    assert isinstance(model_message, dict)
+    canonical_message = CanonicalMessage.from_json(model_message)
+    assert canonical_message.role is MessageRole.USER
+    assert canonical_message.text == "private canonical input"
+    assert canonical_message.policy.include_in_context is True
 
 
 def test_group_request_rejects_private_state_before_durable_serialization() -> None:
