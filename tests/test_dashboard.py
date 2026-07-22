@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import asyncpg  # type: ignore[import-untyped]
 from rich.console import Console
 
 from fogmoe_dashboard.api import DashboardClient
@@ -31,6 +32,7 @@ from fogmoe_dashboard.domain.models import (
     TimeWindow,
 )
 from fogmoe_dashboard.infrastructure.postgres import PostgresDashboardRepository
+from fogmoe_dashboard.presentation import cli
 from fogmoe_dashboard.presentation.cli import build_parser
 from fogmoe_dashboard.presentation.duration import parse_duration
 from fogmoe_dashboard.presentation.render import print_json, render, to_jsonable
@@ -388,6 +390,40 @@ def test_dashboard_cli_registers_views_and_root_config_argument() -> None:
     assert parse_duration("1.5h") == timedelta(minutes=90)
     with pytest.raises(ValueError):
         parse_duration("yesterday")
+
+
+def test_dashboard_cli_reports_database_failures_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """@brief CLI 将 PostgreSQL 故障映射为简洁的运维错误 / CLI maps PostgreSQL failures to a concise operational error.
+
+    @param monkeypatch pytest 替换器 / pytest monkeypatch helper.
+    @param capsys pytest 输出捕获器 / pytest output capture.
+    @return None / None.
+    """
+
+    async def fail(_: object) -> None:
+        """@brief 模拟报表角色认证失败 / Simulate reporting-role authentication failure.
+
+        @param _ 已解析参数 / Parsed arguments.
+        @return 不返回 / Never returns.
+        """
+
+        raise asyncpg.InvalidPasswordError("reporting authentication failed")
+
+    monkeypatch.setattr(cli, "_run", fail)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["overview"])
+
+    captured = capsys.readouterr()
+    assert exit_info.value.code == 2
+    assert captured.out == ""
+    assert captured.err == (
+        "fogmoe-dashboard: error: reporting authentication failed\n"
+    )
+    assert "Traceback" not in captured.err
 
 
 def test_overview_renders_rich_table_and_stable_json() -> None:

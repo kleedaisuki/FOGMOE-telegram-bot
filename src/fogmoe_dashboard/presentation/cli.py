@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from datetime import timedelta
 from pathlib import Path
 
+import asyncpg  # type: ignore[import-untyped]
 from rich.console import Console
 from rich.live import Live
 
@@ -128,7 +129,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         asyncio.run(_run(args))
     except KeyboardInterrupt:
         return
-    except (ValueError, RuntimeError, OSError) as error:
+    except (ValueError, RuntimeError, OSError, asyncpg.PostgresError) as error:
         parser.exit(2, f"fogmoe-dashboard: error: {error}\n")
 
 
