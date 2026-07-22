@@ -9,7 +9,11 @@ from datetime import timedelta
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCapability,
 )
-from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
+from fogmoe_bot.application.runtime import (
+    LeaseRecoveryCadence,
+    SystemUtcClock,
+    UtcClock,
+)
 from fogmoe_bot.domain.admin import AnnouncementRecipientClaim
 from fogmoe_bot.domain.conversation.identity import OutboundMessageId
 
@@ -78,6 +82,24 @@ class AdminRuntime:
         @note CancelledError 不会被吞掉 / CancelledError is never swallowed.
         """
 
+        recovery = LeaseRecoveryCadence.for_lease(self._lease_for)
+        async with asyncio.TaskGroup() as task_group:
+            task_group.create_task(
+                self._recover_leases(stop_event, recovery=recovery),
+                name="admin-announcement-recovery",
+            )
+            task_group.create_task(
+                self._run_business_passes(stop_event),
+                name="admin-announcement-business",
+            )
+
+    async def _run_business_passes(self, stop_event: asyncio.Event) -> None:
+        """@brief 按固定 SLO 推进投递完成并扩展公告 / Promote delivery completions and expand announcements at the fixed SLO.
+
+        @param stop_event 统一停止事件 / Unified stop event.
+        @return None / None.
+        """
+
         while not stop_event.is_set():
             try:
                 work = await self.run_once()
@@ -94,18 +116,63 @@ class AdminRuntime:
                 except TimeoutError:
                     pass
 
+    async def _recover_leases(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        recovery: LeaseRecoveryCadence,
+    ) -> None:
+        """@brief 以单一 owner 独立低频回收过期公告租约 / Recover expired announcement leases independently under one owner.
+
+        @param stop_event 统一停止事件 / Unified stop event.
+        @param recovery 与租约半程对齐的恢复节奏 / Recovery cadence aligned with half the lease.
+        @return None；恢复故障不会取消业务轮询 / None; recovery failures do not cancel business polling.
+        @note 首轮立即恢复，后续周期不受公告轮询阻塞或空闲等待影响 / The first
+            pass recovers immediately; subsequent periods are independent of announcement
+            polling stalls and idle waits.
+        """
+
+        while not stop_event.is_set():
+            if recovery.take_due():
+                await self._recover_expired_leases()
+            try:
+                async with asyncio.timeout(recovery.interval_seconds):
+                    await stop_event.wait()
+            except TimeoutError:
+                continue
+
+    async def _recover_expired_leases(self) -> None:
+        """@brief 回收一个有界批次的过期公告租约 / Recover one bounded batch of expired announcement leases.
+
+        @return None；持久化故障隔离到后续 cadence / None; persistence failures are isolated until a later cadence.
+        """
+
+        try:
+            recovered = await self._operations.recover_expired(
+                now=self._clock.now(),
+                limit=self._batch_size,
+            )
+            if recovered:
+                logger.warning(
+                    "Recovered expired admin announcement leases: count=%s",
+                    recovered,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Admin announcement lease recovery failed; a later pass will retry"
+            )
+
     async def run_once(self) -> int:
-        """@brief 恢复过期租约、推进投递终态并处理一个有界批次 / Recover leases, promote delivery terminals, and process one bounded batch.
+        """@brief 推进投递终态并处理一个有界公告批次 / Promote delivery terminals and process one bounded announcement batch.
 
         @return 本轮完成的状态转移数 / Number of state transitions completed in this pass.
+        @note 租约恢复由 ``run`` 中的独立结构化任务唯一持有 / Lease recovery is owned solely by the independent structured task in ``run``.
         """
 
         now = self._clock.now()
-        work = await self._operations.recover_expired(
-            now=now,
-            limit=self._batch_size,
-        )
-        work += await self._operations.promote_delivery_completions(
+        work = await self._operations.promote_delivery_completions(
             now=now,
             limit=self._batch_size,
         )

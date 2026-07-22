@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
 
 from fogmoe_bot.application.admin.runtime import AdminRuntime
+from fogmoe_bot.application.admin.models import (
+    AnnouncementAcceptance,
+    RequestAnnouncement,
+)
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
@@ -89,6 +94,23 @@ class ScriptedOperations:
         """@brief 最终失败调用 / Final-failure calls."""
         self.cancel_first_mark = False
         """@brief 首次终结时模拟 kill-9 取消 / Simulate kill-9 cancellation on first finalization."""
+        self.recover_calls = 0
+        """@brief 租约恢复调用数 / Lease-recovery call count."""
+        self.promote_calls = 0
+        """@brief 投递完成推进调用数 / Delivery-completion promotion call count."""
+        self.claim_calls = 0
+        """@brief 公告领取调用数 / Announcement-claim call count."""
+
+    async def accept(self, command: RequestAnnouncement) -> AnnouncementAcceptance:
+        """@brief 拒绝此 runtime 测试范围外的公告创建 / Reject announcement creation outside this runtime-test scope.
+
+        @param command 公告请求 / Announcement request.
+        @return 永不返回 / Never returns.
+        @raise AssertionError 此测试端口不应创建公告 / Raised because this test port must not create announcements.
+        """
+
+        del command
+        raise AssertionError("accept is outside the AdminRuntime test boundary")
 
     async def recover_expired(self, *, now: datetime, limit: int) -> int:
         """@brief 模拟无过期租约 / Simulate no expired leases.
@@ -99,6 +121,7 @@ class ScriptedOperations:
         """
 
         del now, limit
+        self.recover_calls += 1
         return 0
 
     async def promote_delivery_completions(self, *, now: datetime, limit: int) -> int:
@@ -110,6 +133,7 @@ class ScriptedOperations:
         """
 
         del now, limit
+        self.promote_calls += 1
         return 0
 
     async def claim_ready(
@@ -128,6 +152,7 @@ class ScriptedOperations:
         """
 
         del now, lease_for
+        self.claim_calls += 1
         batch = self.claim_batches.pop(0) if self.claim_batches else ()
         return batch[:limit]
 
@@ -192,6 +217,45 @@ class ScriptedOperations:
         return True
 
 
+class PeriodicRecoveryOperations(ScriptedOperations):
+    """@brief 记录独立租约恢复 cadence 的操作端口 / Operations port recording the independent lease-recovery cadence."""
+
+    def __init__(self, stop_event: asyncio.Event, *, fail_first: bool) -> None:
+        """@brief 配置第二轮恢复后停止 / Configure a stop after the second recovery pass.
+
+        @param stop_event 结构化停止事件 / Structured stop event.
+        @param fail_first 首次恢复是否失败 / Whether the first recovery fails.
+        """
+
+        super().__init__([])
+        self._stop_event = stop_event
+        self._fail_first = fail_first
+        self.recovery_times: list[float] = []
+        """@brief 恢复调用的单调时间 / Monotonic instants of recovery calls."""
+        self.recovery_tasks: list[str] = []
+        """@brief 恢复调用的任务名 / Task names owning recovery calls."""
+
+    async def recover_expired(self, *, now: datetime, limit: int) -> int:
+        """@brief 记录恢复并可选注入首轮故障 / Record recovery and optionally inject a first-pass failure.
+
+        @param now 当前时间 / Current instant.
+        @param limit 批量上限 / Batch limit.
+        @return 零 / Zero.
+        @raise RuntimeError 注入的首轮故障 / Injected first-pass failure.
+        """
+
+        del now, limit
+        self.recover_calls += 1
+        self.recovery_times.append(time.monotonic())
+        task = asyncio.current_task()
+        self.recovery_tasks.append(task.get_name() if task is not None else "")
+        if self._fail_first and self.recover_calls == 1:
+            raise RuntimeError("transient recovery failure")
+        if self.recover_calls >= 2:
+            self._stop_event.set()
+        return 0
+
+
 def _claim(
     *, token: object | None = None, attempt: int = 1
 ) -> AnnouncementRecipientClaim:
@@ -246,6 +310,60 @@ def test_kill_after_outbox_commit_replays_one_semantic_effect() -> None:
     assert outbound.calls[0] == outbound.calls[1]
     assert len(operations.mark_calls) == 1
     assert operations.mark_calls[0][0].claim_token == second.claim_token
+
+
+def test_run_once_is_a_deterministic_business_pass_without_recovery() -> None:
+    """@brief run_once 只推进完成与领取，不隐式恢复租约 / run_once only promotes and claims without hidden lease recovery."""
+
+    operations = ScriptedOperations([])
+    runtime = AdminRuntime(
+        operations=operations,
+        outbound=RecordingOutbound(),
+        factory=TelegramAnnouncementOutboundFactory(),
+        clock=FixedClock(),
+    )
+
+    assert asyncio.run(runtime.run_once()) == 0
+    assert operations.recover_calls == 0
+    assert operations.promote_calls == 1
+    assert operations.claim_calls == 1
+
+
+@pytest.mark.parametrize("fail_first", [False, True], ids=["steady", "retry"])
+def test_recovery_cadence_is_independent_of_business_polling(
+    fail_first: bool,
+) -> None:
+    """@brief 单 owner 恢复不受长业务轮询影响且可隔离短暂故障 / Single-owner recovery is independent of long business polling and isolates transient faults.
+
+    @param fail_first 首轮恢复是否注入故障 / Whether the first recovery attempt fails.
+    """
+
+    async def scenario() -> None:
+        """@brief 观察立即恢复与租约半程 cadence / Observe immediate recovery and the half-lease cadence."""
+
+        stop_event = asyncio.Event()
+        operations = PeriodicRecoveryOperations(stop_event, fail_first=fail_first)
+        runtime = AdminRuntime(
+            operations=operations,
+            outbound=RecordingOutbound(),
+            factory=TelegramAnnouncementOutboundFactory(),
+            clock=FixedClock(),
+            poll_interval=2.0,
+            lease_for=timedelta(milliseconds=200),
+        )
+
+        started = time.monotonic()
+        await asyncio.wait_for(runtime.run(stop_event), timeout=1)
+
+        assert len(operations.recovery_times) == 2
+        assert operations.recovery_times[0] - started < 0.5
+        recovery_gap = operations.recovery_times[1] - operations.recovery_times[0]
+        assert 0.075 <= recovery_gap < 0.5
+        assert set(operations.recovery_tasks) == {"admin-announcement-recovery"}
+        assert operations.promote_calls == 1
+        assert operations.claim_calls == 1
+
+    asyncio.run(scenario())
 
 
 def test_runtime_constructor_rejects_unbounded_configuration() -> None:

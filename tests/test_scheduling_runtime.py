@@ -39,6 +39,32 @@ class _FixedClock:
         return NOW
 
 
+class _MonotonicClock:
+    """@brief 可手动推进的单调时钟 / Manually advanced monotonic clock."""
+
+    def __init__(self) -> None:
+        """@brief 从零创建时钟 / Create a clock starting at zero."""
+
+        self.seconds = 0.0
+
+    def __call__(self) -> float:
+        """@brief 返回当前单调秒数 / Return the current monotonic seconds.
+
+        @return 当前秒数 / Current seconds.
+        """
+
+        return self.seconds
+
+    def advance(self, seconds: float) -> None:
+        """@brief 推进单调时钟 / Advance the monotonic clock.
+
+        @param seconds 正向增量 / Positive increment.
+        @return None / None.
+        """
+
+        self.seconds += seconds
+
+
 def _user() -> DurableAssistantUser:
     """@brief 构造 acceptance-time 用户 / Build an acceptance-time user.
 
@@ -255,6 +281,10 @@ def _worker(
     worker_count: int = 1,
     max_attempts: int = 3,
     jitter: Callable[[float, float], float] | None = None,
+    poll_interval: float = 0.01,
+    lease_for: timedelta = timedelta(minutes=1),
+    attempt_timeout: timedelta = timedelta(seconds=10),
+    recovery_monotonic: Callable[[], float] | None = None,
 ) -> ScheduleWorker:
     """@brief 构造固定配置的 worker / Build a worker with fixed configuration.
 
@@ -264,20 +294,26 @@ def _worker(
     @param worker_count batch 并发上限 / Batch concurrency cap.
     @param max_attempts 最大尝试数 / Maximum attempts.
     @param jitter 可选可测 full-jitter 函数 / Optional testable full-jitter function.
+    @param poll_interval 空闲 claim 间隔 / Idle claim interval.
+    @param lease_for claim lease 时长 / Claim lease duration.
+    @param attempt_timeout 单次执行预算 / Per-attempt execution budget.
+    @param recovery_monotonic 可选回收单调时钟 / Optional recovery monotonic clock.
     @return 已配置 worker / Configured worker.
     """
 
     values: dict[str, object] = {}
     if jitter is not None:
         values["jitter"] = jitter
+    if recovery_monotonic is not None:
+        values["recovery_monotonic"] = recovery_monotonic
     return ScheduleWorker(
         queue=queue,
         acceptance=acceptance,  # type: ignore[arg-type]
         profiles=profiles,
         worker_count=worker_count,
-        poll_interval=0.01,
-        lease_for=timedelta(minutes=1),
-        attempt_timeout=timedelta(seconds=10),
+        poll_interval=poll_interval,
+        lease_for=lease_for,
+        attempt_timeout=attempt_timeout,
         max_attempts=max_attempts,
         retry_base=2.0,
         retry_cap=20.0,
@@ -303,7 +339,7 @@ def test_worker_claims_and_atomically_accepts_before_advancing_cursor() -> None:
         ).process_once()
 
         assert handled == 1
-        assert queue.recover_calls == [NOW]
+        assert queue.recover_calls == []
         assert queue.claim_calls == [(NOW, 1, timedelta(minutes=1))]
         assert profiles.user_ids == [42]
         assert len(acceptance.calls) == 1
@@ -503,11 +539,68 @@ def test_stale_acceptance_token_is_swallowed_without_followup_write() -> None:
     asyncio.run(scenario())
 
 
-def test_worker_recovers_expired_leases_before_claiming() -> None:
-    """@brief 每轮先回收过期 lease 再查找 due work / Every batch recovers expired leases before looking for due work."""
+class _FailOnceRecoveryQueue(_Queue):
+    """@brief 首次恢复失败、第二次成功的队列 / Queue failing its first recovery and succeeding on its second."""
+
+    def __init__(self) -> None:
+        """@brief 创建恢复同步事件 / Create recovery synchronization events."""
+
+        super().__init__(recovered=2)
+        self.first_recovery = asyncio.Event()
+        self.second_recovery = asyncio.Event()
+
+    async def recover_expired(self, *, now: datetime) -> int:
+        """@brief 记录并执行可重试恢复 / Record and execute a retryable recovery.
+
+        @param now 当前 UTC 时刻 / Current UTC instant.
+        @return 第二次及以后返回恢复数 / Recovery count on the second and later calls.
+        @raise RuntimeError 首次调用模拟存储故障 / First call simulates a storage failure.
+        """
+
+        self.recover_calls.append(now)
+        if len(self.recover_calls) == 1:
+            self.first_recovery.set()
+            raise RuntimeError("recovery unavailable")
+        self.second_recovery.set()
+        return self.recovered
+
+
+class _BlockingRecoveryQueue(_Queue):
+    """@brief 阻塞恢复以观察结构化并发 / Block recovery to observe structured concurrency."""
+
+    def __init__(self, claims: tuple[ScheduleClaim, ...] = ()) -> None:
+        """@brief 创建带恢复 barrier 的队列 / Create a queue with a recovery barrier.
+
+        @param claims 可领取计划 / Claimable schedules.
+        """
+
+        super().__init__(claims)
+        self.recovery_started = asyncio.Event()
+        self.release_recovery = asyncio.Event()
+        self.recovery_cancelled = False
+
+    async def recover_expired(self, *, now: datetime) -> int:
+        """@brief 阻塞到释放或取消 / Block until released or cancelled.
+
+        @param now 当前 UTC 时刻 / Current UTC instant.
+        @return 零恢复数 / Zero recoveries.
+        """
+
+        self.recover_calls.append(now)
+        self.recovery_started.set()
+        try:
+            await self.release_recovery.wait()
+        except asyncio.CancelledError:
+            self.recovery_cancelled = True
+            raise
+        return 0
+
+
+def test_process_once_only_claims_and_never_runs_lease_recovery() -> None:
+    """@brief focused batch 边界不再执行 lease recovery / The focused batch boundary no longer performs lease recovery."""
 
     async def scenario() -> None:
-        """@brief 执行无 due work 的回收轮次 / Execute a recovery pass with no due work."""
+        """@brief 执行空 batch / Execute an empty batch."""
 
         queue = _Queue(recovered=2)
         handled = await _worker(
@@ -518,8 +611,115 @@ def test_worker_recovers_expired_leases_before_claiming() -> None:
         ).process_once()
 
         assert handled == 0
-        assert queue.recover_calls == [NOW]
+        assert queue.recover_calls == []
         assert queue.claim_calls == [(NOW, 4, timedelta(minutes=1))]
+
+    asyncio.run(scenario())
+
+
+def test_run_recovers_immediately_then_retries_on_lease_cadence() -> None:
+    """@brief recovery 首次立即且失败后只在 lease cadence 重试 / Recovery is immediate and retries only on the lease cadence."""
+
+    async def scenario() -> None:
+        """@brief 推进单调时钟跨过半 lease 边界 / Advance monotonic time across the half-lease boundary."""
+
+        monotonic = _MonotonicClock()
+        queue = _FailOnceRecoveryQueue()
+        stop_event = asyncio.Event()
+        worker = _worker(
+            queue=queue,
+            acceptance=_Acceptance(),
+            profiles=_Profiles(_user()),
+            lease_for=timedelta(milliseconds=40),
+            attempt_timeout=timedelta(milliseconds=10),
+            recovery_monotonic=monotonic,
+        )
+
+        running = asyncio.create_task(worker.run(stop_event))
+        await asyncio.wait_for(queue.first_recovery.wait(), timeout=1)
+        monotonic.advance(0.019)
+        await asyncio.sleep(0.025)
+        assert queue.recover_calls == [NOW]
+
+        monotonic.advance(0.001)
+        await asyncio.wait_for(queue.second_recovery.wait(), timeout=1)
+        stop_event.set()
+        await asyncio.wait_for(running, timeout=1)
+
+        assert queue.recover_calls == [NOW, NOW]
+
+    asyncio.run(scenario())
+
+
+def test_blocked_recovery_does_not_delay_claims_and_graceful_stop_drains_it() -> None:
+    """@brief 阻塞的 recovery 不延迟 claim，graceful stop 等待结构化子任务 / Blocked recovery does not delay claims, and graceful stop drains the structured child."""
+
+    async def scenario() -> None:
+        """@brief 并行观察 claim 与恢复 barrier / Observe claims alongside the recovery barrier."""
+
+        claim = _claim(52)
+        queue = _BlockingRecoveryQueue((claim,))
+        acceptance = _Acceptance()
+        stop_event = asyncio.Event()
+        running = asyncio.create_task(
+            _worker(
+                queue=queue,
+                acceptance=acceptance,
+                profiles=_Profiles(_user()),
+            ).run(stop_event)
+        )
+
+        await asyncio.wait_for(queue.recovery_started.wait(), timeout=1)
+        while not acceptance.calls:
+            await asyncio.sleep(0)
+        assert acceptance.calls[0][0] is claim
+
+        stop_event.set()
+        await asyncio.sleep(0)
+        assert not running.done()
+        queue.release_recovery.set()
+        await asyncio.wait_for(running, timeout=1)
+        assert not queue.recovery_cancelled
+        assert not {
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task.get_name() in {"schedule-claims", "schedule-lease-recovery"}
+        }
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_run_cancels_recovery_without_detached_tasks() -> None:
+    """@brief 取消顶层 run 会取消 recovery 且不遗留 detached task / Cancelling run cancels recovery without leaving detached tasks."""
+
+    async def scenario() -> None:
+        """@brief 在恢复阻塞时取消 TaskGroup owner / Cancel the TaskGroup owner while recovery is blocked."""
+
+        queue = _BlockingRecoveryQueue()
+        stop_event = asyncio.Event()
+        running = asyncio.create_task(
+            _worker(
+                queue=queue,
+                acceptance=_Acceptance(),
+                profiles=_Profiles(_user()),
+            ).run(stop_event)
+        )
+        await asyncio.wait_for(queue.recovery_started.wait(), timeout=1)
+
+        running.cancel()
+        try:
+            await running
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("ScheduleWorker.run() swallowed cancellation")
+
+        assert queue.recovery_cancelled
+        assert not {
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task.get_name() in {"schedule-claims", "schedule-lease-recovery"}
+        }
 
     asyncio.run(scenario())
 

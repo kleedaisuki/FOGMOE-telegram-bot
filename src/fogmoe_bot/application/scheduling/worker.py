@@ -5,10 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections.abc import Callable
 from datetime import timedelta
 
-from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
+from fogmoe_bot.application.runtime import (
+    LeaseRecoveryCadence,
+    SystemUtcClock,
+    UtcClock,
+)
 from fogmoe_bot.application.scheduling.assistant_ports import (
     ScheduledAssistantProfileReader,
     ScheduledOccurrenceAcceptance,
@@ -43,6 +48,7 @@ class ScheduleWorker:
         retry_cap: float,
         clock: UtcClock | None = None,
         jitter: Callable[[float, float], float] = random.uniform,
+        recovery_monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         """@brief 创建有界 worker / Create a bounded worker.
 
@@ -72,11 +78,33 @@ class ScheduleWorker:
         self._retry_cap = retry_cap
         self._clock = clock or SystemUtcClock()
         self._jitter = jitter
+        self._recovery_monotonic = recovery_monotonic
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """@brief 运行至收到停止信号 / Run until a stop signal is received.
 
         @param stop_event 进程停止信号 / Process stop signal.
+        @return None / None.
+        """
+
+        recovery = LeaseRecoveryCadence.for_lease(
+            self._lease_for,
+            monotonic=self._recovery_monotonic,
+        )
+        async with asyncio.TaskGroup() as task_group:
+            task_group.create_task(
+                self._run_claims(stop_event),
+                name="schedule-claims",
+            )
+            task_group.create_task(
+                self._run_recovery(stop_event, recovery=recovery),
+                name="schedule-lease-recovery",
+            )
+
+    async def _run_claims(self, stop_event: asyncio.Event) -> None:
+        """@brief 以不超过一秒的空闲延迟领取到期计划 / Claim due schedules with at most one second of idle latency.
+
+        @param stop_event 顶层结构化停止信号 / Top-level structured stop signal.
         @return None / None.
         """
 
@@ -88,18 +116,56 @@ class ScheduleWorker:
                 async with asyncio.timeout(self._poll_interval):
                     await stop_event.wait()
             except TimeoutError:
-                pass
+                continue
+
+    async def _run_recovery(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        recovery: LeaseRecoveryCadence,
+    ) -> None:
+        """@brief 按 lease 生命周期独立回收过期领取 / Recover expired claims independently on a lease-aligned cadence.
+
+        @param stop_event 顶层结构化停止信号 / Top-level structured stop signal.
+        @param recovery 当前 worker 唯一的回收节奏 / Sole recovery cadence for this worker.
+        @return None；恢复故障不取消并行 claim loop /
+            None; recovery failures do not cancel the concurrent claim loop.
+        """
+
+        while not stop_event.is_set():
+            if recovery.take_due():
+                await self._recover_expired_leases()
+            try:
+                async with asyncio.timeout(recovery.interval_seconds):
+                    await stop_event.wait()
+            except TimeoutError:
+                continue
+
+    async def _recover_expired_leases(self) -> None:
+        """@brief 执行一次隔离的过期 lease 恢复 / Execute one isolated expired-lease recovery pass.
+
+        @return None；存储故障留待下一 cadence 重试 /
+            None; storage failures are retried by a later cadence.
+        """
+
+        try:
+            recovered = await self._queue.recover_expired(
+                now=ensure_utc(self._clock.now())
+            )
+            if recovered:
+                logger.warning("Recovered %s expired schedule leases", recovered)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Schedule lease recovery failed; a later pass will retry")
 
     async def process_once(self) -> int:
-        """@brief 回收 leases 并并发处理一批 claims / Recover leases and concurrently process one claim batch.
+        """@brief 领取并并发处理一批 claims / Claim and concurrently process one claim batch.
 
         @return 本轮 claim 数 / Number of claims in this batch.
         """
 
         now = ensure_utc(self._clock.now())
-        recovered = await self._queue.recover_expired(now=now)
-        if recovered:
-            logger.warning("Recovered %s expired schedule leases", recovered)
         claims = tuple(
             await self._queue.claim_due(
                 now=now,
