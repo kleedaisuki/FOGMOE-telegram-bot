@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0063_observability_resource_liveness
--- Alembic head: 0063_observability_resource_liveness
+-- Source migrations: 0001_initial through 0067_close_schema_creator_and_default_gaps
+-- Alembic head: 0067_close_schema_creator_and_default_gaps
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and retired user-plan backfill) and the
@@ -28,7 +28,13 @@ CREATE SCHEMA IF NOT EXISTS chance;
 CREATE SCHEMA IF NOT EXISTS personal_rpg;
 CREATE SCHEMA IF NOT EXISTS scheduling;
 
+-- pgvector precedes migration 0039, so its extension routines retain PostgreSQL's
+-- extension-defined execution privileges before FogMoe adopts an explicit routine allow-list.
 CREATE EXTENSION IF NOT EXISTS vector;
+
+-- PostgreSQL's function EXECUTE default is global; callable functions are granted explicitly.
+ALTER DEFAULT PRIVILEGES
+  REVOKE EXECUTE ON ROUTINES FROM PUBLIC;
 
 -- DB_MIGRATION_SCHEMA defaults to infra.  Its version value is data, so it is
 -- intentionally not recorded in this schema-only snapshot.
@@ -2023,7 +2029,16 @@ BEGIN
 END;
 $$;
 
-CREATE VIEW observability.pipeline_health AS
+REVOKE ALL PRIVILEGES
+  ON FUNCTION observability.ensure_daily_partitions(DATE)
+  FROM PUBLIC;
+
+REVOKE ALL PRIVILEGES
+  ON FUNCTION observability.drop_partitions_before(DATE)
+  FROM PUBLIC;
+
+CREATE VIEW observability.pipeline_health
+WITH (security_barrier = true, security_invoker = false) AS
 SELECT 'inbox'::TEXT AS stage,
        count(*) FILTER (WHERE status = 'pending') AS pending_count,
        count(*) FILTER (WHERE status = 'processing') AS processing_count,
@@ -2033,7 +2048,7 @@ SELECT 'inbox'::TEXT AS stage,
          WHERE status IN ('pending', 'retry_wait')
        ) AS oldest_ready_at,
        count(*) FILTER (
-         WHERE status = 'processing' AND lease_expires_at < CURRENT_TIMESTAMP
+         WHERE status = 'processing' AND lease_expires_at <= CURRENT_TIMESTAMP
        ) AS expired_lease_count
 FROM conversation.inbound_updates
 UNION ALL
@@ -2044,7 +2059,7 @@ SELECT 'inference',
        count(*) FILTER (WHERE status = 'failed'),
        min(next_attempt_at) FILTER (WHERE status IN ('pending', 'retry')),
        count(*) FILTER (
-         WHERE status = 'processing' AND lease_expires_at < CURRENT_TIMESTAMP
+         WHERE status = 'processing' AND lease_expires_at <= CURRENT_TIMESTAMP
        )
 FROM conversation.inference_activities
 UNION ALL
@@ -2057,9 +2072,67 @@ SELECT 'outbox',
          WHERE status IN ('pending', 'retry_wait')
        ),
        count(*) FILTER (
-         WHERE status = 'processing' AND lease_expires_at < CURRENT_TIMESTAMP
+         WHERE status = 'processing' AND lease_expires_at <= CURRENT_TIMESTAMP
        )
-FROM conversation.outbound_messages;
+FROM conversation.outbound_messages
+UNION ALL
+SELECT 'retrieval.embedding',
+       count(*) FILTER (WHERE status = 'pending'),
+       count(*) FILTER (WHERE status = 'processing'),
+       count(*) FILTER (WHERE status = 'retry_wait'),
+       count(*) FILTER (WHERE status = 'failed_final'),
+       min(next_attempt_at) FILTER (WHERE status IN ('pending', 'retry_wait')),
+       count(*) FILTER (
+         WHERE status = 'processing' AND lease_expires_at <= CURRENT_TIMESTAMP
+       )
+FROM retrieval.passage_vectors
+UNION ALL
+SELECT 'user_profile.dreaming',
+       count(*) FILTER (WHERE status = 'pending'),
+       count(*) FILTER (WHERE status = 'processing'),
+       count(*) FILTER (WHERE status = 'retry_wait'),
+       count(*) FILTER (WHERE status = 'failed_final'),
+       min(next_attempt_at) FILTER (WHERE status IN ('pending', 'retry_wait')),
+       count(*) FILTER (
+         WHERE status = 'processing' AND lease_expires_at <= CURRENT_TIMESTAMP
+       )
+FROM user_profile.dreams;
+
+CREATE VIEW observability.retrieval_queue_health
+WITH (security_barrier = true, security_invoker = false) AS
+SELECT space.space_id,
+       space.model,
+       space.dimensions,
+       count(vector.passage_id) FILTER (
+         WHERE vector.status = 'pending'
+       ) AS pending_count,
+       count(vector.passage_id) FILTER (
+         WHERE vector.status = 'processing'
+       ) AS processing_count,
+       count(vector.passage_id) FILTER (
+         WHERE vector.status = 'retry_wait'
+       ) AS retry_count,
+       count(vector.passage_id) FILTER (
+         WHERE vector.status = 'completed'
+       ) AS completed_count,
+       count(vector.passage_id) FILTER (
+         WHERE vector.status = 'failed_final'
+       ) AS failed_final_count,
+       min(vector.next_attempt_at) FILTER (
+         WHERE vector.status IN ('pending', 'retry_wait')
+       ) AS oldest_ready_at,
+       EXTRACT(EPOCH FROM (
+         CURRENT_TIMESTAMP - min(vector.next_attempt_at) FILTER (
+           WHERE vector.status IN ('pending', 'retry_wait')
+         )
+       )) AS oldest_ready_age_seconds,
+       count(vector.passage_id) FILTER (
+         WHERE vector.status = 'processing'
+           AND vector.lease_expires_at <= CURRENT_TIMESTAMP
+       ) AS expired_lease_count
+FROM retrieval.embedding_spaces AS space
+LEFT JOIN retrieval.passage_vectors AS vector USING (space_id)
+GROUP BY space.space_id, space.model, space.dimensions;
 
 CREATE VIEW observability.turn_latency AS
 SELECT turn.turn_id,
@@ -2954,3 +3027,158 @@ FOR EACH ROW EXECUTE FUNCTION personal_rpg.forbid_append_only_mutation();
 CREATE TRIGGER personal_rpg_operation_receipts_append_only_tr
 BEFORE UPDATE OR DELETE ON personal_rpg.operation_receipts
 FOR EACH ROW EXECUTE FUNCTION personal_rpg.forbid_append_only_mutation();
+
+-- PUBLIC is inherited by every login.  The vector extension retains its
+-- bootstrap-superuser-owned object ACLs, but PUBLIC loses lookup rights on its
+-- containing schema; dbctl grants that schema USAGE directly to the application.
+DO $fogmoe_snapshot_public_acl$
+DECLARE
+  schema_name TEXT;
+  target_type RECORD;
+BEGIN
+  REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC;
+
+  FOREACH schema_name IN ARRAY ARRAY[
+    'infra', 'identity', 'conversation', 'context_window', 'retrieval',
+    'user_profile', 'assistant', 'scheduling', 'economy', 'moderation',
+    'crypto', 'game', 'media', 'admin', 'observability', 'bank', 'billing',
+    'town', 'chance', 'personal_rpg'
+  ]
+  LOOP
+    EXECUTE format(
+      'REVOKE ALL PRIVILEGES ON SCHEMA %I FROM PUBLIC',
+      schema_name
+    );
+    EXECUTE format(
+      'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM PUBLIC CASCADE',
+      schema_name
+    );
+    EXECUTE format(
+      'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I FROM PUBLIC CASCADE',
+      schema_name
+    );
+    EXECUTE format(
+      'REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA %I FROM PUBLIC CASCADE',
+      schema_name
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I '
+      'REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC',
+      schema_name
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I '
+      'REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC',
+      schema_name
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I '
+      'REVOKE ALL PRIVILEGES ON ROUTINES FROM PUBLIC',
+      schema_name
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA %I '
+      'REVOKE ALL PRIVILEGES ON TYPES FROM PUBLIC',
+      schema_name
+    );
+  END LOOP;
+
+  FOR target_type IN
+    SELECT namespace.nspname AS schema_name,
+           data_type.typname AS type_name
+    FROM pg_type AS data_type
+    JOIN pg_namespace AS namespace ON namespace.oid = data_type.typnamespace
+    WHERE namespace.nspname <> 'public'
+      AND namespace.nspname <> 'information_schema'
+      AND namespace.nspname !~ '^pg_'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM pg_type AS element_type
+        WHERE element_type.typarray = data_type.oid
+      )
+  LOOP
+    EXECUTE format(
+      'REVOKE ALL PRIVILEGES ON TYPE %I.%I FROM PUBLIC CASCADE',
+      target_type.schema_name,
+      target_type.type_name
+    );
+  END LOOP;
+END;
+$fogmoe_snapshot_public_acl$;
+
+ALTER DEFAULT PRIVILEGES
+  REVOKE ALL PRIVILEGES ON SCHEMAS FROM PUBLIC;
+
+ALTER DEFAULT PRIVILEGES
+  REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC;
+
+ALTER DEFAULT PRIVILEGES
+  REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC;
+
+ALTER DEFAULT PRIVILEGES
+  REVOKE ALL PRIVILEGES ON ROUTINES FROM PUBLIC;
+
+ALTER DEFAULT PRIVILEGES
+  REVOKE ALL PRIVILEGES ON TYPES FROM PUBLIC;
+
+-- Missing global default-ACL rows would restore PostgreSQL's built-in PUBLIC
+-- EXECUTE/USAGE defaults.  The snapshot therefore proves both explicit rows and
+-- the effective CREATE boundary across every non-system schema.
+DO $fogmoe_snapshot_acl_proof$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_roles AS migration_role
+    WHERE migration_role.rolname = current_user
+      AND migration_role.rolcanlogin
+      AND NOT migration_role.rolsuper
+  ) THEN
+    RAISE EXCEPTION
+      'schema snapshot must run as the non-superuser LOGIN maintenance owner'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM pg_namespace AS namespace
+    CROSS JOIN pg_roles AS candidate_role
+    WHERE namespace.nspname <> 'information_schema'
+      AND namespace.nspname !~ '^pg_'
+      AND candidate_role.rolcanlogin
+      AND NOT candidate_role.rolsuper
+      AND candidate_role.rolname <> current_user
+      AND has_schema_privilege(
+        candidate_role.oid,
+        namespace.oid,
+        'CREATE'
+      )
+  ) THEN
+    RAISE EXCEPTION
+      'a non-superuser login other than maintenance can CREATE in a non-system schema'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM (VALUES ('f'::"char"), ('T'::"char")) AS required_acl(object_type)
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM pg_default_acl AS default_acl
+      JOIN pg_roles AS owner_role
+        ON owner_role.oid = default_acl.defaclrole
+      WHERE owner_role.rolname = current_user
+        AND default_acl.defaclnamespace = 0
+        AND default_acl.defaclobjtype = required_acl.object_type
+        AND NOT EXISTS (
+          SELECT 1
+          FROM aclexplode(default_acl.defaclacl) AS privilege
+          WHERE privilege.grantee = 0
+        )
+    )
+  ) THEN
+    RAISE EXCEPTION
+      'maintenance requires explicit global routine and type default ACLs without PUBLIC'
+      USING ERRCODE = '42501';
+  END IF;
+END;
+$fogmoe_snapshot_acl_proof$;

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
-from math import ceil
+from datetime import UTC, datetime, timedelta
+from math import ceil, isfinite
 from typing import Any, cast
 from uuid import UUID
 
@@ -19,6 +19,7 @@ from fogmoe_dashboard.domain.models import (
     MetricStats,
     Overview,
     PipelineStage,
+    RESOURCE_STALE_AFTER,
     ResourceInstance,
     ResourceState,
     RetrievalQueueStats,
@@ -44,12 +45,15 @@ class PostgresDashboardRepository:
         *,
         pool_size: int = 4,
         command_timeout: float = 5.0,
+        resource_stale_after_seconds: float = RESOURCE_STALE_AFTER.total_seconds(),
     ) -> None:
         """@brief 保存惰性连接配置 / Store lazy connection configuration.
 
         @param dsn PostgreSQL DSN / PostgreSQL DSN.
         @param pool_size 最大并行查询连接 / Maximum concurrent query connections.
         @param command_timeout 单条命令超时秒数 / Per-command timeout in seconds.
+        @param resource_stale_after_seconds 资源心跳失活阈值秒数 /
+            Resource-heartbeat stale threshold in seconds.
         @return None / None.
         """
 
@@ -60,9 +64,18 @@ class PostgresDashboardRepository:
             raise ValueError("Dashboard pool_size must be between 1 and 16")
         if command_timeout <= 0 or command_timeout > 60:
             raise ValueError("Dashboard command_timeout must be in (0, 60]")
+        if (
+            isinstance(resource_stale_after_seconds, bool)
+            or not isfinite(resource_stale_after_seconds)
+            or resource_stale_after_seconds <= 0
+        ):
+            raise ValueError(
+                "Dashboard resource_stale_after_seconds must be positive and finite"
+            )
         self._dsn = normalized
         self._pool_size = pool_size
         self._command_timeout = command_timeout
+        self._resource_stale_after = timedelta(seconds=resource_stale_after_seconds)
         self._pool: asyncpg.Pool | None = None
 
     async def overview(self, window: TimeWindow) -> Overview:
@@ -416,7 +429,13 @@ class PostgresDashboardRepository:
     ) -> Sequence[ResourceInstance]:
         """@brief 查询资源生命周期 / Query resource lifecycles."""
 
-        rows = await self._fetch(_RESOURCES_SQL, window.start, window.end, limit)
+        rows = await self._fetch(
+            _RESOURCES_SQL,
+            window.start,
+            window.end,
+            limit,
+            self._resource_stale_after.total_seconds(),
+        )
         resources: list[ResourceInstance] = []
         for row in rows:
             last_seen_at = _datetime(row["last_seen_at"])
@@ -437,6 +456,7 @@ class PostgresDashboardRepository:
                         last_seen_at=last_seen_at,
                         stopped_at=stopped_at,
                         observed_at=window.end,
+                        stale_after=self._resource_stale_after,
                     ),
                     attributes=freeze_json_object(row["attributes"]),
                 )
@@ -626,35 +646,9 @@ FROM span_rollup CROSS JOIN log_rollup
 """@brief RED 总览聚合 SQL / RED overview aggregation SQL."""
 
 _PIPELINE_SQL = """
-SELECT * FROM (
-  SELECT stage, pending_count, processing_count, retry_count,
-         failed_final_count, oldest_ready_at, expired_lease_count
-  FROM observability.pipeline_health
-  UNION ALL
-  SELECT 'retrieval.embedding' AS stage,
-         count(*) FILTER (WHERE status = 'pending') AS pending_count,
-         count(*) FILTER (WHERE status = 'processing') AS processing_count,
-         count(*) FILTER (WHERE status = 'retry_wait') AS retry_count,
-         count(*) FILTER (WHERE status = 'failed_final') AS failed_final_count,
-         min(next_attempt_at) FILTER (WHERE status IN ('pending','retry_wait'))
-           AS oldest_ready_at,
-         count(*) FILTER (
-           WHERE status = 'processing' AND lease_expires_at <= CURRENT_TIMESTAMP
-         ) AS expired_lease_count
-  FROM retrieval.passage_vectors
-  UNION ALL
-  SELECT 'user_profile.dreaming' AS stage,
-         count(*) FILTER (WHERE status = 'pending') AS pending_count,
-         count(*) FILTER (WHERE status = 'processing') AS processing_count,
-         count(*) FILTER (WHERE status = 'retry_wait') AS retry_count,
-         count(*) FILTER (WHERE status = 'failed_final') AS failed_final_count,
-         min(next_attempt_at) FILTER (WHERE status IN ('pending','retry_wait'))
-           AS oldest_ready_at,
-         count(*) FILTER (
-           WHERE status = 'processing' AND lease_expires_at <= CURRENT_TIMESTAMP
-         ) AS expired_lease_count
-  FROM user_profile.dreams
-) AS pipeline
+SELECT stage, pending_count, processing_count, retry_count,
+       failed_final_count, oldest_ready_at, expired_lease_count
+FROM observability.pipeline_health
 ORDER BY CASE stage
   WHEN 'inbox' THEN 1
   WHEN 'inference' THEN 2
@@ -781,29 +775,11 @@ ORDER BY p95_ms DESC, calls DESC
 """@brief Retrieval operation RED 聚合 / Retrieval-operation RED aggregation."""
 
 _RETRIEVAL_QUEUE_SQL = """
-SELECT space.space_id, space.model, space.dimensions,
-       count(vector.passage_id) FILTER (WHERE vector.status = 'pending') AS pending_count,
-       count(vector.passage_id) FILTER (WHERE vector.status = 'processing') AS processing_count,
-       count(vector.passage_id) FILTER (WHERE vector.status = 'retry_wait') AS retry_count,
-       count(vector.passage_id) FILTER (WHERE vector.status = 'completed') AS completed_count,
-       count(vector.passage_id) FILTER (WHERE vector.status = 'failed_final')
-         AS failed_final_count,
-       min(vector.next_attempt_at) FILTER (
-         WHERE vector.status IN ('pending','retry_wait')
-       ) AS oldest_ready_at,
-       EXTRACT(EPOCH FROM (
-         CURRENT_TIMESTAMP - min(vector.next_attempt_at) FILTER (
-           WHERE vector.status IN ('pending','retry_wait')
-         )
-       )) AS oldest_ready_age_seconds,
-       count(vector.passage_id) FILTER (
-         WHERE vector.status = 'processing'
-           AND vector.lease_expires_at <= CURRENT_TIMESTAMP
-       ) AS expired_lease_count
-FROM retrieval.embedding_spaces AS space
-LEFT JOIN retrieval.passage_vectors AS vector USING (space_id)
-GROUP BY space.space_id, space.model, space.dimensions
-ORDER BY space.space_id
+SELECT space_id, model, dimensions, pending_count, processing_count,
+       retry_count, completed_count, failed_final_count, oldest_ready_at,
+       oldest_ready_age_seconds, expired_lease_count
+FROM observability.retrieval_queue_health
+ORDER BY space_id
 """
 """@brief Retrieval 当前队列健康 / Current Retrieval queue health."""
 
@@ -986,7 +962,11 @@ _RESOURCES_SQL = """
 SELECT resource_id, service_name, service_version, deployment_environment,
        service_instance_id, started_at, last_seen_at, stopped_at, attributes
 FROM observability.resources
-WHERE started_at < $2 AND coalesce(stopped_at, $2) >= $1
+WHERE started_at < $2
+  AND coalesce(
+        stopped_at,
+        last_seen_at + make_interval(secs => $4::DOUBLE PRECISION)
+      ) >= $1
 ORDER BY started_at DESC
 LIMIT $3
 """

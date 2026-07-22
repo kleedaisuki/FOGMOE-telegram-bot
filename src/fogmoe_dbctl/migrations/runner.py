@@ -5,9 +5,13 @@ from pathlib import Path
 
 from alembic import op
 
+from fogmoe_dbctl.postgres import quote_identifier, quote_literal
+
 SECTION_RE = re.compile(r"^\s*--\s*migrate:(up|down)\s*$", re.IGNORECASE)
 _DOLLAR_QUOTE_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
 """@brief PostgreSQL dollar-quote 起始或结束标签 / PostgreSQL dollar-quote delimiter."""
+_TEMPLATE_TOKEN_RE = re.compile(r"\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}")
+"""@brief 迁移 SQL 的显式模板 token / Explicit migration-SQL template token."""
 
 
 class MigrationSqlError(RuntimeError):
@@ -89,11 +93,25 @@ def _render_template(sql: str) -> str:
     if "{{" not in sql:
         return sql
 
-    replacements = {
-        "{{ admin_user_id }}": str(_injected_admin_user_id()),
-    }
+    replacements: dict[str, str] = {}
+    if "{{ admin_user_id }}" in sql:
+        replacements["{{ admin_user_id }}"] = str(_injected_admin_user_id())
+    if "{{ application_role }}" in sql:
+        replacements["{{ application_role }}"] = quote_identifier(
+            _injected_application_role()
+        )
+    if "{{ application_role_literal }}" in sql:
+        replacements["{{ application_role_literal }}"] = quote_literal(
+            _injected_application_role()
+        )
     for token, value in replacements.items():
         sql = sql.replace(token, value)
+    unresolved = sorted(set(_TEMPLATE_TOKEN_RE.findall(sql)))
+    if unresolved:
+        raise MigrationSqlError(
+            "unsupported or unavailable migration template token(s): "
+            + ", ".join(unresolved)
+        )
     return sql
 
 
@@ -114,6 +132,27 @@ def _injected_admin_user_id() -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise MigrationSqlError(
             "fogmoe-dbctl migrate must inject a positive admin_user_id"
+        )
+    return value
+
+
+def _injected_application_role() -> str:
+    """@brief 读取命令注入的应用角色 / Read the application role injected by the command.
+
+    @return 非空 PostgreSQL 角色名 / Non-empty PostgreSQL role name.
+    @raise MigrationSqlError Alembic 未收到显式配置时抛出 /
+        Raised when Alembic did not receive explicit configuration.
+    """
+
+    alembic_config = op.get_context().config
+    if alembic_config is None:
+        raise MigrationSqlError(
+            "migration requires an Alembic config with injected application_role"
+        )
+    value = alembic_config.attributes.get("application_role")
+    if not isinstance(value, str) or not value:
+        raise MigrationSqlError(
+            "fogmoe-dbctl migrate must inject a non-empty application_role"
         )
     return value
 

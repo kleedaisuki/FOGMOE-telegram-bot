@@ -19,7 +19,7 @@ from fogmoe_dashboard.application.queries import (
     execute_query,
 )
 from fogmoe_dashboard.api import DashboardClient
-from fogmoe_dashboard.config import read_dashboard_settings
+from fogmoe_dashboard.config import DashboardQuerySettings, read_dashboard_settings
 from fogmoe_dashboard.domain.models import (
     Overview,
     PipelineStage,
@@ -199,7 +199,12 @@ def test_dashboard_reads_its_jsonc_projection_and_builds_typed_client(
             }
           },
           "observability": {
-            "dashboard": {"pool_size": 7, "command_timeout_seconds": 9.5}
+            "metric_interval_seconds": 20.0,
+            "dashboard": {
+              "pool_size": 7,
+              "command_timeout_seconds": 9.5,
+              "resource_stale_after_seconds": 60.0
+            }
           }
         }
         """,
@@ -211,6 +216,8 @@ def test_dashboard_reads_its_jsonc_projection_and_builds_typed_client(
 
     assert settings.endpoint.host == "analytics.internal"
     assert settings.query.pool_size == 7
+    assert settings.query.heartbeat_interval_seconds == 20.0
+    assert settings.query.resource_stale_after_seconds == 60.0
     assert settings.database_url() == (
         "postgresql+asyncpg://read%2Bonly:p%3Aass%5Cword@"
         "analytics.internal:5544/fogmoe-analytics"
@@ -222,6 +229,24 @@ def test_dashboard_reads_its_jsonc_projection_and_builds_typed_client(
     )
     assert client._repository._pool_size == 7
     assert client._repository._command_timeout == 9.5
+    assert client._repository._resource_stale_after == timedelta(seconds=60)
+
+
+def test_dashboard_resource_liveness_budget_covers_three_heartbeats() -> None:
+    """@brief 失活窗口至少覆盖三次心跳 / The stale window covers at least three heartbeats."""
+
+    assert (
+        DashboardQuerySettings(
+            heartbeat_interval_seconds=20.0,
+            resource_stale_after_seconds=60.0,
+        ).resource_stale_after_seconds
+        == 60.0
+    )
+    with pytest.raises(ValueError, match="3 \\* heartbeat_interval_seconds"):
+        DashboardQuerySettings(
+            heartbeat_interval_seconds=20.0,
+            resource_stale_after_seconds=59.9,
+        )
 
 
 def test_dashboard_enforces_limits_filters_and_trace_identity() -> None:

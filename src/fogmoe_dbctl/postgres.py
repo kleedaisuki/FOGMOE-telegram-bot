@@ -40,6 +40,36 @@ def quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def dollar_quote(value: str, *, prefix: str = "fogmoe") -> str:
+    """@brief 选择不与动态正文冲突的 PostgreSQL dollar quote / Choose a PostgreSQL dollar quote absent from dynamic text.
+
+    @param value 待引用正文 / Text to quote.
+    @param prefix dollar tag 的稳定前缀 / Stable prefix for the dollar tag.
+    @return 安全 dollar-quoted 字符串 / Safely dollar-quoted string.
+    @raise ValueError prefix 不是安全 SQL tag 时抛出 / Raised when ``prefix`` is not a safe SQL tag.
+    @note 随机密码等配置可能合法包含 ``$$`` 或固定 tagged delimiter；delimiter
+        必须按正文选择。/ Configuration such as random passwords may legitimately contain
+        ``$$`` or a fixed tagged delimiter, so the delimiter is selected from the text.
+    """
+
+    if (
+        not prefix
+        or not prefix.isascii()
+        or (not prefix[0].isalpha() and prefix[0] != "_")
+        or any(not character.isalnum() and character != "_" for character in prefix)
+    ):
+        raise ValueError(
+            "Dollar-quote prefix must start with an ASCII letter or underscore and "
+            "contain only ASCII letters, digits, or underscores"
+        )
+    index = 0
+    while True:
+        delimiter = f"${prefix}_{index}$"
+        if delimiter not in value:
+            return f"{delimiter}{value}{delimiter}"
+        index += 1
+
+
 def sqlalchemy_url(
     *,
     host: str,

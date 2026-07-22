@@ -275,11 +275,11 @@ class DbctlSettings(_FrozenSettings):
 
     @model_validator(mode="after")
     def require_distinct_login_roles(self) -> Self:
-        """@brief 强制三个数据库登录身份两两不同 / Require all three database login identities to be pairwise distinct.
+        """@brief 强制受管登录角色与 bootstrap 管理身份两两不同 / Require managed login roles and the bootstrap administrator to be pairwise distinct.
 
         @return 已验证设置 / Validated settings.
-        @raise ValueError 任意两个登录角色名相同时抛出 /
-            Raised when any two login role names are equal.
+        @raise ValueError 任意两个角色名相同时抛出 /
+            Raised when any two role names are equal.
         @note 角色分离是授权模型不变量，不能留给 bootstrap 执行顺序补救。/
             Role separation is an authorization-model invariant and must not be
             deferred to bootstrap execution order.
@@ -289,11 +289,13 @@ class DbctlSettings(_FrozenSettings):
             self.application.username,
             self.maintenance.username,
             self.reporting.username,
+            self.bootstrap.system_user,
         )
         if len(set(usernames)) != len(usernames):
             raise ValueError(
                 "database.application.username, database.maintenance.username, "
-                "and database.reporting.username must be pairwise distinct"
+                "database.reporting.username, and database.bootstrap.system_user "
+                "must be pairwise distinct"
             )
         return self
 

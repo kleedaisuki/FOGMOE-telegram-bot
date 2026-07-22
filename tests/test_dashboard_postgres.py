@@ -41,10 +41,10 @@ def _asyncpg_database_url() -> str:
     pytest.skip("set FOGMOE_TEST_DATABASE_URL to run the real PostgreSQL contract")
 
 
-def test_resource_adapter_classifies_an_expired_null_stop_as_stale(
+def test_resource_adapter_uses_one_configured_liveness_threshold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """@brief PostgreSQL adapter 不再把 stopped_at 为空等同于 active / The PostgreSQL adapter no longer equates null stopped_at with active.
+    """@brief SQL 窗口与领域状态共用配置阈值 / SQL windows and domain state share the configured threshold.
 
     @param monkeypatch pytest 方法替换器 / Pytest method patcher.
     @return None / None.
@@ -60,10 +60,12 @@ def test_resource_adapter_classifies_an_expired_null_stop_as_stale(
         @param repository 被替换的 repository / Patched repository.
         @param query 资源 SQL / Resource SQL.
         @param args 查询边界 / Query bounds.
-        @return 失联资源行 / Stale resource row.
+        @return 一个心跳仍新鲜的资源行 / A resource row whose heartbeat remains fresh.
         """
 
-        del repository, query, args
+        del repository
+        assert "last_seen_at + make_interval" in query
+        assert args[3] == 120.0
         observed_at = datetime(2026, 7, 22, 8, tzinfo=UTC)
         return (
             {
@@ -73,7 +75,7 @@ def test_resource_adapter_classifies_an_expired_null_stop_as_stale(
                 "deployment_environment": "test",
                 "service_instance_id": "lost-instance",
                 "started_at": observed_at - timedelta(hours=1),
-                "last_seen_at": observed_at - timedelta(minutes=5),
+                "last_seen_at": observed_at - timedelta(seconds=100),
                 "stopped_at": None,
                 "attributes": {},
             },
@@ -83,7 +85,10 @@ def test_resource_adapter_classifies_an_expired_null_stop_as_stale(
         """@brief 执行无数据库的 adapter 映射 / Execute adapter mapping without a database."""
 
         observed_at = datetime(2026, 7, 22, 8, tzinfo=UTC)
-        repository = PostgresDashboardRepository("postgresql://unused")
+        repository = PostgresDashboardRepository(
+            "postgresql://unused",
+            resource_stale_after_seconds=120.0,
+        )
 
         resources = await repository.resources(
             TimeWindow(observed_at - timedelta(hours=1), observed_at),
@@ -91,7 +96,7 @@ def test_resource_adapter_classifies_an_expired_null_stop_as_stale(
         )
 
         assert len(resources) == 1
-        assert resources[0].state is ResourceState.STALE
+        assert resources[0].state is ResourceState.ACTIVE
         assert resources[0].stopped_at is None
 
     monkeypatch.setattr(PostgresDashboardRepository, "_fetch", fake_fetch)

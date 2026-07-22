@@ -98,6 +98,59 @@ SELECT 'user:42:free', 'system:staking_pool';
     assert executed == ["SELECT 'user:42:free', 'system:staking_pool'"]
 
 
+def test_migration_template_quotes_the_injected_application_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief 应用角色模板只能渲染为 PostgreSQL quoted identifier / The application-role template renders only as a PostgreSQL quoted identifier.
+
+    @param monkeypatch pytest 依赖替换器 / Pytest dependency patcher.
+    @return None / None.
+    """
+
+    monkeypatch.setattr(
+        runner,
+        "_injected_application_role",
+        lambda: 'runtime"role',
+    )
+
+    rendered = runner._render_template(
+        "GRANT EXECUTE ON FUNCTION observability.demo() TO {{ application_role }};"
+    )
+
+    assert rendered.endswith('TO "runtime""role";')
+    assert "{{" not in rendered
+
+
+def test_migration_template_quotes_application_role_as_a_literal_in_dynamic_sql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief 动态 SQL 的角色值使用 literal 而非 identifier 表达式 / Dynamic SQL receives a role literal rather than an identifier expression.
+
+    @param monkeypatch pytest 依赖替换器 / Pytest dependency patcher.
+    @return None / None.
+    """
+
+    monkeypatch.setattr(
+        runner,
+        "_injected_application_role",
+        lambda: "runtime'role",
+    )
+
+    rendered = runner._render_template(
+        "SELECT format('GRANT TO %I', {{ application_role_literal }});"
+    )
+
+    assert rendered.endswith("'runtime''role');")
+    assert "{{" not in rendered
+
+
+def test_migration_template_rejects_unknown_tokens() -> None:
+    """@brief 未知模板 token 必须失败关闭 / Unknown template tokens fail closed."""
+
+    with pytest.raises(runner.MigrationSqlError, match="unsupported.*unknown"):
+        runner._render_template("SELECT {{ unknown }};")
+
+
 def test_schema_snapshot_head_matches_the_single_migration_graph_head() -> None:
     """@brief schema header 自动匹配 migration DAG 唯一 head / The schema header automatically matches the migration DAG's sole head."""
 

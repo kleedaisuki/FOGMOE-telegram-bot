@@ -10,7 +10,7 @@ from alembic.config import Config
 from fogmoe_dbctl import cli
 from fogmoe_dbctl.commands import bootstrap, export_csv, migrate, shell
 from fogmoe_dbctl.config import DbctlSettings, ReportingRoleSettings
-from fogmoe_dbctl.postgres import RoleSecret, sqlalchemy_url
+from fogmoe_dbctl.postgres import RoleSecret, dollar_quote, sqlalchemy_url
 
 
 def _settings() -> DbctlSettings:
@@ -54,23 +54,28 @@ def test_reporting_settings_are_strict_and_have_a_dedicated_default() -> None:
 
 
 @pytest.mark.parametrize(
-    ("application", "maintenance", "reporting"),
+    ("application", "maintenance", "reporting", "system_user"),
     (
-        ("shared", "shared", "reporting"),
-        ("application", "shared", "shared"),
-        ("shared", "maintenance", "shared"),
+        ("shared", "shared", "reporting", "postgres"),
+        ("application", "shared", "shared", "postgres"),
+        ("shared", "maintenance", "shared", "postgres"),
+        ("postgres", "maintenance", "reporting", "postgres"),
+        ("application", "postgres", "reporting", "postgres"),
+        ("application", "maintenance", "postgres", "postgres"),
     ),
 )
 def test_dbctl_login_roles_must_be_pairwise_distinct(
     application: str,
     maintenance: str,
     reporting: str,
+    system_user: str,
 ) -> None:
-    """@brief 配置模型拒绝任意登录身份复用 / The configuration model rejects every login-identity collision.
+    """@brief 配置模型拒绝受管角色或系统管理员身份复用 / The configuration model rejects managed-role or system-administrator identity reuse.
 
     @param application 应用角色名 / Application role name.
     @param maintenance 维护角色名 / Maintenance role name.
     @param reporting 报表角色名 / Reporting role name.
+    @param system_user bootstrap 系统管理员角色 / Bootstrap system-administrator role.
     @return None / None.
     """
 
@@ -80,6 +85,7 @@ def test_dbctl_login_roles_must_be_pairwise_distinct(
                 "application": {"username": application},
                 "maintenance": {"username": maintenance},
                 "reporting": {"username": reporting},
+                "bootstrap": {"system_user": system_user},
             }
         )
 
@@ -176,7 +182,7 @@ def test_sqlalchemy_url_uses_escaping() -> None:
 def test_migrate_injects_all_migration_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """@brief 验证迁移显式注入 URL、schema 与管理员 ID / Verify migrations receive an explicit URL, schema, and administrator ID."""
+    """@brief 验证迁移显式注入 URL、schema、管理员与应用角色 / Verify migrations receive an explicit URL, schema, administrator, and application role."""
 
     calls: list[tuple[object, str]] = []
     monkeypatch.setattr(
@@ -197,6 +203,7 @@ def test_migrate_injects_all_migration_inputs(
     )
     assert config.attributes["migration_schema"] == "infra"
     assert config.attributes["admin_user_id"] == 42
+    assert config.attributes["application_role"] == "fogmoe-app"
 
 
 def test_runtime_grants_include_every_new_bounded_context_schema() -> None:
@@ -206,7 +213,9 @@ def test_runtime_grants_include_every_new_bounded_context_schema() -> None:
     """
 
     sql = migrate.build_runtime_grant_sql(
+        database="fogmoe",
         schemas=migrate._APPLICATION_SCHEMAS,
+        functions=migrate._APPLICATION_FUNCTIONS,
         application_role="fogmoe-app",
         owner_role="fogmoe-maintenance",
     )
@@ -221,36 +230,82 @@ def test_runtime_grants_include_every_new_bounded_context_schema() -> None:
     ):
         assert schema in migrate._APPLICATION_SCHEMAS
         assert f'GRANT USAGE ON SCHEMA "{schema}" TO "fogmoe-app";' in sql
+        assert (
+            f'REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA "{schema}" FROM PUBLIC;' in sql
+        )
+        assert (
+            f'REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA "{schema}" '
+            'FROM "fogmoe-app";' in sql
+        )
+
+    assert (
+        'ALTER DEFAULT PRIVILEGES FOR ROLE "fogmoe-maintenance" '
+        "REVOKE EXECUTE ON ROUTINES FROM PUBLIC;"
+    ) in sql
+    assert "GRANT EXECUTE ON ALL ROUTINES" not in sql
+    assert "GRANT EXECUTE ON ROUTINES" not in sql
+    for schema, function, signature in migrate._APPLICATION_FUNCTIONS:
+        assert (
+            f'GRANT EXECUTE ON FUNCTION "{schema}"."{function}"({signature}) '
+            'TO "fogmoe-app";'
+        ) in sql
 
 
-def test_reporting_grants_are_read_only_for_existing_and_future_objects() -> None:
-    """@brief 报表授权只包含连接、命名空间与读取能力 / Reporting grants contain only connection, namespace, and read capabilities.
+def test_reporting_grants_are_read_only_for_explicit_observability_models() -> None:
+    """@brief 报表授权仅包含显式观测读模型 / Reporting grants contain only explicit observability read models.
 
     @return None / None.
     """
 
     sql = migrate.build_reporting_grant_sql(
         database="fogmoe",
-        schemas=migrate._APPLICATION_SCHEMAS,
+        owned_schemas=migrate._APPLICATION_SCHEMAS,
+        relations=migrate._REPORTING_RELATIONS,
         reporting_role="fogmoe-dashboard",
         owner_role="fogmoe-maintenance",
     )
 
     assert 'GRANT CONNECT ON DATABASE "fogmoe" TO "fogmoe-dashboard";' in sql
     for schema in migrate._APPLICATION_SCHEMAS:
-        assert f'GRANT USAGE ON SCHEMA "{schema}" TO "fogmoe-dashboard";' in sql
-        assert (
-            f'GRANT SELECT ON ALL TABLES IN SCHEMA "{schema}" TO "fogmoe-dashboard";'
-        ) in sql
-        assert (
-            'ALTER DEFAULT PRIVILEGES FOR ROLE "fogmoe-maintenance" '
-            f'IN SCHEMA "{schema}" GRANT SELECT ON TABLES '
-            'TO "fogmoe-dashboard";'
-        ) in sql
         assert (
             f'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA "{schema}" '
             'FROM "fogmoe-dashboard";'
         ) in sql
+        assert (
+            f'REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA "{schema}" FROM PUBLIC;' in sql
+        )
+        assert (
+            f'REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA "{schema}" '
+            'FROM "fogmoe-dashboard";'
+        ) in sql
+
+    for schema, relations in migrate._REPORTING_RELATIONS:
+        assert f'GRANT USAGE ON SCHEMA "{schema}" TO "fogmoe-dashboard";' in sql
+        qualified = ", ".join(f'"{schema}"."{relation}"' for relation in relations)
+        assert f'GRANT SELECT ON TABLE {qualified} TO "fogmoe-dashboard";' in sql
+
+    for sensitive_schema in (
+        "identity",
+        "conversation",
+        "retrieval",
+        "user_profile",
+        "bank",
+        "billing",
+        "admin",
+    ):
+        assert (
+            f'GRANT USAGE ON SCHEMA "{sensitive_schema}" TO "fogmoe-dashboard";'
+            not in sql
+        )
+
+    assert (
+        'ALTER DEFAULT PRIVILEGES FOR ROLE "fogmoe-maintenance" '
+        "REVOKE EXECUTE ON ROUTINES FROM PUBLIC;"
+    ) in sql
+    assert (
+        'ALTER DEFAULT PRIVILEGES FOR ROLE "fogmoe-maintenance" '
+        'REVOKE ALL PRIVILEGES ON ROUTINES FROM "fogmoe-dashboard";'
+    ) in sql
 
     for forbidden_grant in (
         "GRANT INSERT",
@@ -262,8 +317,15 @@ def test_reporting_grants_are_read_only_for_existing_and_future_objects() -> Non
         "GRANT USAGE, SELECT",
         "GRANT SELECT ON ALL SEQUENCES",
         "GRANT SELECT ON SEQUENCES",
+        "GRANT SELECT ON ALL TABLES",
+        "GRANT SELECT ON TABLES",
+        "GRANT SELECT ON ROUTINES",
     ):
         assert forbidden_grant not in sql
+
+    assert tuple(schema for schema, _relations in migrate._REPORTING_RELATIONS) == (
+        "observability",
+    )
 
 
 def test_bootstrap_hardens_reporting_role_and_database_ownership() -> None:
@@ -279,9 +341,28 @@ def test_bootstrap_hardens_reporting_role_and_database_ownership() -> None:
     )
     assert "NOBYPASSRLS" in role_sql
     assert role_sql.count("NOBYPASSRLS") == 6
+    assert role_sql.count("NOINHERIT") == 6
+    assert role_sql.count("FROM pg_auth_members") == 1
+    assert "managed FogMoe login roles must not inherit" in role_sql
+    assert role_sql.startswith("BEGIN;")
+    assert role_sql.endswith("COMMIT;\n")
     assert (
         'ALTER ROLE "fogmoe-dashboard" SET default_transaction_read_only = on;'
     ) in role_sql
+
+    preflight_sql = bootstrap.build_role_boundary_preflight_sql(
+        "fogmoe-app",
+        "fogmoe-dashboard",
+    )
+    assert "FROM pg_database AS owned_database" in preflight_sql
+    assert "FROM pg_tablespace AS owned_tablespace" in preflight_sql
+    assert "FROM pg_shdepend AS dependency" in preflight_sql
+    assert "FROM pg_default_acl AS default_acl" in preflight_sql
+    assert "aclexplode(attribute.attacl)" in preflight_sql
+    assert "REASSIGN OWNED" not in preflight_sql
+    assert "DROP OWNED" not in preflight_sql
+    assert preflight_sql.startswith("BEGIN;")
+    assert preflight_sql.endswith("COMMIT;\n")
 
     database_sql = bootstrap.build_database_sql("fogmoe", "fogmoe-maintenance")
     assert 'ALTER DATABASE "fogmoe" OWNER TO "fogmoe-maintenance";' in database_sql
@@ -293,6 +374,13 @@ def test_bootstrap_hardens_reporting_role_and_database_ownership() -> None:
         "fogmoe-dashboard",
     )
     assert 'REVOKE ALL PRIVILEGES ON DATABASE "fogmoe" FROM PUBLIC;' in grant_sql
+    for role in ("fogmoe-app", "fogmoe-maintenance", "fogmoe-dashboard"):
+        assert f'ALTER ROLE "{role}" IN DATABASE "fogmoe" RESET ALL;' in grant_sql
+    assert 'ALTER ROLE "fogmoe-dashboard" IN DATABASE "fogmoe" RESET ALL;' in grant_sql
+    assert (
+        'ALTER ROLE "fogmoe-dashboard" IN DATABASE "fogmoe"\n'
+        "  SET default_transaction_read_only = on;" in grant_sql
+    )
     assert (
         'GRANT CONNECT ON DATABASE "fogmoe" TO "fogmoe-app", '
         '"fogmoe-maintenance", "fogmoe-dashboard";'
@@ -306,12 +394,44 @@ def test_bootstrap_hardens_reporting_role_and_database_ownership() -> None:
         for line in grant_sql.splitlines()
         if "CREATE" in line or "TEMPORARY" in line
     )
+    assert grant_sql.startswith("BEGIN;")
+    assert grant_sql.endswith("COMMIT;\n")
 
 
-def test_migrate_applies_runtime_and_reporting_grants(
+def test_bootstrap_dollar_quotes_role_secrets_without_a_fixed_delimiter() -> None:
+    """@brief bootstrap 安全容纳含 dollar delimiter 的合法凭据 / Bootstrap safely accepts credentials containing dollar delimiters.
+
+    @return None / None.
+    """
+
+    sql = bootstrap.build_role_sql(
+        RoleSecret("app$$role", "secret$fogmoe_0$$fogmoe_1$tail"),
+        RoleSecret("maintenance", "secret$$tail"),
+        RoleSecret("reporting", "secret$fogmoe_1$tail"),
+    )
+
+    assert "DO $$" not in sql
+    assert 'CREATE ROLE "app$$role"' in sql
+    assert "PASSWORD 'secret$fogmoe_0$$fogmoe_1$tail'" in sql
+    assert "$fogmoe_2$" in sql
+
+
+@pytest.mark.parametrize("prefix", ("1invalid", "hyphen-tag", "étiquette"))
+def test_dollar_quote_rejects_invalid_postgresql_tags(prefix: str) -> None:
+    """@brief dollar quote tag 遵守 PostgreSQL 标识符词法 / Dollar-quote tags obey PostgreSQL identifier lexical rules.
+
+    @param prefix 待拒绝的 tag 前缀 / Tag prefix to reject.
+    @return None / None.
+    """
+
+    with pytest.raises(ValueError, match="ASCII letter or underscore"):
+        dollar_quote("body", prefix=prefix)
+
+
+def test_migrate_applies_runtime_and_reporting_grants_atomically(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """@brief migrate 分别应用运行时与只读授权 / Migrate applies runtime and read-only grants separately.
+    """@brief migrate 在同一授权事务中应用运行时与只读边界 / Migrate applies runtime and read-only boundaries in one grant transaction.
 
     @param monkeypatch pytest 替换器 / pytest monkey patcher.
     @return None / None.
@@ -328,12 +448,79 @@ def test_migrate_applies_runtime_and_reporting_grants(
 
     args.handler(args, settings=_settings())
 
-    assert len(granted_sql) == 2
+    assert len(granted_sql) == 1
     assert 'TO "fogmoe-app";' in granted_sql[0]
-    assert 'TO "fogmoe-dashboard";' in granted_sql[1]
-    assert "INSERT" not in granted_sql[1]
-    assert "UPDATE" not in granted_sql[1]
-    assert "DELETE" not in granted_sql[1]
+    assert 'TO "fogmoe-dashboard";' in granted_sql[0]
+    reporting_sql = granted_sql[0].split(
+        'REVOKE ALL PRIVILEGES ON DATABASE "fogmoe" FROM "fogmoe-dashboard";',
+        maxsplit=1,
+    )[1]
+    assert "INSERT" not in reporting_sql
+    assert "UPDATE" not in reporting_sql
+    assert "DELETE" not in reporting_sql
+
+
+def test_non_head_migration_requires_explicit_grant_skip() -> None:
+    """@brief 非 head revision 不得套用 head ACL allow-list / A non-head revision cannot apply the head ACL allow-list.
+
+    @return None / None.
+    """
+
+    args = cli.build_parser().parse_args(["migrate", "--revision", "0063"])
+    with pytest.raises(ValueError, match="require --skip-grants"):
+        args.handler(args, settings=_settings())
+
+
+def test_psql_grants_use_one_explicit_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief 授权收敛通过 psql 单事务执行 / Grant convergence executes in one psql transaction.
+
+    @param monkeypatch pytest 替换器 / Pytest monkey patcher.
+    @return None / None.
+    """
+
+    calls: list[tuple[list[str], str, bool]] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        input: str,
+        text: bool,
+        env: dict[str, str],
+        check: bool,
+    ) -> None:
+        """@brief 记录授权子进程 / Record the grant subprocess.
+
+        @param command 子进程参数 / Subprocess arguments.
+        @param input 标准输入 SQL / Standard-input SQL.
+        @param text 是否文本模式 / Whether text mode is enabled.
+        @param env 显式连接环境 / Explicit connection environment.
+        @param check 是否检查退出码 / Whether the exit status is checked.
+        @return None / None.
+        """
+
+        assert env["PGUSER"] == "fogmoe-maintenance"
+        calls.append((command, input, check))
+
+    monkeypatch.setattr(migrate.subprocess, "run", fake_run)
+
+    migrate.run_psql_grants(
+        settings=_settings(),
+        sql="SELECT 1;",
+        dry_run=False,
+    )
+
+    command, sql, check = calls[0]
+    assert command == [
+        "psql",
+        "--no-psqlrc",
+        "--single-transaction",
+        "--set",
+        "ON_ERROR_STOP=1",
+    ]
+    assert sql == "SELECT 1;"
+    assert check is True
 
 
 def test_bootstrap_dry_run_redacts_passwords(
@@ -349,6 +536,10 @@ def test_bootstrap_dry_run_redacts_passwords(
     assert "maintenance-secret" not in output
     assert "reporting-secret" not in output
     assert "***" in output
+    assert "-- psql database=fogmoe" in output
+    assert "FROM pg_shdepend AS dependency" in output
+    assert "REASSIGN OWNED" not in output
+    assert "DROP OWNED" not in output
 
 
 def test_export_csv_accepts_only_schema_qualified_identifiers() -> None:

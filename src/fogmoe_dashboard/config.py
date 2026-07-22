@@ -10,10 +10,17 @@ from collections.abc import Mapping
 import json
 from math import isfinite
 from pathlib import Path
-from typing import Annotated, Final, Literal, Never, cast
+from typing import Annotated, Final, Literal, Never, Self, cast
 from urllib.parse import quote_plus
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    model_validator,
+)
 
 
 type JSONValue = (
@@ -234,6 +241,24 @@ class DashboardQuerySettings(_FrozenSettings):
 
     pool_size: PositiveInt = 4
     command_timeout_seconds: PositiveFloat = 5.0
+    heartbeat_interval_seconds: PositiveFloat = 15.0
+    resource_stale_after_seconds: PositiveFloat = 90.0
+
+    @model_validator(mode="after")
+    def _validate_resource_liveness_budget(self) -> Self:
+        """@brief 为心跳抖动保留三个采样周期 / Reserve three sampling periods for heartbeat jitter.
+
+        @return 验证后的不可变设置 / Validated immutable settings.
+        @raise ValueError 失活阈值小于三个心跳周期时抛出 /
+            Raised when the stale threshold is shorter than three heartbeat periods.
+        """
+
+        minimum_stale_after = 3 * self.heartbeat_interval_seconds
+        if self.resource_stale_after_seconds < minimum_stale_after:
+            raise ValueError(
+                "resource_stale_after_seconds must be >= 3 * heartbeat_interval_seconds"
+            )
+        return self
 
 
 class DashboardSettings(_FrozenSettings):
@@ -317,10 +342,13 @@ def _dashboard_payload(document: Mapping[str, JSONValue]) -> dict[str, object]:
     _require_schema_version(document)
     database = _object_at(document, "database")
     observability = _object_at(document, "observability")
+    query = dict(_object_at(observability, "dashboard"))
+    if "metric_interval_seconds" in observability:
+        query["heartbeat_interval_seconds"] = observability["metric_interval_seconds"]
     return {
         "endpoint": _object_at(database, "endpoint"),
         "reporting": _object_at(database, "reporting"),
-        "query": _object_at(observability, "dashboard"),
+        "query": query,
     }
 
 
