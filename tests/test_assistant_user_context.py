@@ -63,10 +63,16 @@ def test_snapshot_read_maps_authoritative_balances_and_reuses_connection(
     sql, params, connection = calls[0]
     assert connection is expected_connection
     assert params == (42,)
+    assert "bank.accounts AS free_account" in sql
     assert "bank.account_balances AS free_balance" in sql
+    assert "bank.accounts AS paid_account" in sql
     assert "bank.account_balances AS paid_balance" in sql
+    assert ":free" not in sql
+    assert ":paid" not in sql
     assert "identity.users.coins" not in sql
     assert "FOR UPDATE" not in sql
+    statement, bindings = assistant_user_context.db._prepare_statement(sql, params)
+    assert set(statement.compile().params) == set(bindings) == {"p0"}
 
 
 def test_identity_lock_requires_and_reuses_transaction_connection(

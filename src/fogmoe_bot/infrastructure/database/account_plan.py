@@ -67,10 +67,14 @@ class PostgresAccountPlanResolver:
             "WHERE owner_id = %s AND status = 'active' "
             "AND period_starts_at <= CURRENT_TIMESTAMP "
             "AND CURRENT_TIMESTAMP < period_ends_at"
-            "), COALESCE(("
-            "SELECT balance > 0 FROM bank.account_balances "
-            "WHERE account_key = 'user:' || %s::TEXT || ':paid'"
-            "), FALSE)",
+            "), EXISTS ("
+            "SELECT 1 FROM bank.accounts AS account "
+            "JOIN bank.account_balances AS balance USING (account_key) "
+            "WHERE account.account_scope = 'user' "
+            "AND account.owner_id = %s "
+            "AND account.token_bucket = 'paid' "
+            "AND balance.balance > 0"
+            ")",
             (user_id, user_id),
             connection=connection,
         )

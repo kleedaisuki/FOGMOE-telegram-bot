@@ -116,7 +116,13 @@ def test_postgres_account_plan_resolver_uses_billing_and_bank_in_caller_transact
         assert "status = 'active'" in sql
         assert "period_starts_at <= CURRENT_TIMESTAMP" in sql
         assert "CURRENT_TIMESTAMP < period_ends_at" in sql
-        assert "FROM bank.account_balances" in sql
+        assert "FROM bank.accounts AS account" in sql
+        assert "JOIN bank.account_balances" in sql
+        assert "account.owner_id = %s" in sql
+        assert "account.token_bucket = 'paid'" in sql
         assert "balance > 0" in sql
+        assert ":paid" not in sql
+        statement, bindings = account_plan.db._prepare_statement(sql, params)
+        assert set(statement.compile().params) == set(bindings) == {"p0", "p1"}
 
     asyncio.run(scenario())
