@@ -6,7 +6,7 @@
 
 ```text
 cli.py                    组合根：构造 argparse、注册并分发命令
-commands/bootstrap.py     建库、三类登录角色与初始授权用例
+commands/bootstrap.py     建库、三类受管登录角色与初始授权用例
 commands/migrate.py       Alembic 迁移、运行时与只读报表授权用例
 commands/export_csv.py    通过受配置约束的连接原子导出表为 CSV
 postgres.py               PostgreSQL DSN、标识符与连接原语
@@ -24,8 +24,10 @@ migrations/               Alembic 适配层与版本化 SQL
 解析器，不调用 bot 或 Dashboard 的配置服务；三个程序只共享用户填写的同一个配置文件，
 而不共享运行时配置对象。
 
-`application`、`maintenance`、`reporting` 是三个不可复用的登录身份，配置模型会在执行任何
-命令前强制其 `username` 两两不同。默认报表角色名为 `fogmoe-dashboard`。
+`application`、`maintenance`、`reporting` 是三个不可复用的受管登录身份；它们与
+`bootstrap.system_user` 也不得复用。配置模型会在执行任何命令前强制四个角色名两两不同，
+防止 bootstrap 把 PostgreSQL 管理员误收敛为低权限角色。默认报表角色名为
+`fogmoe-dashboard`。
 
 配置只来自根目录的 JSONC 文档。完整字段、默认值和说明见仓库根目录的
 [`example.config.json`](../example.config.json)。
@@ -42,7 +44,7 @@ migrations/               Alembic 适配层与版本化 SQL
 
 ## 命令
 
-- `bootstrap`：创建或收敛应用、维护、报表角色及数据库 owner。
+- `bootstrap`：创建或收敛应用、维护、报表角色及数据库 owner，并清理历史角色授权。
 - `migrate`：执行 Alembic 迁移，并分别授予应用运行时权限与报表只读权限。
 - `shell`：以维护身份启动交互式 `psql`。
 - `export-csv`：导出一张受限的 `schema.table`。
@@ -63,8 +65,16 @@ fogmoe-dbctl export-csv \
 
 `bootstrap` 始终把数据库 owner 校正为 `database.maintenance.username`；报表角色不能成为
 数据库 owner。三个登录角色都显式设置为 `NOSUPERUSER`、`NOCREATEDB`、`NOCREATEROLE`、
-`NOREPLICATION` 与 `NOBYPASSRLS`。报表角色额外设置
+`NOINHERIT`、`NOREPLICATION` 与 `NOBYPASSRLS`。任一 membership 边以受管角色为被授予方
+或 member 时，bootstrap 都会失败关闭（fail closed），不会隐式级联撤销集群级 membership。报表角色额外设置
 `default_transaction_read_only=on`，作为对象授权之外的第二层防线。
+
+application/reporting 必须是 FogMoe 专用角色，不得拥有数据库、表空间或目标数据库对象，
+也不得持有 default ACL 或列级 ACL。bootstrap 对这些历史状态只做无破坏预检：发现后立即
+失败并要求操作者显式转移 ownership 或撤销 ACL；它不会调用可能波及其他数据库 shared
+objects 的 `REASSIGN OWNED`/`DROP OWNED`。新建环境及新增 reporting 角色仍应按
+`bootstrap -> migrate` 顺序执行，后者负责把已知 schema、relation 和 routine 权限收敛到
+闭集。
 
 数据库级默认 `PUBLIC` 权限会被撤销，然后只显式授予：
 
@@ -72,10 +82,45 @@ fogmoe-dbctl export-csv \
 - application：`CONNECT`、`TEMPORARY`；
 - reporting：仅 `CONNECT`。
 
-每次 `migrate` 后，报表权限都会先撤销再收敛到以下闭集：
+每次 `migrate` 后，授权会在一笔独立的 `psql --single-transaction` 事务中先撤销再收敛。
+PostgreSQL 的 `PUBLIC` 是所有登录角色隐式继承的伪角色，不能由“受管角色没有直接 ACL”
+推出不可访问。dbctl 因此还会动态枚举全部非系统用户 schema，撤销 `PUBLIC` 的 schema、
+relation、列、序列、routine、type 与 large-object 权限，并以 catalog guard 验证没有残留；
+未来 schema/table/sequence/routine/type 的默认权限也同步收紧，而且 guard 会检查所有
+owner，不能由第三方角色的 per-schema default ACL 重开访问面。guard 还会通过
+effective privilege 检查证明：任何非系统 schema 都没有 maintenance 之外的非超级
+LOGIN 角色可以 `CREATE`。对 routine/function 与 type，`pg_default_acl` 缺行会回退到
+PostgreSQL 内建的 `PUBLIC EXECUTE`/`PUBLIC USAGE`，因此 maintenance 的全局 `f`/`T`
+覆盖行必须显式存在且不含 `PUBLIC`。application 只可直接执行
+`observability.ensure_daily_partitions(date)` 与
+`observability.drop_partitions_before(date)`，并显式获得业务 type 的 `USAGE`。
 
-- 每个应用 schema 的 `USAGE`；
-- 已有表及未来由 maintenance 创建的表的 `SELECT`。
+唯一例外是 bootstrap superuser 拥有的受信 `vector` extension 成员：maintenance 无权可靠修改
+这些对象的 ACL，因此保留扩展自带的 type/routine `PUBLIC` ACL，但撤销 `PUBLIC` 对其所在
+`public` schema 的 `USAGE`，只把 schema `USAGE` 直接授予 application。PostgreSQL 同时要求
+schema 与对象权限，这使 application 可继续使用 `<=>`，reporting 却无法解析或调用 vector
+对象。所有非扩展 routine 均不授予 application 或 reporting。
+PostgreSQL 明确指出撤销 schema `USAGE` 不能使既有 session 已完成的名称解析失效；因此应用
+0065 时必须先停止 Bot/Dashboard 并在迁移后建立新连接。新建的 reporting 角色天然没有这类
+缓存，本仓库的上线流程也把迁移放在进程重启之前。
+
+报表权限只收敛到以下闭集：
+
+- `observability` schema 的 `USAGE`；
+- `resources`、`log_records`、`spans`、`metric_points`、`pipeline_health`、
+  `turn_latency` 与 `retrieval_queue_health` 的 `SELECT`。
+
+`pipeline_health` 与 `retrieval_queue_health` 是由 maintenance 拥有的聚合观测读模型
+（read model），只暴露队列计数、最旧就绪时间与过期 lease；Dashboard 不获得
+`retrieval` 或 `user_profile` schema 权限，因此不能读取 embedding、队列 `last_error`、
+用户 ID、画像 patch 或 metadata。新增 Dashboard 查询必须显式增加观测读模型和授权 allow-list；
+未来表不会自动获得 `SELECT`。
 
 报表角色不会获得 schema/database `CREATE`、表 DML、`TRUNCATE` 或序列
-`USAGE`/`SELECT`/`UPDATE`。`--skip-grants` 会同时跳过 application 与 reporting 的授权步骤。
+`USAGE`/`SELECT`/`UPDATE`，也不会获得 routine `EXECUTE`。`--skip-grants` 会同时跳过
+application 与 reporting 的授权收敛；Alembic 迁移事务和后续授权事务彼此独立。
+由于授权 allow-list 描述当前 schema head，`--revision` 指向非 `head` 时必须同时传
+`--skip-grants`，避免向旧 revision 授予尚不存在的关系。
+
+0065 会删除来源不可逆推出的历史 `PUBLIC` ACL，因此明确拒绝 downgrade；执行生产迁移前应
+保留 dbctl 建议的逻辑备份，而不是用一个猜测性的 down migration 重新开放权限。

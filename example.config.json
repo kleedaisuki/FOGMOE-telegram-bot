@@ -65,7 +65,7 @@
       "per_key_capacity": 8,
       // 空闲 mailbox 从内存回收前的秒数。
       "idle_ttl_seconds": 300.0,
-      // 关闭进程时等待串行 durable drain 阶段完成的最长秒数。
+      // 关闭进程时等待 durable drain 的全局截止秒数；Compose 部署要求 1..190。
       "shutdown_grace_seconds": 180.0
     },
     // 定时任务调度器。
@@ -474,16 +474,16 @@
       // Alembic 版本表所在的 schema。
       "migration_schema": "infra"
     },
-    // 由 dbctl 管理、Dashboard 只读报表使用的独立数据库身份；不得与应用或维护身份复用。
+    // 由 dbctl 管理、Dashboard 只读报表使用的独立数据库身份；不得与应用、维护或 bootstrap 身份复用。
     "reporting": {
-      // Dashboard 最小权限角色名；bootstrap 默认只读事务，migrate 仅授予 SELECT 能力。
+      // Dashboard 最小权限角色名；bootstrap 默认只读事务，migrate 仅授予命名观测读模型的 SELECT。
       "username": "fogmoe-dashboard",
       // dbctl bootstrap 创建或更新该报表登录角色时使用的密码。
       "password": null
     },
     // 首次创建数据库与角色时的本机 PostgreSQL 管理身份。
     "bootstrap": {
-      // 本机 PostgreSQL 超级用户账户名。
+      // 本机 PostgreSQL 超级用户账户名；不得与三个受管角色复用。
       "system_user": "postgres"
     }
   },
@@ -577,7 +577,9 @@
       // Dashboard PostgreSQL 查询连接池大小。
       "pool_size": 4,
       // Dashboard 单条查询的最长秒数。
-      "command_timeout_seconds": 5.0
+      "command_timeout_seconds": 5.0,
+      // 资源心跳超过此秒数未刷新时视为失活；不得小于三个指标采集周期。
+      "resource_stale_after_seconds": 90.0
     }
   }
 }

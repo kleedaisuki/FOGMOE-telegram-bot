@@ -72,9 +72,22 @@ Dashboard 只从根目录 `config.json` 的 `database.endpoint` 与 `database.re
 `fogmoe-dbctl` 的配置服务。三者共享的是面向操作者的 `config.json`，而不是跨包的全局配置
 对象。完整字段、默认值和 JSONC 注释见 [`example.config.json`](../example.config.json)。
 
-Dashboard 连接设置 default_transaction_read_only=on，并具有独立连接池、默认五秒
-statement timeout、一秒 lock timeout、最多 1,000 行的 API limit，以及最长 90 天的
-查询窗口。即使 automation role 拥有写权限，Dashboard 自身仍不能意外修改生产数据。
+Dashboard 必须使用 dbctl 创建的独立 reporting 角色。该角色只能读取显式授权的
+`observability` 关系；Retrieval 与 User Profile 队列通过聚合观测 view 暴露，不开放原始
+embedding、队列 `last_error`、用户 ID 或画像内容。连接同时设置
+`default_transaction_read_only=on`，并具有独立连接池、默认五秒 statement timeout、
+一秒 lock timeout、最多 1,000 行的 API limit，以及最长 90 天的查询窗口。会话只读设置是
+纵深防御（defense in depth），不能替代独立 reporting 角色，也不应复用 maintenance 身份。
+dbctl 同时移除所有非系统用户 schema 的 `PUBLIC` 继承权限；受信 `vector` extension 虽保留
+superuser 所拥有的对象 ACL，但其 `public` schema 只向 application 开放，因此 Dashboard
+不能借 `PUBLIC` 绕过命名观测 view 的 allow-list。PostgreSQL 系统 catalog 仍按平台自身的
+元数据可见性规则工作，不属于业务 relation allow-list。
+
+Resources 视图把 `observability.metric_interval_seconds` 作为心跳周期，并由
+`observability.dashboard.resource_stale_after_seconds` 定义失活阈值（默认 90 秒）。
+配置边界要求失活阈值至少覆盖三个心跳周期，为调度抖动和短暂的数据库
+延迟留出容错窗口。同一个类型化阈值同时约束 SQL 时间窗和 `ResourceState`
+的 active/stale 判定，避免列表范围与显示状态产生语义漂移（semantic drift）。
 
 ~~~bash
 fogmoe-dashboard \
