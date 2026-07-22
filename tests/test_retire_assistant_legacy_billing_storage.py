@@ -52,8 +52,8 @@ def test_0058_fails_closed_then_drops_only_retired_structures() -> None:
     assert "irreversible" in sections["down"]
 
 
-def test_schema_snapshot_has_0060_head_without_retired_structures() -> None:
-    """@brief DDL 快照停在 0060 且不声明退役结构 / DDL snapshot ends at 0060 and declares no retired structures.
+def test_schema_snapshot_has_current_head_without_retired_structures() -> None:
+    """@brief DDL 快照停在当前 head 且不声明退役结构 / DDL snapshot ends at the current head and declares no retired structures.
 
     @return None / None.
     """
@@ -62,7 +62,7 @@ def test_schema_snapshot_has_0060_head_without_retired_structures() -> None:
         encoding="utf-8"
     )
 
-    assert "-- Alembic head: 0060_retire_asset_action_confirmations" in snapshot
+    assert "-- Alembic head: 0061_rebuild_assistant_scheduling" in snapshot
     for retired_structure in (
         "assistant.billing_reservations",
         "assistant_billing_reservations_retired_tr",

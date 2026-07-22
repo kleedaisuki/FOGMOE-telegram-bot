@@ -28,6 +28,7 @@ _APPLICATION_SCHEMAS = (
     "retrieval",
     "user_profile",
     "assistant",
+    "scheduling",
     "economy",
     "moderation",
     "crypto",

@@ -149,8 +149,8 @@ def test_migrate_injects_all_migration_inputs(
     assert config.attributes["admin_user_id"] == 42
 
 
-def test_runtime_grants_include_every_new_economy_boundary_schema() -> None:
-    """@brief 运行时角色必须获得银行、账单、活动和 RPG schema 权限 / The runtime role must receive bank, billing, activity, and RPG schema privileges.
+def test_runtime_grants_include_every_new_bounded_context_schema() -> None:
+    """@brief 运行时角色必须获得 Scheduling、银行、账单、活动和 RPG schema 权限 / The runtime role must receive Scheduling, bank, billing, activity, and RPG schema privileges.
 
     @return None / None.
     """
@@ -161,7 +161,14 @@ def test_runtime_grants_include_every_new_economy_boundary_schema() -> None:
         owner_role="fogmoe-maintenance",
     )
 
-    for schema in ("bank", "billing", "town", "chance", "personal_rpg"):
+    for schema in (
+        "scheduling",
+        "bank",
+        "billing",
+        "town",
+        "chance",
+        "personal_rpg",
+    ):
         assert schema in migrate._APPLICATION_SCHEMAS
         assert f'GRANT USAGE ON SCHEMA "{schema}" TO "fogmoe-app";' in sql
 
