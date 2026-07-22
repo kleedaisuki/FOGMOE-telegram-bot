@@ -236,6 +236,11 @@ class DurableAssistantInferenceAdapter:
                         group_id=command.scope.group_id,
                         message_id=command.scope.message_id,
                         message_thread_id=command.message_thread_id,
+                        allowed_tools=(
+                            None
+                            if command.allowed_tools is None
+                            else frozenset(command.allowed_tools)
+                        ),
                     )
                 ),
             )

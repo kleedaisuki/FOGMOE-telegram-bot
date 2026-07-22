@@ -26,6 +26,16 @@ from fogmoe_bot.domain.temporal import ensure_utc
 SCHEDULED_PROMPT_SOURCE_KIND = "schedule.prompt"
 """@brief Schedule occurrence 的 TurnSource namespace / TurnSource namespace for schedule occurrences."""
 
+SCHEDULED_READ_TOOL_NAMES = (
+    "get_current_time",
+    "google_search",
+    "fetch_url",
+    "search_memory",
+    "search_memory_by_time",
+    "list_available_stickers",
+)
+"""@brief Scheduled Turn 可用的只读工具 capability / Read-only tool capability available to scheduled Turns."""
+
 
 def prepare_scheduled_occurrence(
     schedule: ScheduledAssistantTurn,
@@ -39,8 +49,8 @@ def prepare_scheduled_occurrence(
     @param user acceptance-time 创建者快照 / Creator snapshot at acceptance time.
     @param observed_at worker 观察时刻 / Worker observation instant.
     @return 可交给跨聚合 UoW 的 prepared acceptance / Prepared acceptance for the cross-aggregate UoW.
-    @note Scheduled Turn 暂不授予工具 capability；Prompt 文本不是授权边界。/
-        Scheduled Turns currently receive no tool capability; prompt text is not an authorization boundary.
+    @note Scheduled Turn 仅授予显式只读 allowlist；Prompt 文本不是授权边界。/
+        Scheduled Turns receive only an explicit read-only allowlist; prompt text is not an authorization boundary.
     """
 
     if user.user_id != schedule.creator_user_id:
@@ -97,7 +107,8 @@ def prepare_scheduled_occurrence(
         disable_notification=False,
         protect_content=False,
         disable_web_page_preview=False,
-        allow_tools=False,
+        allow_tools=True,
+        allowed_tools=SCHEDULED_READ_TOOL_NAMES,
     ).to_json()
     return ConversationWorkflow.prepare(
         AcceptConversationTurn(
@@ -138,6 +149,7 @@ def _instant_text(value: datetime, *, timespec: str = "seconds") -> str:
 
 __all__ = [
     "SCHEDULED_PROMPT_SOURCE_KIND",
+    "SCHEDULED_READ_TOOL_NAMES",
     "occurrence_key",
     "prepare_scheduled_occurrence",
 ]

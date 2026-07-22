@@ -1,6 +1,7 @@
 """@brief 可恢复 Agent loop 测试 / Tests for the resumable Agent loop."""
 
 import asyncio
+from typing import cast
 from uuid import uuid4
 from observability_testkit import make_telemetry
 
@@ -16,7 +17,10 @@ from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectRequest,
     ToolExecutionContext,
 )
-from fogmoe_bot.application.assistant.tools.catalog import DEFAULT_TOOL_CATALOG
+from fogmoe_bot.application.assistant.tools.catalog import (
+    DEFAULT_TOOL_CATALOG,
+    ToolDefinition,
+)
 from fogmoe_bot.application.memory.ports import WorkingMemoryQuery
 from fogmoe_bot.domain.context import ContextState, ConversationScope, UserState
 from fogmoe_bot.domain.conversation.identity import (
@@ -24,7 +28,8 @@ from fogmoe_bot.domain.conversation.identity import (
     DeliveryStreamId,
     TurnId,
 )
-from fogmoe_bot.domain.memory import WorkingMemory
+from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.domain.memory import PersonalMemoryScope, WorkingMemory
 
 
 class _Checkpoints:
@@ -107,7 +112,7 @@ class _Receipts:
             return PersistedToolResult(self.values[key], True)  # type: ignore[arg-type]
         self.order.append(f"effect:{request.invocation_id}")
         self.mutation_count += 1
-        result = {"status": "updated"}
+        result: JsonObject = {"status": "updated"}
         self.values[key] = result
         return PersistedToolResult(result, False)
 
@@ -143,7 +148,11 @@ def _context() -> ContextState:
     )
 
 
-def _tool_context(turn_id: TurnId) -> ToolExecutionContext:
+def _tool_context(
+    turn_id: TurnId,
+    *,
+    allowed_tools: frozenset[str] | None = None,
+) -> ToolExecutionContext:
     """@brief 构造 durable tool context / Build durable tool context."""
 
     return ToolExecutionContext(
@@ -155,7 +164,46 @@ def _tool_context(turn_id: TurnId) -> ToolExecutionContext:
         is_group=False,
         group_id=None,
         message_id=1,
+        allowed_tools=allowed_tools,
     )
+
+
+def test_turn_capability_filters_provider_tool_definitions() -> None:
+    """@brief Provider 只看到 Turn allowlist 与 route 支持集的交集 / The provider sees only the intersection of turn and route capabilities."""
+
+    async def scenario() -> None:
+        """@brief 执行一个无工具调用的受限回合 / Run one restricted turn without a tool call."""
+
+        order: list[str] = []
+        completion = _Completion(
+            [AssistantCompletion("done", {"role": "assistant", "content": "done"})],
+            order,
+        )
+        await AgentLoop(
+            runtime=AgentRuntime(
+                catalog=DEFAULT_TOOL_CATALOG,
+                persistence=_Receipts(order),
+            ),
+            completion=completion,
+            checkpoints=_Checkpoints(order),
+            memory=_Memory(),
+            telemetry=make_telemetry(),
+        ).run(
+            _context(),
+            AgentExecutionConfig(provider="test", model="model", allow_tools=True),
+            tool_context=_tool_context(
+                TurnId.new(),
+                allowed_tools=frozenset({"get_current_time", "search_memory_by_time"}),
+            ),
+        )
+
+        tools = cast(tuple[ToolDefinition, ...], completion.requests[0]["tools"])
+        assert [definition.name for definition in tools] == [
+            "get_current_time",
+            "search_memory_by_time",
+        ]
+
+    asyncio.run(scenario())
 
 
 def test_checkpoint_precedes_effect_and_restart_replays_without_provider_or_mutation() -> (
@@ -221,11 +269,14 @@ def test_checkpoint_precedes_effect_and_restart_replays_without_provider_or_muta
             "remember me",
             "remember me",
         ]
-        assert all(query.scope.user_id == 42 for query in first_memory.queries)
+        assert all(
+            isinstance(query.scope, PersonalMemoryScope) and query.scope.user_id == 42
+            for query in first_memory.queries
+        )
         assert all(
             sum(
                 "WorkingMemory is freshly retrieved" in str(message.get("content"))
-                for message in request["messages"]
+                for message in cast(tuple[JsonObject, ...], request["messages"])
             )
             == 1
             for request in first_completion.requests
@@ -287,7 +338,9 @@ def test_memory_tool_result_never_enters_context_state_or_history() -> None:
                         ),
                     ),
                 ),
-                AssistantCompletion("answer", {"role": "assistant", "content": "answer"}),
+                AssistantCompletion(
+                    "answer", {"role": "assistant", "content": "answer"}
+                ),
             ],
             order,
         )
@@ -305,7 +358,9 @@ def test_memory_tool_result_never_enters_context_state_or_history() -> None:
             tool_context=_tool_context(TurnId.new()),
         )
 
-        assert response.history_messages == ({"role": "assistant", "content": "answer"},)
+        assert response.history_messages == (
+            {"role": "assistant", "content": "answer"},
+        )
         assert context.messages == [
             {"role": "user", "content": "remember me"},
             {"role": "assistant", "content": "answer"},

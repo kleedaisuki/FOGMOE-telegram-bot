@@ -43,7 +43,9 @@ class _Persistence:
         return PersistedToolResult({"status": "updated"}, len(self.requests) > 1)
 
 
-def _context() -> ToolExecutionContext:
+def _context(
+    allowed_tools: frozenset[str] | None = None,
+) -> ToolExecutionContext:
     """@brief 构造 durable context / Build a durable context.
 
     @return context / Context.
@@ -58,6 +60,7 @@ def _context() -> ToolExecutionContext:
         is_group=False,
         group_id=None,
         message_id=7,
+        allowed_tools=allowed_tools,
     )
 
 
@@ -119,5 +122,30 @@ def test_runtime_hides_media_artifact_identity_from_model_feedback() -> None:
             "message": "Generated media was durably queued for delivery.",
         }
         assert "private-artifact" not in str(result.public_result)
+
+    asyncio.run(scenario())
+
+
+def test_runtime_rejects_tool_outside_turn_capability_before_persistence() -> None:
+    """@brief Turn allowlist 在 receipt 前拒绝越权工具 / The turn allowlist rejects an unauthorized tool before persistence."""
+
+    async def scenario() -> None:
+        """@brief 尝试从只读 Turn 调用 mutation / Try a mutation from a read-only turn."""
+
+        persistence = _Persistence()
+        runtime = AgentRuntime(catalog=DEFAULT_TOOL_CATALOG, persistence=persistence)
+        result = await runtime.execute(
+            context=_context(frozenset({"get_current_time"})),
+            step=0,
+            ordinal=0,
+            provider_call_id=None,
+            tool_name="schedule_ai_message",
+            raw_arguments={"action": "list"},
+        )
+
+        assert result.public_result == {
+            "error": "Tool is not authorized for this turn: schedule_ai_message"
+        }
+        assert persistence.requests == []
 
     asyncio.run(scenario())

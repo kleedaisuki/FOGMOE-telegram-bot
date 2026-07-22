@@ -230,7 +230,12 @@ class AgentLoop:
         """
 
         route_key = f"{state.config.provider}:{state.config.model}"
-        request_hash = _completion_request_hash(state, expose_tools=expose_tools)
+        allowed_tools = None if tool_context is None else tool_context.allowed_tools
+        request_hash = _completion_request_hash(
+            state,
+            expose_tools=expose_tools,
+            allowed_tools=allowed_tools,
+        )
         if tool_context is not None:
             existing = await self._checkpoints.load_step(
                 tool_context.turn_id, state.step
@@ -273,6 +278,7 @@ class AgentLoop:
                 definition
                 for definition in self._runtime.tool_definitions
                 if definition.name not in state.config.skip_tools
+                and (allowed_tools is None or definition.name in allowed_tools)
             )
             if expose_tools
             else ()
@@ -429,11 +435,17 @@ class AgentLoop:
         state.events.append(result_event)
 
 
-def _completion_request_hash(state: AgentExecutionState, *, expose_tools: bool) -> str:
+def _completion_request_hash(
+    state: AgentExecutionState,
+    *,
+    expose_tools: bool,
+    allowed_tools: frozenset[str] | None = None,
+) -> str:
     """@brief 摘要不含瞬时 WorkingMemory 的稳定模型 step / Digest a stable model step excluding ephemeral WorkingMemory.
 
     @param state 当前状态 / Current state.
     @param expose_tools 是否暴露工具 / Whether tools are exposed.
+    @param allowed_tools 可选 Turn 工具 allowlist / Optional turn tool allowlist.
     @return SHA-256 / SHA-256.
     """
 
@@ -445,6 +457,7 @@ def _completion_request_hash(state: AgentExecutionState, *, expose_tools: bool) 
         "tool_choice": state.config.tool_choice if expose_tools else None,
         "expose_tools": expose_tools,
         "skip_tools": sorted(state.config.skip_tools),
+        "allowed_tools": None if allowed_tools is None else sorted(allowed_tools),
         "options": dict(state.config.completion_options),
     }
     canonical = json.dumps(

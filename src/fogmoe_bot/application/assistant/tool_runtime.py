@@ -102,6 +102,8 @@ class ToolExecutionContext:
     @param group_id 可选群组 ID / Optional group identifier.
     @param message_id 当前消息 ID / Current message identifier.
     @param message_thread_id 可选 Telegram 话题 ID / Optional Telegram topic identifier.
+    @param allowed_tools 可选 Turn 级工具 allowlist；None 表示完整目录 /
+        Optional turn-level tool allowlist; None means the complete catalog.
     """
 
     turn_id: TurnId
@@ -113,6 +115,7 @@ class ToolExecutionContext:
     group_id: int | None
     message_id: int | None
     message_thread_id: int | None = None
+    allowed_tools: frozenset[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +256,20 @@ class AgentRuntime:
             raise ValueError("step and ordinal must be non-negative")
         invocation_id = f"step:{step}:call:{ordinal}"
         correlation_id = provider_call_id or invocation_id
+        if context.allowed_tools is not None and tool_name not in context.allowed_tools:
+            return ToolRuntimeResult(
+                invocation_id=invocation_id,
+                provider_call_id=correlation_id,
+                name=tool_name,
+                arguments={},
+                effect_kind=f"read.{tool_name}",
+                validation_error=None,
+                public_result={
+                    "error": f"Tool is not authorized for this turn: {tool_name}"
+                },
+                replayed=False,
+                result_residency=ToolResultResidency.AGENT_TURN,
+            )
         validation = self._catalog.validate(tool_name, raw_arguments)
         if isinstance(validation, UnknownTool):
             return ToolRuntimeResult(
@@ -369,6 +386,9 @@ def _request_hash(
         "group_id": context.group_id,
         "message_id": context.message_id,
         "message_thread_id": context.message_thread_id,
+        "allowed_tools": (
+            None if context.allowed_tools is None else sorted(context.allowed_tools)
+        ),
         "invocation_id": invocation_id,
         "tool_name": tool_name,
         "effect_kind": effect_kind,

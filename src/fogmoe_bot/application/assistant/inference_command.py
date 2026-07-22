@@ -9,6 +9,7 @@ provider, Telegram SDK, or persistence implementation.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Literal, Self, cast
 from uuid import UUID
@@ -35,6 +36,9 @@ ASSISTANT_INFERENCE_SCHEMA_VERSION: Literal[2] = 2
 
 type AssistantTaskKind = Literal["assistant", "translation"]
 """@brief Durable Assistant 活动种类 / Durable Assistant activity kind."""
+
+_TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,99}$")
+"""@brief Durable capability 中的工具名格式 / Tool-name grammar in a durable capability."""
 
 
 class _StrictFrozenModel(BaseModel):
@@ -171,6 +175,8 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
     @param protect_content 是否保护内容 / Whether content is protected.
     @param disable_web_page_preview 是否禁用链接预览 / Whether link previews are disabled.
     @param allow_tools 当前 Turn 是否具有工具 capability / Whether this Turn has tool capability.
+    @param allowed_tools 可选 Turn 级工具 allowlist；None 表示完整目录 /
+        Optional turn-level tool allowlist; None means the complete catalog.
     """
 
     schema_version: Literal[2] = ASSISTANT_INFERENCE_SCHEMA_VERSION
@@ -188,6 +194,30 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
     protect_content: bool = False
     disable_web_page_preview: bool = True
     allow_tools: bool = True
+    allowed_tools: tuple[str, ...] | None = Field(default=None, max_length=32)
+
+    @field_validator("allowed_tools")
+    @classmethod
+    def validate_allowed_tools(
+        cls, value: tuple[str, ...] | None
+    ) -> tuple[str, ...] | None:
+        """@brief 校验并规范化 Turn 工具 allowlist / Validate and normalize a turn tool allowlist.
+
+        @param value 可选工具名元组 / Optional tuple of tool names.
+        @return 保序且已验证的元组或 None / Ordered validated tuple or None.
+        @raise ValueError 名称非法、重复或集合为空时抛出 /
+            Raised for invalid names, duplicates, or an empty set.
+        """
+
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("allowed_tools cannot be empty; disable tools instead")
+        if any(_TOOL_NAME_PATTERN.fullmatch(name) is None for name in value):
+            raise ValueError("allowed_tools contains an invalid tool name")
+        if len(set(value)) != len(value):
+            raise ValueError("allowed_tools cannot contain duplicates")
+        return value
 
     @field_validator("turn_id")
     @classmethod
@@ -234,6 +264,8 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
             raise ValueError("translation_input is required for translation")
         if self.task_kind == "assistant" and self.translation_input is not None:
             raise ValueError("translation_input is only valid for translation")
+        if not self.allow_tools and self.allowed_tools is not None:
+            raise ValueError("allowed_tools requires allow_tools")
         if self.scope.is_group:
             if not isinstance(self.chat_id, int):
                 raise ValueError("group scope requires an integer chat_id")

@@ -8,6 +8,7 @@ from fogmoe_bot.application.assistant.inference_command import (
     DurableUserProfile,
 )
 from fogmoe_bot.application.scheduling.occurrence import (
+    SCHEDULED_READ_TOOL_NAMES,
     occurrence_key,
     prepare_scheduled_occurrence,
 )
@@ -190,7 +191,8 @@ def test_private_occurrence_preserves_target_and_private_profile() -> None:
     assert command.scope.is_group is False
     assert command.scope.group_id is None
     assert command.user == _user()
-    assert command.allow_tools is False
+    assert command.allow_tools is True
+    assert command.allowed_tools == SCHEDULED_READ_TOOL_NAMES
     assert prepared.message.content["content_kind"] == "scheduled_prompt"
     assert prepared.message.content["source"] == {
         "kind": "schedule.prompt",
@@ -216,4 +218,5 @@ def test_group_occurrence_preserves_topic_but_removes_private_context() -> None:
     assert command.user.profile is None
     assert command.user.personal_info == ""
     assert command.user.diary_exists is False
-    assert command.allow_tools is False
+    assert command.allow_tools is True
+    assert command.allowed_tools == SCHEDULED_READ_TOOL_NAMES
