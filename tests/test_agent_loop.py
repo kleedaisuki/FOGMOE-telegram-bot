@@ -369,3 +369,70 @@ def test_memory_tool_result_never_enters_context_state_or_history() -> None:
         assert "private recalled text" in str(completion.requests[1]["messages"])
 
     asyncio.run(scenario())
+
+
+def test_ephemeral_tool_filter_never_persists_empty_tool_calls() -> None:
+    """@brief 过滤临时工具后保留文本但不保留空调用 / Filtering an ephemeral tool keeps text without empty calls."""
+
+    async def scenario() -> None:
+        """@brief 执行带文本的临时 Memory tool 回合 / Run an ephemeral Memory tool turn carrying text."""
+
+        order: list[str] = []
+        completion = _Completion(
+            [
+                AssistantCompletion(
+                    "I will check memory.",
+                    {
+                        "role": "assistant",
+                        "content": "I will check memory.",
+                        "tool_calls": [
+                            {
+                                "id": "memory-call",
+                                "type": "function",
+                                "function": {
+                                    "name": "search_memory",
+                                    "arguments": '{"query":"tea","limit":3}',
+                                },
+                            }
+                        ],
+                    },
+                    (
+                        CompletionToolCall(
+                            "memory-call",
+                            "search_memory",
+                            {"query": "tea", "limit": 3},
+                        ),
+                    ),
+                ),
+                AssistantCompletion(
+                    "final answer", {"role": "assistant", "content": "final answer"}
+                ),
+            ],
+            order,
+        )
+        response = await AgentLoop(
+            runtime=AgentRuntime(
+                catalog=DEFAULT_TOOL_CATALOG,
+                persistence=_FreshMemoryTool(),
+            ),
+            completion=completion,
+            checkpoints=_Checkpoints(order),
+            memory=_Memory(),
+            telemetry=make_telemetry(),
+        ).run(
+            _context(),
+            AgentExecutionConfig(provider="test", model="model", allow_tools=True),
+            tool_context=_tool_context(TurnId.new()),
+        )
+
+        assert response.history_messages == (
+            {"role": "assistant", "content": "I will check memory."},
+            {"role": "assistant", "content": "final answer"},
+        )
+        assert all(
+            message.get("tool_calls")
+            for message in response.history_messages
+            if "tool_calls" in message
+        )
+
+    asyncio.run(scenario())

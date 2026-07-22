@@ -20,6 +20,9 @@ type JsonValue = (
 type ProviderPayload = dict[str, JsonValue]
 """@brief 归一化后的 Provider 对象 / Normalized provider payload."""
 
+_PROVIDER_SPECIFIC_KEYS = frozenset({"provider_specific_fields"})
+"""@brief 不能跨 Provider 重放的响应字段 / Response fields that cannot be replayed across providers."""
+
 
 def _model_dump(value: object) -> ProviderPayload | None:
     """@brief 尝试导出 SDK/Pydantic 模型 / Try to dump an SDK or Pydantic model.
@@ -189,10 +192,90 @@ def normalise_tool_calls(
     return [] if not tool_calls else [tool_call_to_plain(call) for call in tool_calls]
 
 
+def sanitize_tool_call_for_provider(
+    tool_call: Mapping[str, JsonValue],
+    provider: str,
+) -> ProviderPayload:
+    """@brief 清理一个待重放的工具调用 / Sanitize one tool call before replay.
+
+    @param tool_call OpenAI-compatible 工具调用 / OpenAI-compatible tool call.
+    @param provider 目标 Provider / Target provider.
+    @return 不含跨 Provider 私有字段的独立对象 / Independent payload without cross-provider private fields.
+    """
+
+    sanitized = dict(tool_call)
+    if provider != "gemini":
+        for key in _PROVIDER_SPECIFIC_KEYS:
+            sanitized.pop(key, None)
+    else:
+        sanitized.pop("id", None)
+    return sanitized
+
+
+def sanitize_message_for_provider(
+    message: Mapping[str, JsonValue],
+    provider: str,
+) -> ProviderPayload:
+    """@brief 在唯一外部协议边界清理历史消息 / Sanitize history at the sole external protocol boundary.
+
+    @param message 规范的持久化消息 / Canonical persisted message.
+    @param provider 目标 Provider / Target provider.
+    @return 可安全发送且不含空 ``tool_calls`` 的新消息 / New provider-safe message without empty ``tool_calls``.
+    @note 空工具列表没有协议语义，且部分 OpenAI-compatible Provider 会直接拒绝；
+        因此这里也修复数据库中已经持久化的历史载荷。/ Empty tool-call lists carry no
+        protocol meaning and are rejected by some OpenAI-compatible providers, so this
+        boundary also repairs already-persisted history payloads.
+    """
+
+    sanitized = dict(message)
+    if provider != "gemini":
+        for key in _PROVIDER_SPECIFIC_KEYS:
+            sanitized.pop(key, None)
+
+    tool_calls = sanitized.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        sanitized["tool_calls"] = [
+            sanitize_tool_call_for_provider(tool_call, provider)
+            if isinstance(tool_call, Mapping)
+            else tool_call
+            for tool_call in tool_calls
+        ]
+    else:
+        sanitized.pop("tool_calls", None)
+
+    if (
+        provider == "gemini"
+        and sanitized.get("role") == "assistant"
+        and sanitized.get("tool_calls")
+        and not str(sanitized.get("content") or "").strip()
+    ):
+        sanitized.pop("content", None)
+    if provider == "gemini" and sanitized.get("role") == "tool":
+        sanitized.pop("tool_call_id", None)
+    return sanitized
+
+
+def sanitize_messages_for_provider(
+    messages: Sequence[Mapping[str, JsonValue]],
+    provider: str,
+) -> list[ProviderPayload]:
+    """@brief 清理完整 Provider 历史 / Sanitize complete provider history.
+
+    @param messages 规范消息序列 / Canonical message sequence.
+    @param provider 目标 Provider / Target provider.
+    @return 与输入顺序一致的独立消息 / Independent messages preserving input order.
+    """
+
+    return [sanitize_message_for_provider(message, provider) for message in messages]
+
+
 __all__ = [
     "JsonValue",
     "ProviderPayload",
     "assistant_message_to_plain",
     "json_safe",
     "normalise_tool_calls",
+    "sanitize_message_for_provider",
+    "sanitize_messages_for_provider",
+    "sanitize_tool_call_for_provider",
 ]

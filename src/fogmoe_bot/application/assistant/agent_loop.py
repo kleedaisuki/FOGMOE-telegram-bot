@@ -612,11 +612,15 @@ def _append_persistable_tool_exchange(
     message = dict(completion.message)
     calls = message.get("tool_calls")
     if isinstance(calls, list):
-        message["tool_calls"] = [
-            dict(call)
+        persistent_calls: list[JsonValue] = [
+            cast(JsonValue, dict(call))
             for call in calls
             if isinstance(call, Mapping) and call.get("id") in persistent_ids
         ]
+        if persistent_calls:
+            message["tool_calls"] = persistent_calls
+        else:
+            message.pop("tool_calls", None)
     content = message.get("content")
     has_content = isinstance(content, str) and bool(content.strip())
     if persistent or has_content:

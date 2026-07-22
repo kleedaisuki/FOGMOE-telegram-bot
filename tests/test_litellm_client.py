@@ -6,7 +6,7 @@ import litellm
 from fogmoe_bot.application.assistant.tools.catalog import ToolArguments, define_tool
 from fogmoe_bot.config import AiProvidersSettings
 from fogmoe_bot.infrastructure.llm import litellm_client
-from fogmoe_bot.infrastructure.llm.litellm_message_sanitizer import (
+from fogmoe_bot.infrastructure.llm.protocol import (
     sanitize_message_for_provider,
 )
 from fogmoe_bot.infrastructure.llm.litellm_models import normalize_provider
@@ -207,6 +207,20 @@ def test_sanitize_message_removes_provider_specific_fields_for_non_gemini() -> N
         ],
     }
 
+
+def test_sanitize_message_removes_empty_tool_calls_for_every_provider() -> None:
+    """@brief 已持久化的空工具列表不会到达 Provider / Persisted empty tool calls never reach a provider."""
+
+    message = {"role": "assistant", "content": "usable text", "tool_calls": []}
+
+    assert sanitize_message_for_provider(message, "openai") == {
+        "role": "assistant",
+        "content": "usable text",
+    }
+    assert sanitize_message_for_provider(message, "gemini") == {
+        "role": "assistant",
+        "content": "usable text",
+    }
 
 def test_sanitize_message_applies_native_gemini_tool_message_rules() -> None:
     """@brief 验证原生 Gemini 的工具消息规则 / Verify native Gemini tool-message rules."""
