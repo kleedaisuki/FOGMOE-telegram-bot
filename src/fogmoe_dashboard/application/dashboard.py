@@ -24,7 +24,6 @@ from fogmoe_dashboard.domain.models import (
     TurnLatencyStats,
 )
 
-
 _TRACE_ID = re.compile(r"[0-9a-f]{32}\Z")
 """@brief 规范 trace identifier / Canonical trace identifier."""
 

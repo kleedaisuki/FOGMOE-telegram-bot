@@ -35,7 +35,6 @@ from fogmoe_dashboard.domain.models import TimeWindow
 from fogmoe_dashboard.presentation.duration import parse_duration
 from fogmoe_dashboard.presentation.render import print_json, render
 
-
 _SEVERITY = {"trace": 1, "debug": 5, "info": 9, "warn": 13, "error": 17, "fatal": 21}
 """@brief CLI 严重度到 OTel number 映射 / CLI severity-to-OTel-number mapping."""
 

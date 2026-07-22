@@ -30,7 +30,6 @@ from fogmoe_bot.infrastructure.database.chance import (
     _result_mapping,
 )
 
-
 _ROUND_ID = UUID("00000000-0000-0000-0000-00000000cafe")
 """@brief 映射测试使用的稳定轮次 UUID / Stable round UUID used by mapping tests."""
 

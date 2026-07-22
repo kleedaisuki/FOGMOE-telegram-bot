@@ -19,7 +19,6 @@ from .models import (
 )
 from .normalization import normalize_for_matching
 
-
 URL_PATTERN = re.compile(
     r"https?://\S+|www\.\S+|t\.me/\S+|\S+\.\S*|"
     r"\S+\.(com|org|net|io|co|ru|cn|me|app|xyz|gov|edu)\b",

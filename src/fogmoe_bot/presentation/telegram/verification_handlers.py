@@ -30,7 +30,6 @@ from fogmoe_bot.domain.moderation.verification import (
 
 from .idempotency import telegram_update_idempotency_key
 
-
 logger = logging.getLogger(__name__)
 
 

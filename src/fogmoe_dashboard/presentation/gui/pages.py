@@ -79,7 +79,6 @@ from fogmoe_dashboard.presentation.gui.table import (
     percent,
 )
 
-
 _RIGHT = Qt.AlignmentFlag.AlignRight
 """@brief 数值列右对齐 / Right alignment for numeric columns."""
 _SEVERITIES = (

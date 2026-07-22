@@ -8,7 +8,6 @@ from pathlib import Path
 
 from fogmoe_bot.domain.moderation.models import ModerationRule, RuleKind, RuleScope
 
-
 logger = logging.getLogger(__name__)
 
 

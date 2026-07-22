@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
 
-
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     ConversationMessageId,
@@ -16,7 +15,6 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnId,
     UpdateId,
 )
-from fogmoe_bot.domain.conversation.turn import ConversationTurn
 from fogmoe_bot.domain.conversation.inference import (
     InferenceActivity,
     InferenceActivityDraft,
@@ -32,6 +30,7 @@ from fogmoe_bot.domain.conversation.outbox import (
     SEND_TELEGRAM_MESSAGE,
     OutboundDraft,
 )
+from fogmoe_bot.domain.conversation.turn import ConversationTurn
 from fogmoe_bot.infrastructure.database.conversation_workflow import turn_uow
 
 NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)

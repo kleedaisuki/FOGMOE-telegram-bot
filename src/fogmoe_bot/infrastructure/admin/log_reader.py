@@ -8,7 +8,6 @@ from pathlib import Path
 
 from fogmoe_bot.application.admin.models import LogTail
 
-
 type LogPathProvider = Callable[[], Path]
 """@brief 返回当前日志文件的端口 / Port returning the current log file."""
 

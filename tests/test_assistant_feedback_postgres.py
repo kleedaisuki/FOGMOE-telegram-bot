@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from observability_testkit import make_telemetry
-from datetime import UTC, datetime
 import os
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+from observability_testkit import make_telemetry
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -16,6 +16,7 @@ from sqlalchemy.pool import NullPool
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
+from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
@@ -26,12 +27,11 @@ from fogmoe_bot.domain.conversation.outbox import (
     OutboundDraft,
     OutboundEnqueueResult,
 )
-from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
-from fogmoe_bot.infrastructure.database.standalone_outbound import (
-    PostgresStandaloneOutboundCapability,
-)
 from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
     PostgresOutboxRepository,
+)
+from fogmoe_bot.infrastructure.database.standalone_outbound import (
+    PostgresStandaloneOutboundCapability,
 )
 
 

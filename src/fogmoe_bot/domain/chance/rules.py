@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from fractions import Fraction
 import hashlib
 import json
 import re
+from dataclasses import dataclass
+from fractions import Fraction
 from types import MappingProxyType
 from typing import Final, Mapping
 
 from .fairness import MAX_UNIFORM_BOUND
 from .money import FreeTokenPayout, FreeTokenStake
-
 
 RULESET_FINGERPRINT_DOMAIN: Final[bytes] = b"fogmoe/chance/ruleset/v1\x00"
 """@brief 规则集指纹的域分离前缀 / Domain-separation prefix for ruleset fingerprints."""

@@ -27,7 +27,6 @@ from fogmoe_bot.presentation.telegram.moderation_adapter import (
     TelegramModerationEffectSink,
 )
 
-
 NOW = datetime(2026, 7, 11, tzinfo=UTC)
 
 

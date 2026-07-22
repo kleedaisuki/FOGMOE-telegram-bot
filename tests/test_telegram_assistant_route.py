@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
 import pytest
 from telegram import Update
 
@@ -15,19 +16,22 @@ from fogmoe_bot.application.conversation.assistant_ingress import (
     AssistantTurnRequest,
     AssistantUserNotRegistered,
 )
-from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
-from fogmoe_bot.domain.conversation.payloads import (
-    JsonObject,
-    JsonValue,
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
 )
+from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
+from fogmoe_bot.domain.conversation.payloads import (
+    JsonObject,
+    JsonValue,
+)
 from fogmoe_bot.presentation.telegram import (
     assistant_primary_route,
     assistant_update_models,
@@ -42,11 +46,7 @@ from fogmoe_bot.presentation.telegram.assistant_update_models import (
 from fogmoe_bot.presentation.telegram.assistant_update_parser import (
     parse_telegram_assistant_update,
 )
-from fogmoe_bot.application.conversation.telegram_identity import (
-    TelegramConversationAddress,
-)
 from fogmoe_bot.presentation.telegram.update_mapper import TelegramUpdateMapper
-
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定测试时刻 / Fixed test instant."""

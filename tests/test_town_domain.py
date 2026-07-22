@@ -18,7 +18,6 @@ from fogmoe_bot.domain.town.models import (
 from fogmoe_bot.domain.town.scope import TownScope
 from fogmoe_bot.domain.world.scope import PersonalScope
 
-
 NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
 """@brief 小镇测试使用的稳定 UTC 时刻 / Stable UTC instant used by town tests."""
 

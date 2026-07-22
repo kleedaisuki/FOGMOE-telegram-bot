@@ -15,7 +15,6 @@ from .workflow_models import (
     LookupChanceRound,
 )
 
-
 CHANCE_WORKFLOW_DATA_KEY = "chance.workflow"
 """@brief runtime capability 中可验证随机活动工作流稳定键 / Stable verifiable-chance workflow key in runtime capabilities."""
 

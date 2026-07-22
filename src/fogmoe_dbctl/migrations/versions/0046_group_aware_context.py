@@ -2,7 +2,6 @@
 
 from fogmoe_dbctl.migrations.runner import run_migration_sql
 
-
 revision = "0046_group_aware_context"
 """@brief 当前迁移版本 / Current migration revision."""
 

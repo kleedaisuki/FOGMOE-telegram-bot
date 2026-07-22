@@ -25,7 +25,6 @@ from .assistant_update_models import MalformedTelegramAssistantUpdate
 from .assistant_update_parser import parse_telegram_assistant_update
 from .delivery import delivery_stream_for_chat
 
-
 _RESET_CONFIRMATION_TEXT = (
     "好啦，这段对话已经翻到新的一页了。\n"
     "当前上下文已清空，你的下一条消息会开启新的对话；个人/群聊记忆和 User Profile "

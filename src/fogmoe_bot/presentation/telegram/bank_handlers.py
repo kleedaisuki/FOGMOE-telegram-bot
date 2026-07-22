@@ -28,7 +28,6 @@ from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from .command_cooldown_guard import ParsedTelegramCommand
 from .delivery import enqueue_command_reply
 
-
 _PRIVATE_ONLY_TEXT = "银行命令仅限私聊使用喵，请私聊 Bot 后再试。"
 """@brief 银行私聊边界提示 / Bank private-chat boundary prompt."""
 

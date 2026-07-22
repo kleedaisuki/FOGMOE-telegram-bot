@@ -8,7 +8,6 @@ from typing import Final
 from fogmoe_bot.domain.personal_rpg._validation import normalize_text
 from fogmoe_bot.domain.world.scope import PersonalScope
 
-
 MAX_PERSONAL_LEVEL: Final[int] = 50
 """@brief 个人 RPG 的安全等级上限 / Safety level cap for the personal RPG."""
 

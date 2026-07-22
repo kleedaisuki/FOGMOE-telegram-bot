@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from fogmoe_bot.domain.context.token_estimator import estimate_message_tokens
-from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.context_window.budget import TokenCount
+from fogmoe_bot.domain.conversation.payloads import JsonObject
 
 
 class ConservativeHistoryTokenCounter:

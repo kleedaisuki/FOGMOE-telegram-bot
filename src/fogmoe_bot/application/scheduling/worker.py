@@ -10,9 +10,9 @@ from datetime import timedelta
 
 from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
 from fogmoe_bot.application.scheduling.assistant_ports import (
-    ScheduleQueue,
     ScheduledAssistantProfileReader,
     ScheduledOccurrenceAcceptance,
+    ScheduleQueue,
 )
 from fogmoe_bot.application.scheduling.occurrence import prepare_scheduled_occurrence
 from fogmoe_bot.domain.scheduling.assistant_schedule import (
@@ -21,7 +21,6 @@ from fogmoe_bot.domain.scheduling.assistant_schedule import (
     StaleScheduleClaimError,
 )
 from fogmoe_bot.domain.temporal import ensure_utc
-
 
 logger = logging.getLogger(__name__)
 

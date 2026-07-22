@@ -20,7 +20,6 @@ from fogmoe_bot.infrastructure.network.proxy import create_requests_session
 
 from .requests_response import read_limited_response
 
-
 _MAX_TEXT_RESPONSE = 2 * 1024 * 1024
 """@brief 文本 HTTP 响应字节上限 / Text-HTTP response byte limit."""
 

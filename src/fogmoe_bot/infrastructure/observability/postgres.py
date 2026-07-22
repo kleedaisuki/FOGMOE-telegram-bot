@@ -19,7 +19,6 @@ from fogmoe_bot.domain.observability.signals import (
     TelemetrySignal,
 )
 
-
 _RESOURCE_HEARTBEAT_WRITE_INTERVAL = timedelta(seconds=30)
 """@brief 资源心跳最小落库间隔 / Minimum persistence interval for resource heartbeats."""
 

@@ -14,25 +14,24 @@ from fogmoe_bot.application.conversation.router import (
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
-from fogmoe_bot.application.runtime import ReplayAwareCooldownGate
-from fogmoe_bot.domain.conversation.payloads import (
-    JsonObject,
-    JsonValue,
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
 )
+from fogmoe_bot.application.runtime import ReplayAwareCooldownGate
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
-from fogmoe_bot.application.conversation.telegram_identity import (
-    TelegramConversationAddress,
+from fogmoe_bot.domain.conversation.payloads import (
+    JsonObject,
+    JsonValue,
 )
 from fogmoe_bot.presentation.telegram.command_cooldown_guard import (
     MalformedTelegramCommandUpdate,
     TelegramCommandCooldownGuard,
     parse_telegram_command,
 )
-
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定接收时刻 / Fixed receipt time."""

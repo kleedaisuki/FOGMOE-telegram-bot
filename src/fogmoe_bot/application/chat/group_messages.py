@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
 
-
 DEFAULT_GROUP_CONTEXT_MESSAGES = 256
 """@brief 默认群聊短消息窗口 / Default group-context window for short human messages."""
 

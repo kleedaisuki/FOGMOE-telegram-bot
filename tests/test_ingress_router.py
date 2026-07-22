@@ -20,8 +20,8 @@ from fogmoe_bot.application.conversation.router import (
 from fogmoe_bot.application.runtime import (
     AggregateKey,
     KeyedMailboxRuntime,
-    OverloadScope,
     Overloaded,
+    OverloadScope,
     ShutdownMode,
 )
 from fogmoe_bot.domain.conversation.identity import (

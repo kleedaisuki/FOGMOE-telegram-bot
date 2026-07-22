@@ -2,7 +2,6 @@
 
 from fogmoe_dbctl.migrations.runner import run_migration_sql
 
-
 revision = "0028_assistant_tool_effects"
 """@brief 当前 Alembic revision / Current Alembic revision."""
 

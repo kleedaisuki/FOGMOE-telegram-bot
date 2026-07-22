@@ -26,7 +26,6 @@ from fogmoe_bot.domain.chance.rounds import ChanceRound, ChanceSettlement
 from fogmoe_bot.domain.chance.rules import ChanceRule
 from fogmoe_bot.domain.chance.scope import GroupRoundScope, PersonalRoundScope
 
-
 _ROUND_ID = UUID("00000000-0000-0000-0000-000000000123")
 """@brief 测试中稳定的轮次 UUID / Stable round UUID used in tests."""
 

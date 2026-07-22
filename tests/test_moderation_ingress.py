@@ -42,7 +42,6 @@ from fogmoe_bot.domain.moderation.models import (
     UserId,
 )
 
-
 NOW = datetime(2026, 7, 11, tzinfo=UTC)
 
 

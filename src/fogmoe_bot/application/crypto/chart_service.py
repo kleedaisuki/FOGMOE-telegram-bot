@@ -15,7 +15,6 @@ from typing import Protocol
 
 from fogmoe_bot.domain.crypto import ChartToken
 
-
 CHART_SERVICE_DATA_KEY = "fogmoe.chart.service"
 """@brief ``bot_data`` 中图表服务的稳定键 / Stable chart-service key in ``bot_data``."""
 

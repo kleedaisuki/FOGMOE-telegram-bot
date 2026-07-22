@@ -8,7 +8,6 @@ from typing import Final
 
 from .rules import ChanceOutcome, ChanceRule, ChanceRuleset
 
-
 SICBO_LIKE_HOUSE_EDGE: Final[Fraction] = Fraction(1, 20)
 """@brief 骰宝风格示例的 5% 精确庄家优势 / Exact 5% house edge for the Sic-Bo-like example."""
 

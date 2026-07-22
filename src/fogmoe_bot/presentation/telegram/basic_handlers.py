@@ -12,7 +12,6 @@ from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
 from .command_cooldown_guard import ParsedTelegramCommand
 from .delivery import delivery_stream_for_chat
 
-
 _GITHUB_TEXT = "Open Source:\nAGPL-3.0: https://github.com/FogMoe/telegram-bot"
 """@brief 稳定纯文本源码链接 / Stable plain-text source link."""
 

@@ -4,9 +4,10 @@ import logging
 import os
 import re
 
+from observability_testkit import make_telemetry
+
 from fogmoe_bot.config import LoggingSettings
 from fogmoe_bot.infrastructure.observability import logging as bot_logging
-from observability_testkit import make_telemetry
 
 
 def test_configure_logging_uses_timestamped_file_and_queue_consumer(tmp_path):

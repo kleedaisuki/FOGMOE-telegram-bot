@@ -13,7 +13,6 @@ from fogmoe_bot.domain.personal_rpg._validation import normalize_day, normalize_
 from fogmoe_bot.domain.personal_rpg.catalog import MaterialBundle, MaterialKind
 from fogmoe_bot.domain.world.scope import PersonalScope
 
-
 EXPLORATION_RULESET_VERSION: Final[str] = "personal-rpg-exploration-v1"
 """@brief 每日探索规则集版本 / Version of the daily-exploration ruleset."""
 

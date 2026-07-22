@@ -21,7 +21,6 @@ from fogmoe_dashboard.application.queries import DashboardQuery, DashboardResult
 from fogmoe_dashboard.domain.models import TimeWindow
 from fogmoe_dashboard.presentation.gui.table import ObjectTableModel
 
-
 RowT = TypeVar("RowT")
 """@brief table_view 保留的行类型 / Row type preserved by table_view."""
 

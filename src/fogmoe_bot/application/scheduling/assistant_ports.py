@@ -13,9 +13,9 @@ from fogmoe_bot.domain.scheduling.assistant_schedule import (
     Cadence,
     MisfirePolicy,
     ScheduleClaim,
+    ScheduledAssistantTurn,
     ScheduleSnapshot,
     ScheduleTarget,
-    ScheduledAssistantTurn,
 )
 from fogmoe_bot.domain.temporal import TimeZoneId, ensure_utc
 

@@ -19,25 +19,24 @@ from fogmoe_bot.application.conversation.assistant_ingress import (
     AssistantTurnRequest,
     AssistantUserNotRegistered,
 )
-from fogmoe_bot.application.conversation.telegram_identity import (
-    GROUP_CHAT_TYPES,
-    TelegramConversationAddress,
-)
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCapability,
     StandaloneOutboundCommand,
 )
+from fogmoe_bot.application.conversation.telegram_identity import (
+    GROUP_CHAT_TYPES,
+    TelegramConversationAddress,
+)
 from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
-from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
     UpdateId,
 )
-from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
+from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.observability.trace import TraceContext
-
+from fogmoe_bot.domain.temporal import ensure_utc
 
 TRANSLATION_TEXT_LIMIT = 3000
 """@brief 翻译输入字符上限 / Translation-input character limit."""

@@ -12,11 +12,10 @@ from .formatting import (
     join_prompt_sections,
     xml_escape,
 )
-
 from .models import (
     ChatMessageContext,
-    ConversationScope,
     ContextState,
+    ConversationScope,
     RuntimeMessageReplacement,
     ScheduledTaskContext,
     UserState,

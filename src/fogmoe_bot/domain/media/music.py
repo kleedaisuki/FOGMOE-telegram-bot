@@ -9,7 +9,6 @@ from typing import NewType
 
 from .identifiers import UserId
 
-
 MusicSearchId = NewType("MusicSearchId", str)
 """持久化音乐搜索会话标识 / Durable music-search-session identifier."""
 

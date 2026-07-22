@@ -9,7 +9,6 @@ from typing import Protocol
 from fogmoe_bot.domain.conversation.identity import UpdateId
 from fogmoe_bot.domain.temporal import ensure_utc
 
-
 GROUP_MEMORY_RESET_CAPABILITY = "memory.reset_group"
 """@brief 群记忆重置 capability / Group-memory reset capability."""
 

@@ -8,7 +8,6 @@ from fogmoe_bot.config import AiSettings, ProviderName
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
 from fogmoe_bot.infrastructure.llm.litellm_models import normalize_provider
 
-
 #: @brief Assistant 支持的推理任务 / Inference tasks supported by the Assistant.
 TaskName: TypeAlias = Literal["chat", "summary", "dreaming", "translation"]
 #: @brief 所有配置 provider 的稳定构造顺序 / Stable construction order for configured providers.

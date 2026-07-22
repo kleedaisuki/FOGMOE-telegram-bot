@@ -11,7 +11,6 @@ from typing import Any
 from fogmoe_dbctl.commands import bootstrap, export_csv, migrate, shell
 from fogmoe_dbctl.config import default_config_path, read_dbctl_settings
 
-
 COMMAND_MODULES = (bootstrap, migrate, export_csv, shell)
 
 

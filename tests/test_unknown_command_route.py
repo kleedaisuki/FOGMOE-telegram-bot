@@ -19,7 +19,6 @@ from fogmoe_bot.presentation.telegram.unknown_command_route import (
     TelegramUnknownCommandPrimaryRoute,
 )
 
-
 _NOW = datetime(2030, 1, 2, 3, 4, tzinfo=UTC)
 """@brief 固定 durable 接收时刻 / Fixed durable receipt instant."""
 

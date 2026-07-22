@@ -8,7 +8,6 @@ from enum import StrEnum
 
 from fogmoe_bot.domain.admin import AnnouncementId
 
-
 ADMIN_SERVICE_DATA_KEY = "admin.service"
 """@brief 组合根中 AdminService 的稳定键 / Stable composition-root key for AdminService."""
 

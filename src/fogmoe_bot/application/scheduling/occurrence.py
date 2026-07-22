@@ -22,7 +22,6 @@ from fogmoe_bot.domain.observability.trace import TraceContext
 from fogmoe_bot.domain.scheduling.assistant_schedule import ScheduledAssistantTurn
 from fogmoe_bot.domain.temporal import ensure_utc
 
-
 SCHEDULED_PROMPT_SOURCE_KIND = "schedule.prompt"
 """@brief Schedule occurrence 的 TurnSource namespace / TurnSource namespace for schedule occurrences."""
 

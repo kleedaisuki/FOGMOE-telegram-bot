@@ -5,26 +5,25 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
+)
 from fogmoe_bot.application.conversation.translation_ingress import (
     TranslationFeedbackReason,
     TranslationReplyTarget,
     TranslationTurnRequest,
 )
-from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
-from fogmoe_bot.application.conversation.telegram_identity import (
-    TelegramConversationAddress,
-)
+from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.presentation.telegram.command_cooldown_guard import (
     parse_telegram_command,
 )
 from fogmoe_bot.presentation.telegram.translation_handlers import (
     TranslationTelegramCommandHandler,
 )
-
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定接收时刻 / Fixed receipt instant."""

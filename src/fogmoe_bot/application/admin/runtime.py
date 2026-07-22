@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
 import logging
+from datetime import timedelta
 
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCapability,
@@ -14,7 +14,6 @@ from fogmoe_bot.domain.admin import AnnouncementRecipientClaim
 from fogmoe_bot.domain.conversation.identity import OutboundMessageId
 
 from .ports import AdminAnnouncementOperations, AnnouncementOutboundFactory
-
 
 logger = logging.getLogger(__name__)
 

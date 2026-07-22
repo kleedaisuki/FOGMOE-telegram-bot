@@ -14,17 +14,16 @@ from fogmoe_bot.application.context_window.worker import (
 )
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
 from fogmoe_bot.domain.context.token_estimator import estimate_tokens
-from fogmoe_bot.domain.conversation.payloads import (
-    JsonObject,
-    JsonValue,
-)
 from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
 from fogmoe_bot.domain.context_window.compaction import (
     Compaction,
     CompactionStatus,
     CompactionSummary,
 )
-
+from fogmoe_bot.domain.conversation.payloads import (
+    JsonObject,
+    JsonValue,
+)
 
 _SUMMARY_SYSTEM_PROMPT = (
     "You maintain a cumulative Context State checkpoint for a conversation. The supplied JSON is "

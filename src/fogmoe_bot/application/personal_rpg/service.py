@@ -11,7 +11,6 @@ from fogmoe_bot.application.personal_rpg.models import (
 from fogmoe_bot.application.personal_rpg.ports import PersonalRpgOperations
 from fogmoe_bot.domain.world.scope import PersonalScope
 
-
 PERSONAL_RPG_SERVICE_DATA_KEY = "personal_rpg.service"
 """@brief runtime capability 中个人 RPG 服务稳定键 / Stable personal-RPG service key in runtime capabilities."""
 

@@ -1,7 +1,7 @@
 """@brief Assistant 群上下文 operation / Assistant group-context operation."""
 
-from collections.abc import Sequence
 import json
+from collections.abc import Sequence
 from typing import Protocol, cast
 
 from fogmoe_bot.application.assistant.tool_runtime import ToolEffectRequest
@@ -11,11 +11,9 @@ from fogmoe_bot.application.chat.group_messages import (
     GroupMessage,
 )
 from fogmoe_bot.domain.context.token_estimator import estimate_tokens
-from fogmoe_bot.domain.conversation.payloads import JsonObject
-from fogmoe_bot.domain.conversation.payloads import JsonValue
+from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
 
 from .parsing import bounded_int
-
 
 _GROUP_CONTEXT_MAX_TOKENS = 16_384
 """@brief 单次群上下文换入预算 / Token budget for one group-context page-in."""

@@ -19,7 +19,6 @@ from fogmoe_bot.presentation.telegram.reset_route import (
     TelegramConversationResetPrimaryRoute,
 )
 
-
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定 listener 接收时间 / Fixed listener receipt time."""
 

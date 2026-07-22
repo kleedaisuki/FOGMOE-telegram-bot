@@ -10,16 +10,16 @@ import pytest
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
-from fogmoe_bot.domain.conversation.payloads import (
-    JsonObject,
-    JsonValue,
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
 )
 from fogmoe_bot.domain.conversation.identity import (
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
-from fogmoe_bot.application.conversation.telegram_identity import (
-    TelegramConversationAddress,
+from fogmoe_bot.domain.conversation.payloads import (
+    JsonObject,
+    JsonValue,
 )
 from fogmoe_bot.presentation.telegram.basic_handlers import (
     StaticTelegramCommandHandler,
@@ -30,7 +30,6 @@ from fogmoe_bot.presentation.telegram.command_cooldown_guard import (
 from fogmoe_bot.presentation.telegram.command_route import (
     TelegramDurableCommandPrimaryRoute,
 )
-
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定接收时刻 / Fixed receipt time."""

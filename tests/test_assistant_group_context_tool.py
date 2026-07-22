@@ -6,21 +6,21 @@ import asyncio
 from datetime import UTC, datetime
 from typing import cast
 
+from fogmoe_bot.application.assistant.temporal_memory import TemporalMemoryReader
 from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectRequest,
     ToolExecutionContext,
 )
-from fogmoe_bot.application.assistant.temporal_memory import TemporalMemoryReader
-from fogmoe_bot.application.memory.ports import WorkingMemoryQuery
 from fogmoe_bot.application.chat.group_messages import GroupMessage, GroupMessageKind
-from fogmoe_bot.application.timekeeping.service import TimeService
+from fogmoe_bot.application.memory.ports import WorkingMemoryQuery
 from fogmoe_bot.application.scheduling.service import SchedulingService
-from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
+from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
     TurnId,
 )
+from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
 from fogmoe_bot.domain.memory.models import WorkingMemory
 from fogmoe_bot.domain.temporal import UTC_TIME_ZONE
 from fogmoe_bot.infrastructure.assistant.tool_operations.dispatcher import (
@@ -29,7 +29,6 @@ from fogmoe_bot.infrastructure.assistant.tool_operations.dispatcher import (
 from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
     PostgresOutboxRepository,
 )
-
 
 NOW = datetime(2026, 7, 12, tzinfo=UTC)
 

@@ -20,7 +20,6 @@ from fogmoe_dbctl.commands import bootstrap, migration_execution
 from fogmoe_dbctl.config import DbctlSettings
 from fogmoe_dbctl.postgres import direct_psql_environment, quote_identifier
 
-
 _POSTGRES_BIN = Path("/usr/lib/postgresql/16/bin")
 """@brief PostgreSQL 16 服务端工具目录 / PostgreSQL 16 server-tool directory."""
 

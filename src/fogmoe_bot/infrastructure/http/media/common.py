@@ -2,7 +2,6 @@
 
 from collections.abc import Mapping
 
-
 HEADERS: Mapping[str, str] = {
     "User-Agent": "FogMoeBot/1.0 (+https://github.com/TelechaBot/FOGMOE-telegram-bot)",
     "Accept": "application/json",

@@ -24,7 +24,6 @@ from fogmoe_bot.application.chat.group_messages import (
 )
 from fogmoe_bot.domain.memory.models import MAX_WORKING_MEMORY_MESSAGES
 
-
 type SchemaScalar = None | bool | int | float | str
 """@brief JSON Schema 标量 / JSON-Schema scalar."""
 

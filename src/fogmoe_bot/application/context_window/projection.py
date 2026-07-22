@@ -8,30 +8,29 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, cast
 
-from fogmoe_bot.domain.conversation.payloads import (
-    JsonObject,
-    JsonValue,
+from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
+from fogmoe_bot.domain.context_window.compaction import (
+    Compaction,
+    CompactionEnqueueResult,
+    CompactionId,
+    CompactionPlan,
+    CompactionStatus,
 )
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     TurnId,
 )
-from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.message import (
     ConversationMessage,
     MessageRole,
 )
-from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
-from fogmoe_bot.domain.context_window.compaction import (
-    CompactionEnqueueResult,
-    Compaction,
-    CompactionPlan,
-    CompactionId,
-    CompactionStatus,
+from fogmoe_bot.domain.conversation.payloads import (
+    JsonObject,
+    JsonValue,
 )
+from fogmoe_bot.domain.temporal import ensure_utc
 
 from .cache import CachedContextWindow, ContextWindowCache
-
 
 CONTEXT_WINDOW_PROJECTION_VERSION = 1
 """@brief 当前 provider-neutral 历史投影版本 / Current provider-neutral history-projection version."""

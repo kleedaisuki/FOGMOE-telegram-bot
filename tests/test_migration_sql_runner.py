@@ -1,11 +1,10 @@
 import ast
-from pathlib import Path
 import re
+from pathlib import Path
 
 import pytest
 
 from fogmoe_dbctl.migrations import runner
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 """@brief 项目根目录 / Project root."""

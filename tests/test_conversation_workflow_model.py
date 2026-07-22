@@ -13,15 +13,15 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnSource,
     UpdateId,
 )
+from fogmoe_bot.domain.conversation.outbox import (
+    SEND_TELEGRAM_MESSAGE,
+    OutboundDraft,
+)
 from fogmoe_bot.domain.conversation.turn import (
     ConversationTurn,
     InvalidTurnTransition,
     TurnEvent,
     TurnState,
-)
-from fogmoe_bot.domain.conversation.outbox import (
-    SEND_TELEGRAM_MESSAGE,
-    OutboundDraft,
 )
 
 NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)

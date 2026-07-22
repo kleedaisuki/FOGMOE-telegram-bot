@@ -14,12 +14,11 @@ from fogmoe_bot.domain.scheduling.assistant_schedule import (
     FixedInterval,
     MisfirePolicy,
     ScheduleClaim,
-    ScheduleTarget,
     ScheduledAssistantTurn,
+    ScheduleTarget,
     StaleScheduleClaimError,
 )
 from fogmoe_bot.domain.temporal import TimeZoneId
-
 
 RUN_AT = datetime(2026, 7, 22, 12, tzinfo=UTC)
 """@brief 当前未消费 occurrence / Current unconsumed occurrence."""

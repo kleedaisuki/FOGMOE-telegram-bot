@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Hashable
-from dataclasses import dataclass
 import math
 import time
+from collections.abc import Callable, Hashable
+from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from fogmoe_bot.domain.moderation.aggregate import GroupModeration
@@ -16,7 +16,6 @@ from fogmoe_bot.domain.moderation.models import (
 )
 
 from .ports import GroupModerationRepository
-
 
 KeyT = TypeVar("KeyT", bound=Hashable)
 """@brief 缓存键类型 / Cache-key type."""

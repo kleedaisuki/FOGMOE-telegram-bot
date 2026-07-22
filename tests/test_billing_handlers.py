@@ -22,7 +22,6 @@ from fogmoe_bot.presentation.telegram.command_cooldown_guard import (
     ParsedTelegramCommand,
 )
 
-
 NOW = datetime(2030, 1, 2, 3, 4, tzinfo=UTC)
 """@brief 测试固定接收时刻 / Fixed receipt instant for tests."""
 

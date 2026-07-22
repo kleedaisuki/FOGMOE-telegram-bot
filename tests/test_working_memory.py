@@ -32,7 +32,6 @@ from fogmoe_bot.domain.retrieval import (
     RetrievalScope,
 )
 
-
 NOW = datetime(2036, 1, 1, tzinfo=UTC)
 """@brief 固定来源时刻 / Fixed source instant."""
 

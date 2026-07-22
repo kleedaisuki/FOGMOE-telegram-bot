@@ -32,7 +32,6 @@ from .moderation_composition import (
     TelegramModerationCapability,
 )
 
-
 logger = logging.getLogger(__name__)
 
 SPAM_HELP_CALLBACK_DATA = "spam_help"

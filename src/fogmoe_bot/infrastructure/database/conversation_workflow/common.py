@@ -8,25 +8,24 @@ from datetime import datetime, timedelta
 from typing import cast
 from uuid import UUID
 
-from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.domain.conversation.errors import (
+    IdempotencyConflictError,
+    StaleClaimError,
+)
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     InferenceActivityId,
     LeaseToken,
     TurnId,
 )
-from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.inference import (
     InferenceActivity,
     InferenceActivityDraft,
     InferenceActivityStatus,
 )
-from fogmoe_bot.domain.conversation.errors import (
-    IdempotencyConflictError,
-    StaleClaimError,
-)
+from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.observability.trace import TraceContext
-
+from fogmoe_bot.domain.temporal import ensure_utc
 
 _INFERENCE_ACTIVITY_COLUMNS = (
     "activity_id, turn_id, conversation_id, request, status, version, "

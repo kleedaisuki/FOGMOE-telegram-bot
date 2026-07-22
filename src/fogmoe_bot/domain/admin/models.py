@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid5
 
-
 _ANNOUNCEMENT_ID_NAMESPACE = UUID("6bfaf3fd-aaf4-53f5-b789-0db71fe8b9ef")
 """@brief 幂等键到公告 ID 的 UUIDv5 命名空间 / UUIDv5 namespace mapping idempotency keys to announcement IDs."""
 

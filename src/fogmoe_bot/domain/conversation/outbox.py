@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
+from fogmoe_bot.domain.observability.trace import TraceContext
+from fogmoe_bot.domain.temporal import ensure_utc
+
 from .identity import (
     ConversationId,
     DeliveryStreamId,
@@ -14,8 +17,6 @@ from .identity import (
     normalize_idempotency_key,
 )
 from .payloads import JsonObject
-from fogmoe_bot.domain.temporal import ensure_utc
-from fogmoe_bot.domain.observability.trace import TraceContext
 
 
 @dataclass(frozen=True, slots=True)

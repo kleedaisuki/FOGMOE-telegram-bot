@@ -9,7 +9,6 @@ from fogmoe_bot.config import default_config_path as bot_default_config_path
 from fogmoe_dashboard.config import default_config_path as dashboard_default_config_path
 from fogmoe_dbctl.config import default_config_path as dbctl_default_config_path
 
-
 #: @brief 源码仓库根目录 / Source repository root directory.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 

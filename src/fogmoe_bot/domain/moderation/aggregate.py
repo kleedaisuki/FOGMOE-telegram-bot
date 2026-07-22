@@ -9,8 +9,8 @@ a group configuration cannot be partially updated.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
 import re
+from dataclasses import dataclass, replace
 from typing import Self
 
 from fogmoe_bot.domain.moderation.models import KeywordReply
@@ -23,7 +23,6 @@ from .models import (
     RuleScope,
     UserId,
 )
-
 
 MAX_GROUP_RULES = 10
 """@brief 每群最大垃圾规则数 / Maximum spam rules per group."""

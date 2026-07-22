@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from enum import IntEnum, StrEnum
 from typing import Any, Self
 
-
 type AggregateIdentityPart = str | int
 """@brief 聚合标识的一个稳定组成部分 / One stable aggregate-identity component."""
 

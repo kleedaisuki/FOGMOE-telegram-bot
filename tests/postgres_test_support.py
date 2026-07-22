@@ -10,7 +10,6 @@ from fogmoe_bot.config import BotDatabaseSettings
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_dbctl.config import default_config_path, read_dbctl_settings
 
-
 _DEDICATED_TEST_DATABASE_NAME = re.compile(
     r"(?:^test(?:[_-]|$)|(?:^|[_-])test(?:[_-]|$))",
     re.IGNORECASE,

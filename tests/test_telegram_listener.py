@@ -13,7 +13,6 @@ from fogmoe_bot.presentation.telegram.listener import (
     TelegramPollingListener,
 )
 
-
 NOW = datetime(2026, 7, 11, 12, tzinfo=timezone.utc)
 """@brief listener 测试时间 / Listener test time."""
 

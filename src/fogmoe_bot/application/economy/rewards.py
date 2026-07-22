@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-import random
 from typing import Protocol
 
 from .common import EconomyCode

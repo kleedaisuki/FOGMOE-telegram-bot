@@ -44,7 +44,6 @@ from fogmoe_bot.application.conversation.outbox_worker import (
     PermanentDeliveryError,
     RetryableDeliveryError,
 )
-from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.outbox import (
     EDIT_TELEGRAM_MESSAGE,
     SEND_TELEGRAM_ARTIFACT,
@@ -53,10 +52,10 @@ from fogmoe_bot.domain.conversation.outbox import (
     SEND_TELEGRAM_STICKER,
     OutboundMessage,
 )
+from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.media.artifact import ArtifactKind
 from fogmoe_bot.domain.media.identifiers import ArtifactId
 from fogmoe_bot.infrastructure.media.file_artifact_store import FileArtifactStore
-
 
 _SEND_KEYS = frozenset(
     {

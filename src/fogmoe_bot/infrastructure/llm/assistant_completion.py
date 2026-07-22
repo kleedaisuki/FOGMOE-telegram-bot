@@ -9,14 +9,14 @@ from fogmoe_bot.application.assistant.completion import (
     CompletionToolCall,
 )
 from fogmoe_bot.application.assistant.tools.catalog import ToolDefinition
+from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.domain.conversation.payloads import (
     JsonObject,
     JsonValue,
 )
-from fogmoe_bot.infrastructure.blocking import AsyncBlockingBulkhead
-from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind
+from fogmoe_bot.infrastructure.blocking import AsyncBlockingBulkhead
 
 from .litellm_client import LiteLLMChatClient
 from .protocol import assistant_message_to_plain, normalise_tool_calls

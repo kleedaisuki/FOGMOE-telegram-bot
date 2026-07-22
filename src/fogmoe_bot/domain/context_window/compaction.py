@@ -11,18 +11,17 @@ from enum import StrEnum
 from typing import Self, cast
 from uuid import UUID, uuid5
 
-from fogmoe_bot.domain.conversation.payloads import (
-    JsonObject,
-    JsonValue,
-)
+from fogmoe_bot.domain.context_window.budget import TokenCount
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     LeaseToken,
     TurnId,
 )
+from fogmoe_bot.domain.conversation.payloads import (
+    JsonObject,
+    JsonValue,
+)
 from fogmoe_bot.domain.temporal import ensure_utc
-from fogmoe_bot.domain.context_window.budget import TokenCount
-
 
 _COMPACTION_NAMESPACE = UUID("f21610f9-072f-50ed-98e7-354ee460c530")
 """@brief Compaction 稳定 UUIDv5 命名空间 / Stable UUIDv5 namespace for compactions."""

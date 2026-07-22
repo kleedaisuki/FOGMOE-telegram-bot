@@ -17,7 +17,6 @@ from fogmoe_bot.domain.moderation.models import (
 from .configuration import GroupModerationConfiguration
 from .ports import GroupModerationRepository
 
-
 type GroupMutation = Callable[[GroupModeration], GroupModeration]
 """@brief 纯群组聚合变换 / Pure group-aggregate transformation."""
 

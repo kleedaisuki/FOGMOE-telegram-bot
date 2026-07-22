@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from fogmoe_bot.domain.conversation.identity import ConversationId
 
-
 GROUP_CHAT_TYPES = frozenset({"group", "supergroup"})
 """@brief 共享 Conversation 的 Telegram 群类型 / Telegram group types sharing a Conversation."""
 

@@ -33,7 +33,6 @@ from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 
 from .update_mapper import TelegramUpdateMapper
 
-
 logger = logging.getLogger(__name__)
 
 

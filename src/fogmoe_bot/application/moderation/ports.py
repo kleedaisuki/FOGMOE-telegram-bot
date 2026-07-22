@@ -16,8 +16,8 @@ from fogmoe_bot.domain.moderation.effects import (
 )
 from fogmoe_bot.domain.moderation.models import (
     ChatId,
-    ModerationToggleResult,
     ModerationRequest,
+    ModerationToggleResult,
 )
 from fogmoe_bot.domain.moderation.reporting import (
     ReportDeliveryResult,

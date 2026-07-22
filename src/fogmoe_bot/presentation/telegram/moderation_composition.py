@@ -29,6 +29,9 @@ from fogmoe_bot.application.moderation.service import ModerationService
 from fogmoe_bot.application.runtime import SystemUtcClock
 from fogmoe_bot.domain.moderation.aggregate import GroupModeration
 from fogmoe_bot.domain.moderation.models import ChatId
+from fogmoe_bot.infrastructure.database.group_message_projection import (
+    PostgresGroupMessageProjection,
+)
 from fogmoe_bot.infrastructure.database.moderation.effects import (
     PostgresModerationEffectRepository,
 )
@@ -38,21 +41,17 @@ from fogmoe_bot.infrastructure.database.moderation.group import (
 from fogmoe_bot.infrastructure.database.moderation.reports import (
     PostgresModerationReportRepository,
 )
-from fogmoe_bot.infrastructure.database.group_message_projection import (
-    PostgresGroupMessageProjection,
-)
 from fogmoe_bot.infrastructure.moderation.wordlist import FileModerationRuleProvider
 
+from .group_message_observer import (
+    GroupMessageIngressObserver,
+    TelegramObserverPipeline,
+)
 from .moderation_adapter import (
     TelegramModerationEffectSink,
     TelegramModerationMapper,
     TelegramReportDelivery,
 )
-from .group_message_observer import (
-    GroupMessageIngressObserver,
-    TelegramObserverPipeline,
-)
-
 
 MODERATION_CAPABILITY_DATA_KEY = "fogmoe.moderation_capability"
 """@brief bot_data 中治理 capability 的稳定键 / Stable bot_data key for the moderation capability."""

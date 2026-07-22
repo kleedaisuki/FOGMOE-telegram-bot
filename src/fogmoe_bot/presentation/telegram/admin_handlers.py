@@ -24,7 +24,6 @@ from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
 from .command_cooldown_guard import ParsedTelegramCommand
 from .delivery import delivery_stream_for_chat
 
-
 _PERMISSION_DENIED_TEXT = (
     "您没有权限执行此操作。\nYou do not have permission to perform this operation."
 )

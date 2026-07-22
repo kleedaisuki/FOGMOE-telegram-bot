@@ -9,8 +9,9 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Self
 
-from .identity import ConversationId, TurnId, TurnSource
 from fogmoe_bot.domain.temporal import ensure_utc
+
+from .identity import ConversationId, TurnId, TurnSource
 
 
 class TurnState(StrEnum):

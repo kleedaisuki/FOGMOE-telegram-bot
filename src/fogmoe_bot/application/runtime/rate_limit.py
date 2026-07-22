@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from collections import OrderedDict
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass
-import time
 
 
 @dataclass(frozen=True, slots=True)

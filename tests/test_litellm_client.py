@@ -1,19 +1,19 @@
 """@brief 注入式 LiteLLM 客户端测试 / Tests for the injected LiteLLM client."""
 
-import pytest
 import litellm
+import pytest
 
 from fogmoe_bot.application.assistant.tools.catalog import ToolArguments, define_tool
 from fogmoe_bot.config import AiProvidersSettings
 from fogmoe_bot.infrastructure.llm import litellm_client
-from fogmoe_bot.infrastructure.llm.protocol import (
-    sanitize_message_for_provider,
-)
 from fogmoe_bot.infrastructure.llm.litellm_models import normalize_provider
 from fogmoe_bot.infrastructure.llm.litellm_provider_config import (
     gemini_native_api_base,
     openai_compatible_api_base,
     provider_params,
+)
+from fogmoe_bot.infrastructure.llm.protocol import (
+    sanitize_message_for_provider,
 )
 
 

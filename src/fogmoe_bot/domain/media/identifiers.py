@@ -2,7 +2,6 @@
 
 from typing import NewType
 
-
 ArtifactId = NewType("ArtifactId", str)
 """持久化媒体制品或图片报价标识 / Durable media-artifact or picture-offer identifier."""
 

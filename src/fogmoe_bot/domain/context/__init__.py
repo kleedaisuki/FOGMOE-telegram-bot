@@ -12,8 +12,8 @@ from .builder import (
 )
 from .models import (
     ChatMessageContext,
-    ConversationScope,
     ContextState,
+    ConversationScope,
     RuntimeMessageReplacement,
     ScheduledTaskContext,
     UserState,

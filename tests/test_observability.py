@@ -23,11 +23,11 @@ from fogmoe_bot.domain.observability.signals import (
     TelemetrySignal,
 )
 from fogmoe_bot.domain.observability.trace import TraceContext, TraceId
+from fogmoe_bot.infrastructure.observability.composition import build_observability
 from fogmoe_bot.infrastructure.observability.logging import (
     ContextQueueHandler,
     TelemetryLogHandler,
 )
-from fogmoe_bot.infrastructure.observability.composition import build_observability
 
 
 def test_observability_composition_uses_explicit_typed_settings() -> None:

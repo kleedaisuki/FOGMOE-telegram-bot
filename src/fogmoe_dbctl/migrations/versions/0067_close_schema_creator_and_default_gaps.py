@@ -2,7 +2,6 @@
 
 from fogmoe_dbctl.migrations.runner import run_migration_sql
 
-
 revision = "0067_close_schema_creator_and_default_gaps"
 """@brief 当前 Alembic revision / Current Alembic revision."""
 

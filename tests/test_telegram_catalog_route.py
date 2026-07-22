@@ -15,18 +15,17 @@ from fogmoe_bot.domain.conversation.identity import (
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
+from fogmoe_bot.presentation.telegram.catalog_route import (
+    MalformedPersistedTelegramUpdate,
+    TelegramCatalogDispatcher,
+    TelegramCatalogPrimaryRoute,
+)
 from fogmoe_bot.presentation.telegram.handler_catalog import (
     HandlerCatalog,
     HandlerDefinition,
     HandlerKind,
     TelegramApplication,
 )
-from fogmoe_bot.presentation.telegram.catalog_route import (
-    MalformedPersistedTelegramUpdate,
-    TelegramCatalogDispatcher,
-    TelegramCatalogPrimaryRoute,
-)
-
 
 type TelegramContext = ContextTypes.DEFAULT_TYPE
 """@brief 测试 callback context / Test callback context."""

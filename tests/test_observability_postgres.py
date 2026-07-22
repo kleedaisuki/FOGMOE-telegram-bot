@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import asyncpg
 import pytest
+from postgres_test_support import database_settings_from_url
 
 from fogmoe_bot.domain.observability.signals import (
     LogSignal,
@@ -23,7 +24,6 @@ from fogmoe_bot.domain.observability.signals import (
 )
 from fogmoe_bot.domain.observability.trace import TraceContext
 from fogmoe_bot.infrastructure.observability.postgres import PostgresTelemetrySink
-from postgres_test_support import database_settings_from_url
 
 
 class _RecordingConnection:

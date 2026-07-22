@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import re
+from datetime import UTC, datetime
 from typing import Final
 
 _CODE_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_.-]*$")

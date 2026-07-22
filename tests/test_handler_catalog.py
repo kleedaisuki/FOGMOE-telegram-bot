@@ -1,7 +1,7 @@
+import re
 from collections import Counter
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-import re
 from typing import cast
 
 import pytest
@@ -9,7 +9,6 @@ from observability_testkit import make_observability
 from telegram import Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
-from fogmoe_bot.config import BotSettings
 from fogmoe_bot.application.banking.service import BANK_SERVICE_DATA_KEY, BankService
 from fogmoe_bot.application.billing.service import (
     BILLING_SERVICE_DATA_KEY,
@@ -42,11 +41,8 @@ from fogmoe_bot.application.personal_rpg.service import (
     PersonalRpgService,
 )
 from fogmoe_bot.application.town.service import TOWN_SERVICE_DATA_KEY, TownService
+from fogmoe_bot.config import BotSettings
 from fogmoe_bot.presentation.telegram import handler_composition
-from fogmoe_bot.presentation.telegram.moderation_composition import (
-    MODERATION_CAPABILITY_DATA_KEY,
-    TelegramModerationCapability,
-)
 from fogmoe_bot.presentation.telegram.handler_catalog import (
     HANDLER_CATALOG,
     DuplicateCallbackNamespaceError,
@@ -61,6 +57,10 @@ from fogmoe_bot.presentation.telegram.handler_catalog import (
 )
 from fogmoe_bot.presentation.telegram.handler_composition import (
     assemble_handler_capabilities,
+)
+from fogmoe_bot.presentation.telegram.moderation_composition import (
+    MODERATION_CAPABILITY_DATA_KEY,
+    TelegramModerationCapability,
 )
 from fogmoe_bot.resources import load_resources
 

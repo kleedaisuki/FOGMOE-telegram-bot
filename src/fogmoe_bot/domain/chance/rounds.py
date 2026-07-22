@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from .fairness import (
+    MAX_NONCE,
     ClientSeed,
     FairnessProof,
-    MAX_NONCE,
     ServerSeed,
     ServerSeedCommitment,
     reveal_fairness_proof,

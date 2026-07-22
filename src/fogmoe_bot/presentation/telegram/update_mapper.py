@@ -16,18 +16,17 @@ from typing import cast
 
 from telegram import Update
 
-from fogmoe_bot.domain.conversation.payloads import (
-    JsonObject,
-    JsonValue,
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
 )
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
-
-from fogmoe_bot.application.conversation.telegram_identity import (
-    TelegramConversationAddress,
+from fogmoe_bot.domain.conversation.payloads import (
+    JsonObject,
+    JsonValue,
 )
 
 

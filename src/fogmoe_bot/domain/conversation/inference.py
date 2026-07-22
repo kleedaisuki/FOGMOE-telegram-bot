@@ -5,10 +5,11 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Self
 
+from fogmoe_bot.domain.observability.trace import TraceContext
+from fogmoe_bot.domain.temporal import ensure_utc
+
 from .identity import ConversationId, InferenceActivityId, LeaseToken, TurnId
 from .payloads import JsonObject
-from fogmoe_bot.domain.temporal import ensure_utc
-from fogmoe_bot.domain.observability.trace import TraceContext
 
 
 class InferenceActivityStatus(StrEnum):

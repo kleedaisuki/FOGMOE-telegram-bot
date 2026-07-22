@@ -4,16 +4,22 @@ import asyncio
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 
+from fogmoe_bot.application.context_window.cache import ContextWindowCache
 from fogmoe_bot.application.context_window.projection import (
-    ContextWindowProjector,
-    ContextWindowBounds,
     CompactionPending,
-    ContextWindowRequest,
+    ContextWindowBounds,
+    ContextWindowProjector,
     ContextWindowReady,
+    ContextWindowRequest,
     checkpoint_summary_message,
 )
-from fogmoe_bot.application.context_window.cache import ContextWindowCache
-from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
+from fogmoe_bot.domain.context_window.compaction import (
+    Compaction,
+    CompactionEnqueueResult,
+    CompactionPlan,
+    CompactionSummary,
+)
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     ConversationMessageId,
@@ -26,14 +32,7 @@ from fogmoe_bot.domain.conversation.message import (
     MessageDraft,
     MessageRole,
 )
-from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
-from fogmoe_bot.domain.context_window.compaction import (
-    CompactionEnqueueResult,
-    Compaction,
-    CompactionPlan,
-    CompactionSummary,
-)
-
+from fogmoe_bot.domain.conversation.payloads import JsonObject
 
 NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)
 """@brief 确定性测试时刻 / Deterministic test instant."""

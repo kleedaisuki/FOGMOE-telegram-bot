@@ -13,7 +13,6 @@ from fogmoe_bot.application.town.models import (
 from fogmoe_bot.application.town.ports import TownAuthorization, TownOperations
 from fogmoe_bot.domain.town.scope import TownScope
 
-
 TOWN_SERVICE_DATA_KEY = "town.service"
 """@brief runtime capability 中小镇服务稳定键 / Stable town-service key in runtime capabilities."""
 

@@ -25,7 +25,6 @@ from fogmoe_bot.domain.retrieval import RetrievalScope
 from .command_cooldown_guard import ParsedTelegramCommand
 from .delivery import delivery_stream_for_chat
 
-
 _COMMANDS = frozenset({"resetmem", "resetprofile", "regen", "resetgroup"})
 """@brief 本 handler 独占的命令 / Commands exclusively owned by this handler."""
 

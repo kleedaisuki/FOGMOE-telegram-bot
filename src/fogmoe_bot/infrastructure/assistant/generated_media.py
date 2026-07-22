@@ -24,7 +24,6 @@ from fogmoe_bot.infrastructure.network.proxy import create_requests_session
 
 from .requests_response import read_limited_response
 
-
 _MAX_IMAGE_BYTES = 16 * 1024 * 1024
 """@brief 单图字节上限 / Per-image byte limit."""
 

@@ -8,10 +8,9 @@ no longer defines wallets, price quotes, predictions, swaps, or any asset-value 
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
-import re
-
 
 _CONTRACT_PATTERN = re.compile(r"^[A-Za-z0-9]{1,100}$")
 """@brief 支持链的保守合约地址字符集 / Conservative contract-address alphabet for supported chains."""

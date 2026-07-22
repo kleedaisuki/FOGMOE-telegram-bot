@@ -32,7 +32,6 @@ from fogmoe_bot.domain.world.scope import PersonalScope
 from .command_cooldown_guard import ParsedTelegramCommand
 from .delivery import enqueue_command_reply
 
-
 _PRIVATE_ONLY_TEXT: Final[str] = "个人冒险仅限私聊使用喵，请私聊 Bot 后再试。"
 """@brief 个人 RPG 私聊边界提示 / Personal-RPG private-chat boundary prompt."""
 

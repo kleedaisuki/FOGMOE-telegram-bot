@@ -13,7 +13,6 @@ from .workflow_models import (
     LookupChanceRound,
 )
 
-
 type ChanceRoundPreparer = Callable[[PrivateCommittedChanceRound], PreparedChanceRound]
 """@brief 在存储事务内由私有承诺态生成准备态的回调 / Callback producing prepared state from private committed state inside storage transaction."""
 

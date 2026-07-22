@@ -19,7 +19,6 @@ from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from .command_cooldown_guard import ParsedTelegramCommand
 from .delivery import delivery_stream_for_chat
 
-
 _SUPPORTED_CHAT_TYPES = frozenset({"private", "group", "supergroup"})
 """@brief `/tl` 支持的 Telegram chat 类型 / Telegram chat types supported by `/tl`."""
 

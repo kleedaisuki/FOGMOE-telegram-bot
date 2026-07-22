@@ -11,7 +11,6 @@ from fogmoe_bot.application.retrieval.ports import (
 )
 from fogmoe_bot.domain.retrieval import RetrievalPassage
 
-
 EPISODIC_PASSAGE_FORMAT_VERSION = 1
 """@brief 当前情景 passage renderer 版本 / Current episodic-passage renderer version."""
 

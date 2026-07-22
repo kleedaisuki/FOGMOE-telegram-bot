@@ -15,22 +15,22 @@ import json
 from dataclasses import dataclass
 from typing import Literal, NotRequired, Protocol, TypedDict, cast
 
-from fogmoe_bot.domain.conversation.payloads import (
-    JsonObject,
-    JsonValue,
-)
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
     TurnId,
+)
+from fogmoe_bot.domain.conversation.payloads import (
+    JsonObject,
+    JsonValue,
 )
 
 from .tools.catalog import (
     InvalidToolArguments,
     ToolCatalog,
     ToolDefinition,
-    ToolValidationIssue,
     ToolResultResidency,
+    ToolValidationIssue,
     UnknownTool,
     ValidatedToolInvocation,
 )

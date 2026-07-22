@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from fogmoe_bot.domain.temporal import ensure_utc
+
 from .identity import (
     ConversationId,
     ConversationMessageId,
@@ -13,7 +15,6 @@ from .identity import (
     normalize_idempotency_key,
 )
 from .payloads import JsonObject
-from fogmoe_bot.domain.temporal import ensure_utc
 
 
 class MessageRole(StrEnum):

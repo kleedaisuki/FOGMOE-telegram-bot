@@ -11,7 +11,6 @@ import base64
 import json
 from collections.abc import Mapping, Sequence
 
-
 type JsonValue = (
     None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 )

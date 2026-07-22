@@ -12,24 +12,23 @@ from fogmoe_bot.application.context_window.worker import (
     RetryableCompactionError,
 )
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
-from fogmoe_bot.domain.conversation.payloads import (
-    JsonObject,
-    JsonValue,
+from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
+from fogmoe_bot.domain.context_window.compaction import (
+    Compaction,
+    CompactionPlan,
 )
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     LeaseToken,
     TurnId,
 )
-from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
-from fogmoe_bot.domain.context_window.compaction import (
-    Compaction,
-    CompactionPlan,
+from fogmoe_bot.domain.conversation.payloads import (
+    JsonObject,
+    JsonValue,
 )
 from fogmoe_bot.infrastructure.context_window.summary import (
     ProviderCompactionSummaryGenerator,
 )
-
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 确定性测试时刻 / Deterministic test instant."""

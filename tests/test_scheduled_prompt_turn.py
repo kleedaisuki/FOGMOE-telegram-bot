@@ -16,11 +16,10 @@ from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.conversation.identity import ConversationId, DeliveryStreamId
 from fogmoe_bot.domain.scheduling.assistant_schedule import (
     OneShot,
-    ScheduleTarget,
     ScheduledAssistantTurn,
+    ScheduleTarget,
 )
 from fogmoe_bot.domain.temporal import TimeZoneId
-
 
 CREATED_AT = datetime(2026, 7, 10, 8, tzinfo=UTC)
 """@brief 测试 schedule 创建时刻 / Test schedule creation instant."""

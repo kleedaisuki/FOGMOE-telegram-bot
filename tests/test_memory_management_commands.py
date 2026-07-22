@@ -9,6 +9,9 @@ from typing import cast
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
+)
 from fogmoe_bot.application.memory import ForgetMemory, ForgetMemoryResult
 from fogmoe_bot.application.telegram import (
     DurableGroupAdministratorAuthorization,
@@ -21,16 +24,12 @@ from fogmoe_bot.application.user_profile import (
 )
 from fogmoe_bot.domain.conversation.identity import UpdateId
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
-from fogmoe_bot.application.conversation.telegram_identity import (
-    TelegramConversationAddress,
-)
 from fogmoe_bot.presentation.telegram.command_cooldown_guard import (
     parse_telegram_command,
 )
 from fogmoe_bot.presentation.telegram.memory_handlers import (
     MemoryManagementTelegramCommandHandler,
 )
-
 
 NOW = datetime(2037, 4, 5, 6, 7, tzinfo=UTC)
 """@brief 固定命令时刻 / Fixed command timestamp."""

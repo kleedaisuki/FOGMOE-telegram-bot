@@ -6,7 +6,6 @@ from telegram import Update
 from telegram.constants import ChatMemberStatus
 from telegram.ext import ContextTypes
 
-
 _WELCOME_TEXT = (
     "欢迎使用雾萌机器人喵！输入 /help 查看功能。\n"
     "Welcome to FogMoeBot! Type /help to see available features."

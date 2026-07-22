@@ -21,7 +21,6 @@ from fogmoe_bot.domain.temporal import UtcInterval, ensure_utc
 
 from .parsing import bounded_int, optional_text
 
-
 _TOOL_RESULT_MAX_TOKENS = 4_096
 """@brief 单次时间历史工具结果上限 / Per-call temporal-history tool-result limit."""
 

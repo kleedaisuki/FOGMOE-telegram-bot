@@ -13,7 +13,6 @@ from .assistant_update_models import (
     TelegramReplyMetadata,
 )
 
-
 _SERVICE_MESSAGE_KEYS = frozenset(
     {
         "new_chat_members",

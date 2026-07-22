@@ -10,14 +10,14 @@ import litellm
 
 from fogmoe_bot.application.assistant.tools.catalog import ToolDefinition
 from fogmoe_bot.config import AiProvidersSettings, NetworkSettings
-from fogmoe_bot.infrastructure.llm.protocol import (
-    sanitize_messages_for_provider,
-)
 from fogmoe_bot.infrastructure.llm.litellm_models import (
     litellm_model_name,
     normalize_provider,
 )
 from fogmoe_bot.infrastructure.llm.litellm_provider_config import provider_params
+from fogmoe_bot.infrastructure.llm.protocol import (
+    sanitize_messages_for_provider,
+)
 from fogmoe_bot.infrastructure.llm.tool_serialization import serialize_tool_definitions
 from fogmoe_bot.infrastructure.network.proxy import configure_litellm_proxy
 

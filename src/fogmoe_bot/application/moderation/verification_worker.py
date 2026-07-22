@@ -11,7 +11,6 @@ from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
 
 from .verification_service import VerificationRepository, VerificationService
 
-
 VERIFICATION_WORKER_DATA_KEY = "fogmoe.verification_worker"
 """@brief 组合根保存验证 worker 的稳定键 / Stable composition-root key for the verification worker."""
 

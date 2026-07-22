@@ -22,7 +22,6 @@ from fogmoe_bot.presentation.telegram.admin_handlers import (
     TelegramAnnouncementOutboundFactory,
 )
 
-
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定 worker 时间 / Fixed worker instant."""
 

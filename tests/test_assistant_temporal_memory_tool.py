@@ -38,7 +38,6 @@ from fogmoe_bot.infrastructure.assistant.tool_operations.temporal_memory import 
     search_memory_by_time,
 )
 
-
 ANCHOR = datetime(2032, 1, 2, 3, 4, tzinfo=UTC)
 """@brief 定点检索的确定性 UTC 锚 / Deterministic UTC anchor for point retrieval."""
 

@@ -3,6 +3,7 @@
 import asyncio
 from typing import cast
 from uuid import uuid4
+
 from observability_testkit import make_telemetry
 
 from fogmoe_bot.application.assistant.agent_loop import AgentExecutionConfig, AgentLoop

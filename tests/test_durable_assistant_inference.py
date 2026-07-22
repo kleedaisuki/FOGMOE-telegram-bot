@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+
 import pytest
 from pydantic import ValidationError
 
@@ -10,6 +11,7 @@ from fogmoe_bot.application.assistant.durable_inference import (
     TRANSLATION_SYSTEM_PROMPT,
     DurableAssistantInferenceAdapter,
 )
+from fogmoe_bot.application.assistant.errors import AssistantInferenceUnavailableError
 from fogmoe_bot.application.assistant.inference_command import (
     DurableAssistantInferenceCommand,
     DurableAssistantScope,
@@ -17,26 +19,26 @@ from fogmoe_bot.application.assistant.inference_command import (
     DurableProfileClaim,
     DurableUserProfile,
 )
-from fogmoe_bot.application.assistant.errors import AssistantInferenceUnavailableError
 from fogmoe_bot.application.context_window.projection import (
-    ContextWindowBounds,
     CompactionPending,
+    ContextWindowBounds,
+    ContextWindowReady,
     ContextWindowRequest,
     ContextWindowResult,
-    ContextWindowReady,
     project_conversation_message,
 )
 from fogmoe_bot.application.conversation.inference_worker import (
-    InferenceErrorCategory,
     InferenceDependencyPending,
+    InferenceErrorCategory,
     InferenceOutputError,
     InferenceRuntimeLimits,
     PermanentInferenceError,
     RetryableInferenceError,
 )
-from fogmoe_bot.domain.context import ContextState
 from fogmoe_bot.domain.accounts.plan import AccountPlan
-from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.domain.context import ContextState
+from fogmoe_bot.domain.context_window.budget import TokenCount
+from fogmoe_bot.domain.context_window.compaction import CompactionId
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     ConversationMessageId,
@@ -50,13 +52,11 @@ from fogmoe_bot.domain.conversation.message import (
     MessageRole,
 )
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
-from fogmoe_bot.domain.context_window.compaction import CompactionId
-from fogmoe_bot.domain.context_window.budget import TokenCount
+from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.user_profile.models import (
     ProfileClaimKind,
     ProfileConfidence,
 )
-
 
 NOW = datetime(2026, 7, 11, 10, tzinfo=timezone.utc)
 """@brief 测试基准时间 / Test reference time."""

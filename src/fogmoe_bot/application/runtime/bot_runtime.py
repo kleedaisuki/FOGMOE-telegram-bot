@@ -14,7 +14,6 @@ from fogmoe_bot.application.runtime.keyed_mailbox import (
     ShutdownMode,
 )
 
-
 logger = logging.getLogger(__name__)
 
 BOT_RUNTIME_DATA_KEY = "fogmoe.bot_runtime"

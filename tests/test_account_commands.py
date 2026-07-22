@@ -17,19 +17,18 @@ from fogmoe_bot.application.accounts.operations import (
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
+from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
-from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.presentation.telegram.account_handlers import (
     AccountTelegramCommandHandler,
 )
 from fogmoe_bot.presentation.telegram.command_cooldown_guard import (
     ParsedTelegramCommand,
 )
-
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定接收时刻 / Fixed receipt time."""

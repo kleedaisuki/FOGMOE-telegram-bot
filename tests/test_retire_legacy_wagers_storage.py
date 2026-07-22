@@ -6,7 +6,6 @@ from pathlib import Path
 
 from fogmoe_dbctl.migrations import runner
 
-
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 """@brief 项目根目录 / Project root directory."""
 

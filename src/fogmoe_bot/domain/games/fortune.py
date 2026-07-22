@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import random
 from collections.abc import Mapping
 from datetime import date
 from enum import StrEnum
-import hashlib
-import random
 from types import MappingProxyType
 from typing import Final
 

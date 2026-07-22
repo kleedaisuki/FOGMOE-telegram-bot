@@ -19,7 +19,6 @@ from .account import MediaAccountProfiles
 from .music_ports import MusicSessionRepository, MusicSource
 from .music_runtime import MusicRuntime
 
-
 MUSIC_SERVICE_DATA_KEY = "media.music.service"
 
 

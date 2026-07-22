@@ -11,7 +11,6 @@ from uuid import UUID
 
 from fogmoe_bot.domain.temporal import ensure_utc
 
-
 _SOURCE_KIND_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,99}$")
 """@brief Memory 来源类别语法 / Memory-source-kind grammar."""
 

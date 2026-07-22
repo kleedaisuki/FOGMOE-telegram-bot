@@ -2,7 +2,6 @@
 
 from fogmoe_dbctl.migrations.runner import run_migration_sql
 
-
 revision = "0065_close_public_user_object_access"
 """@brief 当前 Alembic revision / Current Alembic revision."""
 

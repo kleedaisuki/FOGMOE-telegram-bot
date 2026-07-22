@@ -16,21 +16,20 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
+)
 from fogmoe_bot.domain.accounts.plan import AccountPlan
-from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     TurnId,
 )
+from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.user_profile.models import (
     ProfileClaimKind,
     ProfileConfidence,
     UserProfileSnapshot,
 )
-from fogmoe_bot.application.conversation.telegram_identity import (
-    TelegramConversationAddress,
-)
-
 
 ASSISTANT_INFERENCE_SCHEMA_VERSION: Literal[2] = 2
 """@brief Durable inference request schema 版本 / Durable inference-request schema version."""

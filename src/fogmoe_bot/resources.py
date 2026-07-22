@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-
 #: @brief 静态资源所在的项目根目录 / Project root containing static resources.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 

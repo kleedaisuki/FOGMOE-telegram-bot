@@ -2,7 +2,6 @@
 
 from fogmoe_dbctl.migrations.runner import run_migration_sql
 
-
 revision = "0066_validate_public_default_acl_owners"
 """@brief 当前 Alembic revision / Current Alembic revision."""
 

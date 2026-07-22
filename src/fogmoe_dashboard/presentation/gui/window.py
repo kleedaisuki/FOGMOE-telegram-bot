@@ -44,7 +44,6 @@ from fogmoe_dashboard.presentation.gui.worker import (
     QuerySuccess,
 )
 
-
 _WINDOWS = (
     ("15 分钟", 15 * 60),
     ("1 小时", 60 * 60),

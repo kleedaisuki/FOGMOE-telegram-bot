@@ -12,6 +12,7 @@ from uuid import UUID
 import asyncpg  # type: ignore[import-untyped]
 
 from fogmoe_dashboard.domain.models import (
+    RESOURCE_STALE_AFTER,
     ErrorEvent,
     GenAiStats,
     HealthPoint,
@@ -19,7 +20,6 @@ from fogmoe_dashboard.domain.models import (
     MetricStats,
     Overview,
     PipelineStage,
-    RESOURCE_STALE_AFTER,
     ResourceInstance,
     ResourceState,
     RetrievalQueueStats,

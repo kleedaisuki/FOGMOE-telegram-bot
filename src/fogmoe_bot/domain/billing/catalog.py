@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
-import re
 from typing import Final
 from uuid import UUID
 

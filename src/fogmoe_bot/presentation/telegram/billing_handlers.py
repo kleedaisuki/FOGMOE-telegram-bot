@@ -24,7 +24,6 @@ from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from .command_cooldown_guard import ParsedTelegramCommand
 from .delivery import enqueue_command_reply
 
-
 _PRIVATE_ONLY_TEXT = "账单、订阅和退款命令仅限私聊使用喵。"
 """@brief Billing 私聊边界提示 / Billing private-chat boundary prompt."""
 

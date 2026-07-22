@@ -20,7 +20,6 @@ from fogmoe_bot.application.retrieval import (
 from fogmoe_bot.domain.observability.signals import SpanKind
 from fogmoe_bot.domain.retrieval import EmbeddingSpace, EmbeddingVector
 
-
 logger = logging.getLogger(__name__)
 """@brief Embedding adapter logger / Embedding-adapter logger."""
 

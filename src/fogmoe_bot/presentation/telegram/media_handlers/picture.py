@@ -22,7 +22,6 @@ from fogmoe_bot.application.media.picture_service import (
 from fogmoe_bot.domain.media.identifiers import UserId
 from fogmoe_bot.domain.media.picture import PictureCandidate, PictureRating
 
-
 PICTURE_FREE_HELP = (
     "📷 图片功能（免费预览）\n\n"
     "• `/pic` — 随机获取一张安全图片\n"

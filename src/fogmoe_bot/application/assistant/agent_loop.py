@@ -20,16 +20,19 @@ from fogmoe_bot.application.memory.ports import (
     WorkingMemoryReader,
 )
 from fogmoe_bot.application.memory.rendering import compose_model_messages
-from fogmoe_bot.domain.memory.models import (
-    MAX_WORKING_MEMORY_MESSAGES,
-    GroupMemoryScope,
-    PersonalMemoryScope,
-)
+from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.domain.context import ContextState
 from fogmoe_bot.domain.conversation.payloads import (
     JsonObject,
     JsonValue,
 )
+from fogmoe_bot.domain.memory.models import (
+    MAX_WORKING_MEMORY_MESSAGES,
+    GroupMemoryScope,
+    PersonalMemoryScope,
+)
+from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
+from fogmoe_bot.domain.observability.signals import SpanKind
 
 from .completion import (
     AgentCheckpointConflictError,
@@ -48,9 +51,6 @@ from .tool_runtime import (
     ToolRuntimeResult,
 )
 from .tools.catalog import ToolResultResidency
-from fogmoe_bot.application.observability.telemetry import Telemetry
-from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
-from fogmoe_bot.domain.observability.signals import SpanKind
 
 
 @dataclass(frozen=True, slots=True)

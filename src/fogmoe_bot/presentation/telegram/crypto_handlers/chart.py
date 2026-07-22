@@ -17,7 +17,6 @@ from fogmoe_bot.domain.crypto import Blockchain, ChartToken, ContractAddress
 
 from .common import chart_service
 
-
 logger = logging.getLogger(__name__)
 """@brief 图表 handler 的结构化日志器 / Structured logger for the chart handler."""
 

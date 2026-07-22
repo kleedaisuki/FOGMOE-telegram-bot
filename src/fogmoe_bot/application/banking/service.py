@@ -16,7 +16,6 @@ from .models import (
 )
 from .ports import BankOperations
 
-
 BANK_SERVICE_DATA_KEY = "banking.service"
 """@brief runtime capability 中银行服务的稳定键 / Stable bank-service key in runtime capability."""
 

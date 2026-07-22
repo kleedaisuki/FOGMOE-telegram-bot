@@ -15,12 +15,11 @@ from fogmoe_bot.application.conversation.telegram_identity import (
     GROUP_CHAT_TYPES,
     TelegramConversationAddress,
 )
+from fogmoe_bot.domain.context import ChatMessageContext, render_chat_message
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from fogmoe_bot.domain.conversation.payloads import JsonObject
-from fogmoe_bot.domain.context import ChatMessageContext, render_chat_message
 
 from .delivery import delivery_stream_for_chat
-
 
 SUPPORTED_ASSISTANT_CHAT_TYPES = frozenset({"private", *GROUP_CHAT_TYPES})
 """Telegram chat types accepted by Assistant ingress."""

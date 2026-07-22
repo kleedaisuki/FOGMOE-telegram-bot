@@ -35,7 +35,6 @@ from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from .command_cooldown_guard import ParsedTelegramCommand
 from .delivery import enqueue_command_reply
 
-
 _EXPOSED_RULES: Final[frozenset[str]] = frozenset(
     {
         "big",

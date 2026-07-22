@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date
 import random
+from datetime import date
 
 from fogmoe_bot.domain.games import FortuneLevel, daily_fortune
 

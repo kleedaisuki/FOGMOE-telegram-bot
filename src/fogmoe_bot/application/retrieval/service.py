@@ -24,7 +24,6 @@ from fogmoe_bot.domain.retrieval import (
     RetrievalScope,
 )
 
-
 MAX_SEMANTIC_RECALL_RESULTS = 128
 """@brief 单次通用语义召回结果硬上限 / Hard result limit for one generic semantic recall."""
 

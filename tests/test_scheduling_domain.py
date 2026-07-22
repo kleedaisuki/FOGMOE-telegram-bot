@@ -15,13 +15,12 @@ from fogmoe_bot.application.scheduling.service import (
 from fogmoe_bot.domain.conversation.identity import ConversationId, DeliveryStreamId
 from fogmoe_bot.domain.scheduling.assistant_schedule import (
     FixedInterval,
+    ScheduledAssistantTurn,
     ScheduleSnapshot,
     ScheduleStatus,
     ScheduleTarget,
-    ScheduledAssistantTurn,
 )
 from fogmoe_bot.domain.temporal import TimeZoneId
-
 
 NOW = datetime(2026, 7, 22, 8, tzinfo=UTC)
 """@brief 应用服务的固定当前时刻 / Fixed current instant for application-service tests."""

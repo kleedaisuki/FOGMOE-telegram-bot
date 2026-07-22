@@ -11,7 +11,6 @@ from alembic.config import Config
 from fogmoe_dbctl.config import DbctlSettings, reveal_secret
 from fogmoe_dbctl.postgres import direct_psql_environment, sqlalchemy_url
 
-
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 """@brief 仓库根目录 / Repository root directory."""
 

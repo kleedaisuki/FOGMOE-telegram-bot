@@ -16,7 +16,6 @@ from .models import (
     UserId,
 )
 
-
 _MODERATION_EFFECT_NAMESPACE = UUID("85fd59e6-3151-54e5-87aa-64c292a2900d")
 """@brief Update 到治理副作用的 UUIDv5 命名空间 / UUIDv5 namespace for Update-to-moderation effects."""
 

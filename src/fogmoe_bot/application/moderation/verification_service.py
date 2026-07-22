@@ -31,7 +31,6 @@ from fogmoe_bot.domain.moderation.verification import (
     hash_verification_token,
 )
 
-
 VERIFICATION_SERVICE_DATA_KEY = "fogmoe.verification_service"
 """@brief 组合根保存验证服务的稳定键 / Stable composition-root key for the verification service."""
 

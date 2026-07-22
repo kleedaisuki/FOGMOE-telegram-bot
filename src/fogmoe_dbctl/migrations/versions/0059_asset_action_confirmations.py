@@ -2,7 +2,6 @@
 
 from fogmoe_dbctl.migrations.runner import run_migration_sql
 
-
 revision = "0059_asset_action_confirmations"
 """@brief 当前 Alembic revision / Current Alembic revision."""
 

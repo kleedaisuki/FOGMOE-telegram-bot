@@ -8,7 +8,6 @@ from enum import StrEnum
 from typing import TypeAlias
 from uuid import UUID
 
-
 JsonScalar: TypeAlias = str | bool | int | float | None
 JsonObject: TypeAlias = dict[str, "JsonValue"]
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | JsonObject

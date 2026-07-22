@@ -14,10 +14,9 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnSource,
     UpdateId,
 )
-from fogmoe_bot.domain.conversation.turn import ConversationTurn
 from fogmoe_bot.domain.conversation.inference import InferenceActivityDraft
 from fogmoe_bot.domain.conversation.message import MessageDraft
-
+from fogmoe_bot.domain.conversation.turn import ConversationTurn
 
 NOW = datetime(2026, 7, 11, 10, tzinfo=timezone.utc)
 """@brief 工作流测试基准时间 / Workflow test reference time."""

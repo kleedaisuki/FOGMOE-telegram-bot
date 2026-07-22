@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import asyncpg
 import pytest
+from postgres_test_support import database_settings_from_url
 
 from fogmoe_bot.domain.observability.signals import (
     LogSignal,
@@ -26,7 +27,6 @@ from fogmoe_bot.infrastructure.observability.postgres import PostgresTelemetrySi
 from fogmoe_dashboard.api import DashboardClient
 from fogmoe_dashboard.domain.models import ResourceState, TimeWindow
 from fogmoe_dashboard.infrastructure.postgres import PostgresDashboardRepository
-from postgres_test_support import database_settings_from_url
 
 
 def _asyncpg_database_url() -> str:

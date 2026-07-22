@@ -13,7 +13,6 @@ from pathlib import Path
 from fogmoe_bot.domain.media.artifact import ArtifactKind, ArtifactRecord
 from fogmoe_bot.domain.media.identifiers import ArtifactId
 
-
 _SAFE_EXTENSION = re.compile(r"^\.[a-z0-9]{1,8}$")
 """@brief 允许的文件扩展名 grammar / Allowed filename-extension grammar."""
 

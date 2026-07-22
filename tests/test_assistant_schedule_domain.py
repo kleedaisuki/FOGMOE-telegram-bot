@@ -13,10 +13,10 @@ from fogmoe_bot.domain.scheduling.assistant_schedule import (
     MisfirePolicy,
     OneShot,
     ScheduleClaim,
+    ScheduledAssistantTurn,
     ScheduleSnapshot,
     ScheduleStatus,
     ScheduleTarget,
-    ScheduledAssistantTurn,
     StaleScheduleClaimError,
     next_occurrence,
 )

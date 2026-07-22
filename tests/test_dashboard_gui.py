@@ -8,7 +8,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QEventLoop, QTimer, Qt
+from PyQt6.QtCore import QEventLoop, Qt, QTimer
 from PyQt6.QtWidgets import QApplication
 
 from fogmoe_dashboard.application.dashboard import Dashboard
@@ -36,7 +36,6 @@ from fogmoe_dashboard.presentation.gui.worker import (
     QueryRequest,
     QuerySuccess,
 )
-
 
 _APP: QApplication | None = None
 """@brief 保持 QApplication Python wrapper 存活 / Keep the QApplication Python wrapper alive."""

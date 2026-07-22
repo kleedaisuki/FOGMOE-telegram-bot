@@ -30,7 +30,6 @@ from fogmoe_bot.domain.world.scope import PersonalScope
 from .command_cooldown_guard import ParsedTelegramCommand
 from .delivery import enqueue_command_reply
 
-
 _GROUP_ONLY_TEXT = (
     "群组小镇只能在群聊或超级群中使用喵；个人冒险请私聊后使用 /adventure。"
 )

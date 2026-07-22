@@ -20,7 +20,6 @@ from .account import MediaAccountProfiles
 from .picture_runtime import PictureRuntime
 from .picture_source import PictureSource
 
-
 PICTURE_SERVICE_DATA_KEY = "media.picture.service"
 """@brief 图片服务 capability 键 / Picture-service capability key."""
 

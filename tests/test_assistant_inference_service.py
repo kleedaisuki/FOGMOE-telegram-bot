@@ -4,8 +4,8 @@ from uuid import uuid4
 from fogmoe_bot.application.assistant.agent_loop import AgentResponse
 from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
 from fogmoe_bot.application.runtime import FailureCircuit, FailureCircuitPolicy
-from fogmoe_bot.domain.context import ContextState, ConversationScope, UserState
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
+from fogmoe_bot.domain.context import ContextState, ConversationScope, UserState
 
 
 def _route(

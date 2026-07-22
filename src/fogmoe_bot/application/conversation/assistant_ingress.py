@@ -15,15 +15,13 @@ from fogmoe_bot.application.assistant.inference_command import (
     DurableAssistantUser,
     DurableUserProfile,
 )
-from fogmoe_bot.domain.user_profile.models import UserProfileSnapshot
-from fogmoe_bot.application.conversation.workflow import AcceptConversationTurn
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCapability,
     StandaloneOutboundCommand,
 )
+from fogmoe_bot.application.conversation.workflow import AcceptConversationTurn
 from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
 from fogmoe_bot.domain.accounts.plan import AccountPlan
-from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
@@ -31,11 +29,12 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnSource,
     UpdateId,
 )
-from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
+from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.workflow_results import TurnAcceptanceResult
 from fogmoe_bot.domain.observability.trace import TraceContext
-
+from fogmoe_bot.domain.temporal import ensure_utc
+from fogmoe_bot.domain.user_profile.models import UserProfileSnapshot
 
 ASSISTANT_TEXT_LIMIT = 4096
 """@brief Assistant 文本输入上限 / Assistant text-input limit."""

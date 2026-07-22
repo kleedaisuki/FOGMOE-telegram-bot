@@ -9,7 +9,6 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
-
 logger = logging.getLogger(__name__)
 
 BTC_MONITOR_DATA_KEY = "fogmoe.btc_monitor"

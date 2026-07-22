@@ -28,7 +28,6 @@ from fogmoe_bot.domain.observability.signals import (
 )
 from fogmoe_bot.domain.observability.trace import TraceContext
 
-
 _CURRENT_TRACE: ContextVar[TraceContext | None] = ContextVar(
     "fogmoe_trace_context",
     default=None,

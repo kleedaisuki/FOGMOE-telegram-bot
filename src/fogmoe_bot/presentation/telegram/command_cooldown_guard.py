@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 
 from fogmoe_bot.application.conversation.inbox_worker import PermanentIngressError
 from fogmoe_bot.application.conversation.router import (
@@ -16,21 +16,19 @@ from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCapability,
     StandaloneOutboundCommand,
 )
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
+)
 from fogmoe_bot.application.runtime import ReplayAwareCooldownGate, WorkPriority
+from fogmoe_bot.domain.conversation.identity import ConversationId
+from fogmoe_bot.domain.conversation.inbox import InboundUpdate
+from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
 from fogmoe_bot.domain.conversation.payloads import (
     JsonObject,
     JsonValue,
 )
-from fogmoe_bot.domain.conversation.identity import ConversationId
-from fogmoe_bot.domain.conversation.inbox import InboundUpdate
-from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
-
-from fogmoe_bot.application.conversation.telegram_identity import (
-    TelegramConversationAddress,
-)
 
 from .delivery import delivery_stream_for_chat
-
 
 _COMMAND_TOKEN = re.compile(r"^/([A-Za-z0-9_]{1,32})(?:@([A-Za-z0-9_]{1,64}))?$")
 """@brief Telegram Bot command token schema / Telegram Bot command-token schema."""

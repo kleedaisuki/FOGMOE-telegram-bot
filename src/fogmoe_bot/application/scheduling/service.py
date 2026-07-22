@@ -8,10 +8,9 @@ from fogmoe_bot.application.scheduling.assistant_ports import (
     ScheduleDefinition,
 )
 from fogmoe_bot.domain.scheduling.assistant_schedule import (
-    ScheduleSnapshot,
     ScheduledAssistantTurn,
+    ScheduleSnapshot,
 )
-
 
 MAX_ACTIVE_SCHEDULES_PER_SCOPE = 32
 """@brief 每个创建者与 Conversation 的 active schedule 上限 / Active-schedule cap per creator and Conversation."""

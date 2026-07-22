@@ -23,7 +23,6 @@ from fogmoe_bot.domain.user_profile.models import (
     UserProfileSnapshot,
 )
 
-
 _DREAM_NAMESPACE = UUID("4235ec26-caad-57c8-a12b-cba708cffc23")
 """@brief Dream job 确定性 UUIDv5 namespace / Deterministic UUIDv5 namespace for Dream jobs."""
 

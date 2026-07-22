@@ -6,10 +6,10 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from observability_testkit import make_observability
 from telegram import User
 from telegram.ext import ApplicationBuilder
 
-from fogmoe_bot.config import BotSettings
 from fogmoe_bot.application.runtime import (
     BOT_RUNTIME_DATA_KEY,
     EXECUTION_RUNTIME_DATA_KEY,
@@ -17,13 +17,13 @@ from fogmoe_bot.application.runtime import (
     KeyedMailboxRuntime,
     ServiceBinding,
 )
+from fogmoe_bot.config import BotSettings
 from fogmoe_bot.presentation.telegram import bot_app
 from fogmoe_bot.presentation.telegram.handler_catalog import install_error_policy
 from fogmoe_bot.presentation.telegram.handler_composition import (
     assemble_handler_capabilities,
 )
 from fogmoe_bot.resources import BotResources, load_resources
-from observability_testkit import make_observability
 
 
 def _settings() -> BotSettings:

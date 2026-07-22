@@ -10,11 +10,11 @@ from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     TurnSource,
 )
-from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.outbox import (
     OutboundDraft,
     OutboundEnqueueResult,
 )
+from fogmoe_bot.domain.temporal import ensure_utc
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from observability_testkit import make_telemetry
 from datetime import UTC, datetime
 
 import pytest
+from observability_testkit import make_telemetry
 
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
@@ -23,7 +23,6 @@ from fogmoe_bot.domain.conversation.outbox import (
 from fogmoe_bot.infrastructure.database.standalone_outbound import (
     PostgresStandaloneOutboundCapability,
 )
-
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定测试时刻 / Fixed test instant."""

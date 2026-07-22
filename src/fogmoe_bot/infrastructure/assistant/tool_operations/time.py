@@ -6,7 +6,6 @@ from fogmoe_bot.domain.conversation.payloads import JsonValue
 
 from .parsing import optional_text
 
-
 _WEEKDAY_NAMES = (
     "Monday",
     "Tuesday",

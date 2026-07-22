@@ -11,7 +11,6 @@ from uuid import UUID
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt
 from PyQt6.QtGui import QColor
 
-
 RowT = TypeVar("RowT")
 """@brief 表格行领域类型 / Domain type represented by a table row."""
 

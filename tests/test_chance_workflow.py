@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from uuid import UUID
-
 from typing import cast
+from uuid import UUID
 
 from fogmoe_bot.application.chance.models import (
     CommitChanceRound,
@@ -31,7 +30,6 @@ from fogmoe_bot.domain.chance.examples import sicbo_like_ruleset
 from fogmoe_bot.domain.chance.fairness import ClientSeed, ServerSeed
 from fogmoe_bot.domain.chance.money import FreeTokenStake
 from fogmoe_bot.domain.chance.scope import GroupRoundScope, PersonalRoundScope
-
 
 _ROUND_ID = UUID("00000000-0000-0000-0000-000000000456")
 """@brief 工作流测试的稳定轮次 UUID / Stable round UUID for workflow tests."""

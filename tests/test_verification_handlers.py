@@ -15,7 +15,6 @@ from fogmoe_bot.application.moderation.verification_service import (
     VerificationRejected,
     VerificationRejectionCode,
 )
-
 from fogmoe_bot.domain.moderation.models import ChatId, MessageId, UserId
 from fogmoe_bot.domain.moderation.verification import (
     VerificationEvent,
@@ -30,7 +29,6 @@ from fogmoe_bot.presentation.telegram.verification_handlers import (
     VerificationCallback,
     verify_callback,
 )
-
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定测试时间 / Fixed test time."""

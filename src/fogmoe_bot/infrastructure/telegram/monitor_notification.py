@@ -9,7 +9,6 @@ from fogmoe_bot.infrastructure.telegram.telegram_utils import (
     safe_send_markdown,
 )
 
-
 logger = logging.getLogger(__name__)
 
 

@@ -21,7 +21,6 @@ from fogmoe_bot.application.media.music_service import (
 from fogmoe_bot.domain.media.identifiers import UserId
 from fogmoe_bot.domain.media.music import MusicPlatform, MusicSearchId
 
-
 _MUSIC_PAGE_CALLBACK = re.compile(r"^music_p_([0-9a-f]{32})_([0-9]{1,3})$")
 _MUSIC_SWITCH_CALLBACK = re.compile(
     r"^music_s_([0-9a-f]{32})_(wy|qq|kw|mg|qi)_([0-9]{1,3})$"

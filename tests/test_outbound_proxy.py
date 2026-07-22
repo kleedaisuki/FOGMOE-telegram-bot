@@ -2,14 +2,14 @@
 
 import asyncio
 import os
+from collections.abc import Coroutine
 from pathlib import Path
 from types import SimpleNamespace
-from collections.abc import Coroutine
 from typing import Any
 
 import pytest
-from observability_testkit import make_observability
 import telegram.error
+from observability_testkit import make_observability
 
 from fogmoe_bot.config import BotSettings, NetworkSettings
 from fogmoe_bot.infrastructure.network import proxy

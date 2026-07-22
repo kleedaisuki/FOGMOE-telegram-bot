@@ -20,7 +20,6 @@ from fogmoe_dashboard.domain.models import (
     TurnLatencyStats,
 )
 
-
 _BACKGROUND = "#111827"
 """@brief 图表背景色 / Chart background color."""
 _FOREGROUND = "#d1d5db"

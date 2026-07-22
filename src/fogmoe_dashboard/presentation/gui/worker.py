@@ -17,7 +17,6 @@ from fogmoe_dashboard.application.queries import (
     execute_query,
 )
 
-
 DashboardFactory = Callable[[], Dashboard]
 """@brief 惰性 Dashboard 工厂 / Lazy Dashboard factory."""
 

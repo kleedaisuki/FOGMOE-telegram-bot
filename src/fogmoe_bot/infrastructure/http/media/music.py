@@ -4,13 +4,12 @@ import aiohttp
 
 from fogmoe_bot.application.media.errors import UpstreamUnavailable
 from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.domain.media.music import MusicPlatform, MusicTrack
 from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind
-from fogmoe_bot.domain.media.music import MusicPlatform, MusicTrack
 from fogmoe_bot.infrastructure.network.proxy import create_aiohttp_session
 
 from .common import HEADERS, optional_str
-
 
 _ENDPOINT = "https://api.jkyai.top/API/hqyyid.php"
 

@@ -6,7 +6,6 @@ from typing import cast
 
 from fogmoe_bot.config import AiProvidersSettings, ProviderName
 
-
 #: @brief 已经带 LiteLLM provider 前缀的模型名 / Model-name prefixes already understood by LiteLLM.
 LITELLM_PREFIXES = ("openai/", "openrouter/", "azure/", "gemini/", "zai/")
 #: @brief 当前配置 schema 允许的 provider 集合 / Providers permitted by the current configuration schema.

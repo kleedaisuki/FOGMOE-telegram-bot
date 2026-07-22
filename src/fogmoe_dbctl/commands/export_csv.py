@@ -15,7 +15,6 @@ from fogmoe_dbctl.postgres import (
     quote_identifier,
 )
 
-
 _IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 """@brief 支持的 PostgreSQL 标识符模式 / Supported PostgreSQL identifier pattern."""
 

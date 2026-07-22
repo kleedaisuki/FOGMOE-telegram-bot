@@ -12,7 +12,6 @@ from uuid import UUID, uuid5
 
 from fogmoe_bot.domain.temporal import ensure_utc
 
-
 _IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,99}$")
 """@brief 稳定检索标识符语法 / Stable retrieval-identifier grammar."""
 

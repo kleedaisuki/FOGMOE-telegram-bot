@@ -2,7 +2,6 @@
 
 from telegram import Bot
 
-from fogmoe_bot.config import BotSettings, EconomySettings, IdentitySettings
 from fogmoe_bot.application.accounts.operations import (
     ACCOUNT_SERVICE_DATA_KEY,
     AccountService,
@@ -51,6 +50,7 @@ from fogmoe_bot.application.personal_rpg.service import (
     PersonalRpgService,
 )
 from fogmoe_bot.application.town.service import TOWN_SERVICE_DATA_KEY, TownService
+from fogmoe_bot.config import BotSettings, EconomySettings, IdentitySettings
 from fogmoe_bot.domain.accounts.plan import AccountPlanPolicy
 from fogmoe_bot.infrastructure.billing.payment_events import (
     DenyUnconfiguredPaymentEventVerifier,

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from collections import deque
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass, field
 from math import isfinite
-import time
 
 
 @dataclass(frozen=True, slots=True)

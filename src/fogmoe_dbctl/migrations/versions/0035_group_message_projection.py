@@ -2,7 +2,6 @@
 
 from fogmoe_dbctl.migrations.runner import run_migration_sql
 
-
 revision = "0035_group_message_projection"
 """@brief 当前 Alembic revision / Current Alembic revision."""
 

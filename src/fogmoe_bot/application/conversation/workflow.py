@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
-from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     ConversationMessageId,
@@ -21,15 +20,16 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnId,
     TurnSource,
 )
-from fogmoe_bot.domain.temporal import ensure_utc
-from fogmoe_bot.domain.conversation.turn import ConversationTurn
 from fogmoe_bot.domain.conversation.inference import InferenceActivityDraft
 from fogmoe_bot.domain.conversation.message import (
     MessageDraft,
     MessageRole,
 )
+from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.domain.conversation.turn import ConversationTurn
 from fogmoe_bot.domain.conversation.workflow_results import TurnAcceptanceResult
 from fogmoe_bot.domain.observability.trace import TraceContext
+from fogmoe_bot.domain.temporal import ensure_utc
 
 
 class TurnWorkflowPersistence(Protocol):

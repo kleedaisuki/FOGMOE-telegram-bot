@@ -6,11 +6,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from fogmoe_bot.domain.conversation.identity import TurnId
 from fogmoe_bot.domain.conversation.payloads import (
     JsonObject,
     JsonValue,
 )
-from fogmoe_bot.domain.conversation.identity import TurnId
 
 from .tools.catalog import ToolDefinition
 

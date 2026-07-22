@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
-from fogmoe_bot.domain.chance.fairness import ClientSeed, MAX_NONCE, ServerSeed
+from fogmoe_bot.domain.chance.fairness import MAX_NONCE, ClientSeed, ServerSeed
 from fogmoe_bot.domain.chance.money import FreeTokenStake
 from fogmoe_bot.domain.chance.rounds import (
     ChanceRound,

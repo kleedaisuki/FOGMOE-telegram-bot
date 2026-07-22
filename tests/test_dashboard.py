@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 from rich.console import Console
 
+from fogmoe_dashboard.api import DashboardClient
 from fogmoe_dashboard.application.dashboard import Dashboard
 from fogmoe_dashboard.application.queries import (
     DashboardView,
@@ -18,7 +19,6 @@ from fogmoe_dashboard.application.queries import (
     SpansQuery,
     execute_query,
 )
-from fogmoe_dashboard.api import DashboardClient
 from fogmoe_dashboard.config import DashboardQuerySettings, read_dashboard_settings
 from fogmoe_dashboard.domain.models import (
     Overview,

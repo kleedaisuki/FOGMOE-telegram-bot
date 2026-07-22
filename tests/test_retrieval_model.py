@@ -13,7 +13,6 @@ from fogmoe_bot.domain.retrieval import (
     RetrievalScope,
 )
 
-
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 确定性测试时刻 / Deterministic test instant."""
 

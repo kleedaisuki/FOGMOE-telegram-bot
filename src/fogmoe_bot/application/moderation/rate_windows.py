@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Hashable
-from dataclasses import dataclass
 import math
 import time
+from collections.abc import Callable, Hashable
+from dataclasses import dataclass
 from typing import Generic, TypeVar
-
 
 KeyT = TypeVar("KeyT", bound=Hashable)
 """@brief 时间窗口键类型 / Time-window key type."""

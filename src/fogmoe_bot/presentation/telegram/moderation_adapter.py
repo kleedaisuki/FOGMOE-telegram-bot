@@ -31,7 +31,6 @@ from fogmoe_bot.domain.moderation.reporting import (
     ReportRequest,
 )
 
-
 logger = logging.getLogger(__name__)
 
 

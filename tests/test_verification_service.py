@@ -30,7 +30,6 @@ from fogmoe_bot.domain.moderation.verification import (
     VerificationVersion,
 )
 
-
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定测试起始时刻 / Fixed test start instant."""
 

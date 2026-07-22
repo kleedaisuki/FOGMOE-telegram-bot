@@ -26,7 +26,6 @@ from fogmoe_bot.domain.personal_rpg.profile import PersonalRpgProfile
 from fogmoe_bot.domain.town.scope import TownScope
 from fogmoe_bot.domain.world.scope import PersonalScope
 
-
 DAY = date(2026, 7, 14)
 """@brief 个人 RPG 测试使用的稳定 UTC 业务日 / Stable UTC business day used by personal-RPG tests."""
 

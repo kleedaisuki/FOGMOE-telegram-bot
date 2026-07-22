@@ -5,7 +5,6 @@ from dataclasses import dataclass, replace
 from telegram import Bot
 from telegram.ext import ContextTypes
 
-
 TELEGRAM_SETTINGS_DATA_KEY = "fogmoe.telegram.settings"
 """@brief ``bot_data`` 中 Telegram 配置的稳定键 / Stable Telegram-settings key in ``bot_data``."""
 

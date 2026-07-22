@@ -30,7 +30,6 @@ from .command_cooldown_guard import (
 )
 from .delivery import enqueue_command_reply
 
-
 _UNKNOWN_COMMAND_TEXT = "该命令不可用喵。请使用 /help 查看当前支持的功能。"
 """@brief 未知命令的固定帮助反馈 / Fixed help feedback for an unknown command."""
 

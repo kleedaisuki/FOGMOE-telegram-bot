@@ -6,13 +6,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
-from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
 )
-from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.conversation.outbox import OutboundKind
+from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.domain.temporal import ensure_utc
 
 
 @dataclass(frozen=True, slots=True)

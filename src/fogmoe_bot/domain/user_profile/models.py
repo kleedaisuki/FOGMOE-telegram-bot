@@ -11,7 +11,6 @@ from uuid import UUID
 
 from fogmoe_bot.domain.temporal import ensure_utc
 
-
 DreamId = NewType("DreamId", UUID)
 """@brief Dreaming 工作项标识 / Dreaming work-item identifier."""
 

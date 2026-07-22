@@ -22,7 +22,6 @@ from fogmoe_dashboard.domain.models import (
     TraceDetail,
 )
 
-
 _COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     "pipeline": (
         ("stage", "Stage"),

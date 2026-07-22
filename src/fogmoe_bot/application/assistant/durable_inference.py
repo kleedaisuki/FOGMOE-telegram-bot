@@ -17,10 +17,18 @@ from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import Protocol, cast
 
+from fogmoe_bot.application.context_window.projection import (
+    CompactionPending,
+    ContextWindowReady,
+    ContextWindowRequest,
+    ContextWindowResult,
+    ContextWindowTooLarge,
+    checkpoint_summary_message,
+)
 from fogmoe_bot.application.conversation.inference_worker import (
+    InferenceDependencyPending,
     InferenceError,
     InferenceErrorCategory,
-    InferenceDependencyPending,
     InferenceOutboundIntent,
     InferenceOutputError,
     InferenceResult,
@@ -28,29 +36,21 @@ from fogmoe_bot.application.conversation.inference_worker import (
     PermanentInferenceError,
     RetryableInferenceError,
 )
-from fogmoe_bot.application.context_window.projection import (
-    CompactionPending,
-    ContextWindowRequest,
-    ContextWindowResult,
-    ContextWindowReady,
-    ContextWindowTooLarge,
-    checkpoint_summary_message,
-)
 from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
 from fogmoe_bot.domain.context import (
-    ConversationScope,
     ContextState,
+    ConversationScope,
     UserState,
     build_context_state,
 )
+from fogmoe_bot.domain.context_window.budget import TokenCount
+from fogmoe_bot.domain.conversation.identity import DeliveryStreamId
+from fogmoe_bot.domain.conversation.message import MessageRole
+from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
 from fogmoe_bot.domain.conversation.payloads import (
     JsonObject,
     JsonValue,
 )
-from fogmoe_bot.domain.conversation.identity import DeliveryStreamId
-from fogmoe_bot.domain.conversation.message import MessageRole
-from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
-from fogmoe_bot.domain.context_window.budget import TokenCount
 from fogmoe_bot.domain.user_profile.models import (
     ProfileClaim,
     ProfileDocument,
@@ -70,7 +70,6 @@ from .inference_command import (
 )
 from .reply_filter import normalize_ai_reply_text
 from .tool_runtime import ToolExecutionContext
-
 
 _MAX_TELEGRAM_TEXT_LENGTH = 4096
 """@brief Telegram 单条文本上限 / Telegram single-message text limit."""

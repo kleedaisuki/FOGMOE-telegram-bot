@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from fogmoe_bot.resources import BotResources, PROJECT_ROOT, load_resources
+from fogmoe_bot.resources import PROJECT_ROOT, BotResources, load_resources
 
 
 def _resources() -> tuple[Path, BotResources]:

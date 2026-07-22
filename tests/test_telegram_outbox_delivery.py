@@ -23,7 +23,6 @@ from fogmoe_bot.application.conversation.outbox_worker import (
     PermanentDeliveryError,
     RetryableDeliveryError,
 )
-from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
@@ -42,6 +41,7 @@ from fogmoe_bot.domain.conversation.outbox import (
     OutboundMessage,
     OutboundStatus,
 )
+from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.media.artifact import ArtifactKind
 from fogmoe_bot.infrastructure.media.file_artifact_store import FileArtifactStore
 from fogmoe_bot.infrastructure.telegram.outbox_delivery import (
@@ -50,7 +50,6 @@ from fogmoe_bot.infrastructure.telegram.outbox_delivery import (
     parse_send_photo_payload,
     parse_send_sticker_payload,
 )
-
 
 NOW = datetime(2026, 7, 11, 10, tzinfo=timezone.utc)
 """@brief 测试基准时间 / Test reference time."""

@@ -12,11 +12,11 @@ from fogmoe_bot.application.chat.group_messages import (
 )
 from fogmoe_bot.application.conversation.router import Observer, RoutedOperation
 from fogmoe_bot.application.runtime import AggregateKey, WorkPriority
+from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from fogmoe_bot.domain.conversation.payloads import (
     JsonObject,
     JsonValue,
 )
-from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 
 
 class GroupMessageIngressObserver:

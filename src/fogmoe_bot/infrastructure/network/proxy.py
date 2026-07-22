@@ -18,7 +18,6 @@ from aiohttp_socks import ProxyConnector
 
 from fogmoe_bot.config import NetworkSettings
 
-
 #: @brief 支持的代理协议 / Supported proxy schemes.
 SUPPORTED_PROXY_SCHEMES = frozenset({"http", "https", "socks5", "socks5h"})
 #: @brief SOCKS 代理协议集合 / SOCKS proxy schemes.

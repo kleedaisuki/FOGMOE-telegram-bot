@@ -29,7 +29,6 @@ from fogmoe_bot.presentation.telegram.personal_rpg_handlers import (
     PersonalRpgTelegramCommandHandler,
 )
 
-
 NOW = datetime(2030, 1, 2, 3, 4, tzinfo=UTC)
 """@brief 固定测试接收时刻 / Fixed test receipt instant."""
 

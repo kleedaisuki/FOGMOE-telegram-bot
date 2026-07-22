@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import hashlib
 import hmac
 import secrets
+from dataclasses import dataclass, field
 from typing import Final
 from uuid import UUID
-
 
 COMMITMENT_DOMAIN: Final[bytes] = b"fogmoe/chance/commitment/v1\x00"
 """@brief 服务器种子承诺的域分离前缀 / Domain-separation prefix for server-seed commitments."""

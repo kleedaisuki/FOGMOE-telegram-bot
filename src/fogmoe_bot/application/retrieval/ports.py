@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
-from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.retrieval import (
     EmbeddingSpace,
     EmbeddingVector,
@@ -16,7 +15,7 @@ from fogmoe_bot.domain.retrieval import (
     RetrievalPassage,
     RetrievalScope,
 )
-
+from fogmoe_bot.domain.temporal import ensure_utc
 
 EPISODIC_CORPUS_ID = "conversation.episodic"
 """@brief 私聊情景历史语料库 / Private-conversation episodic-history corpus."""

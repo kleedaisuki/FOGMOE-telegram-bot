@@ -6,9 +6,10 @@ import argparse
 from pathlib import Path
 from types import SimpleNamespace
 
+from observability_testkit import make_observability
+
 from fogmoe_bot import main as bot_main
 from fogmoe_bot.config import BotSettings
-from observability_testkit import make_observability
 
 
 def test_main_starts_bot_without_database_migrations(

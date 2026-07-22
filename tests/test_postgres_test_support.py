@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
-
 import postgres_test_support as support
+import pytest
 
 
 def test_database_settings_require_a_dedicated_test_name() -> None:

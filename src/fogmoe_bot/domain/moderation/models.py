@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from enum import Enum, StrEnum, auto
 from typing import NewType
 
-
 ChatId = NewType("ChatId", int)
 """@brief Telegram 群组 ID / Telegram chat ID."""
 

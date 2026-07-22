@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
-import math
 from types import MappingProxyType
 from typing import TypeAlias
 from uuid import UUID
 
 from .trace import SpanId, TraceId
-
 
 type AttributeScalar = str | bool | int | float
 """@brief OTel 兼容的标量属性 / OTel-compatible scalar attribute."""

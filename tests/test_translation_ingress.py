@@ -11,6 +11,9 @@ from fogmoe_bot.application.conversation.assistant_ingress import (
     AssistantTurnRequest,
     AssistantUserNotRegistered,
 )
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
+)
 from fogmoe_bot.application.conversation.translation_ingress import (
     TranslationFeedbackReason,
     TranslationIngressCoordinator,
@@ -18,15 +21,11 @@ from fogmoe_bot.application.conversation.translation_ingress import (
     TranslationReplyTarget,
     TranslationTurnRequest,
 )
-from fogmoe_bot.application.conversation.telegram_identity import (
-    TelegramConversationAddress,
-)
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
     UpdateId,
 )
-
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定测试时刻 / Fixed test instant."""

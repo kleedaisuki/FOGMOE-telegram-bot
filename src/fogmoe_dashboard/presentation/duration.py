@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 
-
 _DURATION = re.compile(r"(?P<amount>[0-9]+(?:\.[0-9]+)?)(?P<unit>[smhd])\Z")
 """@brief 紧凑时长语法 / Compact duration syntax."""
 

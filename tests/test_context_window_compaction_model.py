@@ -4,11 +4,6 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from fogmoe_bot.domain.conversation.identity import (
-    ConversationId,
-    LeaseToken,
-    TurnId,
-)
 from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
 from fogmoe_bot.domain.context_window.compaction import (
     Compaction,
@@ -17,7 +12,11 @@ from fogmoe_bot.domain.context_window.compaction import (
     CompactionSummary,
     StaleCompactionClaimError,
 )
-
+from fogmoe_bot.domain.conversation.identity import (
+    ConversationId,
+    LeaseToken,
+    TurnId,
+)
 
 NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)
 """@brief 确定性测试时钟 / Deterministic test clock."""

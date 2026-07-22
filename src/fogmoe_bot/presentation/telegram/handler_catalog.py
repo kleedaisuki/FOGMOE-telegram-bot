@@ -11,10 +11,10 @@ dispatch, and PTB error-policy installation remain separate named phases.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Coroutine, Iterator, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-import re
 from typing import Any, cast
 
 from telegram import Update
@@ -34,13 +34,12 @@ from . import (
     verification_handlers,
 )
 from .crypto_handlers import chart as crypto_chart
+from .error_policy import telegram_error_handler
 from .game_handlers import omikuji
 from .media_handlers import music as media_music
 from .media_handlers import picture as media_picture
-from .monitor_handlers import start_btc_monitor, stop_btc_monitor
-from .error_policy import telegram_error_handler
 from .membership_handler import bot_membership_changed
-
+from .monitor_handlers import start_btc_monitor, stop_btc_monitor
 
 type TelegramApplication = Application[Any, Any, Any, Any, Any, Any]
 """@brief 使用 PTB 默认泛型配置的 Application / Application using PTB's default generic configuration."""

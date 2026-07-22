@@ -27,7 +27,6 @@ from fogmoe_bot.domain.user_profile.models import (
     UpsertProfileClaim,
 )
 
-
 DREAMING_PROMPT_VERSION = 1
 """@brief Dreaming prompt 与输出契约版本 / Dreaming prompt and output-contract version."""
 

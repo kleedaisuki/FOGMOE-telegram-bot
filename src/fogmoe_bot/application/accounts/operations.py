@@ -8,7 +8,6 @@ from typing import Protocol
 
 from fogmoe_bot.domain.accounts.plan import AccountPlan
 
-
 ACCOUNT_SERVICE_DATA_KEY = "fogmoe.account.service"
 """@brief runtime capability 中账户服务键 / Account-service key in runtime capabilities."""
 

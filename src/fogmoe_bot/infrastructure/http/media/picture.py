@@ -10,14 +10,13 @@ from dataclasses import dataclass
 
 import aiohttp
 
-from fogmoe_bot.domain.media.picture import PictureCandidate, PictureRating
 from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.domain.media.picture import PictureCandidate, PictureRating
 from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind
 from fogmoe_bot.infrastructure.network.proxy import create_aiohttp_session
 
 from .common import HEADERS, optional_str
-
 
 logger = logging.getLogger(__name__)
 

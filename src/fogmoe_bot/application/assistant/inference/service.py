@@ -10,8 +10,8 @@ from fogmoe_bot.application.runtime import FailureCircuit
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
 from fogmoe_bot.domain.assistant.routing.policy import model_supports_vision
 from fogmoe_bot.domain.context import ContextState
-from fogmoe_bot.domain.memory.models import MAX_WORKING_MEMORY_MESSAGES
 from fogmoe_bot.domain.conversation.payloads import JsonValue
+from fogmoe_bot.domain.memory.models import MAX_WORKING_MEMORY_MESSAGES
 
 from ..agent_loop import AgentExecutionConfig, AgentResponse
 from ..errors import (

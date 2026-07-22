@@ -17,7 +17,6 @@ from fogmoe_bot.domain.memory.models import (
 
 from .parsing import bounded_int, iso_instant, required_text
 
-
 _TOOL_RESULT_MAX_TOKENS = 4_096
 """@brief 单次 Memory tool 回填的保守 token 上限 / Conservative token cap for one Memory-tool result."""
 

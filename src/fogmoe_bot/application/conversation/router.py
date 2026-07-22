@@ -24,7 +24,6 @@ from fogmoe_bot.application.runtime import (
 from fogmoe_bot.domain.conversation.identity import ConversationId
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 
-
 type RoutedCallable = Callable[[], Awaitable[None]]
 """@brief 可在聚合邮箱执行的延迟异步调用 / Lazy async call executable in an aggregate mailbox."""
 

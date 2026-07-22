@@ -8,7 +8,6 @@ from fogmoe_dbctl.commands import access_sql
 from fogmoe_dbctl.commands.access_policy import DEFAULT_ACCESS_POLICY
 from fogmoe_dbctl.migrations import runner
 
-
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 """@brief 仓库根目录 / Project root directory."""
 

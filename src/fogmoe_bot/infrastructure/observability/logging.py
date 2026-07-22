@@ -18,7 +18,6 @@ from fogmoe_bot.config import LoggingSettings
 from fogmoe_bot.domain.observability.signals import Severity
 from fogmoe_bot.domain.observability.trace import TraceContext
 
-
 _LOG_LISTENER: QueueListener | None = None
 """@brief 当前日志消费者 / Active log consumer."""
 _QUEUE_HANDLER: ContextQueueHandler | None = None

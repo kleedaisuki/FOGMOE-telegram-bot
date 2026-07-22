@@ -17,7 +17,6 @@ from fogmoe_bot.application.admin.models import (
 from fogmoe_bot.application.admin.service import AdminService
 from fogmoe_bot.domain.admin import AnnouncementId
 
-
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定测试时间 / Fixed test instant."""
 

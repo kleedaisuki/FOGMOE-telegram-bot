@@ -6,11 +6,11 @@ from datetime import datetime, timezone
 
 from requests.exceptions import ConnectionError
 
+from fogmoe_bot.infrastructure.blocking import AsyncBlockingBulkhead
 from fogmoe_bot.infrastructure.crypto.binance_monitor import (
     BinanceBtcPatternSource,
     BinanceClient,
 )
-from fogmoe_bot.infrastructure.blocking import AsyncBlockingBulkhead
 
 
 class _Client:

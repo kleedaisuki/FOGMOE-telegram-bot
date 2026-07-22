@@ -12,7 +12,6 @@ from enum import StrEnum
 
 from .models import ChatId, MessageId, UserId
 
-
 _TOKEN_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 """@brief SHA-256 十六进制摘要格式 / SHA-256 hexadecimal digest format."""
 

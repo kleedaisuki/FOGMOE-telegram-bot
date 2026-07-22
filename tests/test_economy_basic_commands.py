@@ -37,7 +37,6 @@ from fogmoe_bot.presentation.telegram.economy_basic_handlers import (
     EconomyBasicTelegramCommandHandler,
 )
 
-
 NOW = datetime(2030, 1, 2, 3, 4, tzinfo=UTC)
 """@brief 固定时刻 / Fixed instant."""
 
