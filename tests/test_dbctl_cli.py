@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -202,6 +203,153 @@ def test_cli_without_command_prints_help(capsys: pytest.CaptureFixture[str]) -> 
     output = capsys.readouterr().out
     assert "bootstrap" in output
     assert "migrate" in output
+
+
+def test_bootstrap_sudo_uses_an_isolated_local_peer_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief sudo bootstrap 只走隔离的本地 peer 连接 / Sudo bootstrap uses only an isolated local peer connection.
+
+    @param monkeypatch pytest 替换器 / pytest monkey patcher.
+    @return None / None.
+    """
+
+    calls: list[tuple[list[str], dict[str, str], str, bool]] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        input: str,
+        text: bool,
+        env: dict[str, str],
+        check: bool,
+    ) -> None:
+        """@brief 捕获 bootstrap 子进程 / Capture the bootstrap subprocess.
+
+        @param command 子进程 argv / Subprocess argv.
+        @param input 标准输入 SQL / SQL standard input.
+        @param text 文本模式 / Text mode.
+        @param env 子进程环境 / Child environment.
+        @param check 是否检查退出码 / Whether the exit status is checked.
+        @return None / None.
+        """
+
+        calls.append((command, env, input, text and check))
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+    monkeypatch.setenv("PGHOST", "localhost")
+    monkeypatch.setenv("PGUSER", "ambient-user")
+    monkeypatch.setenv("PGPASSWORD", "ambient-secret")
+    monkeypatch.setenv("PGSERVICE", "ambient-service")
+
+    args = cli.build_parser().parse_args(["bootstrap"])
+    bootstrap.run_psql(
+        args=args,
+        settings=_settings(),
+        database="fogmoe",
+        sql="SELECT 1;",
+    )
+
+    command, environment, sql, checked_text_mode = calls[0]
+    assert command == [
+        "sudo",
+        "-u",
+        "postgres",
+        "--",
+        "psql",
+        "--no-psqlrc",
+        "--set",
+        "ON_ERROR_STOP=1",
+        "--port",
+        "5544",
+        "--dbname",
+        "fogmoe",
+    ]
+    assert not any(name.startswith("PG") for name in environment)
+    assert sql == "SELECT 1;"
+    assert checked_text_mode is True
+
+
+def test_bootstrap_no_sudo_uses_the_explicit_configured_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief no-sudo bootstrap 使用配置 endpoint / No-sudo bootstrap uses the configured endpoint.
+
+    @param monkeypatch pytest 替换器 / pytest monkey patcher.
+    @return None / None.
+    """
+
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        input: str,
+        text: bool,
+        env: dict[str, str],
+        check: bool,
+    ) -> None:
+        """@brief 捕获 direct 子进程 / Capture the direct subprocess.
+
+        @param command 子进程 argv / Subprocess argv.
+        @param input 标准输入 SQL / SQL standard input.
+        @param text 文本模式 / Text mode.
+        @param env 子进程环境 / Child environment.
+        @param check 是否检查退出码 / Whether the exit status is checked.
+        @return None / None.
+        """
+
+        del input, text, check
+        calls.append((command, env))
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+    args = cli.build_parser().parse_args(["bootstrap", "--no-sudo"])
+    bootstrap.run_psql(
+        args=args,
+        settings=_settings(),
+        database="fogmoe",
+        sql="SELECT 1;",
+    )
+
+    command, environment = calls[0]
+    assert command == ["psql", "--no-psqlrc", "--set", "ON_ERROR_STOP=1"]
+    assert environment["PGHOST"] == "db.example.test"
+    assert environment["PGPORT"] == "5544"
+    assert environment["PGDATABASE"] == "fogmoe"
+    assert environment["PGUSER"] == "postgres"
+    assert "PGPASSWORD" not in environment
+
+
+def test_cli_maps_subprocess_failure_without_a_python_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """@brief CLI 将子进程失败映射为简洁退出 / CLI maps subprocess failure to a concise exit.
+
+    @param monkeypatch pytest 替换器 / pytest monkey patcher.
+    @param capsys pytest 输出捕获器 / pytest output capture.
+    @return None / None.
+    """
+
+    def fail_execute(*_args: object, **_kwargs: object) -> None:
+        """@brief 注入 psql 失败 / Inject a psql failure.
+
+        @raise subprocess.CalledProcessError 始终抛出 / Always raised.
+        @return None / None.
+        """
+
+        raise subprocess.CalledProcessError(7, ["psql"])
+
+    monkeypatch.setattr(cli, "read_dbctl_settings", lambda _path: _settings())
+    monkeypatch.setattr(bootstrap, "execute", fail_execute)
+
+    with pytest.raises(SystemExit) as error:
+        cli.main(["--config", "unused.json", "bootstrap"])
+
+    assert error.value.code == 7
+    stderr = capsys.readouterr().err
+    assert stderr == "fogmoe-dbctl: command failed with exit status 7\n"
+    assert "Traceback" not in stderr
 
 
 def test_sqlalchemy_url_uses_escaping() -> None:

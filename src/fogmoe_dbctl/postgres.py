@@ -99,6 +99,22 @@ def sqlalchemy_url(
     return url.render_as_string(hide_password=False)
 
 
+def clean_postgres_environment() -> dict[str, str]:
+    """@brief 清除 libpq 环境连接覆盖项 / Remove ambient libpq connection overrides.
+
+    @return 不含任何 ``PG*`` 变量的子进程环境 / Child environment without any ``PG*`` variables.
+    @note bootstrap 的 sudo/peer 路径必须让 Unix socket 与有效 OS 身份共同决定
+        认证，不能被调用者 shell 中的 ``PGHOST``、``PGSERVICE`` 或密码变量改回 TCP。/
+        The bootstrap sudo/peer path must let the Unix socket and effective OS identity
+        determine authentication; ambient ``PGHOST``, ``PGSERVICE``, or password variables
+        must not redirect it to TCP.
+    """
+
+    return {
+        name: value for name, value in os.environ.items() if not name.startswith("PG")
+    }
+
+
 def direct_psql_environment(
     *,
     host: str,
@@ -119,9 +135,7 @@ def direct_psql_environment(
         All inherited ``PG*`` variables are discarded so ambient shell connection settings cannot override explicit settings.
     """
 
-    environment = {
-        name: value for name, value in os.environ.items() if not name.startswith("PG")
-    }
+    environment = clean_postgres_environment()
     environment.update(
         {
             "PGHOST": host,

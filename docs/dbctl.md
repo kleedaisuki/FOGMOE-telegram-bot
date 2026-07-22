@@ -69,6 +69,19 @@ fogmoe-dbctl export-csv \
 
 所有数据库变更仍需由操作者显式运行。`--dry-run` 不显示数据库密码。
 
+默认 `bootstrap` 专用于本机 PostgreSQL：它通过
+`sudo -u database.bootstrap.system_user` 切换有效 OS 身份，不向 libpq 传入 host 或 user，
+并清除调用者环境里的全部 `PG*` 变量。libpq 因此使用本地 Unix-domain socket，PostgreSQL
+再以 peer authentication 将 OS 身份绑定到同名数据库管理员角色；这个路径不需要也不读取
+`postgres` 数据库密码。数据库名与端口作为显式 `psql` 参数传入，不依赖 sudo 环境保留。
+
+远程数据库、容器暴露的 TCP endpoint 或无 sudo 的临时测试集群必须显式使用
+`bootstrap --no-sudo`；此时才采用 `database.endpoint` 中的 host、port 与 bootstrap 用户。
+两种 transport 是互斥语义，不能在 sudo 路径中保留 `PGHOST=localhost`，因为 `localhost`
+会强制 TCP 并绕过只适用于本地连接的 peer authentication。该边界对应 PostgreSQL 官方的
+[libpq host 选择规则](https://www.postgresql.org/docs/current/libpq-connect.html)与
+[peer authentication 约束](https://www.postgresql.org/docs/current/auth-peer.html)。
+
 ## 角色与授权边界
 
 `bootstrap` 始终把数据库 owner 校正为 `database.maintenance.username`；报表角色不能成为

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -54,4 +55,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     if handler is None:
         parser.error("a command is required")
     settings = read_dbctl_settings(args.config)
-    handler(args, settings=settings)
+    try:
+        handler(args, settings=settings)
+    except subprocess.CalledProcessError as error:
+        parser.exit(
+            error.returncode,
+            f"fogmoe-dbctl: command failed with exit status {error.returncode}\n",
+        )

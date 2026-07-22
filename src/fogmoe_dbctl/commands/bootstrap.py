@@ -9,6 +9,7 @@ from typing import Any
 from fogmoe_dbctl.config import DbctlSettings, reveal_secret
 from fogmoe_dbctl.postgres import (
     RoleSecret,
+    clean_postgres_environment,
     direct_psql_environment,
     dollar_quote,
     quote_identifier,
@@ -34,7 +35,10 @@ def configure_parser(subparsers: Any) -> None:
     parser.add_argument(
         "--no-sudo",
         action="store_true",
-        help="Run psql directly instead of sudo -u database.bootstrap.system_user.",
+        help=(
+            "Use database.endpoint directly instead of local Unix-socket peer "
+            "authentication through sudo -u database.bootstrap.system_user."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -257,13 +261,23 @@ COMMIT;
     )
 
 
-def psql_command(*, args: argparse.Namespace, settings: DbctlSettings) -> list[str]:
+def psql_command(
+    *,
+    args: argparse.Namespace,
+    settings: DbctlSettings,
+    database: str,
+) -> list[str]:
     """@brief 构造系统管理员 psql 命令 / Build the system-administrator psql command.
 
     @param args CLI 参数 / CLI arguments.
     @param settings dbctl 配置投影 / dbctl configuration projection.
-    @return 不含连接或密码参数的 subprocess argv / Subprocess argv without connection or password arguments.
-    @note 连接信息仅通过子进程环境变量传递。/ Connection information is passed only through the child environment.
+    @param database 目标数据库名 / Target database name.
+    @return 不含密码的 subprocess argv / Subprocess argv without a password.
+    @note 默认路径不传 ``host`` 或 ``user``：sudo 选择 OS 身份，libpq 选择本地 Unix
+        socket，并由 peer authentication 绑定二者。只有 ``--no-sudo`` 使用配置 endpoint。/
+        The default path passes neither ``host`` nor ``user``: sudo selects the OS identity,
+        libpq selects a local Unix socket, and peer authentication binds them. Only
+        ``--no-sudo`` uses the configured endpoint.
     """
 
     command = ["psql", "--no-psqlrc", "--set", "ON_ERROR_STOP=1"]
@@ -271,11 +285,14 @@ def psql_command(*, args: argparse.Namespace, settings: DbctlSettings) -> list[s
         return command
     return [
         "sudo",
-        "--preserve-env=PGHOST,PGPORT,PGDATABASE,PGUSER",
         "-u",
         settings.bootstrap.system_user,
         "--",
         *command,
+        "--port",
+        str(settings.endpoint.port),
+        "--dbname",
+        database,
     ]
 
 
@@ -299,15 +316,18 @@ def run_psql(
         print(f"\n-- psql database={database}")
         print(sql)
         return
-    environment = direct_psql_environment(
-        host=settings.endpoint.host,
-        port=settings.endpoint.port,
-        database=database,
-        user=settings.bootstrap.system_user,
-        password=None,
-    )
+    if args.no_sudo:
+        environment = direct_psql_environment(
+            host=settings.endpoint.host,
+            port=settings.endpoint.port,
+            database=database,
+            user=settings.bootstrap.system_user,
+            password=None,
+        )
+    else:
+        environment = clean_postgres_environment()
     subprocess.run(
-        psql_command(args=args, settings=settings),
+        psql_command(args=args, settings=settings, database=database),
         input=sql,
         text=True,
         env=environment,

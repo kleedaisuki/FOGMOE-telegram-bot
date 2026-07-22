@@ -381,6 +381,7 @@ runtime 与本项目部署模型不同，因此这里采用的只是 durable int
 | 用 UTC literal 查询本地重启时间 | aware datetime 的时区语义写错 | 使用 `ZoneInfo` 或数据库 `CURRENT_TIMESTAMP - interval` |
 | application 查询迁移表失败 | least privilege 正常生效 | 用 maintenance 进行控制面只读检查 |
 | Dashboard traceback | driver 异常未在 CLI 边界映射 | 只捕获预期数据库/配置/OS 错误，保留程序 bug traceback |
+| `sudo -u postgres` 后仍索要数据库密码 | sudo 路径保留 `PGHOST=localhost`，libpq 被强制改走 TCP | 清除全部 `PG*`，默认走 Unix socket + peer；远程 endpoint 显式使用 `--no-sudo` |
 | 可恢复网络抖动刷屏 | 所有 retryable 异常都使用 `exc_info=True` | 已分类的 Telegram 网络错误写一行 warning，未知持久化/程序错误保留 traceback |
 | 只看 total tx/s | 无法区分业务、ping 与 telemetry | commit/rollback、表级增量、代码预算三方互证 |
 | 看到 index scan 很大就改 schema | Nested Loop 会放大 scan 计数 | 先看 EXPLAIN 时间/buffer，再做增长实验 |
@@ -400,7 +401,7 @@ runtime 与本项目部署模型不同，因此这里采用的只是 durable int
 8. 再跑 dbctl dry-run；若需要新权限，停在明确的管理员边界。
 9. 更新本 Runbook 中的方法或风险，不把部署 secret/业务数据写入 Git。
 
-本次最终质量门禁为 910 passed、17 skipped；Ruff、mypy（519 个源文件）和 Pyright 均无
+本次最终质量门禁为 913 passed、17 skipped；Ruff、mypy（519 个源文件）和 Pyright 均无
 问题。测试数量会随项目变化，后来者应记录自己的完整输出，而不是把这里的数字当作固定阈值。
 
 ## 10. 结论应如何写
