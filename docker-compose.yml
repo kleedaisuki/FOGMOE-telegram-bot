@@ -7,7 +7,7 @@ services:
     volumes:
       - ./config.json:/app/config.json:ro
       - fogmoe-runtime:/app/logs
-    # 必须覆盖 BotRuntime 默认 180 秒 drain grace，并为外围资源关闭保留缓冲。
+    # Bot 配置在输入边界限制 grace<=190s；Compose 再保留至少 10s 后升级为 SIGKILL。
     stop_grace_period: 200s
     restart: unless-stopped
     # 如需使用代理，可在此添加 extra_hosts 或网络设置

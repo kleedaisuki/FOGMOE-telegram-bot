@@ -129,20 +129,22 @@ def test_working_memory_resilience_defaults_and_positive_bounds() -> None:
         bot_config.WorkingMemorySettings(failure_cooldown_seconds=0.0)
 
 
-def test_runtime_shutdown_grace_covers_serial_durable_drain_phases() -> None:
-    """@brief shutdown grace 严格覆盖 phase 10、20、30 的超时下界 / Shutdown grace strictly covers the phase-10/20/30 timeout lower bound."""
+def test_runtime_shutdown_grace_is_a_bounded_escalation_policy() -> None:
+    """@brief shutdown grace 是与 Compose 一致的有界升级策略 / Shutdown grace is a bounded escalation policy aligned with Compose."""
 
     settings = bot_config.RuntimeSettings()
     assert settings.mailbox.shutdown_grace_seconds == 180.0
 
-    with pytest.raises(ValueError, match="serialized durable drain lower bound"):
-        bot_config.RuntimeSettings(
-            mailbox=bot_config.MailboxRuntimeSettings(shutdown_grace_seconds=155.0)
-        )
-    valid = bot_config.RuntimeSettings(
-        mailbox=bot_config.MailboxRuntimeSettings(shutdown_grace_seconds=156.0)
+    assert (
+        bot_config.MailboxRuntimeSettings(
+            shutdown_grace_seconds=1.0
+        ).shutdown_grace_seconds
+        == 1.0
     )
-    assert valid.mailbox.shutdown_grace_seconds == 156.0
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        bot_config.MailboxRuntimeSettings(shutdown_grace_seconds=0.5)
+    with pytest.raises(ValueError, match="less than or equal to 190"):
+        bot_config.MailboxRuntimeSettings(shutdown_grace_seconds=191.0)
 
 
 def test_process_managers_outlive_runtime_shutdown_grace() -> None:
@@ -165,3 +167,30 @@ def test_process_managers_outlive_runtime_shutdown_grace() -> None:
     assert compose_timeout is not None
     assert int(script_timeout.group(1)) > runtime_grace
     assert int(compose_timeout.group(1)) > runtime_grace
+    assert int(compose_timeout.group(1)) >= bot_config.MAX_SHUTDOWN_GRACE_SECONDS + 10
+    assert "inner + 10" in script
+
+
+def test_runbot_uses_checkout_scoped_pid_identity_instead_of_process_grep() -> None:
+    """@brief 宿主脚本只管理本 checkout 原子记录的进程实例 / The host script manages only the atomically recorded process instance for this checkout.
+
+    @return None / None.
+    """
+
+    repository = EXAMPLE_CONFIG_PATH.parent
+    script = (repository / "runBot.sh").read_text(encoding="utf-8")
+    ignore = (repository / ".gitignore").read_text(encoding="utf-8")
+
+    assert 'PID_FILE="$STATE_DIR/fogmoe-bot.pid"' in script
+    assert "get_process_start_time" in script
+    assert 'readlink -f "/proc/$process_pid/cwd"' in script
+    assert '"/proc/$process_pid/cmdline"' in script
+    assert 'grep -Fqx -- "$VENV_DIR/bin/fogmoe-bot"' in script
+    assert "process_is_managed_bot" in script
+    assert "flock -n 9" in script
+    assert "2>&1 9>&- &" in script
+    assert '"$NEW_PID" "$NEW_START_TIME" "$runtime_grace_seconds"' in script
+    assert 'validate_stop_timeout "$BOT_SHUTDOWN_GRACE"' in script
+    assert "ps -ef" not in script
+    assert "[f]ogmoe-bot" not in script
+    assert ".runtime/" in ignore

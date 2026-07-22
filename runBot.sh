@@ -5,11 +5,14 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BOT_DIR="$SCRIPT_DIR"
 SRC_DIR="$BOT_DIR/src"
 LOG_DIR="$BOT_DIR/logs"
+STATE_DIR="$BOT_DIR/.runtime"
+PID_FILE="$STATE_DIR/fogmoe-bot.pid"
+CONTROL_LOCK_FILE="$STATE_DIR/control.lock"
 VENV_DIR="$BOT_DIR/.venv"
 PYPROJECT_FILE="$BOT_DIR/pyproject.toml"
 CONFIG_FILE="$BOT_DIR/config.json"
 EXAMPLE_CONFIG_FILE="$BOT_DIR/example.config.json"
-# 外层进程管理器必须晚于应用的 180 秒排空截止时间才可升级为 SIGKILL。
+# 外层进程管理器必须晚于应用的排空截止时间才可升级为 SIGKILL。
 STOP_TIMEOUT_SECONDS="${BOT_STOP_TIMEOUT_SECONDS:-200}"
 
 # 颜色输出
@@ -18,10 +21,136 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# 获取bot进程ID
-get_bot_pid() {
-    ps -ef | grep -E "[f]ogmoe-bot|[p]ython3.*-m fogmoe_bot" \
-        | awk 'NR == 1 {print $2; exit}'
+# 读取 Linux /proc 记录的进程启动时刻，防止 PID reuse。
+get_process_start_time() {
+    local process_pid="$1"
+    local stat_line
+    local stat_tail
+
+    if [ ! -r "/proc/$process_pid/stat" ]; then
+        return 1
+    fi
+    IFS= read -r stat_line < "/proc/$process_pid/stat" || return 1
+    stat_tail="${stat_line##*) }"
+    # 去掉 pid/comm 后，starttime（proc_pid_stat field 22）是第 20 项。
+    set -- $stat_tail
+    if [ "$#" -lt 20 ]; then
+        return 1
+    fi
+    printf '%s\n' "${20}"
+}
+
+# 验证 PID、启动时刻、cwd 与精确入口，绝不按模糊进程文本杀进程。
+process_is_managed_bot() {
+    local process_pid="$1"
+    local expected_start_time="$2"
+    local current_start_time
+    local process_cwd
+
+    [[ "$process_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ "$expected_start_time" =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 "$process_pid" 2>/dev/null || return 1
+    current_start_time="$(get_process_start_time "$process_pid")" || return 1
+    [ "$current_start_time" = "$expected_start_time" ] || return 1
+    process_cwd="$(readlink -f "/proc/$process_pid/cwd" 2>/dev/null)" || return 1
+    [ "$process_cwd" = "$BOT_DIR" ] || return 1
+    tr '\0' '\n' < "/proc/$process_pid/cmdline" 2>/dev/null \
+        | grep -Fqx -- "$VENV_DIR/bin/fogmoe-bot"
+}
+
+# PID 文件是唯一进程发现来源；失效身份只清理本 checkout 的 stale 文件。
+get_bot_identity() {
+    local process_pid
+    local process_start_time
+    local shutdown_grace_seconds
+
+    if [ ! -f "$PID_FILE" ]; then
+        return 1
+    fi
+    if ! read -r process_pid process_start_time shutdown_grace_seconds < "$PID_FILE" \
+        || ! [[ "$shutdown_grace_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        rm -f -- "$PID_FILE"
+        return 1
+    fi
+    if ! process_is_managed_bot "$process_pid" "$process_start_time"; then
+        echo -e "${YELLOW}忽略失效 PID 文件: $PID_FILE${NC}" >&2
+        rm -f -- "$PID_FILE"
+        return 1
+    fi
+    printf '%s %s %s\n' \
+        "$process_pid" "$process_start_time" "$shutdown_grace_seconds"
+}
+
+# 原子记录同一进程实例的 PID、/proc starttime 与启动时排空期限。
+write_bot_identity() {
+    local process_pid="$1"
+    local process_start_time="$2"
+    local shutdown_grace_seconds="$3"
+    local temporary_file="$PID_FILE.$$.tmp"
+
+    mkdir -p "$STATE_DIR"
+    (umask 077; printf '%s %s %s\n' \
+        "$process_pid" "$process_start_time" "$shutdown_grace_seconds" \
+        > "$temporary_file") \
+        || return 1
+    mv -f -- "$temporary_file" "$PID_FILE"
+}
+
+# 只删除仍指向调用方所持进程实例的 PID 文件。
+clear_bot_identity() {
+    local expected_pid="$1"
+    local expected_start_time="$2"
+    local recorded_pid
+    local recorded_start_time
+    local recorded_shutdown_grace
+
+    if read -r recorded_pid recorded_start_time recorded_shutdown_grace \
+        < "$PID_FILE" 2>/dev/null \
+        && [ "$recorded_pid" = "$expected_pid" ] \
+        && [ "$recorded_start_time" = "$expected_start_time" ]; then
+        rm -f -- "$PID_FILE"
+    fi
+}
+
+# 修改生命周期前获取 checkout-local flock，避免并发 start/restart 竞态。
+acquire_control_lock() {
+    mkdir -p "$STATE_DIR"
+    exec 9>"$CONTROL_LOCK_FILE"
+    if ! flock -n 9; then
+        echo -e "${RED}错误: 另一个 runBot.sh 生命周期操作仍在执行${NC}"
+        exit 1
+    fi
+}
+
+# 读取本次启动实际采用的运行时 grace period。
+read_runtime_shutdown_grace() {
+    if [ ! -x "$VENV_DIR/bin/python" ] || [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${RED}错误: 无法读取运行时 shutdown grace 配置${NC}" >&2
+        return 1
+    fi
+    PYTHONPATH="$SRC_DIR" "$VENV_DIR/bin/python" - "$CONFIG_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+from fogmoe_bot.config import read_bot_settings
+
+print(read_bot_settings(Path(sys.argv[1])).runtime.mailbox.shutdown_grace_seconds)
+PY
+}
+
+# 外层强杀期限必须是正整数，且严格晚于进程启动时的运行时 grace period。
+validate_stop_timeout() {
+    local runtime_grace_seconds="$1"
+
+    if ! [[ "$STOP_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+        echo -e "${RED}错误: BOT_STOP_TIMEOUT_SECONDS 必须是正整数${NC}"
+        return 1
+    fi
+    if ! awk -v outer="$STOP_TIMEOUT_SECONDS" -v inner="$runtime_grace_seconds" \
+        'BEGIN { exit !(outer >= inner + 10) }'; then
+        echo -e "${RED}错误: BOT_STOP_TIMEOUT_SECONDS 必须至少比 shutdown_grace_seconds 多 10 秒${NC}"
+        return 1
+    fi
 }
 
 # 获取当前或最近一次应用日志；应用进程会以时间戳文件名写入。
@@ -120,12 +249,15 @@ init_environment() {
 
 # 启动bot
 start_bot() {
+    local runtime_grace_seconds
+
     echo "=== 雾萌娘 Telegram Bot 启动脚本 ==="
     echo "Bot 目录: $BOT_DIR"
 
     # 检查是否已经在运行
-    OLD_PID=$(get_bot_pid)
-    if [ -n "$OLD_PID" ]; then
+    OLD_IDENTITY="$(get_bot_identity)"
+    if [ -n "$OLD_IDENTITY" ]; then
+        read -r OLD_PID _OLD_START_TIME <<< "$OLD_IDENTITY"
         echo -e "${YELLOW}Bot已在运行 (PID: $OLD_PID)${NC}"
         echo "如需重启，请使用: $0 restart"
         exit 1
@@ -176,6 +308,9 @@ start_bot() {
         exit 1
     fi
 
+    runtime_grace_seconds="$(read_runtime_shutdown_grace)" || exit 1
+    validate_stop_timeout "$runtime_grace_seconds" || exit 1
+
     # 切换到项目根目录，使用 src layout 启动入口
     cd "$BOT_DIR"
 
@@ -186,15 +321,24 @@ start_bot() {
     STDOUT_LOG_FILE="$LOG_DIR/stdout_${START_TIMESTAMP}.log"
     echo "标准输出日志: $STDOUT_LOG_FILE"
     PYTHONPATH="$SRC_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-        nohup "$VENV_DIR/bin/fogmoe-bot" > "$STDOUT_LOG_FILE" 2>&1 &
+        nohup "$VENV_DIR/bin/fogmoe-bot" \
+        > "$STDOUT_LOG_FILE" 2>&1 9>&- &
 
     # 获取新进程PID
     NEW_PID=$!
+    NEW_START_TIME="$(get_process_start_time "$NEW_PID")"
+    if [ -z "$NEW_START_TIME" ] \
+        || ! write_bot_identity \
+            "$NEW_PID" "$NEW_START_TIME" "$runtime_grace_seconds"; then
+        echo -e "${RED}✗ 错误: 无法记录 Bot 进程身份${NC}"
+        kill "$NEW_PID" 2>/dev/null
+        exit 1
+    fi
     echo "Bot已启动 (PID: $NEW_PID)"
 
     # 检查进程是否成功启动
     sleep 2
-    if ps -p "$NEW_PID" > /dev/null; then
+    if process_is_managed_bot "$NEW_PID" "$NEW_START_TIME"; then
         LOG_FILE=$(get_latest_log_file)
         echo -e "${GREEN}✓ Bot运行正常${NC}"
         echo ""
@@ -205,6 +349,7 @@ start_bot() {
         echo "停止bot: $0 stop"
         echo "查看状态: $0 status"
     else
+        clear_bot_identity "$NEW_PID" "$NEW_START_TIME"
         echo -e "${RED}✗ 错误: Bot启动失败${NC}"
         echo "请查看标准输出日志: $STDOUT_LOG_FILE"
         exit 1
@@ -215,12 +360,15 @@ start_bot() {
 stop_bot() {
     echo "=== 雾萌娘 Telegram Bot 停止脚本 ==="
 
-    BOT_PID=$(get_bot_pid)
+    BOT_IDENTITY="$(get_bot_identity)"
 
-    if [ -z "$BOT_PID" ]; then
+    if [ -z "$BOT_IDENTITY" ]; then
         echo "未发现运行中的bot进程"
-        exit 0
+        return 0
     fi
+    read -r BOT_PID BOT_START_TIME BOT_SHUTDOWN_GRACE <<< "$BOT_IDENTITY"
+
+    validate_stop_timeout "$BOT_SHUTDOWN_GRACE" || exit 1
 
     echo "发现bot进程 (PID: $BOT_PID)"
     echo "正在停止..."
@@ -228,26 +376,27 @@ stop_bot() {
     # 尝试优雅地停止
     kill "$BOT_PID"
 
-    # BotRuntime 默认会在 180 秒 grace period 内按阶段排空；外层额外保留
-    # Telegram、数据库与遥测资源关闭所需的 20 秒缓冲。
+    # 运行时在启动时记录的 grace period 内尽力按阶段排空；外层在其后升级。
     waited=0
-    while ps -p "$BOT_PID" > /dev/null 2>&1 && [ "$waited" -lt "$STOP_TIMEOUT_SECONDS" ]; do
+    while process_is_managed_bot "$BOT_PID" "$BOT_START_TIME" \
+        && [ "$waited" -lt "$STOP_TIMEOUT_SECONDS" ]; do
         sleep 1
         waited=$((waited + 1))
     done
 
     # 检查是否还在运行
-    if ps -p "$BOT_PID" > /dev/null 2>&1; then
+    if process_is_managed_bot "$BOT_PID" "$BOT_START_TIME"; then
         echo "进程在 ${STOP_TIMEOUT_SECONDS} 秒内未完成排空，强制终止..."
         kill -9 "$BOT_PID"
         sleep 1
     fi
 
     # 最终检查
-    if ps -p "$BOT_PID" > /dev/null 2>&1; then
+    if process_is_managed_bot "$BOT_PID" "$BOT_START_TIME"; then
         echo -e "${RED}✗ 错误: 无法停止进程 $BOT_PID${NC}"
         exit 1
     else
+        clear_bot_identity "$BOT_PID" "$BOT_START_TIME"
         echo -e "${GREEN}✓ Bot已成功停止${NC}"
 
         # 显示最后几行日志
@@ -273,12 +422,13 @@ restart_bot() {
 status_bot() {
     echo "=== 雾萌娘 Telegram Bot 状态 ==="
 
-    BOT_PID=$(get_bot_pid)
+    BOT_IDENTITY="$(get_bot_identity)"
 
-    if [ -z "$BOT_PID" ]; then
+    if [ -z "$BOT_IDENTITY" ]; then
         echo -e "状态: ${RED}✗ 未运行${NC}"
         exit 1
     else
+        read -r BOT_PID _BOT_START_TIME <<< "$BOT_IDENTITY"
         echo -e "状态: ${GREEN}✓ 运行中${NC}"
         echo "PID: $BOT_PID"
 
@@ -314,8 +464,8 @@ update_deps() {
     fi
 
     # 检查bot是否在运行
-    BOT_PID=$(get_bot_pid)
-    if [ -n "$BOT_PID" ]; then
+    BOT_IDENTITY="$(get_bot_identity)"
+    if [ -n "$BOT_IDENTITY" ]; then
         echo -e "${YELLOW}警告: Bot正在运行，建议先停止${NC}"
         echo "是否继续更新? (y/n)"
         read -r response
@@ -365,21 +515,26 @@ show_help() {
 # 主逻辑
 case "${1:-start}" in
     init|setup|install)
+        acquire_control_lock
         init_environment
         ;;
     start)
+        acquire_control_lock
         start_bot
         ;;
     stop)
+        acquire_control_lock
         stop_bot
         ;;
     restart)
+        acquire_control_lock
         restart_bot
         ;;
     status)
         status_bot
         ;;
     update|upgrade)
+        acquire_control_lock
         update_deps
         ;;
     help|--help|-h)
