@@ -24,11 +24,13 @@ from fogmoe_bot.application.retrieval import (
     RetrievalWorker,
     SemanticRecall,
 )
+from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.application.user_profile.worker import DreamingWorker
 from fogmoe_bot.config import AssistantSettings, BotSettings, reveal_secret
 from fogmoe_bot.domain.assistant.routing.circuit import ProviderCircuit
 from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
 from fogmoe_bot.domain.retrieval import EmbeddingSpace
+from fogmoe_bot.domain.temporal import TimeZoneId
 from fogmoe_bot.infrastructure.assistant.external_reads import (
     ExternalReadSettings,
     RequestsExternalReadTools,
@@ -237,6 +239,9 @@ def build_durable_assistant(
         outbox=PostgresOutboxRepository(),
         memory=working_memory,
         groups=PostgresGroupMessageProjection(),
+        time=TimeService(
+            default_time_zone=TimeZoneId(assistant_settings.time.default_timezone)
+        ),
     )
     store = PostgresAssistantToolStore(operations=operations)
     completion = LiteLLMAssistantCompletion(

@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.domain.conversation.payloads import JsonObject
-from fogmoe_bot.domain.scheduling import ensure_utc
+from fogmoe_bot.domain.temporal import ensure_utc
 
 
 def required_connection(connection: AsyncConnection | None) -> AsyncConnection:

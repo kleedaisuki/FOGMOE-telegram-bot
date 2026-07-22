@@ -74,6 +74,20 @@ class GetHelpTextArgs(ToolArguments):
     """@brief 获取帮助文本参数 / Get-help-text arguments."""
 
 
+class GetCurrentTimeArgs(ToolArguments):
+    """@brief 获取当前日期时间参数 / Get-current-date-and-time arguments."""
+
+    timezone: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description=(
+            "Optional IANA time-zone name such as Asia/Shanghai; omit it to use the "
+            "assistant's configured default"
+        ),
+    )
+
+
 class ListAvailableStickersArgs(ToolArguments):
     """@brief 列出贴纸参数 / List-available-stickers arguments."""
 
@@ -607,6 +621,16 @@ DEFAULT_TOOL_CATALOG = ToolCatalog(
             arguments_model=GetHelpTextArgs,
         ),
         define_tool(
+            name="get_current_time",
+            description=(
+                "Return the current clock time, calendar date, ISO weekday, UTC offset, "
+                "and canonical UTC instant in an IANA time zone. Use this before resolving "
+                "relative dates for memory searches or schedules"
+            ),
+            arguments_model=GetCurrentTimeArgs,
+            result_residency=ToolResultResidency.AGENT_TURN,
+        ),
+        define_tool(
             name="list_available_stickers",
             description="List configured sticker packs and emoji",
             arguments_model=ListAvailableStickersArgs,
@@ -700,6 +724,7 @@ __all__ = [
     "FrozenSchemaValue",
     "GenerateImageArgs",
     "GenerateVoiceArgs",
+    "GetCurrentTimeArgs",
     "GetHelpTextArgs",
     "GoogleSearchArgs",
     "InvalidToolArguments",

@@ -15,6 +15,7 @@ from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectRequest,
     ToolExecutionContext,
 )
+from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.domain.conversation.payloads import JsonValue
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -27,6 +28,7 @@ from fogmoe_bot.domain.conversation.outbox import (
     SEND_TELEGRAM_STICKER,
     OutboundDraft,
 )
+from fogmoe_bot.domain.temporal import UTC_TIME_ZONE
 from fogmoe_bot.infrastructure.assistant.tool_operations.dispatcher import (
     AssistantToolOperationDispatcher,
 )
@@ -303,6 +305,7 @@ def test_receipt_replay_queues_exactly_one_standalone_sticker_outbox(
             outbox=cast(StandaloneOutboxWriter, workflow),
             memory=adapters,
             groups=PostgresGroupMessageProjection(),
+            time=TimeService(default_time_zone=UTC_TIME_ZONE),
         )
         turn_id = TurnId.new()
         conversation_id = ConversationId("assistant-user:42")
@@ -384,6 +387,7 @@ def test_generated_media_runs_outside_transaction_then_finalizes_once(
             outbox=cast(StandaloneOutboxWriter, outbox),
             memory=unused,
             groups=PostgresGroupMessageProjection(),
+            time=TimeService(default_time_zone=UTC_TIME_ZONE),
         )
         turn_id = TurnId.new()
         conversation_id = ConversationId("assistant-user:42")

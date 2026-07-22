@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.application.assistant.tool_runtime import ToolEffectRequest
 from fogmoe_bot.application.memory.ports import WorkingMemoryReader
+from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.domain.conversation.payloads import JsonValue
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_STICKER
 from fogmoe_bot.infrastructure.database.assistant_tool_effects import (
@@ -20,6 +21,7 @@ from .memory import search_memory
 from .outbound import finalize_downstream_effect
 from .parsing import optional_text, required_connection, required_text
 from .schedule import execute_schedule
+from .time import get_current_time
 
 
 class AssistantToolOperationDispatcher:
@@ -35,6 +37,7 @@ class AssistantToolOperationDispatcher:
         outbox: StandaloneOutboxWriter,
         memory: WorkingMemoryReader,
         groups: GroupContextReader,
+        time: TimeService,
     ) -> None:
         """注入全部显式 adapter；工具 metadata 仍仅由 ToolCatalog 拥有。"""
 
@@ -45,6 +48,7 @@ class AssistantToolOperationDispatcher:
         self._outbox = outbox
         self._memory = memory
         self._groups = groups
+        self._time = time
 
     def transaction_mode(self, request: ToolEffectRequest) -> ToolTransactionMode:
         """按 catalog 提供的 mutation/effect classification 选择事务模式。"""
@@ -64,6 +68,8 @@ class AssistantToolOperationDispatcher:
         match request.tool_name:
             case "get_help_text":
                 return {"help_text": self._help_text}
+            case "get_current_time":
+                return get_current_time(request, time=self._time)
             case "list_available_stickers":
                 return await self._stickers.list_packs(
                     optional_text(request.arguments, "pack_name")

@@ -399,6 +399,11 @@
       "capacity": 256,
       // 缓存条目的生存秒数。
       "ttl_seconds": 900.0
+    },
+    // 当前时间、记忆时间范围和日程共同使用的时区语义。
+    "time": {
+      // 工具调用未显式给出 IANA 时区时使用的默认值。
+      "default_timezone": "Asia/Shanghai"
     }
   },
 

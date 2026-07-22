@@ -13,12 +13,14 @@ from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectRequest,
     ToolExecutionContext,
 )
+from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
     TurnId,
 )
+from fogmoe_bot.domain.temporal import UTC_TIME_ZONE
 from fogmoe_bot.infrastructure.assistant.tool_operations.dispatcher import (
     AssistantToolOperationDispatcher,
 )
@@ -93,6 +95,7 @@ def test_diary_and_schedule_share_atomic_receipt_transactions(
             outbox=PostgresOutboxRepository(),
             memory=external,
             groups=PostgresGroupMessageProjection(),
+            time=TimeService(default_time_zone=UTC_TIME_ZONE),
         )
         context = ToolExecutionContext(
             turn_id=turn_id,

@@ -25,6 +25,8 @@ from pydantic import (
     model_validator,
 )
 
+from fogmoe_bot.domain.temporal import TimeZoneId
+
 
 type JSONValue = (
     None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
@@ -805,6 +807,25 @@ class HistoryCacheSettings(_FrozenSettings):
     ttl_seconds: PositiveFloat = 900.0
 
 
+class TimeSettings(_FrozenSettings):
+    """@brief Assistant 时间语义设置 / Assistant temporal-semantics settings."""
+
+    default_timezone: str = "Asia/Shanghai"
+    """@brief 未指定时使用的 IANA 时区 / IANA zone used when a request omits one."""
+
+    @field_validator("default_timezone")
+    @classmethod
+    def _validate_default_timezone(cls, value: str) -> str:
+        """@brief 规范并验证默认 IANA 时区 / Normalize and validate the default IANA time zone.
+
+        @param value 配置中的时区名 / Configured time-zone name.
+        @return 规范时区名 / Canonicalized zone name.
+        @raise ValueError 时区不存在时抛出 / Raised when the zone is unknown.
+        """
+
+        return TimeZoneId(value).value
+
+
 class AssistantSettings(_FrozenSettings):
     """@brief Assistant 记忆、上下文与检索设置 / Assistant memory, context, and retrieval settings."""
 
@@ -812,6 +833,7 @@ class AssistantSettings(_FrozenSettings):
     working_memory: WorkingMemorySettings = Field(default_factory=WorkingMemorySettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     history_cache: HistoryCacheSettings = Field(default_factory=HistoryCacheSettings)
+    time: TimeSettings = Field(default_factory=TimeSettings)
 
 
 class DatabaseEndpointSettings(_FrozenSettings):

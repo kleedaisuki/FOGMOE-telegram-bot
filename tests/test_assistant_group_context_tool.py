@@ -12,6 +12,7 @@ from fogmoe_bot.application.assistant.tool_runtime import (
 )
 from fogmoe_bot.application.memory.ports import WorkingMemoryQuery
 from fogmoe_bot.application.chat.group_messages import GroupMessage, GroupMessageKind
+from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -19,6 +20,7 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnId,
 )
 from fogmoe_bot.domain.memory.models import WorkingMemory
+from fogmoe_bot.domain.temporal import UTC_TIME_ZONE
 from fogmoe_bot.infrastructure.assistant.tool_operations.dispatcher import (
     AssistantToolOperationDispatcher,
 )
@@ -144,6 +146,7 @@ def test_group_context_tool_reads_only_the_canonical_projection() -> None:
             outbox=PostgresOutboxRepository(),
             memory=unused,
             groups=groups,
+            time=TimeService(default_time_zone=UTC_TIME_ZONE),
         )
         result = await operations.execute(
             _request(is_group=True, message_thread_id=23), connection=None
@@ -229,6 +232,7 @@ def test_group_context_tool_keeps_a_recent_suffix_inside_its_hard_budget() -> No
             outbox=PostgresOutboxRepository(),
             memory=unused,
             groups=groups,
+            time=TimeService(default_time_zone=UTC_TIME_ZONE),
         )
 
         result = await operations.execute(

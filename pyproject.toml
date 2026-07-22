@@ -22,6 +22,7 @@ dependencies = [
     "requests[socks]",
     "telegramify-markdown",
     "rich>=14.1",
+    "tzdata>=2026.1",
 ]
 
 [project.optional-dependencies]
