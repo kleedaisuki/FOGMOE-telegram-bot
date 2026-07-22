@@ -80,7 +80,9 @@ class TemporalMemoryPassage:
         source_kind = self.source_kind.strip()
         content = self.content.strip()
         if not source_kind or len(source_kind) > 100:
-            raise ValueError("Temporal Memory source_kind must contain 1-100 characters")
+            raise ValueError(
+                "Temporal Memory source_kind must contain 1-100 characters"
+            )
         if not content or len(content) > 20_000:
             raise ValueError("Temporal Memory content must contain 1-20000 characters")
         distance = self.temporal_distance_seconds

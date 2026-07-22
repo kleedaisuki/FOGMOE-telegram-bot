@@ -88,9 +88,7 @@ class ScheduleCatalog(Protocol):
 
         ...
 
-    async def count_active(
-        self, creator_user_id: int, conversation_id: str
-    ) -> int:
+    async def count_active(self, creator_user_id: int, conversation_id: str) -> int:
         """@brief 统计 active schedules / Count active schedules."""
 
         ...

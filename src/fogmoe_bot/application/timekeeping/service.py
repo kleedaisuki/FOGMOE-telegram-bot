@@ -32,7 +32,9 @@ class TimeReading:
         instant = ensure_utc(self.instant_utc)
         expected_local = self.time_zone.localize(instant)
         if self.local_datetime != expected_local:
-            raise ValueError("Time reading local projection does not match its UTC instant")
+            raise ValueError(
+                "Time reading local projection does not match its UTC instant"
+            )
         object.__setattr__(self, "instant_utc", instant)
 
     @property

@@ -185,7 +185,9 @@ def ensure_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _local_candidates(local_time: datetime, time_zone: TimeZoneId) -> tuple[datetime, ...]:
+def _local_candidates(
+    local_time: datetime, time_zone: TimeZoneId
+) -> tuple[datetime, ...]:
     """@brief 枚举能往返保持墙钟值的唯一 UTC 瞬间 / Enumerate unique UTC instants that round-trip to a wall-clock value.
 
     @param local_time naive 本地时间 / Naive local time.
