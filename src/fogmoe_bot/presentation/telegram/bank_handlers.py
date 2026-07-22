@@ -384,7 +384,7 @@ def _positive_amount(raw_amount: str) -> TokenAmount | str:
 
     try:
         return TokenAmount(int(raw_amount))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return "数量必须是正整数。"
 
 
@@ -499,7 +499,9 @@ def _review_result_text(result: TokenRequestResult) -> str:
         return "审核未完成，请稍后重试。"
     request = result.request
     if request.status is TokenRequestStatus.APPROVED:
-        balance = result.overview.free.value if result.overview is not None else "已更新"
+        balance = (
+            result.overview.free.value if result.overview is not None else "已更新"
+        )
         return (
             f"申请已批准，已发行 {request.requested_amount.value} 枚免费金币。\n"
             f"账本分录：{request.ledger_entry_id}\n"

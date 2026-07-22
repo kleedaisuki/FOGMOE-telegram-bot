@@ -450,7 +450,9 @@ async def _save_receipt(
             operation_kind,
             actor_id,
             fingerprint,
-            json.dumps(dict(result), ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+            json.dumps(
+                dict(result), ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            ),
         ),
         connection=connection,
     )
@@ -517,7 +519,9 @@ async def _insert_committed_round(
             scope_kind.value,
             scope_id,
             topic_id,
-            json.dumps(_ruleset_mapping(committed.ruleset), ensure_ascii=True, sort_keys=True),
+            json.dumps(
+                _ruleset_mapping(committed.ruleset), ensure_ascii=True, sort_keys=True
+            ),
             committed.ruleset_fingerprint,
             committed.rule_code,
             committed.stake.value,
@@ -558,7 +562,9 @@ async def _persist_settlement(
             ChanceRoundStatus.SETTLED.value,
             settlement.outcome.code,
             settlement.credited if settlement.credited > 0 else None,
-            json.dumps(_proof_mapping(settlement.proof), ensure_ascii=True, sort_keys=True),
+            json.dumps(
+                _proof_mapping(settlement.proof), ensure_ascii=True, sort_keys=True
+            ),
             settled_at,
             committed.round_id,
             ChanceRoundStatus.COMMITTED.value,
@@ -622,7 +628,9 @@ def _committed_round_from_row(row: Mapping[str, Any]) -> CommittedChanceRound:
     @return 经规则集指纹校验的承诺轮次 / Committed round validated against ruleset fingerprint.
     """
 
-    ruleset = _ruleset_from_mapping(_json_mapping(row["ruleset"], label="chance ruleset"))
+    ruleset = _ruleset_from_mapping(
+        _json_mapping(row["ruleset"], label="chance ruleset")
+    )
     persisted_fingerprint = str(row["ruleset_fingerprint"])
     if ruleset.fingerprint != persisted_fingerprint:
         raise ValueError("Persisted chance ruleset fingerprint does not match payload")
@@ -653,7 +661,9 @@ def _result_mapping(result: ChanceWorkflowResult) -> dict[str, object]:
     """
 
     if result.code is not ChanceWorkflowCode.SUCCESS or result.view is None:
-        raise ValueError("Only successful chance results may be stored as replay receipts")
+        raise ValueError(
+            "Only successful chance results may be stored as replay receipts"
+        )
     return {
         "schema_version": 1,
         "code": result.code.value,
@@ -673,7 +683,12 @@ def _result_from_mapping(
     @return 经过所有领域不变量重新校验的结果 / Result revalidated through all domain invariants.
     """
 
-    if _integer_value(value.get("schema_version"), label="chance receipt schema version") != 1:
+    if (
+        _integer_value(
+            value.get("schema_version"), label="chance receipt schema version"
+        )
+        != 1
+    ):
         raise ValueError("Unsupported chance receipt schema version")
     code = ChanceWorkflowCode(str(value["code"]))
     raw_view = value.get("view")
@@ -697,7 +712,9 @@ def _view_mapping(view: ChanceRoundView) -> dict[str, object]:
         "round": _committed_round_mapping(view.committed_round),
         "status": view.status.value,
         "settlement": (
-            _settlement_mapping(view.settlement) if view.settlement is not None else None
+            _settlement_mapping(view.settlement)
+            if view.settlement is not None
+            else None
         ),
     }
 
@@ -862,10 +879,14 @@ def _proof_from_mapping(value: Mapping[str, Any]) -> FairnessProof:
     return FairnessProof(
         round_id=_uuid_value(value["round_id"], label="chance proof round id"),
         commitment=ServerSeedCommitment(str(value["commitment"])),
-        revealed_server_seed=ServerSeed(bytes.fromhex(str(value["revealed_server_seed"]))),
+        revealed_server_seed=ServerSeed(
+            bytes.fromhex(str(value["revealed_server_seed"]))
+        ),
         client_seed=ClientSeed(str(value["client_seed"])),
         nonce=_integer_value(value["nonce"], label="chance proof nonce"),
-        upper_bound=_integer_value(value["upper_bound"], label="chance proof upper bound"),
+        upper_bound=_integer_value(
+            value["upper_bound"], label="chance proof upper bound"
+        ),
         sample=sample,
     )
 
@@ -916,7 +937,10 @@ def _ruleset_from_mapping(value: Mapping[str, Any]) -> ChanceRuleset:
         )
         for item in raw_outcomes
     )
-    rules = tuple(_rule_from_mapping(_mapping_item(item, label="chance rule")) for item in raw_rules)
+    rules = tuple(
+        _rule_from_mapping(_mapping_item(item, label="chance rule"))
+        for item in raw_rules
+    )
     return ChanceRuleset(
         code=str(value["code"]),
         revision=_integer_value(value["revision"], label="chance ruleset revision"),
@@ -973,7 +997,9 @@ def _scope_from_mapping(value: Mapping[str, Any]) -> RoundScope:
 
     kind = ChanceScopeKind(str(value["kind"]))
     if kind is ChanceScopeKind.PERSONAL:
-        return PersonalRoundScope(_integer_value(value["user_id"], label="chance user id"))
+        return PersonalRoundScope(
+            _integer_value(value["user_id"], label="chance user id")
+        )
     return GroupRoundScope(
         _integer_value(value["group_id"], label="chance group id"),
         _optional_integer_value(value.get("topic_id"), label="chance topic id"),

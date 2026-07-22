@@ -216,8 +216,7 @@ async def _read_profile(
     """
 
     row = await db_connection.fetch_one(
-        "SELECT id, permission, name "
-        "FROM identity.users WHERE id = %s",
+        "SELECT id, permission, name FROM identity.users WHERE id = %s",
         (user_id,),
         connection=connection,
     )

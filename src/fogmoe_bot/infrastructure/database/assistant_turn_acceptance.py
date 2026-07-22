@@ -235,4 +235,5 @@ class PostgresAssistantTurnAcceptanceUoW:
             )
         return str(row[2])
 
+
 __all__ = ["PostgresAssistantTurnAcceptanceUoW"]

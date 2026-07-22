@@ -136,7 +136,10 @@ class TelegramUnknownCommandPrimaryRoute:
         @return 应由本 route 拒绝时为 True / True when this route should reject it.
         """
 
-        if command.target is not None and command.target.casefold() != self._bot_username:
+        if (
+            command.target is not None
+            and command.target.casefold() != self._bot_username
+        ):
             return False
         return command.command not in self._known_commands
 

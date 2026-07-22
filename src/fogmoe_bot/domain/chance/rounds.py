@@ -283,13 +283,19 @@ class ChanceSettlement:
             raise ValueError("Chance settlement proof uses another outcome-space bound")
         if not self.proof.verifies():
             raise ValueError("Chance settlement contains an invalid fairness proof")
-        expected_outcome = self.round.ruleset.outcome_for_ticket(self.proof.sample.ticket)
+        expected_outcome = self.round.ruleset.outcome_for_ticket(
+            self.proof.sample.ticket
+        )
         if self.outcome != expected_outcome:
-            raise ValueError("Chance settlement outcome does not match its fairness ticket")
+            raise ValueError(
+                "Chance settlement outcome does not match its fairness ticket"
+            )
         won = self.outcome.code in self.round.rule.winning_outcome_codes
         if won:
             if self.payout != self.round.quote.gross_payout:
-                raise ValueError("Chance win must use the centrally quoted gross payout")
+                raise ValueError(
+                    "Chance win must use the centrally quoted gross payout"
+                )
         elif self.payout is not None:
             raise ValueError("Chance loss cannot contain a payout")
 

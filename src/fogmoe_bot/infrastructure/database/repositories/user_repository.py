@@ -55,6 +55,7 @@ class UserIdentityContext:
     info: str
     """@brief 个人信息 / Personal information."""
 
+
 def _coerce_user_account(row: Sequence[object] | None) -> UserAccount | None:
     """@brief 将数据库行转换为账户快照 / Convert a database row into an account snapshot.
 
@@ -124,8 +125,7 @@ async def fetch_user_identity_context(
 
     lock_clause = " FOR UPDATE" if for_update else ""
     row = await db_connection.fetch_one(
-        "SELECT id, permission, info "
-        f"FROM identity.users WHERE id = %s{lock_clause}",
+        f"SELECT id, permission, info FROM identity.users WHERE id = %s{lock_clause}",
         (user_id,),
         connection=connection,
     )

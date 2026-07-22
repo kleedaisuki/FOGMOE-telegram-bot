@@ -91,9 +91,7 @@ async def pic_command(update: Update, context: TelegramContext) -> None:
         raise AssertionError("unhandled free-picture result")
     await message.reply_photo(
         photo=result.picture.preview_url,
-        caption=_free_picture_caption(
-            f"@{user.username or user.id}", result.picture
-        ),
+        caption=_free_picture_caption(f"@{user.username or user.id}", result.picture),
     )
 
 

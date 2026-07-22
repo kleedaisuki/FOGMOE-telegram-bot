@@ -1321,7 +1321,9 @@ async def _save_receipt(
             operation_kind,
             actor_id,
             request_fingerprint,
-            json.dumps(dict(result), ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+            json.dumps(
+                dict(result), ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            ),
         ),
         connection=connection,
     )

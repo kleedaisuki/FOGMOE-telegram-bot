@@ -217,7 +217,9 @@ class PostgresAssistantToolStore:
 
         if not request.result_cacheable:
             if request.mutating:
-                raise ValueError("A mutating tool result cannot bypass durable receipts")
+                raise ValueError(
+                    "A mutating tool result cannot bypass durable receipts"
+                )
             if (
                 self._operations.transaction_mode(request)
                 is not ToolTransactionMode.OUTSIDE_TRANSACTION

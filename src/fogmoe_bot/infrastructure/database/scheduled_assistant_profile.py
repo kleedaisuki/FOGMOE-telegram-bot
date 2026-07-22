@@ -17,7 +17,9 @@ from fogmoe_bot.infrastructure.database.repositories import (
     conversation_repository,
     user_repository,
 )
-from fogmoe_bot.infrastructure.database.user_profile.store import PostgresUserProfileStore
+from fogmoe_bot.infrastructure.database.user_profile.store import (
+    PostgresUserProfileStore,
+)
 
 
 class PostgresScheduledAssistantProfileReader:

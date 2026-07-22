@@ -275,7 +275,9 @@ class ContributeToTown:
         object.__setattr__(
             self,
             "requested_at",
-            normalize_instant(self.requested_at, field="Town contribution request time"),
+            normalize_instant(
+                self.requested_at, field="Town contribution request time"
+            ),
         )
         object.__setattr__(
             self,

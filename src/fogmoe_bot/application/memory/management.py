@@ -38,7 +38,9 @@ class ForgetMemory:
 
         timestamp = ensure_utc(self.requested_at)
         if self.confirmation.conversation_id != self.conversation_id:
-            raise ValueError("Memory-reset confirmation must belong to its conversation")
+            raise ValueError(
+                "Memory-reset confirmation must belong to its conversation"
+            )
         if self.confirmation.turn_id is not None:
             raise ValueError("Memory-reset confirmation must be standalone")
         if self.confirmation.created_at != timestamp:

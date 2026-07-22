@@ -12,6 +12,7 @@ from .runtime_settings import telegram_runtime_settings
 
 logger = logging.getLogger(__name__)
 
+
 async def telegram_error_handler(
     update: object,
     context: ContextTypes.DEFAULT_TYPE,

@@ -194,7 +194,9 @@ class PostgresBankOperations(BankOperations):
                     idempotency_key=command.idempotency_key,
                     reason=LedgerReason.BANK_ISSUANCE,
                     source=LedgerAccount.system(SystemAccountKind.ISSUANCE),
-                    destination=LedgerAccount.user(command.recipient_id, command.bucket),
+                    destination=LedgerAccount.user(
+                        command.recipient_id, command.bucket
+                    ),
                     amount=command.amount,
                     created_at=command.issued_at,
                     actor_id=command.administrator_id,
@@ -698,6 +700,8 @@ async def ensure_bank_user_wallets(
             (key,),
             connection=connection,
         )
+
+
 async def load_bank_overview(
     user_id: int,
     connection: AsyncConnection,
@@ -714,7 +718,10 @@ async def load_bank_overview(
         "SELECT "
         "(SELECT balance FROM bank.account_balances WHERE account_key = %s), "
         "(SELECT balance FROM bank.account_balances WHERE account_key = %s)",
-        (_user_wallet_key(user_id, TokenBucket.FREE), _user_wallet_key(user_id, TokenBucket.PAID)),
+        (
+            _user_wallet_key(user_id, TokenBucket.FREE),
+            _user_wallet_key(user_id, TokenBucket.PAID),
+        ),
         connection=connection,
     )
     if row is None or row[0] is None or row[1] is None:
@@ -734,7 +741,9 @@ def _account_key(account: LedgerAccount) -> str:
     """
 
     if account.scope is AccountScope.USER:
-        return _user_wallet_key(cast(int, account.owner_id), cast(TokenBucket, account.bucket))
+        return _user_wallet_key(
+            cast(int, account.owner_id), cast(TokenBucket, account.bucket)
+        )
     if account.scope is AccountScope.GROUP:
         return f"group:{cast(int, account.owner_id)}:treasury"
     return f"system:{cast(SystemAccountKind, account.system_kind).value}"
@@ -788,7 +797,9 @@ def _result_mapping(result: TokenRequestResult) -> dict[str, object]:
 
     return {
         "code": result.code.value,
-        "request": _request_mapping(result.request) if result.request is not None else None,
+        "request": _request_mapping(result.request)
+        if result.request is not None
+        else None,
         "overview": _overview_mapping(result.overview)
         if result.overview is not None
         else None,
@@ -903,7 +914,9 @@ def _request_mapping(request: TokenRequest) -> dict[str, object]:
         "reviewer_id": request.reviewer_id,
         "review_note": request.review_note,
         "ledger_entry_id": (
-            str(request.ledger_entry_id) if request.ledger_entry_id is not None else None
+            str(request.ledger_entry_id)
+            if request.ledger_entry_id is not None
+            else None
         ),
         "version": request.version,
     }

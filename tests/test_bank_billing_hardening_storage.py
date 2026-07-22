@@ -12,7 +12,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 """@brief 仓库根目录 / Repository root directory."""
 
 
-def test_bank_billing_hardening_migration_and_snapshot_share_integrity_contract() -> None:
+def test_bank_billing_hardening_migration_and_snapshot_share_integrity_contract() -> (
+    None
+):
     """@brief 迁移和快照共同阻止重复支付、空分录与余额直写 /
     Migration and snapshot jointly reject duplicate payments, empty entries, and direct balance writes.
     """

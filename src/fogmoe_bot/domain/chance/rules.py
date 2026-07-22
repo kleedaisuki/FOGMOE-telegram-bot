@@ -240,7 +240,9 @@ class ChanceRuleset:
             raise ValueError("Chance ruleset needs at least one outcome")
         if not normalized_rules:
             raise ValueError("Chance ruleset needs at least one rule")
-        if not all(isinstance(outcome, ChanceOutcome) for outcome in normalized_outcomes):
+        if not all(
+            isinstance(outcome, ChanceOutcome) for outcome in normalized_outcomes
+        ):
             raise TypeError("Chance ruleset outcomes must be ChanceOutcome instances")
         if not all(isinstance(rule, ChanceRule) for rule in normalized_rules):
             raise TypeError("Chance ruleset rules must be ChanceRule instances")
@@ -252,7 +254,9 @@ class ChanceRuleset:
             raise ValueError("Chance ruleset rule codes must be unique")
         total_weight = sum(outcome.weight for outcome in normalized_outcomes)
         if total_weight > MAX_UNIFORM_BOUND:
-            raise ValueError("Chance ruleset weight exceeds the fairness-protocol bound")
+            raise ValueError(
+                "Chance ruleset weight exceeds the fairness-protocol bound"
+            )
         known_outcomes = frozenset(outcome_codes)
         for rule in normalized_rules:
             unknown_outcomes = rule.winning_outcome_codes - known_outcomes
@@ -362,7 +366,9 @@ class ChanceRuleset:
         expected_gross = probability * gross_payout.value
         expected_net = expected_gross - stake.value
         if expected_net >= 0:
-            raise AssertionError("Negative-EV payout formula unexpectedly produced nonnegative EV")
+            raise AssertionError(
+                "Negative-EV payout formula unexpectedly produced nonnegative EV"
+            )
         return ChanceQuote(
             ruleset_code=self.code,
             ruleset_revision=self.revision,
@@ -416,6 +422,4 @@ def _validate_code(value: str, *, label: str) -> None:
     """
 
     if not isinstance(value, str) or _CODE_PATTERN.fullmatch(value) is None:
-        raise ValueError(
-            f"{label} code must match [a-z][a-z0-9_.-]{{0,63}}"
-        )
+        raise ValueError(f"{label} code must match [a-z][a-z0-9_.-]{{0,63}}")

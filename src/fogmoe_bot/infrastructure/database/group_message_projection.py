@@ -149,9 +149,7 @@ def _message(row: RowMapping) -> GroupMessage:
         content=content,
         created_at=created_at,
         edited=_boolean(row, "is_edited"),
-        sender_username=(
-            None if sender_username is None else str(sender_username)
-        ),
+        sender_username=(None if sender_username is None else str(sender_username)),
         message_thread_id=(
             None if message_thread_id is None else int(cast(int, message_thread_id))
         ),

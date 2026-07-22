@@ -90,7 +90,9 @@ class CommitDurableChanceRound:
         _validate_actor_id(self.actor_id)
         if not isinstance(self.round, CommitChanceRound):
             raise TypeError("Durable chance commitment requires CommitChanceRound")
-        object.__setattr__(self, "idempotency_key", _normalize_idempotency_key(self.idempotency_key))
+        object.__setattr__(
+            self, "idempotency_key", _normalize_idempotency_key(self.idempotency_key)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +140,9 @@ class BindAndSettleChanceRound:
         _validate_scope(self.scope)
         if not isinstance(self.client_seed, ClientSeed):
             raise TypeError("Chance bind-and-settle requires ClientSeed")
-        object.__setattr__(self, "idempotency_key", _normalize_idempotency_key(self.idempotency_key))
+        object.__setattr__(
+            self, "idempotency_key", _normalize_idempotency_key(self.idempotency_key)
+        )
 
 
 @dataclass(frozen=True, slots=True)

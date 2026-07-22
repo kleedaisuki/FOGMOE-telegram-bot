@@ -73,7 +73,9 @@ async def load_chart_receipt(
     if str(row[0]) != operation_kind or int(row[1]) != actor_id:
         raise ValueError("Chart idempotency key changed meaning")
     raw_result: object = row[2]
-    decoded: object = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+    decoded: object = (
+        json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+    )
     if not isinstance(decoded, Mapping):
         raise ValueError("Invalid chart operation receipt")
     return cast(Mapping[str, Any], decoded)

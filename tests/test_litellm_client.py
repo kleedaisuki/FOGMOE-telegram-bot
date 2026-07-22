@@ -222,6 +222,7 @@ def test_sanitize_message_removes_empty_tool_calls_for_every_provider() -> None:
         "content": "usable text",
     }
 
+
 def test_sanitize_message_applies_native_gemini_tool_message_rules() -> None:
     """@brief 验证原生 Gemini 的工具消息规则 / Verify native Gemini tool-message rules."""
 

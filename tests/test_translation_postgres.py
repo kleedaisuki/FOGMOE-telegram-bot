@@ -36,6 +36,7 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
 )
 from postgres_test_support import configure_bot_database
 
+
 def _postgres_url() -> str:
     """@brief 读取真实 PostgreSQL DSN / Read a real PostgreSQL DSN.
 

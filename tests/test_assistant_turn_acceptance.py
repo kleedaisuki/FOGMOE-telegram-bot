@@ -35,6 +35,7 @@ from fogmoe_bot.infrastructure.database.repositories.user_repository import (
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 固定 acceptance 时刻 / Fixed acceptance instant."""
 
+
 class RecordingTransaction:
     """@brief 记录事务退出状态的异步上下文 / Async context recording transaction exit state."""
 
@@ -388,7 +389,11 @@ def test_group_acceptance_does_not_read_private_profile_or_diary(
             """
 
             del params, connection
-            return ("assistant-group:-1001:thread:23",) if "inbound_updates" in sql else None
+            return (
+                ("assistant-group:-1001:thread:23",)
+                if "inbound_updates" in sql
+                else None
+            )
 
         async def fake_identity(*args: object, **kwargs: object) -> UserIdentityContext:
             """@brief 返回身份上下文 / Return identity context.
@@ -568,7 +573,9 @@ def test_missing_identity_is_a_business_rejection(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize(("message_inserted", "activity_inserted"), ((True, False), (False, True)))
+@pytest.mark.parametrize(
+    ("message_inserted", "activity_inserted"), ((True, False), (False, True))
+)
 def test_partial_acceptance_receipt_still_rolls_back(
     monkeypatch: pytest.MonkeyPatch,
     message_inserted: bool,

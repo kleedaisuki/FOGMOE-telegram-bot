@@ -88,7 +88,9 @@ class RequestTokens:
         if self.requested_at.tzinfo is None or self.requested_at.utcoffset() is None:
             raise ValueError("Token request time must be timezone-aware")
         if not self.idempotency_key.strip() or len(self.idempotency_key) > 200:
-            raise ValueError("Token request idempotency key must contain 1-200 characters")
+            raise ValueError(
+                "Token request idempotency key must contain 1-200 characters"
+            )
 
     def aggregate(self) -> TokenRequest:
         """@brief 转换为待处理领域聚合 / Convert to a pending domain aggregate.
@@ -150,7 +152,9 @@ class ReviewTokenRequest:
         if self.reviewed_at.tzinfo is None or self.reviewed_at.utcoffset() is None:
             raise ValueError("Token review time must be timezone-aware")
         if not self.idempotency_key.strip() or len(self.idempotency_key) > 200:
-            raise ValueError("Token review idempotency key must contain 1-200 characters")
+            raise ValueError(
+                "Token review idempotency key must contain 1-200 characters"
+            )
         if self.note is not None and len(self.note.strip()) > 500:
             raise ValueError("Token review note cannot exceed 500 characters")
 
@@ -200,7 +204,9 @@ class IssueTokens:
         if self.administrator_id <= 0 or self.recipient_id <= 0:
             raise ValueError("Issuance identities must be positive")
         if self.bucket is not TokenBucket.FREE:
-            raise ValueError("Regular bank issuance is limited to the free token bucket")
+            raise ValueError(
+                "Regular bank issuance is limited to the free token bucket"
+            )
         if not 1 <= len(self.purpose.strip()) <= 500:
             raise ValueError("Issuance purpose must contain 1-500 characters")
         if self.issued_at.tzinfo is None or self.issued_at.utcoffset() is None:
@@ -247,7 +253,9 @@ class FundActivityPot:
         if self.administrator_id <= 0:
             raise ValueError("Activity-pot funding administrator must be positive")
         if not 1 <= len(self.purpose.strip()) <= 500:
-            raise ValueError("Activity-pot funding purpose must contain 1-500 characters")
+            raise ValueError(
+                "Activity-pot funding purpose must contain 1-500 characters"
+            )
         if self.funded_at.tzinfo is None or self.funded_at.utcoffset() is None:
             raise ValueError("Activity-pot funding time must be timezone-aware")
         if not self.idempotency_key.strip() or len(self.idempotency_key) > 200:
@@ -375,7 +383,10 @@ class PendingTokenRequestsResult:
             raise TypeError("Pending-token-requests result code must be BankCode")
         if self.code is not BankCode.SUCCESS and self.requests:
             raise ValueError("Failed pending-request result cannot carry requests")
-        if any(request.status is not TokenRequestStatus.PENDING for request in self.requests):
+        if any(
+            request.status is not TokenRequestStatus.PENDING
+            for request in self.requests
+        ):
             raise ValueError("Pending-request result can contain only pending requests")
 
 

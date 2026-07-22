@@ -147,7 +147,9 @@ class ConversationScope:
         if isinstance(self.group_id, bool) or self.group_id == 0:
             raise ValueError("ConversationScope group_id cannot be zero")
         if not self.is_group and self.message_thread_id is not None:
-            raise ValueError("Private ConversationScope cannot have a message_thread_id")
+            raise ValueError(
+                "Private ConversationScope cannot have a message_thread_id"
+            )
         if self.message_id is not None and (
             isinstance(self.message_id, bool) or self.message_id <= 0
         ):

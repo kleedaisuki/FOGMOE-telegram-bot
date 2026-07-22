@@ -110,7 +110,9 @@ class _Workflow:
             return ChanceWorkflowResult(code)
         if self.private_round is None:
             return ChanceWorkflowResult(ChanceWorkflowCode.NOT_FOUND)
-        prepared = self._chance.bind_client_seed(self.private_round, command.client_seed)
+        prepared = self._chance.bind_client_seed(
+            self.private_round, command.client_seed
+        )
         settlement = prepared.settlement()
         return ChanceWorkflowResult(
             ChanceWorkflowCode.SUCCESS,
@@ -196,7 +198,9 @@ def _command(
     @return 已解析命令 envelope / Parsed command envelope.
     """
 
-    resolved_chat_id = chat_id if chat_id is not None else (42 if chat_type == "private" else -100_42)
+    resolved_chat_id = (
+        chat_id if chat_id is not None else (42 if chat_type == "private" else -100_42)
+    )
     return ParsedTelegramCommand(
         command=name,
         target=None,
@@ -251,7 +255,9 @@ def test_chance_commit_uses_free_stake_deterministic_uuid_and_source_idempotency
         assert durable.round.scope == PersonalRoundScope(42)
         assert durable.round.stake == FreeTokenStake(10)
         assert durable.round.rule_code == "big"
-        assert outbound.commands[0].idempotency_key == "update:70:command:chance:response"
+        assert (
+            outbound.commands[0].idempotency_key == "update:70:command:chance:response"
+        )
         assert outbound.commands[0].created_at == NOW
         text = str(outbound.commands[0].payload["text"])
         assert "Commitment" in text
@@ -307,8 +313,7 @@ def test_chance_exposes_high_variance_rules_as_canonical_negative_ev_quotes() ->
         assert exact_triple_quote.win_probability.denominator == 216
         assert exact_triple_quote.expected_net_change < 0
         assert (
-            exact_triple_quote.gross_payout.value
-            > any_triple_quote.gross_payout.value
+            exact_triple_quote.gross_payout.value > any_triple_quote.gross_payout.value
         )
 
     asyncio.run(scenario())

@@ -42,7 +42,9 @@ def test_0057_limits_each_subscription_to_one_open_renewal_order() -> None:
     assert "GROUP BY orders.renewal_subscription_id" in upgrade
     assert "HAVING count(*) > 1" in upgrade
     assert "duplicate open renewal orders exist" in upgrade
-    assert "DROP INDEX IF EXISTS billing.billing_orders_one_open_renewal_uq" in downgrade
+    assert (
+        "DROP INDEX IF EXISTS billing.billing_orders_one_open_renewal_uq" in downgrade
+    )
 
     for storage in (upgrade, snapshot):
         assert "CREATE UNIQUE INDEX billing_orders_one_open_renewal_uq" in storage

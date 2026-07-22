@@ -350,9 +350,7 @@ def test_message_entity_parse_error_falls_back_to_plain_text() -> None:
     """@brief Markdown 实体解析失败时以同一文本降级纯文本 / An entity parse failure retries the same text as plain text."""
 
     bot = _Bot(
-        send_errors=(
-            BadRequest("Can't parse entities: can't find end of the entity"),
-        )
+        send_errors=(BadRequest("Can't parse entities: can't find end of the entity"),)
     )
 
     receipt = asyncio.run(
@@ -372,7 +370,9 @@ def test_message_entity_parse_error_falls_back_to_plain_text() -> None:
     assert receipt.external_message_id == "42"
     assert [call["parse_mode"] for call in bot.send_calls] == ["Markdown", None]
     assert bot.send_calls[0]["text"] == bot.send_calls[1]["text"]
-    assert bot.send_calls[1]["reply_parameters"] == bot.send_calls[0]["reply_parameters"]
+    assert (
+        bot.send_calls[1]["reply_parameters"] == bot.send_calls[0]["reply_parameters"]
+    )
 
 
 def test_edit_message_returns_existing_external_id() -> None:

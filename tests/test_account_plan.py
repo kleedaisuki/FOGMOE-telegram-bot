@@ -70,9 +70,7 @@ def test_postgres_account_plan_resolver_uses_current_subscription_in_caller_tran
             return (True,)
 
         monkeypatch.setattr(account_plan.db_connection, "fetch_one", fake_fetch_one)
-        resolver = PostgresAccountPlanResolver(
-            AccountPlanPolicy(administrator_id=1)
-        )
+        resolver = PostgresAccountPlanResolver(AccountPlanPolicy(administrator_id=1))
 
         assert await resolver.resolve(42, connection=connection) is AccountPlan.PAID  # type: ignore[arg-type]
         sql, params, used_connection = calls[0]

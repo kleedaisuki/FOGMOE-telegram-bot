@@ -137,7 +137,9 @@ class _Authorization:
         return self.manage
 
 
-def test_service_gates_member_and_governance_writes_without_losing_scope_types() -> None:
+def test_service_gates_member_and_governance_writes_without_losing_scope_types() -> (
+    None
+):
     """@brief 服务先授权再写入，且始终传递显式小镇与个人范围 / Service authorizes before writes while preserving explicit town and personal scopes.
 
     @return None / None.

@@ -18,8 +18,14 @@ from fogmoe_bot.application.conversation.translation_ingress import (
     TranslationReplyTarget,
     TranslationTurnRequest,
 )
-from fogmoe_bot.application.conversation.telegram_identity import TelegramConversationAddress
-from fogmoe_bot.domain.conversation.identity import ConversationId, DeliveryStreamId, UpdateId
+from fogmoe_bot.application.conversation.telegram_identity import (
+    TelegramConversationAddress,
+)
+from fogmoe_bot.domain.conversation.identity import (
+    ConversationId,
+    DeliveryStreamId,
+    UpdateId,
+)
 
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
@@ -29,7 +35,9 @@ NOW = datetime(2030, 1, 1, tzinfo=UTC)
 class FakeAcceptance:
     """@brief 捕获翻译转换出的 Assistant 请求 / Double capturing Assistant requests converted from translation."""
 
-    def __init__(self, result: AssistantTurnAccepted | AssistantUserNotRegistered) -> None:
+    def __init__(
+        self, result: AssistantTurnAccepted | AssistantUserNotRegistered
+    ) -> None:
         """@brief 注入 acceptance 结果 / Inject an acceptance result.
 
         @param result 预设结果 / Predefined result.
@@ -107,7 +115,9 @@ def _target(*, chat_type: str = "private") -> TranslationReplyTarget:
     )
 
 
-def _request(*, chat_type: str = "private", text: str = "hello") -> TranslationTurnRequest:
+def _request(
+    *, chat_type: str = "private", text: str = "hello"
+) -> TranslationTurnRequest:
     """@brief 构造翻译请求 / Build a translation request.
 
     @param chat_type Telegram chat 类型 / Telegram chat type.
@@ -159,7 +169,9 @@ def test_too_long_translation_never_reaches_acceptance() -> None:
         @return None / None.
         """
 
-        acceptance = FakeAcceptance(AssistantTurnAccepted(acceptance=None, replayed=True))
+        acceptance = FakeAcceptance(
+            AssistantTurnAccepted(acceptance=None, replayed=True)
+        )
         feedback = FakeFeedback()
         coordinator = TranslationIngressCoordinator(
             acceptance=acceptance,

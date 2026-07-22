@@ -91,13 +91,17 @@ def test_sicbo_like_quotes_use_fraction_math_and_are_strictly_negative_ev() -> N
 
     for rule in ruleset.rules:
         for amount in (1, 5, 100, 1_000):
-            assert ruleset.quote(rule.code, FreeTokenStake(amount)).expected_net_change < 0
+            assert (
+                ruleset.quote(rule.code, FreeTokenStake(amount)).expected_net_change < 0
+            )
 
     with pytest.raises(ValueError, match="strictly between"):
         ChanceRule("broken", frozenset({"dice-1-1-1"}), Fraction(0, 1))
 
 
-def test_every_telegram_exposed_regular_and_high_variance_rule_has_negative_ev() -> None:
+def test_every_telegram_exposed_regular_and_high_variance_rule_has_negative_ev() -> (
+    None
+):
     """@brief 所有 Telegram 公开骰宝规则（含高方差围骰）都保持严格负 EV /
     Every Telegram-exposed Sic-Bo rule, including high-variance triples, retains strictly negative EV.
 
@@ -119,7 +123,9 @@ def test_every_telegram_exposed_regular_and_high_variance_rule_has_negative_ev()
         "triple-6",
     )
 
-    quotes = tuple(ruleset.quote(rule_code, FreeTokenStake(1)) for rule_code in exposed_rules)
+    quotes = tuple(
+        ruleset.quote(rule_code, FreeTokenStake(1)) for rule_code in exposed_rules
+    )
 
     assert all(quote.expected_net_change < 0 for quote in quotes)
     assert all(quote.configured_house_edge > 0 for quote in quotes)
@@ -174,9 +180,7 @@ def test_round_types_exclude_paid_or_generic_assets_and_preserve_scope_boundary(
     assert not hasattr(group_round.stake, "bucket")
 
 
-def test_commit_then_client_seed_then_settlement_produces_a_verifiable_proof() -> (
-    None
-):
+def test_commit_then_client_seed_then_settlement_produces_a_verifiable_proof() -> None:
     """@brief 承诺先于客户端种子，结算生成可独立复验的证明 / Commitment precedes client seed and settlement creates an independently verifiable proof."""
 
     seeds = _FixedSeeds(_SERVER_SEED)
@@ -185,7 +189,10 @@ def test_commit_then_client_seed_then_settlement_produces_a_verifiable_proof() -
 
     assert seeds.calls == 1
     assert committed.committed_round.commitment == commit_server_seed(_SERVER_SEED)
-    assert committed.committed_round.ruleset_fingerprint == sicbo_like_ruleset().fingerprint
+    assert (
+        committed.committed_round.ruleset_fingerprint
+        == sicbo_like_ruleset().fingerprint
+    )
     assert "redacted" in repr(committed.server_seed)
 
     prepared = service.bind_client_seed(committed, ClientSeed("Klee-seed-v1"))

@@ -44,7 +44,9 @@ class BindChartToken:
 
         if self.group_id == 0 or self.actor_id <= 0:
             raise ValueError("Chart binding identifiers are invalid")
-        object.__setattr__(self, "idempotency_key", _idempotency_key(self.idempotency_key))
+        object.__setattr__(
+            self, "idempotency_key", _idempotency_key(self.idempotency_key)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +71,9 @@ class ClearChartToken:
 
         if self.group_id == 0 or self.actor_id <= 0:
             raise ValueError("Chart clear identifiers are invalid")
-        object.__setattr__(self, "idempotency_key", _idempotency_key(self.idempotency_key))
+        object.__setattr__(
+            self, "idempotency_key", _idempotency_key(self.idempotency_key)
+        )
 
 
 @dataclass(frozen=True, slots=True)

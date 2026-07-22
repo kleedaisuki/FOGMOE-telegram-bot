@@ -180,9 +180,7 @@ def test_public_billing_request_fingerprints_bind_every_command_semantic() -> No
         ),
         (
             postgres_module._request_refund_request_fingerprint(request_refund),
-            postgres_module._request_refund_request_fingerprint(
-                changed_request_refund
-            ),
+            postgres_module._request_refund_request_fingerprint(changed_request_refund),
         ),
         (
             postgres_module._review_refund_request_fingerprint(review),
@@ -392,9 +390,7 @@ def test_successful_payment_ownership_lock_query_conflict_and_replay(
         )
     )
     assert loaded == existing
-    assert queries[0][1] == (
-        "billing:successful-payment:telegram_stars:payment-1",
-    )
+    assert queries[0][1] == ("billing:successful-payment:telegram_stars:payment-1",)
     assert "provider_payment_id = %s" in queries[1][0]
     assert "event_kind = %s" in queries[1][0]
     assert queries[1][1] == (
@@ -462,12 +458,16 @@ def test_successful_payment_ownership_lock_query_conflict_and_replay(
         del args
         return paid_order
 
-    monkeypatch.setattr(postgres_module.db_connection, "transaction", asynccontextmanager(transaction))
+    monkeypatch.setattr(
+        postgres_module.db_connection, "transaction", asynccontextmanager(transaction)
+    )
     monkeypatch.setattr(postgres_module, "_lock_idempotency_key", no_op)
     monkeypatch.setattr(postgres_module, "_load_receipt", no_receipt)
     monkeypatch.setattr(postgres_module, "_lock_provider_event", no_op)
     monkeypatch.setattr(postgres_module, "_lock_successful_payment", no_op)
-    monkeypatch.setattr(postgres_module, "_load_successful_payment", load_existing_success)
+    monkeypatch.setattr(
+        postgres_module, "_load_successful_payment", load_existing_success
+    )
     monkeypatch.setattr(postgres_module, "_read_order", load_paid_order)
     monkeypatch.setattr(postgres_module, "_save_receipt", no_op)
 
@@ -809,7 +809,9 @@ def test_renewal_placement_requires_subscription_to_be_active_at_creation_time(
     monkeypatch.setattr(postgres_module, "_identity_exists", identity_exists)
     monkeypatch.setattr(postgres_module, "_lock_sellable_offer", lock_offer)
     monkeypatch.setattr(postgres_module, "_lock_subscription", lock_subscription)
-    monkeypatch.setattr(postgres_module, "_has_open_renewal_order", fail_open_renewal_lookup)
+    monkeypatch.setattr(
+        postgres_module, "_has_open_renewal_order", fail_open_renewal_lookup
+    )
     monkeypatch.setattr(postgres_module, "_insert_order_from_offer", fail_insert)
     monkeypatch.setattr(postgres_module, "_save_receipt", no_op)
 

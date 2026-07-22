@@ -86,10 +86,12 @@ def test_0055_version_and_snapshot_close_the_legacy_vocabulary() -> None:
     """
 
     version = (
-        _PROJECT_ROOT / "src/fogmoe_dbctl/migrations/versions/0055_retire_legacy_wagers.py"
+        _PROJECT_ROOT
+        / "src/fogmoe_dbctl/migrations/versions/0055_retire_legacy_wagers.py"
     ).read_text(encoding="utf-8")
     banking_origin = (
-        _PROJECT_ROOT / "src/fogmoe_dbctl/migrations/sql/postgresql/0047_banking_ledger.sql"
+        _PROJECT_ROOT
+        / "src/fogmoe_dbctl/migrations/sql/postgresql/0047_banking_ledger.sql"
     ).read_text(encoding="utf-8")
     snapshot = (_PROJECT_ROOT / "src/fogmoe_dbctl/schema.sql").read_text(
         encoding="utf-8"

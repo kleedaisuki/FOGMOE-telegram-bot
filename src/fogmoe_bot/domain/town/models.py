@@ -90,7 +90,9 @@ class TownTreasury:
             self.lifetime_settled,
             self.contribution_count,
         )
-        if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) for value in values
+        ):
             raise TypeError("Town treasury values must be integers")
         if any(value < 0 for value in values):
             raise ValueError("Town treasury values cannot be negative")
@@ -240,7 +242,9 @@ class TownProject:
             raise TypeError("Town project prosperity reward must be an integer")
         if self.prosperity_reward <= 0:
             raise ValueError("Town project prosperity reward must be positive")
-        if isinstance(self.funded_amount, bool) or not isinstance(self.funded_amount, int):
+        if isinstance(self.funded_amount, bool) or not isinstance(
+            self.funded_amount, int
+        ):
             raise TypeError("Town project funded amount must be an integer")
         if not 0 <= self.funded_amount <= self.required_amount.value:
             raise ValueError("Town project funding must be within its required amount")
@@ -251,7 +255,9 @@ class TownProject:
         if self.version < 0:
             raise ValueError("Town project version cannot be negative")
 
-        created_at = normalize_instant(self.created_at, field="Town project creation time")
+        created_at = normalize_instant(
+            self.created_at, field="Town project creation time"
+        )
         object.__setattr__(self, "created_at", created_at)
         object.__setattr__(
             self,
@@ -267,14 +273,24 @@ class TownProject:
         if self.status is TownProjectStatus.FUNDING:
             if self.funded_amount >= self.required_amount.value:
                 raise ValueError("Funding projects must remain below their target")
-            if self.completed_at is not None or self.settlement_ledger_entry_id is not None:
-                raise ValueError("Funding projects cannot have completion settlement data")
+            if (
+                self.completed_at is not None
+                or self.settlement_ledger_entry_id is not None
+            ):
+                raise ValueError(
+                    "Funding projects cannot have completion settlement data"
+                )
             return
         if self.status is TownProjectStatus.READY:
             if self.funded_amount != self.required_amount.value:
                 raise ValueError("Ready projects must be fully funded")
-            if self.completed_at is not None or self.settlement_ledger_entry_id is not None:
-                raise ValueError("Ready projects cannot have completion settlement data")
+            if (
+                self.completed_at is not None
+                or self.settlement_ledger_entry_id is not None
+            ):
+                raise ValueError(
+                    "Ready projects cannot have completion settlement data"
+                )
             return
         if self.status is TownProjectStatus.COMPLETED:
             if self.funded_amount != self.required_amount.value:
@@ -519,7 +535,9 @@ class Town:
             raise TypeError("Town project must be a TownProject")
         if any(existing.project_id == project.project_id for existing in self.projects):
             raise ValueError("Town project ID already exists")
-        return replace(self, projects=(*self.projects, project), version=self.version + 1)
+        return replace(
+            self, projects=(*self.projects, project), version=self.version + 1
+        )
 
     def record_contribution(self, contribution: TownContribution) -> Town:
         """@brief 应用一笔已确认到账的贡献 / Apply one contribution confirmed as credited.

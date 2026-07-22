@@ -94,9 +94,7 @@ class GroupMessageObservation:
             raise ValueError("sender_user_id must be positive when present")
         sender_name = self.sender_name.strip() if self.sender_name is not None else None
         sender_username = (
-            self.sender_username.strip()
-            if self.sender_username is not None
-            else None
+            self.sender_username.strip() if self.sender_username is not None else None
         )
         if sender_name is not None and not 1 <= len(sender_name) <= 256:
             raise ValueError("sender_name must contain 1-256 characters")
@@ -164,6 +162,8 @@ class GroupMessage:
             updated_at=self.created_at,
             edited=self.edited,
         )
+
+
 class GroupMessageProjection(Protocol):
     """@brief 群消息规范写入与上下文读取端口 / Port for canonical group-message writes and context reads."""
 

@@ -244,7 +244,9 @@ class PostgresTownOperations(TownOperations):
                                 connection=connection,
                             )
                             if command.project_id is not None:
-                                original_project = _project_by_id(town, command.project_id)
+                                original_project = _project_by_id(
+                                    town, command.project_id
+                                )
                                 updated_project = _project_by_id(
                                     updated_town,
                                     command.project_id,
@@ -851,7 +853,9 @@ def _contribution_fingerprint(command: ContributeToTown) -> dict[str, object]:
         "contribution_id": str(command.contribution_id),
         "amount": command.amount.value,
         "requested_at": command.requested_at.isoformat(),
-        "project_id": str(command.project_id) if command.project_id is not None else None,
+        "project_id": str(command.project_id)
+        if command.project_id is not None
+        else None,
     }
 
 
@@ -1004,7 +1008,9 @@ def _project_mapping(project: TownProject) -> dict[str, object]:
         "funded_amount": project.funded_amount,
         "status": project.status.value,
         "completed_at": (
-            project.completed_at.isoformat() if project.completed_at is not None else None
+            project.completed_at.isoformat()
+            if project.completed_at is not None
+            else None
         ),
         "settlement_ledger_entry_id": (
             str(project.settlement_ledger_entry_id)
@@ -1061,7 +1067,9 @@ def _contribution_mapping(contribution: TownContribution) -> dict[str, object]:
         "contributed_at": contribution.contributed_at.isoformat(),
         "ledger_entry_id": str(contribution.ledger_entry_id),
         "project_id": (
-            str(contribution.project_id) if contribution.project_id is not None else None
+            str(contribution.project_id)
+            if contribution.project_id is not None
+            else None
         ),
     }
 

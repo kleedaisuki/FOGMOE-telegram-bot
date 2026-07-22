@@ -268,10 +268,7 @@ def _scope_for(command: ParsedTelegramCommand) -> RoundScope | str:
         return PersonalRoundScope(command.user_id)
     if chat_type in {"group", "supergroup"}:
         return GroupRoundScope(command.chat_id, command.message_thread_id)
-    return (
-        "随机活动仅支持私聊、群组或超级群组上下文。\n"
-        "（错误码：unsupported_scope）"
-    )
+    return "随机活动仅支持私聊、群组或超级群组上下文。\n（错误码：unsupported_scope）"
 
 
 def _chance_arguments(
@@ -291,7 +288,7 @@ def _chance_arguments(
         return _chance_usage_text()
     try:
         stake = FreeTokenStake(int(arguments[1]))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return "免费金币押注必须是正整数；付费金币不能参与随机活动。"
     return rule_code, stake
 
@@ -325,7 +322,7 @@ def _seed_arguments(argument_text: str) -> tuple[UUID, ClientSeed] | str:
         return "轮次 UUID 格式无效。"
     try:
         client_seed = ClientSeed(parts[1])
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return "客户端种子需为 1–512 个 UTF-8 字节，且不能包含 NUL。"
     return round_id, client_seed
 
@@ -421,7 +418,10 @@ def _settlement_result_text(result: ChanceWorkflowResult) -> str:
 
     if result.code is not ChanceWorkflowCode.SUCCESS or result.view is None:
         return _error_text(result.code)
-    if result.view.status is not ChanceRoundStatus.SETTLED or result.view.settlement is None:
+    if (
+        result.view.status is not ChanceRoundStatus.SETTLED
+        or result.view.settlement is None
+    ):
         return "随机活动状态尚未结算，请稍后用 /chance_show 查询。（错误码：invalid_state）"
     settlement = result.view.settlement
     proof = settlement.proof

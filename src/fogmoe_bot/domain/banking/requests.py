@@ -105,8 +105,7 @@ class TokenRequest:
         if self.reviewer_id is not None and self.reviewer_id <= 0:
             raise ValueError("Token reviewer must be positive")
         if (
-            self.status
-            in {TokenRequestStatus.APPROVED, TokenRequestStatus.REJECTED}
+            self.status in {TokenRequestStatus.APPROVED, TokenRequestStatus.REJECTED}
             and self.reviewer_id == self.requester_id
         ):
             raise ValueError("A requester cannot review their own token request")
@@ -121,7 +120,9 @@ class TokenRequest:
             if self.ledger_entry_id is None:
                 raise ValueError("An approved token request needs a ledger entry")
         elif self.ledger_entry_id is not None:
-            raise ValueError("Only an approved token request can reference a ledger entry")
+            raise ValueError(
+                "Only an approved token request can reference a ledger entry"
+            )
         object.__setattr__(self, "purpose", purpose)
         if self.review_note is not None:
             object.__setattr__(self, "review_note", self.review_note.strip() or None)

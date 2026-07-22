@@ -240,6 +240,7 @@ class EconomyService:
             "Web密码更新成功！" if status.exists else "Web密码设置成功！",
         )
 
+
 def _validate_identity(user_id: int, idempotency_key: str) -> None:
     """@brief 校验用户与幂等键 / Validate user identity and idempotency key.
 

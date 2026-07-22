@@ -50,9 +50,9 @@ def test_0062_uses_delivery_and_refund_facts_for_preview_liability() -> None:
     assert "(receipt.result ->> 'cost')::BIGINT = offer.preview_cost" in migration
     assert "NOT offer.preview_refunded" in migration
     assert "a preview charge is neither delivered nor refunded" in migration
-    assert migration.index("a preview charge is neither delivered nor refunded") < migration.index(
-        "DROP TABLE media.picture_request_receipts"
-    )
+    assert migration.index(
+        "a preview charge is neither delivered nor refunded"
+    ) < migration.index("DROP TABLE media.picture_request_receipts")
 
 
 def test_0062_allows_unclaimed_hd_quote_but_blocks_unrefunded_hd_charge() -> None:
@@ -87,9 +87,9 @@ def test_0062_drops_legacy_tables_explicitly_and_is_irreversible() -> None:
         encoding="utf-8"
     )
 
-    assert migration.index("DROP TABLE media.picture_request_receipts") < migration.index(
-        "DROP TABLE media.picture_offers"
-    )
+    assert migration.index(
+        "DROP TABLE media.picture_request_receipts"
+    ) < migration.index("DROP TABLE media.picture_offers")
     assert "DROP TABLE IF EXISTS game.migration_0027_omikuji_repairs" in migration
     assert "is irreversible" in sections["down"]
     assert 'revision = "0062_retire_identity_mirrors_and_legacy_media"' in version

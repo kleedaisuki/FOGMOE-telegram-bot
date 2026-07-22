@@ -177,10 +177,16 @@ def _workflow() -> tuple[ChanceWorkflow, _Operations, _FixedSeeds]:
     operations = _Operations()
     seeds = _FixedSeeds()
     chance = ChanceService(cast(ServerSeedSource, seeds))
-    return ChanceWorkflow(cast(ChanceRoundOperations, operations), chance), operations, seeds
+    return (
+        ChanceWorkflow(cast(ChanceRoundOperations, operations), chance),
+        operations,
+        seeds,
+    )
 
 
-def test_commit_rejects_delegated_wager_before_consuming_seed_or_touching_port() -> None:
+def test_commit_rejects_delegated_wager_before_consuming_seed_or_touching_port() -> (
+    None
+):
     """@brief 委托下注在随机与持久化前被拒绝 / Delegated wager is rejected before randomness or persistence."""
 
     async def scenario() -> None:

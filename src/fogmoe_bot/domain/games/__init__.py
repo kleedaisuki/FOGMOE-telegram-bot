@@ -6,6 +6,7 @@ from fogmoe_bot.domain.games.fortune import (
     daily_fortune,
     daily_fortune_variant,
 )
+
 __all__ = [
     "FORTUNE_WEIGHTS",
     "FortuneLevel",

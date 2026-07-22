@@ -30,7 +30,7 @@ class TelegramGroupAdministratorSource:
 
         try:
             member = await self._bot.get_chat_member(chat_id, user_id)
-        except (BadRequest, Forbidden):
+        except BadRequest, Forbidden:
             return False
         return member.status in {
             ChatMemberStatus.ADMINISTRATOR,

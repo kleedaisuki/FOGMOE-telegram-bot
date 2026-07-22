@@ -226,7 +226,10 @@ def test_recharge_now_creates_a_token_request_in_private_chat() -> None:
         request = operations.requests[0]
         assert request.amount == TokenAmount(12)
         assert request.purpose == "修复个人灯塔"
-        assert outbound.commands[0].idempotency_key == "update:20:command:recharge:response"
+        assert (
+            outbound.commands[0].idempotency_key
+            == "update:20:command:recharge:response"
+        )
         assert "申请 ID" in str(outbound.commands[0].payload["text"])
 
     asyncio.run(scenario())

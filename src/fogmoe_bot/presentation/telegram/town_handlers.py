@@ -31,7 +31,9 @@ from .command_cooldown_guard import ParsedTelegramCommand
 from .delivery import enqueue_command_reply
 
 
-_GROUP_ONLY_TEXT = "群组小镇只能在群聊或超级群中使用喵；个人冒险请私聊后使用 /adventure。"
+_GROUP_ONLY_TEXT = (
+    "群组小镇只能在群聊或超级群中使用喵；个人冒险请私聊后使用 /adventure。"
+)
 """@brief 非群组调用小镇时的固定提示 / Fixed prompt for non-group town calls."""
 
 _PROJECT_KIND_ALIASES: Mapping[str, TownProjectKind] = {
@@ -258,7 +260,9 @@ class TownTelegramCommandHandler:
 
         parts = command.argument_text.split(maxsplit=3)
         if len(parts) != 4:
-            return "用法：/town project <hall|workshop|garden|observatory> <金币> <项目名>"
+            return (
+                "用法：/town project <hall|workshop|garden|observatory> <金币> <项目名>"
+            )
         kind = _PROJECT_KIND_ALIASES.get(parts[1].casefold())
         if kind is None:
             return "项目类型只能是 hall、workshop、garden 或 observatory。"
@@ -389,7 +393,7 @@ def _positive_amount(raw_amount: str) -> TokenAmount | str:
 
     try:
         return TokenAmount(int(raw_amount))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return "金币数量必须是正整数。"
 
 
@@ -430,7 +434,9 @@ def _town_result_text(result: TownResult) -> str:
     prefix = "已回放同一请求的结果。\n" if result.replayed else ""
     action_line = _action_line(result)
     overview = _town_overview_text(result.town)
-    return f"{prefix}{action_line}\n{overview}" if action_line else f"{prefix}{overview}"
+    return (
+        f"{prefix}{action_line}\n{overview}" if action_line else f"{prefix}{overview}"
+    )
 
 
 def _action_line(result: TownResult) -> str:

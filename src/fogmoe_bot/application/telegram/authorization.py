@@ -125,7 +125,9 @@ class DurableGroupAdministratorAuthorization:
 
         existing = await self._store.read(update_id)
         if existing is not None:
-            self._validate_subject(existing, chat_id=chat_id, actor_user_id=actor_user_id)
+            self._validate_subject(
+                existing, chat_id=chat_id, actor_user_id=actor_user_id
+            )
             return existing.allowed
         observed = GroupAdministratorDecision(
             update_id=update_id,

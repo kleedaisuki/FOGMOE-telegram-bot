@@ -107,7 +107,9 @@ class ChanceService:
         """
 
         if not isinstance(committed, PrivateCommittedChanceRound):
-            raise TypeError("Chance client-seed binding requires PrivateCommittedChanceRound")
+            raise TypeError(
+                "Chance client-seed binding requires PrivateCommittedChanceRound"
+            )
         return committed.bind_client_seed(client_seed)
 
     def settle(self, prepared: PreparedChanceRound) -> ChanceSettlement:

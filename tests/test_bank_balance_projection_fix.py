@@ -40,7 +40,9 @@ def test_0056_replaces_speculative_negative_upsert_with_zero_initialization() ->
         assert "ON CONFLICT (account_key) DO NOTHING" in storage
         assert "UPDATE bank.account_balances AS current_balance" in storage
         assert "current_balance.balance + NEW.delta" in storage
-        assert "bank balance projection % was unavailable after initialization" in storage
+        assert (
+            "bank balance projection % was unavailable after initialization" in storage
+        )
         assert "set_config('bank.ledger_posting_apply', 'on', TRUE)" in storage
 
     assert "NEW.account_key, NEW.delta, 0, CURRENT_TIMESTAMP" not in upgrade

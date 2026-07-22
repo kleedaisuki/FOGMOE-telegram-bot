@@ -386,7 +386,7 @@ def verify_fairness_proof(proof: object) -> bool:
             nonce=proof.nonce,
             upper_bound=proof.upper_bound,
         )
-    except (TypeError, ValueError, RuntimeError):
+    except TypeError, ValueError, RuntimeError:
         return False
     return (
         hmac.compare_digest(proof.commitment.hex_digest, expected_commitment.hex_digest)

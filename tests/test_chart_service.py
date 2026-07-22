@@ -99,7 +99,9 @@ def test_chart_service_forwards_only_chart_operations() -> None:
         assert await service.chart_token(-100) is None
         assert (await service.bind_chart(bind)).token == token
         assert await service.chart_token(-100) == token
-        assert (await service.clear_chart(ClearChartToken(-100, 42, "chart:clear:1"))).token is None
+        assert (
+            await service.clear_chart(ClearChartToken(-100, 42, "chart:clear:1"))
+        ).token is None
         assert charts.bound == [bind]
         assert len(charts.cleared) == 1
 

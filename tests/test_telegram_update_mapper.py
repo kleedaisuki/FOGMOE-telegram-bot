@@ -51,9 +51,10 @@ def test_mapper_separates_private_users_and_shares_group_topics() -> None:
         mapper.identity_for(second).conversation_id.value
         == "assistant-group:-20:thread:0"
     )
-    assert mapper.identity_for(other_member).conversation_id == mapper.identity_for(
-        same_topic
-    ).conversation_id
+    assert (
+        mapper.identity_for(other_member).conversation_id
+        == mapper.identity_for(same_topic).conversation_id
+    )
     assert (
         mapper.identity_for(other_member).conversation_id.value
         == "assistant-group:-20:thread:9"

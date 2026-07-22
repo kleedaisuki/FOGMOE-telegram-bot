@@ -129,8 +129,7 @@ def test_real_postgres_registration_and_personal_info_have_stable_receipts(
                 assert row[1] == 5
                 assert row[2] == "later value"
                 bank_balance = await db_connection.fetch_one(
-                    "SELECT balance FROM bank.account_balances "
-                    "WHERE account_key = %s",
+                    "SELECT balance FROM bank.account_balances WHERE account_key = %s",
                     (f"user:{user_id}:free",),
                     connection=connection,
                 )

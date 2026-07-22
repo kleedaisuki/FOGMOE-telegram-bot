@@ -107,8 +107,7 @@ def format_user_state_prompt(
     lines = []
     if identity_attr_text:
         lines.append(
-            '<user_identity trust="trusted_platform_metadata" '
-            f"{identity_attr_text} />"
+            f'<user_identity trust="trusted_platform_metadata" {identity_attr_text} />'
         )
     lines.append(f"<user_state {attr_text} />")
     if profile is not None or personal_info:

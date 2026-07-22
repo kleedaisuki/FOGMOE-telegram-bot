@@ -351,7 +351,9 @@ class TelegramOutboxDeliveryAdapter:
                 if payload.reply_to_message_id is not None
                 else None
             ),
-            link_preview_options=_link_preview_options(payload.disable_web_page_preview),
+            link_preview_options=_link_preview_options(
+                payload.disable_web_page_preview
+            ),
         )
 
     async def _deliver_edit(self, payload: JsonObject) -> DeliveryReceipt:

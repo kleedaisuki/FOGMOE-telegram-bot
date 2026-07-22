@@ -182,9 +182,7 @@ def test_removed_retention_paths_have_no_compatibility_facades() -> None:
 def test_assistant_memory_operation_depends_only_on_port_and_dto() -> None:
     """@brief Assistant Memory operation 不依赖 provider 或数据库 / Assistant Memory operation does not depend on provider or database."""
 
-    path = (
-        SRC_ROOT / "infrastructure" / "assistant" / "tool_operations" / "memory.py"
-    )
+    path = SRC_ROOT / "infrastructure" / "assistant" / "tool_operations" / "memory.py"
     forbidden = (
         "fogmoe_bot.domain.context_window",
         "fogmoe_bot.infrastructure.database",
@@ -233,10 +231,15 @@ def test_database_snapshot_expresses_retrieval_and_context_ownership() -> None:
     assert "scope_id BIGINT NOT NULL" in snapshot
     assert "personal_user_id BIGINT NULL" in snapshot
     assert "personal_user_id = scope_id" in snapshot
-    retrieval_section = snapshot.split("CREATE TABLE retrieval.source_projections", 1)[1]
-    assert "owner_user_id" not in retrieval_section.split(
-        "CREATE TABLE user_profile.evidence_events", 1
-    )[0]
+    retrieval_section = snapshot.split("CREATE TABLE retrieval.source_projections", 1)[
+        1
+    ]
+    assert (
+        "owner_user_id"
+        not in retrieval_section.split("CREATE TABLE user_profile.evidence_events", 1)[
+            0
+        ]
+    )
     assert "CREATE TABLE user_profile.evidence_events" in snapshot
     assert "CREATE TABLE user_profile.profile_revisions" in snapshot
     assert "CREATE TABLE user_profile.dreams" in snapshot
@@ -254,27 +257,21 @@ def test_forgetting_is_enforced_at_discovery_and_projection_commit() -> None:
         later still belongs to the forgotten state.
     """
 
-    retrieval = (
-        SRC_ROOT / "infrastructure" / "database" / "retrieval.py"
-    ).read_text(encoding="utf-8")
+    retrieval = (SRC_ROOT / "infrastructure" / "database" / "retrieval.py").read_text(
+        encoding="utf-8"
+    )
     profile_source = (
-        SRC_ROOT
-        / "infrastructure"
-        / "database"
-        / "user_profile"
-        / "source.py"
+        SRC_ROOT / "infrastructure" / "database" / "user_profile" / "source.py"
     ).read_text(encoding="utf-8")
     profile_store = (
-        SRC_ROOT
-        / "infrastructure"
-        / "database"
-        / "user_profile"
-        / "store.py"
+        SRC_ROOT / "infrastructure" / "database" / "user_profile" / "store.py"
     ).read_text(encoding="utf-8")
 
     assert "retrieval.scope_forgetting_boundaries" in retrieval
     assert "turn.created_at <= boundary.forgotten_through" in retrieval
     assert "await lock_retrieval_scope(connection, turn.scope)" in retrieval
     assert "turn.created_at <= profile.forgotten_through" in profile_source
-    assert "await lock_user_profile(connection, evidence.owner_user_id)" in profile_store
+    assert (
+        "await lock_user_profile(connection, evidence.owner_user_id)" in profile_store
+    )
     assert "await lock_user_profile(connection, claim.owner_user_id)" in profile_store

@@ -264,7 +264,10 @@ class PostgresCommunityOperations(CommunityOperations):
                     created_at=datetime.now(UTC),
                     actor_id=command.user_id,
                     connection=connection,
-                    metadata={"grant_kind": "verified_task", "task_id": command.task_id},
+                    metadata={
+                        "grant_kind": "verified_task",
+                        "task_id": command.task_id,
+                    },
                 )
                 result = TaskClaimResult(EconomyCode.SUCCESS, command.reward)
             await _save_result(

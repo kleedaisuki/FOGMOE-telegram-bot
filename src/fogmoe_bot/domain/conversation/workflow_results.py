@@ -76,4 +76,6 @@ class InferenceCompletionResult:
         if self.activity.turn_id != self.turn.turn_id:
             raise ValueError("Completed activity must belong to the result turn")
         if not self.outbounds:
-            raise ValueError("Inference completion requires at least one outbound effect")
+            raise ValueError(
+                "Inference completion requires at least one outbound effect"
+            )

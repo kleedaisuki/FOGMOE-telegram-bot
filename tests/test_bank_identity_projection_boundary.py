@@ -12,9 +12,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 """@brief 仓库根目录 / Repository root directory."""
 
 
-def test_identity_projection_migration_archives_legacy_billing_before_later_retirement() -> None:
-    """@brief 0054 封闭 identity 金币旁路并归档旧 Assistant 预留 / Migration 0054 closes identity-token bypasses and archives legacy Assistant reservations before a later retirement migration.
-    """
+def test_identity_projection_migration_archives_legacy_billing_before_later_retirement() -> (
+    None
+):
+    """@brief 0054 封闭 identity 金币旁路并归档旧 Assistant 预留 / Migration 0054 closes identity-token bypasses and archives legacy Assistant reservations before a later retirement migration."""
 
     migration_path = (
         _PROJECT_ROOT
@@ -56,7 +57,10 @@ def test_identity_projection_migration_archives_legacy_billing_before_later_reti
     assert "legacy_assistant_reservation_release" in migration
 
     assert "migration:0054:assistant-release:" in migration
-    assert "UPDATE assistant.billing_reservations AS reservation\nSET status = 'released'" in migration
+    assert (
+        "UPDATE assistant.billing_reservations AS reservation\nSET status = 'released'"
+        in migration
+    )
     assert 'down_revision = "0053_bank_billing_hardening"' in version
     assert re.search(r"^-- Alembic head: \S+$", snapshot, flags=re.MULTILINE)
 
@@ -90,7 +94,9 @@ def test_0054_sql_splitter_preserves_projection_and_archive_trigger_bodies() -> 
     )
 
 
-def test_runtime_cannot_rebootstrap_identity_money_or_retain_assistant_billing() -> None:
+def test_runtime_cannot_rebootstrap_identity_money_or_retain_assistant_billing() -> (
+    None
+):
     """@brief 运行时代码不再从 identity 投影补账，也不保留 Assistant 计费兼容层 /
     Runtime code no longer bootstraps from identity projections or retains an Assistant-billing compatibility layer.
     """
@@ -105,7 +111,9 @@ def test_runtime_cannot_rebootstrap_identity_money_or_retain_assistant_billing()
         _PROJECT_ROOT
         / "src/fogmoe_bot/infrastructure/database/assistant_turn_acceptance.py"
     ).read_text(encoding="utf-8")
-    billing = _PROJECT_ROOT / "src/fogmoe_bot/infrastructure/database/assistant_billing.py"
+    billing = (
+        _PROJECT_ROOT / "src/fogmoe_bot/infrastructure/database/assistant_billing.py"
+    )
 
     assert "legacy-projection-bootstrap" not in banking
     assert "SELECT coins, coins_paid FROM identity.users" not in banking

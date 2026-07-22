@@ -14,6 +14,7 @@ class MediaAccountProfile(Protocol):
     @property
     def permission(self) -> int: ...
 
+
 class MediaAccountProfiles(Protocol):
     """@brief 读取媒体准入资料 / Read media-admission profiles."""
 

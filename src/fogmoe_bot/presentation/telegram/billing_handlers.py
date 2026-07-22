@@ -388,7 +388,9 @@ def _entitlements_text(entitlements: tuple[EntitlementGrant, ...]) -> str:
     else:
         lines.append("当前有效权益：")
         for grant in entitlements:
-            expiry = grant.expires_at.isoformat() if grant.expires_at is not None else "永久"
+            expiry = (
+                grant.expires_at.isoformat() if grant.expires_at is not None else "永久"
+            )
             lines.append(f"- {grant.code}（至 {expiry}）")
     lines.append("下单：/billing_order <报价ID> [续费订阅ID]")
     lines.append("退款：/refund <订单ID> <原因>")

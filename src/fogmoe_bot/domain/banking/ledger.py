@@ -56,18 +56,27 @@ class LedgerAccount:
 
         if self.scope is AccountScope.USER:
             if self.owner_id is None or self.owner_id <= 0 or self.bucket is None:
-                raise ValueError("A user account needs a positive owner and wallet bucket")
+                raise ValueError(
+                    "A user account needs a positive owner and wallet bucket"
+                )
             if self.system_kind is not None:
                 raise ValueError("A user account cannot have a system kind")
             return
         if self.scope is AccountScope.GROUP:
             if self.owner_id is None or self.owner_id == 0:
                 raise ValueError("A group account needs a non-zero group identity")
-            if self.bucket is not None or self.system_kind is not SystemAccountKind.GROUP_TREASURY:
+            if (
+                self.bucket is not None
+                or self.system_kind is not SystemAccountKind.GROUP_TREASURY
+            ):
                 raise ValueError("A group account must be its group treasury")
             return
         if self.scope is AccountScope.SYSTEM:
-            if self.owner_id is not None or self.bucket is not None or self.system_kind is None:
+            if (
+                self.owner_id is not None
+                or self.bucket is not None
+                or self.system_kind is None
+            ):
                 raise ValueError("A system account only needs a system kind")
             return
         raise AssertionError("Unhandled ledger account scope")
