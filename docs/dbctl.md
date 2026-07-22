@@ -7,14 +7,20 @@
 ```text
 cli.py                    组合根：构造 argparse、注册并分发命令
 commands/bootstrap.py     建库、三类受管登录角色与初始授权用例
-commands/migrate.py       Alembic 迁移、运行时与只读报表授权用例
+commands/migrate.py       只编排迁移与授权的薄 CLI 用例
+commands/access_policy.py 不可变的 schema、routine 与报表关系闭集
+commands/access_sql.py    纯 PostgreSQL ACL 收敛与 guard SQL 渲染
+commands/migration_execution.py Alembic 与 psql 副作用边界
 commands/export_csv.py    通过受配置约束的连接原子导出表为 CSV
 postgres.py               PostgreSQL DSN、标识符与连接原语
 config.py                 项目路径、schema 拓扑与 config.json 解析
 migrations/               Alembic 适配层与版本化 SQL
 ```
 
-依赖方向保持单向：`cli -> commands -> postgres/config`。迁移适配层可以依赖共享 PostgreSQL 原语；任何控制面模块都不得依赖 `fogmoe_bot`。
+依赖方向保持单向：`cli -> migrate -> (access_policy, access_sql, migration_execution) -> postgres/config`。
+策略对象与 SQL 渲染不读取配置、不连接数据库；
+只有 execution 边界可启动 Alembic 或 `psql`。迁移适配层可以依赖共享 PostgreSQL
+原语；任何控制面模块都不得依赖 `fogmoe_bot`。
 
 ## 配置边界
 

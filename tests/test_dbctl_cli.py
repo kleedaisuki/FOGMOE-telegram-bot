@@ -8,7 +8,20 @@ import pytest
 from alembic.config import Config
 
 from fogmoe_dbctl import cli
-from fogmoe_dbctl.commands import bootstrap, export_csv, migrate, shell
+from fogmoe_dbctl.commands import (
+    access_sql,
+    bootstrap,
+    export_csv,
+    migrate,
+    migration_execution,
+    shell,
+)
+from fogmoe_dbctl.commands.access_policy import (
+    DEFAULT_ACCESS_POLICY,
+    DatabaseAccessPolicy,
+    ReportingRelationGrant,
+    RuntimeFunctionGrant,
+)
 from fogmoe_dbctl.config import DbctlSettings, ReportingRoleSettings
 from fogmoe_dbctl.postgres import RoleSecret, dollar_quote, sqlalchemy_url
 
@@ -51,6 +64,34 @@ def test_reporting_settings_are_strict_and_have_a_dedicated_default() -> None:
         ReportingRoleSettings.model_validate(
             {"username": "fogmoe-dashboard", "write_access": False}
         )
+
+
+def test_access_policy_rejects_out_of_boundary_or_unsafe_grants() -> None:
+    """@brief 访问策略在 SQL 渲染前拒绝越界或不安全授权 / Access policy rejects out-of-bound or unsafe grants before SQL rendering.
+
+    @return None / None.
+    """
+
+    with pytest.raises(ValueError, match="not application-owned"):
+        DatabaseAccessPolicy(
+            application_schemas=("observability",),
+            runtime_functions=(
+                RuntimeFunctionGrant(
+                    schema="private",
+                    name="run",
+                    argument_signature="DATE",
+                ),
+            ),
+            reporting_relations=(),
+        )
+    with pytest.raises(ValueError, match="argument signature is invalid"):
+        RuntimeFunctionGrant(
+            schema="observability",
+            name="run",
+            argument_signature="DATE); SELECT 1",
+        )
+    with pytest.raises(ValueError, match="allow-list is empty"):
+        ReportingRelationGrant(schema="observability", relations=())
 
 
 @pytest.mark.parametrize(
@@ -186,12 +227,14 @@ def test_migrate_injects_all_migration_inputs(
 
     calls: list[tuple[object, str]] = []
     monkeypatch.setattr(
-        migrate.command,
+        migration_execution.command,
         "upgrade",
         lambda config, revision: calls.append((config, revision)),
     )
 
-    migrate.run_alembic(settings=_settings(), revision="head", dry_run=False)
+    migration_execution.run_alembic(
+        settings=_settings(), revision="head", dry_run=False
+    )
 
     raw_config, revision = calls[0]
     config = cast(Config, raw_config)
@@ -212,10 +255,10 @@ def test_runtime_grants_include_every_new_bounded_context_schema() -> None:
     @return None / None.
     """
 
-    sql = migrate.build_runtime_grant_sql(
+    policy = DEFAULT_ACCESS_POLICY
+    sql = access_sql.build_runtime_grant_sql(
         database="fogmoe",
-        schemas=migrate._APPLICATION_SCHEMAS,
-        functions=migrate._APPLICATION_FUNCTIONS,
+        policy=policy,
         application_role="fogmoe-app",
         owner_role="fogmoe-maintenance",
     )
@@ -228,7 +271,7 @@ def test_runtime_grants_include_every_new_bounded_context_schema() -> None:
         "chance",
         "personal_rpg",
     ):
-        assert schema in migrate._APPLICATION_SCHEMAS
+        assert schema in policy.application_schemas
         assert f'GRANT USAGE ON SCHEMA "{schema}" TO "fogmoe-app";' in sql
         assert (
             f'REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA "{schema}" FROM PUBLIC;' in sql
@@ -244,9 +287,10 @@ def test_runtime_grants_include_every_new_bounded_context_schema() -> None:
     ) in sql
     assert "GRANT EXECUTE ON ALL ROUTINES" not in sql
     assert "GRANT EXECUTE ON ROUTINES" not in sql
-    for schema, function, signature in migrate._APPLICATION_FUNCTIONS:
+    for function in policy.runtime_functions:
         assert (
-            f'GRANT EXECUTE ON FUNCTION "{schema}"."{function}"({signature}) '
+            f'GRANT EXECUTE ON FUNCTION "{function.schema}"."{function.name}"'
+            f"({function.argument_signature}) "
             'TO "fogmoe-app";'
         ) in sql
 
@@ -257,16 +301,16 @@ def test_reporting_grants_are_read_only_for_explicit_observability_models() -> N
     @return None / None.
     """
 
-    sql = migrate.build_reporting_grant_sql(
+    policy = DEFAULT_ACCESS_POLICY
+    sql = access_sql.build_reporting_grant_sql(
         database="fogmoe",
-        owned_schemas=migrate._APPLICATION_SCHEMAS,
-        relations=migrate._REPORTING_RELATIONS,
+        policy=policy,
         reporting_role="fogmoe-dashboard",
         owner_role="fogmoe-maintenance",
     )
 
     assert 'GRANT CONNECT ON DATABASE "fogmoe" TO "fogmoe-dashboard";' in sql
-    for schema in migrate._APPLICATION_SCHEMAS:
+    for schema in policy.application_schemas:
         assert (
             f'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA "{schema}" '
             'FROM "fogmoe-dashboard";'
@@ -279,9 +323,12 @@ def test_reporting_grants_are_read_only_for_explicit_observability_models() -> N
             'FROM "fogmoe-dashboard";'
         ) in sql
 
-    for schema, relations in migrate._REPORTING_RELATIONS:
+    for relation_group in policy.reporting_relations:
+        schema = relation_group.schema
         assert f'GRANT USAGE ON SCHEMA "{schema}" TO "fogmoe-dashboard";' in sql
-        qualified = ", ".join(f'"{schema}"."{relation}"' for relation in relations)
+        qualified = ", ".join(
+            f'"{schema}"."{relation}"' for relation in relation_group.relations
+        )
         assert f'GRANT SELECT ON TABLE {qualified} TO "fogmoe-dashboard";' in sql
 
     for sensitive_schema in (
@@ -323,9 +370,9 @@ def test_reporting_grants_are_read_only_for_explicit_observability_models() -> N
     ):
         assert forbidden_grant not in sql
 
-    assert tuple(schema for schema, _relations in migrate._REPORTING_RELATIONS) == (
-        "observability",
-    )
+    assert tuple(
+        relation_group.schema for relation_group in policy.reporting_relations
+    ) == ("observability",)
 
 
 def test_bootstrap_hardens_reporting_role_and_database_ownership() -> None:
@@ -438,9 +485,9 @@ def test_migrate_applies_runtime_and_reporting_grants_atomically(
     """
 
     granted_sql: list[str] = []
-    monkeypatch.setattr(migrate, "run_alembic", lambda **_kwargs: None)
+    monkeypatch.setattr(migration_execution, "run_alembic", lambda **_kwargs: None)
     monkeypatch.setattr(
-        migrate,
+        migration_execution,
         "run_psql_grants",
         lambda *, settings, sql, dry_run: granted_sql.append(sql),
     )
@@ -503,9 +550,9 @@ def test_psql_grants_use_one_explicit_transaction(
         assert env["PGUSER"] == "fogmoe-maintenance"
         calls.append((command, input, check))
 
-    monkeypatch.setattr(migrate.subprocess, "run", fake_run)
+    monkeypatch.setattr(migration_execution.subprocess, "run", fake_run)
 
-    migrate.run_psql_grants(
+    migration_execution.run_psql_grants(
         settings=_settings(),
         sql="SELECT 1;",
         dry_run=False,

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fogmoe_dbctl.commands import migrate
+from fogmoe_dbctl.commands import access_sql
+from fogmoe_dbctl.commands.access_policy import DEFAULT_ACCESS_POLICY
 from fogmoe_dbctl.migrations import runner
 
 
@@ -80,17 +81,16 @@ def test_0065_closes_public_user_objects_with_one_trusted_extension_gate() -> No
 def test_grant_convergence_revokes_public_and_restores_only_application_types() -> None:
     """@brief grant 收敛先移除 PUBLIC/历史类型 ACL，再显式恢复应用依赖 / Grant convergence removes PUBLIC and historical type ACLs before restoring application dependencies."""
 
-    runtime_sql = migrate.build_runtime_grant_sql(
+    policy = DEFAULT_ACCESS_POLICY
+    runtime_sql = access_sql.build_runtime_grant_sql(
         database="fogmoe",
-        schemas=migrate._APPLICATION_SCHEMAS,
-        functions=migrate._APPLICATION_FUNCTIONS,
+        policy=policy,
         application_role="fogmoe-app",
         owner_role="fogmoe-maintenance",
     )
-    reporting_sql = migrate.build_reporting_grant_sql(
+    reporting_sql = access_sql.build_reporting_grant_sql(
         database="fogmoe",
-        owned_schemas=migrate._APPLICATION_SCHEMAS,
-        relations=migrate._REPORTING_RELATIONS,
+        policy=policy,
         reporting_role="fogmoe-dashboard",
         owner_role="fogmoe-maintenance",
     )
