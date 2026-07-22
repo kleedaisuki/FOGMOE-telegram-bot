@@ -215,7 +215,8 @@ kill <PID>
 # 编辑 runBot.sh 查看命令
 ```
 
-`runBot.sh stop` 默认最多等待 40 秒，让运行时完成分阶段排空；部署环境可通过
+`runBot.sh stop` 默认最多等待 200 秒：其中 180 秒供运行时完成分阶段排空，余下时间供
+Telegram、数据库与遥测资源关闭；部署环境可通过
 `BOT_STOP_TIMEOUT_SECONDS` 调整脚本的强制终止上限。
 
 ---
@@ -285,7 +286,8 @@ source .venv/bin/activate
    ```
 4. 查看日志：`docker compose logs -f bot`。Compose 默认用 `fogmoe-runtime` named volume 持久化
    文件日志、待投递媒体 artifact 与跨进程限流状态；如需直接查看宿主机文件，可把该挂载改成
-   `./logs:/app/logs`。Compose 的 40 秒停止宽限覆盖运行时默认 30 秒分阶段排空窗口。
+   `./logs:/app/logs`。Compose 的 200 秒停止宽限覆盖运行时默认 180 秒分阶段排空窗口，
+   并为外围资源关闭保留缓冲。
 5. 更新代码并重建/重启容器：
    ```bash
    git pull --ff-only && docker compose up -d --build bot

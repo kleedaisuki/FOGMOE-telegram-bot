@@ -9,7 +9,8 @@ VENV_DIR="$BOT_DIR/.venv"
 PYPROJECT_FILE="$BOT_DIR/pyproject.toml"
 CONFIG_FILE="$BOT_DIR/config.json"
 EXAMPLE_CONFIG_FILE="$BOT_DIR/example.config.json"
-STOP_TIMEOUT_SECONDS="${BOT_STOP_TIMEOUT_SECONDS:-40}"
+# 外层进程管理器必须晚于应用的 180 秒排空截止时间才可升级为 SIGKILL。
+STOP_TIMEOUT_SECONDS="${BOT_STOP_TIMEOUT_SECONDS:-200}"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -227,8 +228,8 @@ stop_bot() {
     # 尝试优雅地停止
     kill "$BOT_PID"
 
-    # BotRuntime 默认会在 30 秒 grace period 内按阶段排空；这里多留缓冲，
-    # 只在明确超时后才升级为 SIGKILL。
+    # BotRuntime 默认会在 180 秒 grace period 内按阶段排空；外层额外保留
+    # Telegram、数据库与遥测资源关闭所需的 20 秒缓冲。
     waited=0
     while ps -p "$BOT_PID" > /dev/null 2>&1 && [ "$waited" -lt "$STOP_TIMEOUT_SECONDS" ]; do
         sleep 1

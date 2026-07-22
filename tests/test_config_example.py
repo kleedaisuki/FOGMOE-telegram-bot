@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -142,3 +143,25 @@ def test_runtime_shutdown_grace_covers_serial_durable_drain_phases() -> None:
         mailbox=bot_config.MailboxRuntimeSettings(shutdown_grace_seconds=156.0)
     )
     assert valid.mailbox.shutdown_grace_seconds == 156.0
+
+
+def test_process_managers_outlive_runtime_shutdown_grace() -> None:
+    """@brief 外层进程管理器不能提前强杀仍在排空的运行时 / Outer process managers must not kill a runtime that is still draining.
+
+    @return None / None.
+    @note 同时约束宿主机脚本与 Compose，防止部署配置独立漂移。/
+        Constrains both the host script and Compose to prevent independent deployment drift.
+    """
+
+    repository = EXAMPLE_CONFIG_PATH.parent
+    runtime_grace = bot_config.MailboxRuntimeSettings().shutdown_grace_seconds
+    script = (repository / "runBot.sh").read_text(encoding="utf-8")
+    compose = (repository / "docker-compose.yml").read_text(encoding="utf-8")
+
+    script_timeout = re.search(r"BOT_STOP_TIMEOUT_SECONDS:-(\d+)", script)
+    compose_timeout = re.search(r"stop_grace_period:\s*(\d+)s", compose)
+
+    assert script_timeout is not None
+    assert compose_timeout is not None
+    assert int(script_timeout.group(1)) > runtime_grace
+    assert int(compose_timeout.group(1)) > runtime_grace
