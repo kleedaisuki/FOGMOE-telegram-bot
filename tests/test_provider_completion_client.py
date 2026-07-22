@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from datetime import timedelta
+import logging
 
 import aiohttp
 import pytest
@@ -21,9 +22,11 @@ from fogmoe_bot.domain.assistant.routing.models import (
     ProviderRoute,
     RouteModel,
 )
+from fogmoe_bot.domain.observability.signals import LogSignal, SpanSignal, SpanStatus
 from fogmoe_bot.infrastructure.llm.messages import MessageContractError
 from fogmoe_bot.infrastructure.llm.openai_codec import decode_openai_response
 from fogmoe_bot.infrastructure.llm.provider_completion import ProviderCompletionClient
+from fogmoe_bot.infrastructure.observability.logging import TelemetryLogHandler
 from fogmoe_bot.application.assistant.errors import (
     ProviderContractError,
     ProviderFailure,
@@ -50,14 +53,15 @@ def _message(role: str, parts: list[dict[str, object]]) -> CanonicalMessage:
     )
 
 
-def _client() -> ProviderCompletionClient:
+def _client(*, telemetry: Telemetry | None = None) -> ProviderCompletionClient:
     """@brief 构造不受环境代理影响的测试 client / Build a test client unaffected by environment proxy settings.
 
+    @param telemetry 可选的待观测 telemetry / Optional telemetry to inspect.
     @return 使用本地 aiohttp session 的 client / Client using a local aiohttp session.
     """
 
     return ProviderCompletionClient(
-        telemetry=Telemetry(TelemetryBuffer(64)),
+        telemetry=telemetry or Telemetry(TelemetryBuffer(64)),
         session_factory=aiohttp.ClientSession,
     )
 
@@ -174,6 +178,134 @@ def test_openrouter_style_request_maps_custom_metadata_and_tool_role() -> None:
         }
 
     asyncio.run(scenario())
+
+
+def test_provider_completion_emits_safe_correlated_lifecycle_logs() -> None:
+    """@brief 成功模型调用产生可关联、无内容的结构日志 / A successful model call emits correlated structured logs without content.
+
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 运行一个本地成功 provider 场景 / Run one successful local-provider scenario.
+
+        @return None / None.
+        """
+
+        async def completions(_: web.Request) -> web.Response:
+            """@brief 返回含敏感占位文本的成功结果 / Return a success result containing synthetic sensitive text.
+
+            @param _ 未使用的本地 request / Unused local request.
+            @return OpenAI-style 成功 response / OpenAI-style successful response.
+            """
+
+            return web.json_response(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "synthetic-provider-response-secret",
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 11, "completion_tokens": 3},
+                }
+            )
+
+        application = web.Application()
+        application.router.add_post("/chat/completions", completions)
+        runner = web.AppRunner(application)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        sockets = getattr(site._server, "sockets", None)
+        assert sockets
+        port = sockets[0].getsockname()[1]
+        try:
+            completion = await client.complete(
+                route=ProviderRoute(
+                    route_id="chat:0:observability-provider",
+                    provider_id="observability-provider",
+                    provider_label="Observability provider",
+                    style="openai",
+                    endpoint=f"http://127.0.0.1:{port}/chat/completions",
+                    auth=ProviderAuth(api_key="synthetic-provider-api-key"),
+                    models=(RouteModel("observability-test-model"),),
+                    meta={"tenant": "synthetic-route-meta-secret"},
+                ),
+                model="observability-test-model",
+                messages=(
+                    _message(
+                        "user",
+                        [
+                            {
+                                "type": "text",
+                                "text": "synthetic-user-prompt-secret",
+                            }
+                        ],
+                    ),
+                ),
+                tools=(),
+                tool_choice=None,
+                max_tokens=128,
+                timeout_seconds=None,
+                request_meta=normalize_request_meta(
+                    {"caller": "synthetic-request-meta-secret"}
+                ),
+            )
+        finally:
+            await client.aclose()
+            await runner.cleanup()
+        assert completion.content == "synthetic-provider-response-secret"
+
+    buffer = TelemetryBuffer(64)
+    telemetry = Telemetry(buffer)
+    client = _client(telemetry=telemetry)
+    completion_logger = logging.getLogger(
+        "fogmoe_bot.infrastructure.llm.provider_completion"
+    )
+    previous_level = completion_logger.level
+    handler = TelemetryLogHandler(telemetry)
+    completion_logger.addHandler(handler)
+    completion_logger.setLevel(logging.INFO)
+    try:
+        asyncio.run(scenario())
+    finally:
+        completion_logger.removeHandler(handler)
+        completion_logger.setLevel(previous_level)
+        handler.close()
+
+    signals = buffer.drain(64)
+    span = next(signal for signal in signals if isinstance(signal, SpanSignal))
+    logs = [signal for signal in signals if isinstance(signal, LogSignal)]
+    assert span.status is SpanStatus.OK
+    assert span.attributes["fogmoe.llm.route.id"] == "chat:0:observability-provider"
+    assert span.attributes["fogmoe.llm.wire.style"] == "openai"
+    assert span.attributes["fogmoe.llm.request.message.count"] == 1
+    assert span.attributes["fogmoe.llm.request.tool.count"] == 0
+    assert [log.event_name for log in logs] == [
+        "llm.completion.started",
+        "llm.completion.succeeded",
+    ]
+    assert all(log.trace_id == span.trace_id for log in logs)
+    assert all(log.span_id == span.span_id for log in logs)
+    assert logs[1].attributes["outcome"] == "success"
+    assert logs[1].attributes["http.response.status_code"] == 200
+    durable_values = "\n".join(
+        [
+            str(span.attributes),
+            *(f"{log.body}\n{log.attributes}" for log in logs),
+        ]
+    )
+    for secret in (
+        "synthetic-provider-api-key",
+        "synthetic-route-meta-secret",
+        "synthetic-request-meta-secret",
+        "synthetic-user-prompt-secret",
+        "synthetic-provider-response-secret",
+    ):
+        assert secret not in durable_values
 
 
 def test_route_and_caller_metadata_cannot_bypass_the_merged_size_limit() -> None:
@@ -415,13 +547,16 @@ def test_http_failure_is_typed_and_never_echoes_provider_body(
     @param kind 预期稳定 failure kind / Expected stable failure kind.
     """
 
+    provider_body_secret = "synthetic-provider-body-secret"
+    buffer = TelemetryBuffer(64)
+    telemetry = Telemetry(buffer)
+    client = _client(telemetry=telemetry)
+
     async def scenario() -> None:
         """@brief 调用返回失败的本地 OpenAI-style endpoint / Call a failing local OpenAI-style endpoint.
 
         @return None / None.
         """
-
-        provider_body_secret = "synthetic-provider-body-secret"
 
         async def completions(_: web.Request) -> web.Response:
             """@brief 返回包含不应泄漏文本的失败 response / Return a failing response containing text that must not leak.
@@ -446,7 +581,6 @@ def test_http_failure_is_typed_and_never_echoes_provider_body(
         sockets = getattr(site._server, "sockets", None)
         assert sockets
         port = sockets[0].getsockname()[1]
-        client = _client()
         route = ProviderRoute(
             route_id="failure-route",
             provider_id="failure-provider",
@@ -482,7 +616,38 @@ def test_http_failure_is_typed_and_never_echoes_provider_body(
         else:
             assert failure.retry_after is None
 
-    asyncio.run(scenario())
+    completion_logger = logging.getLogger(
+        "fogmoe_bot.infrastructure.llm.provider_completion"
+    )
+    previous_level = completion_logger.level
+    handler = TelemetryLogHandler(telemetry)
+    completion_logger.addHandler(handler)
+    completion_logger.setLevel(logging.INFO)
+    try:
+        asyncio.run(scenario())
+    finally:
+        completion_logger.removeHandler(handler)
+        completion_logger.setLevel(previous_level)
+        handler.close()
+
+    signals = buffer.drain(64)
+    span = next(signal for signal in signals if isinstance(signal, SpanSignal))
+    logs = [signal for signal in signals if isinstance(signal, LogSignal)]
+    assert span.status is SpanStatus.ERROR
+    assert span.attributes["fogmoe.llm.failure.kind"] == kind.value
+    assert [log.event_name for log in logs] == [
+        "llm.completion.started",
+        "llm.completion.failed",
+    ]
+    assert logs[-1].attributes["fogmoe.llm.failure.kind"] == kind.value
+    assert logs[-1].attributes["http.response.status_code"] == status
+    assert all(log.trace_id == span.trace_id for log in logs)
+    assert all(log.span_id == span.span_id for log in logs)
+    durable_values = "\n".join(
+        f"{log.body}\n{log.attributes}" for log in logs
+    )
+    assert provider_body_secret not in durable_values
+    assert "test-key" not in durable_values
 
 
 @pytest.mark.parametrize(

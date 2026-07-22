@@ -52,6 +52,9 @@ class EventName(StrEnum):
     INBOX_PROCESS_FAILED = "inbox.process.failed"
     INFERENCE_ATTEMPT_FAILED = "inference.attempt.failed"
     OUTBOX_DELIVERY_FAILED = "outbox.delivery.failed"
+    LLM_COMPLETION_STARTED = "llm.completion.started"
+    LLM_COMPLETION_SUCCEEDED = "llm.completion.succeeded"
+    LLM_COMPLETION_FAILED = "llm.completion.failed"
 
 
 __all__ = ["EventName", "MetricName", "Outcome"]

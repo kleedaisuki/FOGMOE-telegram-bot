@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -20,6 +21,11 @@ from email.utils import parsedate_to_datetime
 
 import aiohttp
 
+from fogmoe_bot.application.assistant.errors import (
+    ProviderContractError,
+    ProviderFailure,
+    ProviderFailureKind,
+)
 from fogmoe_bot.application.assistant.completion import AssistantCompletion
 from fogmoe_bot.application.assistant.tools.catalog import ToolDefinition
 from fogmoe_bot.application.observability.telemetry import SpanScope, Telemetry
@@ -31,22 +37,20 @@ from fogmoe_bot.domain.assistant.request_metadata import (
 )
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
 from fogmoe_bot.domain.conversation.payloads import JsonObject
-from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
+from fogmoe_bot.domain.observability.conventions import EventName, MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind
 from fogmoe_bot.infrastructure.network.proxy import create_aiohttp_session
 
 from .anthropic_codec import decode_anthropic_response, encode_anthropic_request
 from .messages import MessageContractError, ProviderPayload
 from .openai_codec import decode_openai_response, encode_openai_request
-from fogmoe_bot.application.assistant.errors import (
-    ProviderContractError,
-    ProviderFailure,
-    ProviderFailureKind,
-)
 from .provider_response import DecodedProviderCompletion
 
 type SessionFactory = Callable[[], aiohttp.ClientSession]
 """@brief 无参数 aiohttp session 工厂 / Zero-argument aiohttp session factory."""
+
+logger = logging.getLogger(__name__)
+"""@brief LLM completion adapter 日志器 / LLM-completion adapter logger."""
 
 _DEFAULT_TIMEOUT_SECONDS = 90.0
 """@brief 单个 LLM 请求的默认总 deadline / Default total deadline for one LLM request."""
@@ -163,17 +167,20 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
         ):
             raise ProviderContractError("timeout_seconds must be a positive finite number")
 
-        attributes = {
-            "gen_ai.operation.name": "chat",
-            "gen_ai.provider.name": route.provider_id,
-            "gen_ai.request.model": model,
-            "gen_ai.request.max_tokens": max_tokens,
-        }
+        attributes = _completion_attributes(
+            route=route,
+            model=model,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+        )
         with self._telemetry.span(
             "chat",
             kind=SpanKind.CLIENT,
             attributes=attributes,
         ) as span:
+            response_status: int | None = None
+            response_size: int | None = None
             try:
                 metadata = _request_metadata(route, request_meta)
                 payload = self._encode_request(
@@ -187,6 +194,14 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
                 )
                 session = await self._get_session()
                 deadline = timeout_seconds or self._default_timeout_seconds
+                logger.info(
+                    "LLM completion request started provider=%s model=%s route_id=%s style=%s",
+                    route.provider_id,
+                    model,
+                    route.route_id,
+                    route.style,
+                    extra=_log_extra(EventName.LLM_COMPLETION_STARTED, attributes),
+                )
                 async with session.post(
                     route.endpoint,
                     json=payload,
@@ -197,8 +212,10 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
                         response,
                         maximum_bytes=self._max_response_bytes,
                     )
-                    span.set_attribute("http.response.status_code", response.status)
-                    span.set_attribute("http.response.body.size", len(raw))
+                    response_status = response.status
+                    response_size = len(raw)
+                    span.set_attribute("http.response.status_code", response_status)
+                    span.set_attribute("http.response.body.size", response_size)
                     if not 200 <= response.status < 300:
                         raise _http_failure(response, raw)
                 decoded = self._decode_response(route, _decode_json_object(raw))
@@ -206,7 +223,14 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
             except asyncio.CancelledError:
                 raise
             except ProviderFailure as error:
-                self._record_failure(route, model, error)
+                self._record_failure(
+                    route=route,
+                    model=model,
+                    error=error,
+                    span=span,
+                    attributes=attributes,
+                    response_status=response_status,
+                )
                 raise
             except (aiohttp.ClientError, TimeoutError) as error:
                 failure = ProviderFailure(
@@ -220,7 +244,14 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
                         f"{type(error).__name__}"
                     ),
                 )
-                self._record_failure(route, model, failure)
+                self._record_failure(
+                    route=route,
+                    model=model,
+                    error=failure,
+                    span=span,
+                    attributes=attributes,
+                    response_status=response_status,
+                )
                 raise failure from error
             except (
                 CanonicalMessageError,
@@ -234,7 +265,14 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
                 failure = ProviderContractError(
                     "LLM request or response violated the provider contract"
                 )
-                self._record_failure(route, model, failure)
+                self._record_failure(
+                    route=route,
+                    model=model,
+                    error=failure,
+                    span=span,
+                    attributes=attributes,
+                    response_status=response_status,
+                )
                 raise failure from error
             self._record_usage(route, model, span, decoded)
             self._telemetry.counter(
@@ -244,6 +282,25 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
                     "gen_ai.provider.name": route.provider_id,
                     "gen_ai.request.model": model,
                 },
+            )
+            assert response_status is not None
+            assert response_size is not None
+            logger.info(
+                "LLM completion succeeded provider=%s model=%s route_id=%s style=%s http_status=%s",
+                route.provider_id,
+                model,
+                route.route_id,
+                route.style,
+                response_status,
+                extra=_log_extra(
+                    EventName.LLM_COMPLETION_SUCCEEDED,
+                    {
+                        **attributes,
+                        "outcome": Outcome.SUCCESS,
+                        "http.response.status_code": response_status,
+                        "http.response.body.size": response_size,
+                    },
+                ),
             )
         return completion
 
@@ -375,31 +432,109 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
 
     def _record_failure(
         self,
+        *,
         route: ProviderRoute,
         model: str,
         error: ProviderFailure,
+        span: SpanScope,
+        attributes: Mapping[str, str | int],
+        response_status: int | None,
     ) -> None:
-        """@brief 写入一次失败 outcome metric / Write one failed outcome metric.
+        """@brief 写入失败 span 属性、metric 与结构日志 / Write failed-span attributes, metric, and structured log.
 
         @param route 自包含 route / Self-contained route.
         @param model 模型名 / Model name.
         @param error 已分类 provider failure / Classified provider failure.
+        @param span 当前活跃 LLM span / Active LLM span.
+        @param attributes 已审计的请求归因属性 / Audited request-attribution attributes.
+        @param response_status 已收到的 HTTP 状态码 / Received HTTP status when available.
         @return None / None.
         """
 
+        outcome = (
+            Outcome.TIMEOUT
+            if error.kind is ProviderFailureKind.TIMEOUT
+            else Outcome.FAILURE
+        )
+        status = error.status if error.status is not None else response_status
+        span.set_attribute("fogmoe.llm.failure.kind", error.kind.value)
+        if status is not None:
+            span.set_attribute("http.response.status_code", status)
         self._telemetry.counter(
             MetricName.LLM_OUTCOMES,
             attributes={
-                "outcome": (
-                    Outcome.TIMEOUT
-                    if error.kind is ProviderFailureKind.TIMEOUT
-                    else Outcome.FAILURE
-                ),
+                "outcome": outcome,
                 "gen_ai.provider.name": route.provider_id,
                 "gen_ai.request.model": model,
                 "fogmoe.llm.failure.kind": error.kind.value,
             },
         )
+        log_attributes: dict[str, str | int] = {
+            **attributes,
+            "outcome": outcome,
+            "fogmoe.llm.failure.kind": error.kind.value,
+        }
+        if status is not None:
+            log_attributes["http.response.status_code"] = status
+        logger.warning(
+            "LLM completion failed provider=%s model=%s route_id=%s style=%s failure_kind=%s http_status=%s",
+            route.provider_id,
+            model,
+            route.route_id,
+            route.style,
+            error.kind.value,
+            status,
+            extra=_log_extra(EventName.LLM_COMPLETION_FAILED, log_attributes),
+        )
+
+
+def _completion_attributes(
+    *,
+    route: ProviderRoute,
+    model: str,
+    messages: Sequence[CanonicalMessage],
+    tools: Sequence[ToolDefinition],
+    max_tokens: int,
+) -> dict[str, str | int]:
+    """@brief 构造不含内容或凭据的模型调用归因 / Build model-call attribution without content or credentials.
+
+    @param route 本次调用的完整 route / Complete route for this call.
+    @param model 被选择的模型名 / Selected model name.
+    @param messages canonical 消息序列；仅记录数量 / Canonical messages; only the count is recorded.
+    @param tools 工具定义序列；仅记录数量 / Tool definitions; only the count is recorded.
+    @param max_tokens 输出 token 上限 / Output-token limit.
+    @return 可写入 span 与日志的平坦安全属性 / Flat safe attributes for spans and logs.
+    @note 不得加入 endpoint、headers、request metadata、prompt、tool arguments 或 response body /
+        Do not add the endpoint, headers, request metadata, prompt, tool arguments, or response body.
+    """
+
+    return {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": route.provider_id,
+        "gen_ai.request.model": model,
+        "gen_ai.request.max_tokens": max_tokens,
+        "fogmoe.llm.route.id": route.route_id,
+        "fogmoe.llm.wire.style": route.style,
+        "fogmoe.llm.request.message.count": len(messages),
+        "fogmoe.llm.request.tool.count": len(tools),
+    }
+
+
+def _log_extra(
+    event_name: EventName,
+    attributes: Mapping[str, str | int],
+) -> dict[str, object]:
+    """@brief 构造结构日志的事件与安全属性 / Build event and safe attributes for a structured log.
+
+    @param event_name 稳定低基数事件名 / Stable low-cardinality event name.
+    @param attributes 已审计的平坦属性 / Audited flat attributes.
+    @return 可传给 ``logging`` 的 extra 映射 / Extra mapping accepted by ``logging``.
+    """
+
+    return {
+        "event_name": event_name,
+        "telemetry_attributes": dict(attributes),
+    }
 
 
 def _default_session_factory() -> aiohttp.ClientSession:
