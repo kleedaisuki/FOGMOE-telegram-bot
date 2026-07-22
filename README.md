@@ -191,6 +191,8 @@ fogmoe-dbctl shell
 ~~~
 
 Python 异步 API、全部视图参数和生产安全边界见 [Dashboard 文档](docs/dashboard.md)。
+从症状建立 CPU/事务/表访问证据链、复现实验并评审优化方案，见
+[运行时 Profiling、诊断与优化 Runbook](docs/runtime-profiling.md)。
 
 ### 启动机器人
 

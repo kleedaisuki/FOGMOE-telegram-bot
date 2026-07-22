@@ -4,6 +4,9 @@
 > 审计基线：2026-07-11，重构开始前的 Git `HEAD`；实现状态更新于 2026-07-14。
 > 运行环境：Python 3.14、PostgreSQL、python-telegram-bot（PTB）。
 
+生产 profiling 的采样公式、dbctl/Dashboard 排障顺序、事务归因、复测方法与本轮案例见
+[运行时 Profiling、诊断与优化 Runbook](runtime-profiling.md)。
+
 ## 1. 范围与约束
 
 本文处理的不是一次目录美化，而是执行模型的替换。现有功能语义——Telegram 命令、账户与经济规则、AI 对话、群管理、游戏、媒体和定时任务——需要保留；旧模块、旧函数签名、同步 facade（门面）和进程内状态布局不构成兼容契约，可以直接删除。
