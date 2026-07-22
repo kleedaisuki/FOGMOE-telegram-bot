@@ -1,7 +1,7 @@
 """@brief 数据库控制面配置输入边界 / Configuration input boundary for the database control plane.
 
-本模块只读取控制面拥有的数据库职责：维护、迁移与 bootstrap。它从同一份用户
-语义化 ``config.json`` 取得字段，但不依赖 Bot 或 Dashboard 的配置服务。
+本模块只读取控制面拥有的数据库职责：应用、维护、报表、迁移与 bootstrap。它从
+同一份用户语义化 ``config.json`` 取得字段，但不依赖 Bot 或 Dashboard 的配置服务。
 """
 
 from __future__ import annotations
@@ -10,9 +10,16 @@ from collections.abc import Mapping
 import json
 from math import isfinite
 from pathlib import Path
-from typing import Annotated, Final, Literal, Never, cast
+from typing import Annotated, Final, Literal, Never, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    model_validator,
+)
 
 
 type JSONValue = (
@@ -235,6 +242,13 @@ class MaintenanceRoleSettings(_FrozenSettings):
     migration_schema: str = "infra"
 
 
+class ReportingRoleSettings(_FrozenSettings):
+    """@brief 只读报表登录角色 / Read-only reporting login role."""
+
+    username: str = "fogmoe-dashboard"
+    password: SecretStr | None = None
+
+
 class BootstrapSettings(_FrozenSettings):
     """@brief PostgreSQL bootstrap 设置 / PostgreSQL bootstrap settings."""
 
@@ -255,8 +269,33 @@ class DbctlSettings(_FrozenSettings):
     maintenance: MaintenanceRoleSettings = Field(
         default_factory=MaintenanceRoleSettings
     )
+    reporting: ReportingRoleSettings = Field(default_factory=ReportingRoleSettings)
     bootstrap: BootstrapSettings = Field(default_factory=BootstrapSettings)
     administrator: AdministratorSettings = Field(default_factory=AdministratorSettings)
+
+    @model_validator(mode="after")
+    def require_distinct_login_roles(self) -> Self:
+        """@brief 强制三个数据库登录身份两两不同 / Require all three database login identities to be pairwise distinct.
+
+        @return 已验证设置 / Validated settings.
+        @raise ValueError 任意两个登录角色名相同时抛出 /
+            Raised when any two login role names are equal.
+        @note 角色分离是授权模型不变量，不能留给 bootstrap 执行顺序补救。/
+            Role separation is an authorization-model invariant and must not be
+            deferred to bootstrap execution order.
+        """
+
+        usernames = (
+            self.application.username,
+            self.maintenance.username,
+            self.reporting.username,
+        )
+        if len(set(usernames)) != len(usernames):
+            raise ValueError(
+                "database.application.username, database.maintenance.username, "
+                "and database.reporting.username must be pairwise distinct"
+            )
+        return self
 
 
 def default_config_path() -> Path:
@@ -337,6 +376,7 @@ def _dbctl_payload(document: Mapping[str, JSONValue]) -> dict[str, object]:
             if key in {"username", "password"}
         },
         "maintenance": _object_at(database, "maintenance"),
+        "reporting": _object_at(database, "reporting"),
         "bootstrap": _object_at(database, "bootstrap"),
         "administrator": {
             key: value for key, value in administrator.items() if key == "user_id"
@@ -382,6 +422,7 @@ __all__ = [
     "DbctlSettings",
     "EndpointSettings",
     "MaintenanceRoleSettings",
+    "ReportingRoleSettings",
     "RuntimeRoleSettings",
     "SCHEMA_VERSION",
     "default_config_path",

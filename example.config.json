@@ -470,11 +470,11 @@
       // Alembic 版本表所在的 schema。
       "migration_schema": "infra"
     },
-    // Dashboard 只读报表使用的独立数据库身份。
+    // 由 dbctl 管理、Dashboard 只读报表使用的独立数据库身份；不得与应用或维护身份复用。
     "reporting": {
-      // Dashboard 最小权限只读数据库角色名。
+      // Dashboard 最小权限角色名；bootstrap 默认只读事务，migrate 仅授予 SELECT 能力。
       "username": "fogmoe-dashboard",
-      // Dashboard 数据库角色的密码。
+      // dbctl bootstrap 创建或更新该报表登录角色时使用的密码。
       "password": null
     },
     // 首次创建数据库与角色时的本机 PostgreSQL 管理身份。

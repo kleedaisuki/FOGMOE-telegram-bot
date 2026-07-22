@@ -54,17 +54,18 @@ def configure_parser(subparsers: Any) -> None:
 
     parser = subparsers.add_parser(
         "migrate",
-        help="Run Alembic migrations and grant configured application access.",
+        help="Run Alembic migrations and grant runtime/reporting access.",
         description=(
             "Upgrade the configured database with the maintenance role, then grant "
-            "the configured application role runtime privileges."
+            "the application role runtime privileges and the reporting role read-only "
+            "privileges."
         ),
     )
     parser.add_argument("--revision", default="head")
     parser.add_argument(
         "--skip-grants",
         action="store_true",
-        help="Run migrations without granting runtime privileges to the application role.",
+        help="Run migrations without granting application or reporting privileges.",
     )
     parser.add_argument(
         "--dry-run",
@@ -167,6 +168,76 @@ def build_runtime_grant_sql(
     return "\n".join(statements) + "\n"
 
 
+def build_reporting_grant_sql(
+    *,
+    database: str,
+    schemas: tuple[str, ...],
+    reporting_role: str,
+    owner_role: str,
+) -> str:
+    """@brief 构造报表角色的严格只读授权 SQL / Build strict read-only grants for the reporting role.
+
+    @param database 应用数据库名 / Application database name.
+    @param schemas 应用 schema 列表 / Application schema list.
+    @param reporting_role 只读报表角色名 / Read-only reporting role name.
+    @param owner_role 对象 owner 角色名 / Object owner role name.
+    @return 可执行 SQL / Executable SQL.
+    @note 先撤销既有显式权限再授予闭集：数据库 CONNECT、schema USAGE 与表
+        SELECT；默认表权限采用同一闭集。Dashboard 不读取序列，因此序列权限保持
+        为空。/ Existing explicit privileges are revoked before granting the closed
+        set of database CONNECT, schema USAGE, and table SELECT privileges, with the
+        same closed set applied to default table privileges. Dashboard does not read
+        sequences, so sequence privileges remain empty.
+    """
+
+    database_ident = quote_identifier(database)
+    reporting_ident = quote_identifier(reporting_role)
+    owner_ident = quote_identifier(owner_role)
+    statements = [
+        (f"REVOKE ALL PRIVILEGES ON DATABASE {database_ident} FROM {reporting_ident};"),
+        f"GRANT CONNECT ON DATABASE {database_ident} TO {reporting_ident};",
+    ]
+    for schema in schemas:
+        schema_ident = quote_identifier(schema)
+        statements.extend(
+            [
+                (
+                    f"REVOKE ALL PRIVILEGES ON SCHEMA {schema_ident} "
+                    f"FROM {reporting_ident};"
+                ),
+                f"GRANT USAGE ON SCHEMA {schema_ident} TO {reporting_ident};",
+                (
+                    f"REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA {schema_ident} "
+                    f"FROM {reporting_ident};"
+                ),
+                (
+                    f"GRANT SELECT ON ALL TABLES IN SCHEMA {schema_ident} "
+                    f"TO {reporting_ident};"
+                ),
+                (
+                    f"REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA {schema_ident} "
+                    f"FROM {reporting_ident};"
+                ),
+                (
+                    f"ALTER DEFAULT PRIVILEGES FOR ROLE {owner_ident} "
+                    f"IN SCHEMA {schema_ident} REVOKE ALL PRIVILEGES ON TABLES "
+                    f"FROM {reporting_ident};"
+                ),
+                (
+                    f"ALTER DEFAULT PRIVILEGES FOR ROLE {owner_ident} "
+                    f"IN SCHEMA {schema_ident} GRANT SELECT ON TABLES "
+                    f"TO {reporting_ident};"
+                ),
+                (
+                    f"ALTER DEFAULT PRIVILEGES FOR ROLE {owner_ident} "
+                    f"IN SCHEMA {schema_ident} REVOKE ALL PRIVILEGES ON SEQUENCES "
+                    f"FROM {reporting_ident};"
+                ),
+            ]
+        )
+    return "\n".join(statements) + "\n"
+
+
 def run_psql_grants(
     *,
     settings: DbctlSettings,
@@ -225,9 +296,20 @@ def execute(args: argparse.Namespace, *, settings: DbctlSettings) -> None:
         ),
         dry_run=args.dry_run,
     )
+    run_psql_grants(
+        settings=settings,
+        sql=build_reporting_grant_sql(
+            database=settings.endpoint.name,
+            schemas=_APPLICATION_SCHEMAS,
+            reporting_role=settings.reporting.username,
+            owner_role=settings.maintenance.username,
+        ),
+        dry_run=args.dry_run,
+    )
 
 
 __all__ = [
+    "build_reporting_grant_sql",
     "build_runtime_grant_sql",
     "configure_parser",
     "execute",
