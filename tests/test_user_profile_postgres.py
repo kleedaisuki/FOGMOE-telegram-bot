@@ -20,7 +20,7 @@ from fogmoe_bot.domain.user_profile.models import (
     UpsertProfileClaim,
     apply_profile_patch,
 )
-from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db as db_connection
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.user_profile.store import (
     PostgresUserProfileStore,
@@ -50,7 +50,9 @@ def test_projection_job_claim_and_revision_converge_under_concurrency(
         suffix = uuid4().hex
         user_id = 7_000_000_000_000_000_000 + int(suffix[:12], 16)
         turn_id = uuid4()
-        now = datetime(2036, 2, 3, 4, 5, tzinfo=UTC)
+        now = datetime(2000, 1, 1, tzinfo=UTC) + timedelta(
+            microseconds=int(suffix[:12], 16) % 1_000_000
+        )
         store = PostgresUserProfileStore()
         try:
             async with db_connection.transaction() as connection:
@@ -94,24 +96,30 @@ def test_projection_job_claim_and_revision_converge_under_concurrency(
             )
             assert evidence_count is not None and evidence_count[0] == 1
 
-            enqueued = await asyncio.gather(
-                *(
-                    store.enqueue_eligible(
-                        now=now,
-                        limit=4,
-                        max_events_per_dream=16,
-                        max_evidence_chars=60_000,
-                    )
-                    for _ in range(8)
-                )
+            unrelated_ready = await db_connection.fetch_one(
+                "SELECT "
+                "(SELECT COUNT(*) FROM user_profile.profiles "
+                "WHERE user_id <> %s AND next_eligible_at <= %s) + "
+                "(SELECT COUNT(*) FROM user_profile.dreams "
+                "WHERE user_id <> %s AND status IN ('pending','retry_wait') "
+                "AND next_attempt_at <= %s)",
+                (user_id, now, user_id, now),
             )
-            assert sum(enqueued) == 1
+            assert unrelated_ready is not None and unrelated_ready[0] == 0
+
+            enqueued = await store.enqueue_eligible(
+                now=now,
+                limit=1,
+                max_events_per_dream=16,
+                max_evidence_chars=60_000,
+            )
+            assert enqueued == 1
 
             claimed_batches = await asyncio.gather(
                 *(
                     store.claim_dreams(
                         now=now,
-                        limit=4,
+                        limit=1,
                         lease_for=timedelta(minutes=2),
                     )
                     for _ in range(8)
@@ -119,7 +127,30 @@ def test_projection_job_claim_and_revision_converge_under_concurrency(
             )
             claims = tuple(claim for batch in claimed_batches for claim in batch)
             assert len(claims) == 1
-            claim = claims[0]
+            expired_claim = claims[0]
+            assert (
+                await store.recover_expired_dream_leases(now=now + timedelta(minutes=1))
+                == 0
+            )
+            assert (
+                await store.recover_expired_dream_leases(now=now + timedelta(minutes=2))
+                == 1
+            )
+            reclaimed_batches = await asyncio.gather(
+                *(
+                    store.claim_dreams(
+                        now=now + timedelta(minutes=2),
+                        limit=1,
+                        lease_for=timedelta(minutes=2),
+                    )
+                    for _ in range(8)
+                )
+            )
+            reclaimed = tuple(claim for batch in reclaimed_batches for claim in batch)
+            assert len(reclaimed) == 1
+            claim = reclaimed[0]
+            assert claim.claim_token != expired_claim.claim_token
+            assert claim.attempt_count == expired_claim.attempt_count + 1
             event_id = claim.evidence[0].event_id
             result = DreamResult(
                 ProfilePatch(
@@ -141,11 +172,19 @@ def test_projection_job_claim_and_revision_converge_under_concurrency(
                 result.patch,
                 evidence=claim.evidence,
             )
+            with pytest.raises(StaleDreamClaimError):
+                await store.complete_dream(
+                    expired_claim,
+                    result,
+                    document=document,
+                    completed_at=now + timedelta(minutes=2, seconds=1),
+                    refresh_after=timedelta(hours=6),
+                )
             completed = await store.complete_dream(
                 claim,
                 result,
                 document=document,
-                completed_at=now + timedelta(seconds=1),
+                completed_at=now + timedelta(minutes=2, seconds=1),
                 refresh_after=timedelta(hours=6),
             )
 
@@ -158,7 +197,7 @@ def test_projection_job_claim_and_revision_converge_under_concurrency(
                     claim,
                     result,
                     document=document,
-                    completed_at=now + timedelta(seconds=2),
+                    completed_at=now + timedelta(minutes=2, seconds=2),
                     refresh_after=timedelta(hours=6),
                 )
         finally:
