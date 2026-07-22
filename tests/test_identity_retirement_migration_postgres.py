@@ -635,6 +635,13 @@ def _seed_legacy_0068_messages(
             '81000000-0000-4000-8000-000000000002', 'tool',
             '{"tool_call_id":"call-tool","name":"lookup","content":"{\\"answer\\":42}"}'::JSONB,
             'canonical-v2:legacy-projectable:tool', CURRENT_TIMESTAMP
+          ),
+          (
+            '82000000-0000-4000-8000-000000000007',
+            'canonical-v2:legacy-projectable', 6,
+            '81000000-0000-4000-8000-000000000002', 'user',
+            '{"marker":"written-by-v2-runtime-before-migration","model_message":{"schema_version":2,"role":"user","parts":[{"type":"text","text":"already canonical user text"}],"policy":{"include_in_context":true},"meta":{"source":"runtime"}}}'::JSONB,
+            'canonical-v2:legacy-projectable:already-v2', CURRENT_TIMESTAMP
           );
 
         INSERT INTO context_window.compactions (
@@ -916,7 +923,7 @@ def test_0068_converts_legacy_projectable_rows_and_rejects_non_object_tools() ->
                 """
                 SELECT count(*)
                 FROM conversation.conversation_messages
-                WHERE conversation_id = 'canonical-v2:legacy-projectable'
+            WHERE conversation_id = 'canonical-v2:legacy-projectable'
                   AND content #>> '{model_message,schema_version}' = '2'
                   AND content #>> '{model_message,policy,include_in_context}' = 'true'
                   AND content #> '{model_message,meta}' = '{}'::JSONB
@@ -991,6 +998,20 @@ def test_0068_converts_legacy_projectable_rows_and_rejects_non_object_tools() ->
                 """,
             )
             == "tool:tool_result:42"
+        )
+        assert (
+            _scalar(
+                cluster,
+                success,
+                """
+                SELECT (content #>> '{model_message,parts,0,text}') || ':' ||
+                  (content #>> '{model_message,meta,source}') || ':' ||
+                  (content ->> 'marker')
+                FROM conversation.conversation_messages
+                WHERE message_id = '82000000-0000-4000-8000-000000000007';
+                """,
+            )
+            == "already canonical user text:runtime:written-by-v2-runtime-before-migration"
         )
         expected_snapshot_digest = compaction_source_digest(
             (

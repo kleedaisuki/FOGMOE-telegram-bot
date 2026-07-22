@@ -204,6 +204,262 @@ BEGIN
 END;
 $fogmoe_0068_content$;
 
+-- @brief 验证在 0068 前已由新 runtime 写入的 canonical V2 消息 / Validate canonical V2 messages already written by the new runtime before 0068.
+CREATE FUNCTION conversation.require_canonical_message_v2(
+  message_value JSONB,
+  location TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $fogmoe_0068_existing_v2$
+DECLARE
+  role_value TEXT;
+  policy_value JSONB;
+  part_record RECORD;
+  part_value JSONB;
+  part_type TEXT;
+  source_value JSONB;
+  source_kind TEXT;
+  identifier_value TEXT;
+BEGIN
+  IF jsonb_typeof(message_value) <> 'object' THEN
+    RAISE EXCEPTION
+      'canonical V2 message at % must be an object',
+      location
+      USING ERRCODE = '22023';
+  END IF;
+  IF jsonb_typeof(message_value -> 'schema_version') IS DISTINCT FROM 'number'
+    OR (message_value ->> 'schema_version') <> '2' THEN
+    RAISE EXCEPTION
+      'canonical message at % has an unsupported schema_version',
+      location
+      USING ERRCODE = '22023';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_object_keys(message_value) AS key_value(key)
+    WHERE key_value.key NOT IN ('schema_version', 'role', 'parts', 'policy', 'meta')
+  ) THEN
+    RAISE EXCEPTION
+      'canonical message at % has unsupported top-level keys',
+      location
+      USING ERRCODE = '22023';
+  END IF;
+  IF jsonb_typeof(message_value -> 'role') IS DISTINCT FROM 'string' THEN
+    RAISE EXCEPTION
+      'canonical message at % has an invalid role',
+      location
+      USING ERRCODE = '22023';
+  END IF;
+  role_value := message_value ->> 'role';
+  IF role_value NOT IN ('system', 'user', 'assistant', 'tool') THEN
+    RAISE EXCEPTION
+      'canonical message at % has an unsupported role %',
+      location,
+      role_value
+      USING ERRCODE = '22023';
+  END IF;
+  IF jsonb_typeof(message_value -> 'parts') IS DISTINCT FROM 'array'
+    OR jsonb_array_length(message_value -> 'parts') = 0 THEN
+    RAISE EXCEPTION
+      'canonical message at % must contain a non-empty parts array',
+      location
+      USING ERRCODE = '22023';
+  END IF;
+  IF message_value ? 'policy' THEN
+    policy_value := message_value -> 'policy';
+    IF jsonb_typeof(policy_value) NOT IN ('object', 'null') THEN
+      RAISE EXCEPTION
+        'canonical message policy at % must be an object or null',
+        location
+        USING ERRCODE = '22023';
+    END IF;
+    IF jsonb_typeof(policy_value) = 'object' THEN
+      IF EXISTS (
+        SELECT 1
+        FROM jsonb_object_keys(policy_value) AS key_value(key)
+        WHERE key_value.key <> 'include_in_context'
+      ) OR (
+        policy_value ? 'include_in_context'
+        AND jsonb_typeof(policy_value -> 'include_in_context') IS DISTINCT FROM 'boolean'
+      ) THEN
+        RAISE EXCEPTION
+          'canonical message policy at % is invalid',
+          location
+          USING ERRCODE = '22023';
+      END IF;
+    END IF;
+  END IF;
+  IF message_value ? 'meta'
+    AND jsonb_typeof(message_value -> 'meta') IS DISTINCT FROM 'object' THEN
+    RAISE EXCEPTION
+      'canonical message meta at % must be an object',
+      location
+      USING ERRCODE = '22023';
+  END IF;
+
+  FOR part_record IN
+    SELECT expanded.value, expanded.ordinality
+    FROM jsonb_array_elements(message_value -> 'parts')
+      WITH ORDINALITY AS expanded(value, ordinality)
+    ORDER BY expanded.ordinality
+  LOOP
+    part_value := part_record.value;
+    IF jsonb_typeof(part_value) <> 'object'
+      OR jsonb_typeof(part_value -> 'type') IS DISTINCT FROM 'string' THEN
+      RAISE EXCEPTION
+        'canonical message part at %[%] must be a typed object',
+        location,
+        part_record.ordinality
+        USING ERRCODE = '22023';
+    END IF;
+    part_type := part_value ->> 'type';
+    IF (
+      role_value IN ('system', 'user') AND part_type NOT IN ('text', 'image')
+    ) OR (
+      role_value = 'assistant' AND part_type NOT IN ('text', 'tool_call')
+    ) OR (
+      role_value = 'tool' AND part_type <> 'tool_result'
+    ) THEN
+      RAISE EXCEPTION
+        'canonical message part at %[%] is not allowed for role %',
+        location,
+        part_record.ordinality,
+        role_value
+        USING ERRCODE = '22023';
+    END IF;
+
+    IF part_type = 'text' THEN
+      IF EXISTS (
+        SELECT 1
+        FROM jsonb_object_keys(part_value) AS key_value(key)
+        WHERE key_value.key NOT IN ('type', 'text')
+      ) OR jsonb_typeof(part_value -> 'text') IS DISTINCT FROM 'string' THEN
+        RAISE EXCEPTION
+          'canonical text part at %[%] is invalid',
+          location,
+          part_record.ordinality
+          USING ERRCODE = '22023';
+      END IF;
+    ELSIF part_type = 'image' THEN
+      IF EXISTS (
+        SELECT 1
+        FROM jsonb_object_keys(part_value) AS key_value(key)
+        WHERE key_value.key NOT IN ('type', 'source')
+      ) OR jsonb_typeof(part_value -> 'source') IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION
+          'canonical image part at %[%] is invalid',
+          location,
+          part_record.ordinality
+          USING ERRCODE = '22023';
+      END IF;
+      source_value := part_value -> 'source';
+      source_kind := source_value ->> 'kind';
+      IF source_kind = 'url' THEN
+        IF EXISTS (
+          SELECT 1
+          FROM jsonb_object_keys(source_value) AS key_value(key)
+          WHERE key_value.key NOT IN ('kind', 'url')
+        ) OR jsonb_typeof(source_value -> 'url') IS DISTINCT FROM 'string'
+          OR btrim(source_value ->> 'url') = '' THEN
+          RAISE EXCEPTION
+            'canonical URL image source at %[%] is invalid',
+            location,
+            part_record.ordinality
+            USING ERRCODE = '22023';
+        END IF;
+      ELSIF source_kind = 'base64' THEN
+        IF EXISTS (
+          SELECT 1
+          FROM jsonb_object_keys(source_value) AS key_value(key)
+          WHERE key_value.key NOT IN ('kind', 'media_type', 'data')
+        ) OR jsonb_typeof(source_value -> 'media_type') IS DISTINCT FROM 'string'
+          OR jsonb_typeof(source_value -> 'data') IS DISTINCT FROM 'string'
+          OR (source_value ->> 'media_type') NOT LIKE 'image/%'
+          OR btrim(source_value ->> 'data') = '' THEN
+          RAISE EXCEPTION
+            'canonical base64 image source at %[%] is invalid',
+            location,
+            part_record.ordinality
+            USING ERRCODE = '22023';
+        END IF;
+      ELSE
+        RAISE EXCEPTION
+          'canonical image source at %[%] has an unsupported kind',
+          location,
+          part_record.ordinality
+          USING ERRCODE = '22023';
+      END IF;
+    ELSIF part_type = 'tool_call' THEN
+      IF EXISTS (
+        SELECT 1
+        FROM jsonb_object_keys(part_value) AS key_value(key)
+        WHERE key_value.key NOT IN ('type', 'call_id', 'name', 'arguments')
+      ) OR jsonb_typeof(part_value -> 'call_id') IS DISTINCT FROM 'string'
+        OR jsonb_typeof(part_value -> 'name') IS DISTINCT FROM 'string'
+        OR jsonb_typeof(part_value -> 'arguments') IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION
+          'canonical tool_call part at %[%] is invalid',
+          location,
+          part_record.ordinality
+          USING ERRCODE = '22023';
+      END IF;
+      FOR identifier_value IN
+        SELECT part_value ->> 'call_id'
+        UNION ALL
+        SELECT part_value ->> 'name'
+      LOOP
+        IF btrim(identifier_value) = '' OR char_length(identifier_value) > 512 THEN
+          RAISE EXCEPTION
+            'canonical tool_call identifier at %[%] is invalid',
+            location,
+            part_record.ordinality
+            USING ERRCODE = '22023';
+        END IF;
+      END LOOP;
+    ELSIF part_type = 'tool_result' THEN
+      IF EXISTS (
+        SELECT 1
+        FROM jsonb_object_keys(part_value) AS key_value(key)
+        WHERE key_value.key NOT IN ('type', 'call_id', 'name', 'result', 'is_error')
+      ) OR jsonb_typeof(part_value -> 'call_id') IS DISTINCT FROM 'string'
+        OR jsonb_typeof(part_value -> 'name') IS DISTINCT FROM 'string'
+        OR NOT part_value ? 'result'
+        OR jsonb_typeof(part_value -> 'is_error') IS DISTINCT FROM 'boolean' THEN
+        RAISE EXCEPTION
+          'canonical tool_result part at %[%] is invalid',
+          location,
+          part_record.ordinality
+          USING ERRCODE = '22023';
+      END IF;
+      FOR identifier_value IN
+        SELECT part_value ->> 'call_id'
+        UNION ALL
+        SELECT part_value ->> 'name'
+      LOOP
+        IF btrim(identifier_value) = '' OR char_length(identifier_value) > 512 THEN
+          RAISE EXCEPTION
+            'canonical tool_result identifier at %[%] is invalid',
+            location,
+            part_record.ordinality
+            USING ERRCODE = '22023';
+        END IF;
+      END LOOP;
+    ELSE
+      RAISE EXCEPTION
+        'canonical message part at %[%] has an unsupported type %',
+        location,
+        part_record.ordinality,
+        part_type
+        USING ERRCODE = '22023';
+    END IF;
+  END LOOP;
+  RETURN message_value;
+END;
+$fogmoe_0068_existing_v2$;
+
 -- @brief 将一条 OpenAI 形消息转换为封闭的 canonical V2 / Convert one OpenAI-shaped message into closed canonical V2.
 CREATE FUNCTION conversation.canonical_message_v2(
   legacy_message JSONB,
@@ -232,6 +488,10 @@ BEGIN
       'legacy message at % must be an object',
       location
       USING ERRCODE = '22023';
+  END IF;
+
+  IF legacy_message ? 'schema_version' THEN
+    RETURN conversation.require_canonical_message_v2(legacy_message, location);
   END IF;
 
   IF jsonb_typeof(legacy_message -> 'role') IS DISTINCT FROM 'string' THEN
@@ -776,6 +1036,7 @@ DROP FUNCTION context_window.canonical_json_v2(JSONB);
 DROP FUNCTION conversation.canonical_envelope_v2(JSONB, TEXT, TEXT);
 DROP FUNCTION conversation.canonical_row_message_v2(JSONB, TEXT, TEXT, BOOLEAN);
 DROP FUNCTION conversation.canonical_message_v2(JSONB, TEXT, BOOLEAN);
+DROP FUNCTION conversation.require_canonical_message_v2(JSONB, TEXT);
 DROP FUNCTION conversation.canonical_content_parts_v2(JSONB, TEXT, BOOLEAN);
 DROP FUNCTION conversation.canonical_tool_arguments_v2(JSONB, TEXT);
 

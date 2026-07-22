@@ -46,6 +46,8 @@ def test_0068_canonical_message_migration_is_atomic_and_fail_closed() -> None:
     assert "runtime_events" in upgrade
     assert "assistant_message" in upgrade
     assert "conversation.canonical_row_message_v2" in upgrade
+    assert "conversation.require_canonical_message_v2" in upgrade
+    assert "IF legacy_message ? 'schema_version' THEN" in upgrade
     assert "WHERE message.role <> 'system'" in upgrade
     assert "row_fallback" in upgrade
     assert "history_format', 'canonical-v2'" in upgrade
@@ -73,6 +75,10 @@ def test_0068_sql_is_splitter_safe_for_plpgsql_and_canonical_json() -> None:
     assert len(statements) >= 17
     assert any(
         "CREATE FUNCTION conversation.canonical_message_v2" in statement
+        for statement in statements
+    )
+    assert any(
+        "CREATE FUNCTION conversation.require_canonical_message_v2" in statement
         for statement in statements
     )
     assert any(
