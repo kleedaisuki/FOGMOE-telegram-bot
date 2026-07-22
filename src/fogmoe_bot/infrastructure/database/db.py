@@ -125,6 +125,9 @@ def get_engine() -> AsyncEngine:
     @note 顶层组合根在所有数据库 worker 停止后调用 ``dispose_current_engine``；不再为已删除的
     secondary loops 保留 engine registry。/ The composition root calls ``dispose_current_engine``
     after every database worker stops; no engine registry remains for removed secondary loops.
+    @note 连接池使用乐观断连处理并保留定期回收；持久化工作流在操作边界重试或恢复，故无需为每次
+    checkout 增加探测往返。/ The pool uses optimistic disconnect handling with periodic recycling;
+    durable workflows retry or recover at operation boundaries, so every checkout needs no probe round trip.
     """
 
     global _ENGINE, _ENGINE_OWNER_LOOP
@@ -138,7 +141,7 @@ def get_engine() -> AsyncEngine:
 
     _ENGINE = create_async_engine(
         settings.sqlalchemy_url(),
-        pool_pre_ping=True,
+        pool_pre_ping=False,
         pool_recycle=settings.application.pool_recycle_seconds,
         pool_size=settings.application.pool_size,
         max_overflow=settings.application.max_overflow,

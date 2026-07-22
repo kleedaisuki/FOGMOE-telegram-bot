@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from sqlalchemy import create_engine, text
 
 from fogmoe_bot.application.observability.telemetry import Telemetry, TelemetryBuffer
+from fogmoe_bot.config import BotDatabaseSettings
 from fogmoe_bot.domain.observability.signals import SpanSignal, SpanStatus
 from fogmoe_bot.infrastructure.database import db
 
@@ -27,6 +28,54 @@ class FakeConnection:
 
         self.calls.append((statement, params))
         return "ok"
+
+
+def test_engine_creation_uses_optimistic_disconnect_handling(monkeypatch) -> None:
+    """@brief 引擎跳过 checkout pre-ping / Engine uses optimistic disconnect handling without checkout pre-ping.
+
+    @return None / None.
+    """
+
+    class EngineShape:
+        """@brief 提供 get_engine 所需的最小引擎形状 / Provide the minimal engine shape required by get_engine."""
+
+        sync_engine = object()
+
+    settings = BotDatabaseSettings()
+    engine = EngineShape()
+    observed_options: dict[str, object] = {}
+
+    def fake_create_async_engine(
+        _: str,
+        **options: object,
+    ) -> EngineShape:
+        """@brief 捕获连接池策略 / Capture the connection-pool policy.
+
+        @param _ SQLAlchemy URL / SQLAlchemy URL.
+        @param options 引擎选项 / Engine options.
+        @return 引擎替身 / Engine double.
+        """
+
+        observed_options.update(options)
+        return engine
+
+    monkeypatch.setattr(db, "_ENGINE", None)
+    monkeypatch.setattr(db, "_ENGINE_OWNER_LOOP", None)
+    monkeypatch.setattr(db, "_DATABASE_SETTINGS", settings)
+    monkeypatch.setattr(db, "create_async_engine", fake_create_async_engine)
+    monkeypatch.setattr(db, "_instrument_engine", lambda _: None)
+
+    async def create_engine_once() -> object:
+        """@brief 在活动 event loop 内创建引擎 / Create the engine inside an active event loop.
+
+        @return 已创建引擎 / Created engine.
+        """
+
+        return db.get_engine()
+
+    assert asyncio.run(create_engine_once()) is engine
+    assert observed_options["pool_pre_ping"] is False
+    assert observed_options["pool_recycle"] == settings.application.pool_recycle_seconds
 
 
 def test_exec_sql_uses_connection_from_context(monkeypatch):
