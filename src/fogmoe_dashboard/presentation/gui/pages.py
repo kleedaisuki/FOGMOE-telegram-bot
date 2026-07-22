@@ -788,12 +788,13 @@ class ResourcesPage(QueryPage):
         super().__init__()
         self._model = ObjectTableModel[ResourceInstance](
             (
-                TableColumn("Active", lambda row: row.active),
+                TableColumn("State", lambda row: row.state),
                 TableColumn("Service", lambda row: row.service_name),
                 TableColumn("Version", lambda row: row.service_version),
                 TableColumn("Environment", lambda row: row.environment),
                 TableColumn("Instance", lambda row: row.instance_id, stretch=True),
                 TableColumn("Started", lambda row: row.started_at),
+                TableColumn("Last seen", lambda row: row.last_seen_at),
                 TableColumn("Stopped", lambda row: row.stopped_at),
             )
         )

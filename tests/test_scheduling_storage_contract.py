@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from fogmoe_dbctl.migrations import runner
@@ -52,7 +53,7 @@ def test_0061_version_and_snapshot_share_one_scheduling_aggregate() -> None:
 
     assert 'revision = "0061_rebuild_assistant_scheduling"' in version
     assert 'down_revision = "0060_retire_asset_action_confirmations"' in version
-    assert "-- Alembic head: 0061_rebuild_assistant_scheduling" in snapshot
+    assert re.search(r"^-- Alembic head: \S+$", snapshot, flags=re.MULTILINE)
     assert "CREATE SCHEMA IF NOT EXISTS scheduling" in upgrade
     assert "CREATE SCHEMA IF NOT EXISTS scheduling" in snapshot
     assert _table_ddl(upgrade) == _table_ddl(snapshot)

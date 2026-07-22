@@ -24,7 +24,7 @@ from fogmoe_bot.domain.observability.signals import (
 from fogmoe_bot.domain.observability.trace import TraceContext
 from fogmoe_bot.infrastructure.observability.postgres import PostgresTelemetrySink
 from fogmoe_dashboard.api import DashboardClient
-from fogmoe_dashboard.domain.models import TimeWindow
+from fogmoe_dashboard.domain.models import ResourceState, TimeWindow
 from fogmoe_dashboard.infrastructure.postgres import PostgresDashboardRepository
 from postgres_test_support import database_settings_from_url
 
@@ -39,6 +39,63 @@ def _asyncpg_database_url() -> str:
     if raw_url:
         return database_settings_from_url(raw_url).asyncpg_url()
     pytest.skip("set FOGMOE_TEST_DATABASE_URL to run the real PostgreSQL contract")
+
+
+def test_resource_adapter_classifies_an_expired_null_stop_as_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief PostgreSQL adapter 不再把 stopped_at 为空等同于 active / The PostgreSQL adapter no longer equates null stopped_at with active.
+
+    @param monkeypatch pytest 方法替换器 / Pytest method patcher.
+    @return None / None.
+    """
+
+    async def fake_fetch(
+        repository: PostgresDashboardRepository,
+        query: str,
+        *args: object,
+    ) -> tuple[dict[str, object], ...]:
+        """@brief 返回一个失联资源行 / Return one stale resource row.
+
+        @param repository 被替换的 repository / Patched repository.
+        @param query 资源 SQL / Resource SQL.
+        @param args 查询边界 / Query bounds.
+        @return 失联资源行 / Stale resource row.
+        """
+
+        del repository, query, args
+        observed_at = datetime(2026, 7, 22, 8, tzinfo=UTC)
+        return (
+            {
+                "resource_id": uuid4(),
+                "service_name": "fogmoe-bot",
+                "service_version": "test",
+                "deployment_environment": "test",
+                "service_instance_id": "lost-instance",
+                "started_at": observed_at - timedelta(hours=1),
+                "last_seen_at": observed_at - timedelta(minutes=5),
+                "stopped_at": None,
+                "attributes": {},
+            },
+        )
+
+    async def scenario() -> None:
+        """@brief 执行无数据库的 adapter 映射 / Execute adapter mapping without a database."""
+
+        observed_at = datetime(2026, 7, 22, 8, tzinfo=UTC)
+        repository = PostgresDashboardRepository("postgresql://unused")
+
+        resources = await repository.resources(
+            TimeWindow(observed_at - timedelta(hours=1), observed_at),
+            limit=10,
+        )
+
+        assert len(resources) == 1
+        assert resources[0].state is ResourceState.STALE
+        assert resources[0].stopped_at is None
+
+    monkeypatch.setattr(PostgresDashboardRepository, "_fetch", fake_fetch)
+    asyncio.run(scenario())
 
 
 def test_dashboard_queries_every_signal_family_through_read_only_pool() -> None:
@@ -185,9 +242,12 @@ def test_dashboard_queries_every_signal_family_through_read_only_pool() -> None:
             assert any(
                 item.name == "fogmoe.retrieval.batch.size" for item in retrieval.metrics
             )
+            resources = await dashboard.resources(window)
             assert any(
                 item.resource_id == resource.resource_id
-                for item in await dashboard.resources(window)
+                and item.state is ResourceState.ACTIVE
+                and item.last_seen_at >= item.started_at
+                for item in resources
             )
             await dashboard.latency(window)
             await dashboard.slow_turns(window)

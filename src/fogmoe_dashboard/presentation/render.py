@@ -114,12 +114,13 @@ _COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         ("delivery_attempts", "Delivery tries"),
     ),
     "resources": (
-        ("active", "Active"),
+        ("state", "State"),
         ("service_name", "Service"),
         ("service_version", "Version"),
         ("environment", "Environment"),
         ("instance_id", "Instance"),
         ("started_at", "Started"),
+        ("last_seen_at", "Last seen"),
         ("stopped_at", "Stopped"),
     ),
     "retrieval_queue": (

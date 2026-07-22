@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0062_retire_identity_mirrors_and_legacy_media
--- Alembic head: 0062_retire_identity_mirrors_and_legacy_media
+-- Source migrations: 0001_initial through 0063_observability_resource_liveness
+-- Alembic head: 0063_observability_resource_liveness
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and retired user-plan backfill) and the
@@ -1820,11 +1820,16 @@ CREATE TABLE observability.resources (
   service_instance_id VARCHAR(255) NOT NULL
     CHECK (char_length(btrim(service_instance_id)) > 0),
   started_at TIMESTAMPTZ NOT NULL,
+  last_seen_at TIMESTAMPTZ NOT NULL,
   stopped_at TIMESTAMPTZ,
   attributes JSONB NOT NULL DEFAULT '{}'::JSONB
     CHECK (jsonb_typeof(attributes) = 'object'),
   CONSTRAINT observability_resources_time_ck CHECK (
     stopped_at IS NULL OR stopped_at >= started_at
+  ),
+  CONSTRAINT observability_resources_liveness_ck CHECK (
+    last_seen_at >= started_at
+    AND (stopped_at IS NULL OR last_seen_at >= stopped_at)
   )
 );
 

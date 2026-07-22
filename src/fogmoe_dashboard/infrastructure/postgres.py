@@ -20,6 +20,7 @@ from fogmoe_dashboard.domain.models import (
     Overview,
     PipelineStage,
     ResourceInstance,
+    ResourceState,
     RetrievalQueueStats,
     RetrievalSnapshot,
     SlowTurn,
@@ -416,23 +417,31 @@ class PostgresDashboardRepository:
         """@brief 查询资源生命周期 / Query resource lifecycles."""
 
         rows = await self._fetch(_RESOURCES_SQL, window.start, window.end, limit)
-        return tuple(
-            ResourceInstance(
-                resource_id=_uuid(row["resource_id"]),
-                service_name=str(row["service_name"]),
-                service_version=str(row["service_version"]),
-                environment=str(row["deployment_environment"]),
-                instance_id=str(row["service_instance_id"]),
-                started_at=_datetime(row["started_at"]),
-                stopped_at=(
-                    _datetime(row["stopped_at"])
-                    if row["stopped_at"] is not None
-                    else None
-                ),
-                attributes=freeze_json_object(row["attributes"]),
+        resources: list[ResourceInstance] = []
+        for row in rows:
+            last_seen_at = _datetime(row["last_seen_at"])
+            stopped_at = (
+                _datetime(row["stopped_at"]) if row["stopped_at"] is not None else None
             )
-            for row in rows
-        )
+            resources.append(
+                ResourceInstance(
+                    resource_id=_uuid(row["resource_id"]),
+                    service_name=str(row["service_name"]),
+                    service_version=str(row["service_version"]),
+                    environment=str(row["deployment_environment"]),
+                    instance_id=str(row["service_instance_id"]),
+                    started_at=_datetime(row["started_at"]),
+                    last_seen_at=last_seen_at,
+                    stopped_at=stopped_at,
+                    state=ResourceState.at(
+                        last_seen_at=last_seen_at,
+                        stopped_at=stopped_at,
+                        observed_at=window.end,
+                    ),
+                    attributes=freeze_json_object(row["attributes"]),
+                )
+            )
+        return tuple(resources)
 
     async def close(self) -> None:
         """@brief 关闭惰性连接池 / Close the lazy connection pool."""
@@ -975,7 +984,7 @@ LIMIT $3
 
 _RESOURCES_SQL = """
 SELECT resource_id, service_name, service_version, deployment_environment,
-       service_instance_id, started_at, stopped_at, attributes
+       service_instance_id, started_at, last_seen_at, stopped_at, attributes
 FROM observability.resources
 WHERE started_at < $2 AND coalesce(stopped_at, $2) >= $1
 ORDER BY started_at DESC

@@ -6,6 +6,7 @@ import ast
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from rich.console import Console
@@ -22,6 +23,8 @@ from fogmoe_dashboard.config import read_dashboard_settings
 from fogmoe_dashboard.domain.models import (
     Overview,
     PipelineStage,
+    ResourceInstance,
+    ResourceState,
     RetrievalQueueStats,
     RetrievalSnapshot,
     SpanStats,
@@ -100,6 +103,71 @@ def test_time_window_normalizes_utc_and_rejects_unbounded_queries() -> None:
         TimeWindow(now, now)
     with pytest.raises(ValueError):
         TimeWindow(now - timedelta(days=91), now)
+
+
+def test_resource_liveness_uses_heartbeats_at_the_query_boundary() -> None:
+    """@brief 资源存活性基于查询边界的心跳而非 stopped_at 空值 / Resource liveness uses the query-boundary heartbeat rather than null stopped_at."""
+
+    observed_at = datetime(2026, 7, 22, 8, tzinfo=UTC)
+
+    assert (
+        ResourceState.at(
+            last_seen_at=observed_at - timedelta(seconds=89),
+            stopped_at=None,
+            observed_at=observed_at,
+        )
+        is ResourceState.ACTIVE
+    )
+    assert (
+        ResourceState.at(
+            last_seen_at=observed_at - timedelta(seconds=91),
+            stopped_at=None,
+            observed_at=observed_at,
+        )
+        is ResourceState.STALE
+    )
+    assert (
+        ResourceState.at(
+            last_seen_at=observed_at,
+            stopped_at=observed_at - timedelta(seconds=1),
+            observed_at=observed_at,
+        )
+        is ResourceState.STOPPED
+    )
+    assert (
+        ResourceState.at(
+            last_seen_at=observed_at,
+            stopped_at=observed_at + timedelta(seconds=1),
+            observed_at=observed_at,
+        )
+        is ResourceState.ACTIVE
+    )
+
+
+def test_resource_view_renders_explicit_state_and_last_heartbeat() -> None:
+    """@brief 资源视图明示状态与最后心跳 / The resource view exposes state and the latest heartbeat."""
+
+    observed_at = datetime(2026, 7, 22, 8, tzinfo=UTC)
+    resource = ResourceInstance(
+        resource_id=uuid4(),
+        service_name="fogmoe-bot",
+        service_version="test",
+        environment="test",
+        instance_id="instance-1",
+        started_at=observed_at - timedelta(minutes=5),
+        last_seen_at=observed_at - timedelta(minutes=2),
+        stopped_at=None,
+        state=ResourceState.STALE,
+        attributes={},
+    )
+    console = Console(record=True, width=160, color_system=None)
+
+    console.print(render(DashboardView.RESOURCES, (resource,)))
+
+    rendered = console.export_text()
+    assert "State" in rendered
+    assert "Last seen" in rendered
+    assert "stale" in rendered
 
 
 def test_dashboard_reads_its_jsonc_projection_and_builds_typed_client(

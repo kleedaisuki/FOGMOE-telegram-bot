@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import TypeAlias
 from uuid import UUID
 
@@ -11,6 +12,9 @@ from uuid import UUID
 JsonScalar: TypeAlias = str | bool | int | float | None
 JsonObject: TypeAlias = dict[str, "JsonValue"]
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | JsonObject
+
+RESOURCE_STALE_AFTER = timedelta(seconds=90)
+"""@brief 资源心跳失联阈值 / Resource-heartbeat staleness threshold."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,6 +361,51 @@ class LatencySnapshot:
     slow_turns: tuple[SlowTurn, ...]
 
 
+class ResourceState(StrEnum):
+    """@brief 截至查询时刻的资源存活状态 / Resource liveness state as of a query instant."""
+
+    ACTIVE = "active"
+    """@brief 心跳新鲜且未停止 / Heartbeat is fresh and the resource is not stopped."""
+
+    STALE = "stale"
+    """@brief 未收到停止信号但心跳过期 / No stop signal was received, but the heartbeat is stale."""
+
+    STOPPED = "stopped"
+    """@brief 已在查询时刻前显式停止 / Explicitly stopped by the query instant."""
+
+    @classmethod
+    def at(
+        cls,
+        *,
+        last_seen_at: datetime,
+        stopped_at: datetime | None,
+        observed_at: datetime,
+        stale_after: timedelta = RESOURCE_STALE_AFTER,
+    ) -> ResourceState:
+        """@brief 基于心跳而非空停止时间判定状态 / Classify state from a heartbeat rather than a null stop timestamp.
+
+        @param last_seen_at 最后心跳时刻 / Latest heartbeat instant.
+        @param stopped_at 显式停止时刻 / Explicit stop instant.
+        @param observed_at 查询截止时刻 / Query observation instant.
+        @param stale_after 心跳新鲜度阈值 / Heartbeat freshness threshold.
+        @return 截至查询时刻的状态 / State as of the query instant.
+        """
+
+        timestamps = (last_seen_at, observed_at)
+        if any(value.tzinfo is None for value in timestamps) or (
+            stopped_at is not None and stopped_at.tzinfo is None
+        ):
+            raise ValueError("Resource liveness timestamps must be timezone-aware")
+        if stale_after <= timedelta():
+            raise ValueError("Resource stale threshold must be positive")
+        observation = observed_at.astimezone(UTC)
+        if stopped_at is not None and stopped_at.astimezone(UTC) <= observation:
+            return cls.STOPPED
+        if last_seen_at.astimezone(UTC) >= observation - stale_after:
+            return cls.ACTIVE
+        return cls.STALE
+
+
 @dataclass(frozen=True, slots=True)
 class ResourceInstance:
     """@brief 遥测资源实例生命周期 / Telemetry-resource instance lifecycle."""
@@ -367,17 +416,34 @@ class ResourceInstance:
     environment: str
     instance_id: str
     started_at: datetime
+    last_seen_at: datetime
     stopped_at: datetime | None
+    state: ResourceState
     attributes: JsonObject
 
-    @property
-    def active(self) -> bool:
-        """@brief 指示实例是否仍活动 / Indicate whether the instance is still active.
+    def __post_init__(self) -> None:
+        """@brief 守住资源时间线不变式 / Enforce resource-timeline invariants.
 
-        @return 未停止为 True / True when not stopped.
+        @return None / None.
         """
 
-        return self.stopped_at is None
+        timestamps = (self.started_at, self.last_seen_at)
+        if any(value.tzinfo is None for value in timestamps) or (
+            self.stopped_at is not None and self.stopped_at.tzinfo is None
+        ):
+            raise ValueError("Resource timestamps must be timezone-aware")
+        started_at = self.started_at.astimezone(UTC)
+        last_seen_at = self.last_seen_at.astimezone(UTC)
+        stopped_at = (
+            self.stopped_at.astimezone(UTC) if self.stopped_at is not None else None
+        )
+        if last_seen_at < started_at:
+            raise ValueError("Resource heartbeat cannot precede resource start")
+        if stopped_at is not None and stopped_at < started_at:
+            raise ValueError("Resource stop cannot precede resource start")
+        object.__setattr__(self, "started_at", started_at)
+        object.__setattr__(self, "last_seen_at", last_seen_at)
+        object.__setattr__(self, "stopped_at", stopped_at)
 
 
 def freeze_json_object(value: object) -> JsonObject:
@@ -415,7 +481,9 @@ __all__ = [
     "MetricStats",
     "Overview",
     "PipelineStage",
+    "RESOURCE_STALE_AFTER",
     "ResourceInstance",
+    "ResourceState",
     "RetrievalQueueStats",
     "RetrievalSnapshot",
     "SlowTurn",

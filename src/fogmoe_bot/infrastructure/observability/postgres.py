@@ -20,6 +20,10 @@ from fogmoe_bot.domain.observability.signals import (
 )
 
 
+_RESOURCE_HEARTBEAT_WRITE_INTERVAL = timedelta(seconds=30)
+"""@brief 资源心跳最小落库间隔 / Minimum persistence interval for resource heartbeats."""
+
+
 class PostgresTelemetrySink:
     """@brief 用独立单连接池原子写入遥测批次 / Atomically write telemetry batches through an isolated single-connection pool."""
 
@@ -66,7 +70,10 @@ class PostgresTelemetrySink:
         new_days = signal_days - self._ensured_days
         async with pool.acquire() as connection:
             async with connection.transaction():
-                await self._upsert_resource(cast(asyncpg.Connection, connection))
+                await self._upsert_resource(
+                    cast(asyncpg.Connection, connection),
+                    seen_at=datetime.now(UTC),
+                )
                 if maintenance_needed:
                     await connection.execute(
                         "SELECT observability.drop_partitions_before($1::date)",
@@ -112,10 +119,13 @@ class PostgresTelemetrySink:
         if pool is not None:
             try:
                 async with pool.acquire() as connection:
+                    stopped_at = datetime.now(UTC)
                     await connection.execute(
-                        "UPDATE observability.resources SET stopped_at = $1 "
+                        "UPDATE observability.resources "
+                        "SET stopped_at = $1, "
+                        "last_seen_at = GREATEST(last_seen_at, $1) "
                         "WHERE resource_id = $2 AND stopped_at IS NULL",
-                        datetime.now(UTC),
+                        stopped_at,
                         self._resource.resource_id,
                     )
             finally:
@@ -133,23 +143,39 @@ class PostgresTelemetrySink:
             )
         return self._pool
 
-    async def _upsert_resource(self, connection: asyncpg.Connection) -> None:
-        """@brief 幂等记录进程资源 / Idempotently record the process resource."""
+    async def _upsert_resource(
+        self,
+        connection: asyncpg.Connection,
+        *,
+        seen_at: datetime,
+    ) -> None:
+        """@brief 幂等记录资源并节流更新心跳 / Idempotently record a resource and throttle heartbeat updates.
+
+        @param connection 当前批次连接 / Current batch connection.
+        @param seen_at 本次 flush 证明的存活时刻 / Liveness instant proven by this flush.
+        @return None / None.
+        """
 
         resource = self._resource
+        heartbeat_cutoff = seen_at - _RESOURCE_HEARTBEAT_WRITE_INTERVAL
         await connection.execute(
             "INSERT INTO observability.resources "
             "(resource_id, service_name, service_version, deployment_environment, "
-            "service_instance_id, started_at, attributes) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) "
-            "ON CONFLICT (resource_id) DO NOTHING",
+            "service_instance_id, started_at, last_seen_at, attributes) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb) "
+            "ON CONFLICT (resource_id) DO UPDATE "
+            "SET last_seen_at = GREATEST("
+            "observability.resources.last_seen_at, EXCLUDED.last_seen_at) "
+            "WHERE observability.resources.last_seen_at <= $9",
             resource.resource_id,
             resource.service_name,
             resource.service_version,
             resource.deployment_environment,
             resource.service_instance_id,
             resource.started_at,
+            seen_at,
             _json(resource.attributes),
+            heartbeat_cutoff,
         )
 
     def _log_row(self, signal: LogSignal) -> tuple[object, ...]:
