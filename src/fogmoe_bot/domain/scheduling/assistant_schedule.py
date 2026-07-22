@@ -13,10 +13,10 @@ from fogmoe_bot.domain.temporal import TimeZoneId, ensure_utc
 _MAX_TRIGGER_REASON_LENGTH = 200
 """@brief 触发原因的领域长度上限 / Domain length limit for trigger reasons."""
 
-_MAX_INSTRUCTION_LENGTH = 2_000
+_MAX_INSTRUCTION_LENGTH = 20_000
 """@brief 助手指令的领域长度上限 / Domain length limit for assistant instructions."""
 
-_MAX_CONTEXT_SNAPSHOT_LENGTH = 1_000
+_MAX_CONTEXT_SNAPSHOT_LENGTH = 20_000
 """@brief 创建时上下文快照的领域长度上限 / Domain length limit for creation-time context snapshots."""
 
 _MAX_ERROR_LENGTH = 4_000

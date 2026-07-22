@@ -221,7 +221,7 @@ class DurableAssistantInferenceAdapter:
         try:
             response = await inference.infer(
                 context_state,
-                allow_tools=not is_translation,
+                allow_tools=command.allow_tools and not is_translation,
                 request_timeout=self._provider_timeout.total_seconds(),
                 tool_context=(
                     None

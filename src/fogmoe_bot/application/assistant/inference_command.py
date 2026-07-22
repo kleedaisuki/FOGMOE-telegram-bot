@@ -170,6 +170,7 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
     @param disable_notification 是否静默投递 / Whether delivery is silent.
     @param protect_content 是否保护内容 / Whether content is protected.
     @param disable_web_page_preview 是否禁用链接预览 / Whether link previews are disabled.
+    @param allow_tools 当前 Turn 是否具有工具 capability / Whether this Turn has tool capability.
     """
 
     schema_version: Literal[2] = ASSISTANT_INFERENCE_SCHEMA_VERSION
@@ -186,6 +187,7 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
     disable_notification: bool = False
     protect_content: bool = False
     disable_web_page_preview: bool = True
+    allow_tools: bool = True
 
     @field_validator("turn_id")
     @classmethod

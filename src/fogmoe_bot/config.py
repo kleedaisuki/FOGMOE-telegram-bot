@@ -391,7 +391,26 @@ class SchedulingRuntimeSettings(_FrozenSettings):
 
     poll_interval_seconds: PositiveFloat = 1.0
     worker_count: PositiveInt = 3
-    lease_seconds: PositiveInt = 1800
+    attempt_timeout_seconds: PositiveInt = 10
+    lease_seconds: PositiveInt = 30
+    max_attempts: PositiveInt = 5
+    retry_base_seconds: PositiveFloat = 1.0
+    retry_cap_seconds: PositiveFloat = 60.0
+
+    @model_validator(mode="after")
+    def _validate_worker_bounds(self) -> SchedulingRuntimeSettings:
+        """@brief 校验调度 lease 与重试窗口 / Validate schedule lease and retry bounds.
+
+        @return 已验证设置 / Validated settings.
+        @raise ValueError lease 不覆盖尝试或 retry cap 过小时抛出 /
+            Raised when the lease does not outlive an attempt or the retry cap is too small.
+        """
+
+        if self.lease_seconds <= self.attempt_timeout_seconds:
+            raise ValueError("lease_seconds must be > attempt_timeout_seconds")
+        if self.retry_cap_seconds < self.retry_base_seconds:
+            raise ValueError("retry_cap_seconds must be >= retry_base_seconds")
+        return self
 
 
 class InboxRuntimeSettings(_FrozenSettings):

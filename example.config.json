@@ -74,8 +74,15 @@
       "worker_count": 3,
       // 轮询待调度任务的间隔秒数。
       "poll_interval_seconds": 1.0,
-      // 执行租约超时秒数，过期任务会在重启后回收。
-      "lease_seconds": 1800
+      // 单次短事务接受发生项的最长秒数。
+      "attempt_timeout_seconds": 10,
+      // 执行租约秒数，必须严格长于单次尝试。
+      "lease_seconds": 30,
+      // 同一发生项最终失败前的最大尝试数。
+      "max_attempts": 5,
+      // full-jitter 指数退避的起始与封顶秒数。
+      "retry_base_seconds": 1.0,
+      "retry_cap_seconds": 60.0
     },
     // Telegram 入站消息的 durable inbox worker。
     "inbox": {
