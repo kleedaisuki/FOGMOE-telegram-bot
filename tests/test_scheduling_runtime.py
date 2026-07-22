@@ -446,6 +446,37 @@ def test_max_attempts_exhaustion_is_a_final_failure() -> None:
     asyncio.run(scenario())
 
 
+def test_recovered_claim_beyond_attempt_budget_fails_without_business_work() -> None:
+    """@brief lease 崩溃耗尽预算后只做 fenced 终结 / A lease crash beyond the budget performs only fenced finalization."""
+
+    async def scenario() -> None:
+        """@brief 领取超预算 claim / Claim an item beyond its attempt budget."""
+
+        claim = _claim(51, attempt_count=4)
+        queue = _Queue((claim,))
+        profiles = _Profiles(_user())
+        acceptance = _Acceptance()
+        await _worker(
+            queue=queue,
+            acceptance=acceptance,
+            profiles=profiles,
+            max_attempts=3,
+        ).process_once()
+
+        assert profiles.user_ids == []
+        assert acceptance.calls == []
+        assert queue.retries == []
+        assert queue.final_failures == [
+            (
+                claim,
+                NOW,
+                "schedule attempt budget was exhausted while recovering a lease",
+            )
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_stale_acceptance_token_is_swallowed_without_followup_write() -> None:
     """@brief 原子 UoW 拒绝陈旧 token 后 worker 不再写队列 / The worker swallows a stale atomic-UoW token without another queue write."""
 

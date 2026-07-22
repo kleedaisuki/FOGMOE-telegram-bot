@@ -125,6 +125,14 @@ class ScheduleWorker:
         @return None / None.
         """
 
+        if claim.attempt_count > self._max_attempts:
+            await self._final_failure(
+                claim,
+                RuntimeError(
+                    "schedule attempt budget was exhausted while recovering a lease"
+                ),
+            )
+            return
         try:
             async with asyncio.timeout(self._attempt_timeout.total_seconds()):
                 await self._execute_within_timeout(claim)
