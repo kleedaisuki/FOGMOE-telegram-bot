@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
 
-from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
+from fogmoe_bot.application.runtime import (
+    LeaseRecoveryCadence,
+    SystemUtcClock,
+    UtcClock,
+)
+from fogmoe_bot.domain.moderation.verification import VerificationClaim
 
 from .verification_service import VerificationRepository, VerificationService
 
@@ -26,8 +33,17 @@ class VerificationWorkerState(StrEnum):
     CLOSED = "closed"
 
 
+@dataclass(frozen=True, slots=True)
+class _StopConsumer:
+    """@brief consumer 完成 drain 后的停止哨兵 / Sentinel stopping a consumer after drain."""
+
+
+type _WorkItem = VerificationClaim | _StopConsumer
+"""@brief verification consumer 工作项 / Verification-consumer work item."""
+
+
 class VerificationTimeoutWorker:
-    """@brief 固定 TaskGroup、lease/fencing 与有界 claim 的验证 worker / Verification worker with fixed TaskGroup, leases, fencing, and bounded claims."""
+    """@brief 单 claim producer、固定 consumers 与有界 lease 的验证 worker / Verification worker with one claim producer, fixed consumers, and bounded leases."""
 
     def __init__(
         self,
@@ -44,8 +60,8 @@ class VerificationTimeoutWorker:
 
         @param repository claim 仓储 / Claim repository.
         @param service claim 处理器 / Claim processor.
-        @param worker_count 固定 worker 数 / Fixed worker count.
-        @param claim_limit 每 worker 每批上限 / Per-worker batch claim bound.
+        @param worker_count 固定并行 consumer 数 / Fixed concurrent consumer count.
+        @param claim_limit 单次数据库 claim 上限 / Per-database-claim batch bound.
         @param lease_for claim 租约 / Claim lease.
         @param poll_interval 空闲轮询秒数 / Idle polling seconds.
         @param clock UTC 时钟 / UTC clock.
@@ -64,7 +80,6 @@ class VerificationTimeoutWorker:
         self._poll_interval = poll_interval
         self._clock = clock or SystemUtcClock()
         self._state = VerificationWorkerState.NEW
-        self._wake = asyncio.Event()
 
     @property
     def state(self) -> VerificationWorkerState:
@@ -76,111 +91,124 @@ class VerificationTimeoutWorker:
         return self._state
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        """@brief 回收 lease 并运行固定 workers 直至停止排空 / Recover leases and run fixed workers until stopped and drained.
+        """@brief 单点领取并以固定并发处理至停止排空 / Claim through one producer and process with fixed concurrency until drained.
 
         @param stop_event BotRuntime 拥有的停止信号 / Stop signal owned by BotRuntime.
         @return None / None.
         @raise RuntimeError 同一实例被重复运行时抛出 / Raised when the same instance is run more than once.
-        @note TaskGroup 结构化拥有所有固定 worker；正常停止先停止新 claim，
-        再等待已领取批次完成。/ A TaskGroup structurally owns every fixed worker;
-        normal shutdown stops new claims before awaiting already-claimed batches.
+        @note 单 producer 串行化数据库 claim；容量令牌把排队中与执行中的 claim 总数
+        限制为 ``worker_count * claim_limit``。正常停止先停止新 claim，再排空所有已领取
+        工作。/ One producer serializes database claims; capacity tokens bound queued plus
+        executing claims to ``worker_count * claim_limit``. Normal shutdown stops new claims
+        before draining every acquired claim.
         """
 
         if self._state is not VerificationWorkerState.NEW:
             raise RuntimeError(f"verification worker cannot run from {self._state}")
+        total_capacity = self._worker_count * self._claim_limit
+        work_queue: asyncio.Queue[_WorkItem] = asyncio.Queue(maxsize=total_capacity)
+        capacity: asyncio.Queue[None] = asyncio.Queue(maxsize=total_capacity)
+        for _ in range(total_capacity):
+            capacity.put_nowait(None)
+        recovery = LeaseRecoveryCadence.for_lease(self._lease_for)
         try:
+            recovery.take_due()
             await self._repository.recover_expired_leases(now=self._clock.now())
             self._state = VerificationWorkerState.RUNNING
             async with asyncio.TaskGroup() as task_group:
                 for index in range(self._worker_count):
                     task_group.create_task(
-                        self._loop(index),
-                        name=f"verification-worker-{index}",
+                        self._consume(work_queue, capacity, index),
+                        name=f"verification-consumer-{index}",
                     )
                 task_group.create_task(
-                    self._recover_leases_loop(),
+                    self._recover_leases_loop(stop_event, recovery=recovery),
                     name="verification-lease-recovery",
                 )
                 try:
-                    await stop_event.wait()
+                    await self._produce(work_queue, capacity, stop_event)
                 finally:
                     self._begin_closing()
+                await work_queue.join()
+                for _ in range(self._worker_count):
+                    await work_queue.put(_StopConsumer())
         finally:
             self._begin_closing()
             self._state = VerificationWorkerState.CLOSED
 
-    def wake(self) -> None:
-        """@brief 通知 workers 有新工作 / Notify workers of new work.
-
-        @return None / None.
-        """
-
-        if self._state is VerificationWorkerState.RUNNING:
-            self._notify_waiters()
-
     def _begin_closing(self) -> None:
-        """@brief 停止新 claim 并唤醒固定 workers / Stop new claims and wake the fixed workers.
+        """@brief 标记停止新 claim 并进入 drain / Stop new claims and enter drain.
 
         @return None / None.
         """
 
         if self._state is VerificationWorkerState.RUNNING:
             self._state = VerificationWorkerState.CLOSING
-            self._notify_waiters()
 
-    async def _loop(self, worker_index: int) -> None:
-        """@brief 固定 worker claim 循环 / Fixed worker claim loop.
+    async def _produce(
+        self,
+        work_queue: asyncio.Queue[_WorkItem],
+        capacity: asyncio.Queue[None],
+        stop_event: asyncio.Event,
+    ) -> None:
+        """@brief 以单一 owner 领取不超过可用容量的 claims / Claim up to free capacity under one owner.
 
-        @param worker_index 诊断序号 / Diagnostic index.
+        @param work_queue 有界 consumer 队列 / Bounded consumer queue.
+        @param capacity 排队中与执行中共享的容量令牌 / Capacity tokens shared by queued and executing work.
+        @param stop_event 停止新 claim 的顶层信号 / Top-level signal stopping new claims.
         @return None / None.
         """
 
-        while self._running():
+        while not stop_event.is_set():
+            tokens = self._take_available(capacity, limit=self._claim_limit)
+            if not tokens:
+                await self._wait_for_stop(stop_event, self._poll_interval)
+                continue
             try:
-                claims = await self._repository.claim_ready(
-                    now=self._clock.now(),
-                    limit=self._claim_limit,
-                    lease_for=self._lease_for,
+                claims = tuple(
+                    await self._repository.claim_ready(
+                        now=self._clock.now(),
+                        limit=len(tokens),
+                        lease_for=self._lease_for,
+                    )
                 )
-                if len(claims) > self._claim_limit:
+                if len(claims) > len(tokens):
                     raise RuntimeError(
                         "Verification repository returned more claims than requested"
                     )
-                if claims:
-                    for claim in claims:
-                        try:
-                            await self._service.process_claim(claim)
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception:
-                            logger.exception(
-                                "Verification claim processing failed unexpectedly: "
-                                "worker=%s chat=%s user=%s",
-                                worker_index,
-                                claim.task.chat_id,
-                                claim.task.user_id,
-                            )
-                    continue
             except asyncio.CancelledError:
+                self._return_capacity(capacity, tokens)
                 raise
             except Exception:
-                logger.exception(
-                    "Verification claim polling failed: worker=%s",
-                    worker_index,
-                )
-            await self._wait(self._poll_interval)
+                self._return_capacity(capacity, tokens)
+                logger.exception("Verification claim producer failed")
+                await self._wait_for_stop(stop_event, self._poll_interval)
+                continue
+            for claim in claims:
+                await work_queue.put(claim)
+            self._return_capacity(capacity, tokens[len(claims) :])
+            if claims:
+                continue
+            await self._wait_for_stop(stop_event, self._poll_interval)
 
-    async def _recover_leases_loop(self) -> None:
+    async def _recover_leases_loop(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        recovery: LeaseRecoveryCadence,
+    ) -> None:
         """@brief 周期回收崩溃任务的过期租约 / Periodically recover leases left by crashed tasks.
 
+        @param stop_event 顶层停止信号 / Top-level stop signal.
+        @param recovery 与 lease 半程对齐的共享恢复节奏 / Shared recovery cadence aligned with half the lease.
         @return None / None.
         """
 
-        interval = max(self._poll_interval, min(self._lease_for.total_seconds(), 5.0))
-        while self._running():
-            await self._wait(interval)
-            if not self._running():
+        while not stop_event.is_set():
+            if await self._wait_for_stop(stop_event, recovery.interval_seconds):
                 return
+            if not recovery.take_due():
+                continue
             try:
                 await self._repository.recover_expired_leases(now=self._clock.now())
             except asyncio.CancelledError:
@@ -188,36 +216,83 @@ class VerificationTimeoutWorker:
             except Exception:
                 logger.exception("Verification lease recovery failed")
 
-    async def _wait(self, delay: float) -> None:
-        """@brief 等待通知或有界轮询间隔 / Wait for a notification or a bounded poll interval.
+    async def _consume(
+        self,
+        work_queue: asyncio.Queue[_WorkItem],
+        capacity: asyncio.Queue[None],
+        worker_index: int,
+    ) -> None:
+        """@brief 消费 claims 并在终结尝试后归还容量 / Consume claims and return capacity after finalization attempts.
 
-        @param delay 最大等待秒数 / Maximum delay in seconds.
+        @param work_queue 有界 claim 队列 / Bounded claim queue.
+        @param capacity claim 容量令牌 / Claim-capacity tokens.
+        @param worker_index 诊断序号 / Diagnostic ordinal.
         @return None / None.
         """
 
-        wake = self._wake
-        if self._state is not VerificationWorkerState.RUNNING:
-            return
+        while True:
+            work = await work_queue.get()
+            try:
+                if isinstance(work, _StopConsumer):
+                    return
+                try:
+                    await self._service.process_claim(work)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Verification claim processing failed unexpectedly: "
+                        "worker=%s chat=%s user=%s",
+                        worker_index,
+                        work.task.chat_id,
+                        work.task.user_id,
+                    )
+                finally:
+                    capacity.put_nowait(None)
+            finally:
+                work_queue.task_done()
+
+    @staticmethod
+    async def _wait_for_stop(stop_event: asyncio.Event, delay: float) -> bool:
+        """@brief 等待停止或有界轮询间隔 / Wait for stop or a bounded polling interval.
+
+        @param stop_event 顶层停止信号 / Top-level stop signal.
+        @param delay 最大等待秒数 / Maximum delay in seconds.
+        @return 停止信号是否已置位 / Whether the stop signal is set.
+        """
+
         try:
             async with asyncio.timeout(delay):
-                await wake.wait()
+                await stop_event.wait()
         except TimeoutError:
-            pass
+            return False
+        return True
 
-    def _notify_waiters(self) -> None:
-        """@brief 广播一次且不丢失 shutdown 竞争 / Broadcast once without losing a shutdown race.
+    @staticmethod
+    def _take_available(capacity: asyncio.Queue[None], *, limit: int) -> list[None]:
+        """@brief 非阻塞取得单次 claim 的容量令牌 / Non-blockingly take one claim batch of capacity tokens.
 
+        @param capacity 共享容量令牌 / Shared capacity tokens.
+        @param limit 单次 claim 上限 / Per-claim limit.
+        @return 本轮可用令牌 / Tokens available for this claim.
+        """
+
+        tokens: list[None] = []
+        while len(tokens) < limit:
+            try:
+                tokens.append(capacity.get_nowait())
+            except asyncio.QueueEmpty:
+                return tokens
+        return tokens
+
+    @staticmethod
+    def _return_capacity(capacity: asyncio.Queue[None], tokens: Sequence[None]) -> None:
+        """@brief 归还未消费或已完成 claim 的容量 / Return unused or completed claim capacity.
+
+        @param capacity 共享容量令牌 / Shared capacity tokens.
+        @param tokens 待归还令牌 / Tokens to return.
         @return None / None.
         """
 
-        wake = self._wake
-        self._wake = asyncio.Event()
-        wake.set()
-
-    def _running(self) -> bool:
-        """@brief 判断 worker 是否仍可领取工作 / Check whether the worker may still claim work.
-
-        @return RUNNING 状态为 True / True in RUNNING state.
-        """
-
-        return self._state is VerificationWorkerState.RUNNING
+        for token in tokens:
+            capacity.put_nowait(token)

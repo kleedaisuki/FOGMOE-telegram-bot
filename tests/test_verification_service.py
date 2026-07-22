@@ -430,6 +430,135 @@ class OverclaimingVerificationRepository(MemoryVerificationRepository):
         return claims
 
 
+class BlockingClaimProbeRepository(MemoryVerificationRepository):
+    """@brief 阻塞 claim 以观测 producer 所有权与独立恢复 / Block claims to observe producer ownership and independent recovery."""
+
+    def __init__(self) -> None:
+        """@brief 初始化并发与恢复探针 / Initialize concurrency and recovery probes."""
+
+        super().__init__()
+        self.claim_started = asyncio.Event()
+        """@brief 首次 claim 已进入 / First claim has entered."""
+        self.release_claim = asyncio.Event()
+        """@brief 允许阻塞 claim 返回 / Allow the blocked claim to return."""
+        self.periodic_recovery = asyncio.Event()
+        """@brief 启动恢复后的首次周期恢复已发生 / First periodic recovery after startup has occurred."""
+        self.claim_limits: list[int] = []
+        """@brief 每次数据库 claim 的请求上限 / Requested limit for each database claim."""
+        self.active_claims = 0
+        """@brief 当前并发 claim 调用数 / Currently concurrent claim calls."""
+        self.max_active_claims = 0
+        """@brief 最大并发 claim 调用数 / Maximum concurrent claim calls."""
+        self.recovery_calls = 0
+        """@brief 启动与周期 lease recovery 总调用数 / Total startup and periodic recovery calls."""
+
+    async def claim_ready(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        lease_for: timedelta,
+    ) -> tuple[VerificationClaim, ...]:
+        """@brief 阻塞空 claim 并记录并发 / Block an empty claim and record concurrency.
+
+        @param now 当前时刻 / Current time.
+        @param limit 请求上限 / Requested limit.
+        @param lease_for claim 租约 / Claim lease.
+        @return 空 claims / No claims.
+        """
+
+        del now, lease_for
+        self.claim_limits.append(limit)
+        self.active_claims += 1
+        self.max_active_claims = max(self.max_active_claims, self.active_claims)
+        self.claim_started.set()
+        try:
+            await self.release_claim.wait()
+        finally:
+            self.active_claims -= 1
+        return ()
+
+    async def recover_expired_leases(self, *, now: datetime) -> int:
+        """@brief 记录不受阻塞 producer 影响的恢复调用 / Record recovery calls independent of the blocked producer.
+
+        @param now 当前时刻 / Current time.
+        @return 回收数 / Recovered count.
+        """
+
+        self.recovery_calls += 1
+        if self.recovery_calls >= 2:
+            self.periodic_recovery.set()
+        return await super().recover_expired_leases(now=now)
+
+
+class ClaimLimitRecordingRepository(MemoryVerificationRepository):
+    """@brief 记录单 producer 的批量上限 / Record batch limits requested by the sole producer."""
+
+    def __init__(self) -> None:
+        """@brief 初始化批量记录 / Initialize batch-limit recording."""
+
+        super().__init__()
+        self.claim_limits: list[int] = []
+        """@brief 各次 claim 上限 / Per-call claim limits."""
+
+    async def claim_ready(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        lease_for: timedelta,
+    ) -> tuple[VerificationClaim, ...]:
+        """@brief 记录上限后执行内存 claim / Record the limit before claiming in memory.
+
+        @param now 当前时刻 / Current time.
+        @param limit 请求上限 / Requested limit.
+        @param lease_for claim 租约 / Claim lease.
+        @return claims / Claims.
+        """
+
+        self.claim_limits.append(limit)
+        return await super().claim_ready(now=now, limit=limit, lease_for=lease_for)
+
+
+class ConcurrentRecordingDelivery(RecordingDelivery):
+    """@brief 阻塞并记录验证副作用并发 / Block and record verification-effect concurrency."""
+
+    def __init__(self, *, expected_concurrency: int) -> None:
+        """@brief 配置期望饱和并发 / Configure the expected saturated concurrency.
+
+        @param expected_concurrency 触发饱和事件的并发数 / Concurrency count that signals saturation.
+        """
+
+        super().__init__()
+        self.expected_concurrency = expected_concurrency
+        """@brief 期望并发数 / Expected concurrency."""
+        self.active = 0
+        """@brief 当前并发投递数 / Currently active deliveries."""
+        self.max_active = 0
+        """@brief 最大并发投递数 / Maximum active deliveries."""
+        self.saturated = asyncio.Event()
+        """@brief 已达到期望并发 / Expected concurrency has been reached."""
+        self.gate = asyncio.Event()
+        """@brief 统一释放所有阻塞投递 / Shared gate releasing all blocked deliveries."""
+
+    async def deliver(self, task: VerificationTask) -> None:
+        """@brief 记录任务并阻塞到统一释放 / Record a task and block until shared release.
+
+        @param task 过渡态聚合 / Transitional aggregate.
+        @return None / None.
+        """
+
+        self.calls.append(task)
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        if self.active >= self.expected_concurrency:
+            self.saturated.set()
+        try:
+            await self.gate.wait()
+        finally:
+            self.active -= 1
+
+
 class FailingRecoveryRepository(MemoryVerificationRepository):
     """@brief 启动 lease 恢复失败的测试仓储 / Test repository whose startup lease recovery fails."""
 
@@ -594,6 +723,111 @@ def test_worker_rejects_a_repository_batch_larger_than_its_claim_limit() -> None
         await _stop_worker(stop_event, run_task)
 
         assert delivery.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_worker_uses_one_claim_producer_with_independent_lease_recovery() -> None:
+    """@brief 单 producer 独占 claim，recovery 不受阻塞影响 / One producer owns claims while recovery remains independent."""
+
+    async def scenario() -> None:
+        """@brief 阻塞 producer 并等待独立周期恢复 / Block the producer and await independent periodic recovery."""
+
+        repository = BlockingClaimProbeRepository()
+        service = VerificationService(
+            repository=repository,
+            delivery=RecordingDelivery(),
+            clock=ManualClock(),
+        )
+        worker = VerificationTimeoutWorker(
+            repository=repository,
+            service=service,
+            worker_count=3,
+            claim_limit=2,
+            lease_for=timedelta(seconds=0.02),
+            poll_interval=0.01,
+            clock=ManualClock(),
+        )
+        stop_event, run_task = await _run_worker(worker)
+        try:
+            await asyncio.wait_for(repository.claim_started.wait(), timeout=1)
+            await asyncio.wait_for(repository.periodic_recovery.wait(), timeout=1)
+
+            assert repository.max_active_claims == 1
+            assert repository.claim_limits == [2]
+            assert repository.recovery_calls >= 2
+            assert not hasattr(worker, "wake")
+        finally:
+            stop_event.set()
+            repository.release_claim.set()
+            await run_task
+
+    asyncio.run(scenario())
+
+
+def test_worker_bounds_queued_and_executing_claims_and_drains_them() -> None:
+    """@brief 容量乘积同时约束队列与执行，shutdown 排空全部已领任务 / The capacity product bounds queued plus executing claims and shutdown drains them."""
+
+    async def scenario() -> None:
+        """@brief 以六个任务压满四个 claim 槽 / Saturate four claim slots with six due tasks."""
+
+        worker_count = 2
+        claim_limit = 2
+        total_capacity = worker_count * claim_limit
+        repository = ClaimLimitRecordingRepository()
+        delivery = ConcurrentRecordingDelivery(
+            expected_concurrency=worker_count,
+        )
+        clock = ManualClock()
+        service = VerificationService(
+            repository=repository,
+            delivery=delivery,
+            clock=clock,
+        )
+        for ordinal in range(6):
+            await service.begin(
+                VerificationKey(ChatId(-1001), UserId(100 + ordinal)),
+                member_name=f"Member {ordinal}",
+            )
+        clock.advance(timedelta(seconds=31))
+        worker = VerificationTimeoutWorker(
+            repository=repository,
+            service=service,
+            worker_count=worker_count,
+            claim_limit=claim_limit,
+            poll_interval=0.01,
+            clock=clock,
+        )
+        stop_event, run_task = await _run_worker(worker)
+        await asyncio.wait_for(delivery.saturated.wait(), timeout=1)
+        async with asyncio.timeout(1):
+            while len(repository.claims) < total_capacity:
+                await asyncio.sleep(0)
+
+        assert repository.claim_limits == [claim_limit, claim_limit]
+        assert len(repository.claims) == total_capacity
+        assert len(delivery.calls) == worker_count
+        assert delivery.max_active == worker_count
+
+        stop_event.set()
+        async with asyncio.timeout(1):
+            while worker.state is VerificationWorkerState.RUNNING:
+                await asyncio.sleep(0)
+        assert worker.state.value == VerificationWorkerState.CLOSING.value
+        assert not run_task.done()
+        delivery.gate.set()
+        await run_task
+
+        assert len(delivery.calls) == total_capacity
+        assert sum(task.status.terminal for task in repository.tasks.values()) == 4
+        assert not repository.claims
+        assert worker.state is VerificationWorkerState.CLOSED
+        pending_names = {
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+        }
+        assert not any(name.startswith("verification-") for name in pending_names)
 
     asyncio.run(scenario())
 
