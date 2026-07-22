@@ -6,7 +6,7 @@ import logging
 from collections.abc import Iterable, Mapping
 from typing import Protocol, cast
 
-from fogmoe_bot.domain.assistant.routing.circuit import ProviderCircuit
+from fogmoe_bot.application.runtime import FailureCircuit
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
 from fogmoe_bot.domain.assistant.routing.policy import model_supports_vision
 from fogmoe_bot.domain.context import ContextState
@@ -52,7 +52,7 @@ class AssistantInferenceService:
         *,
         service_order: Iterable[str],
         profiles: Mapping[str, ProviderRoute],
-        circuit: ProviderCircuit,
+        circuit: FailureCircuit[str],
         text_only_model_patterns: Iterable[str],
         working_memory_limit: int,
         working_memory_max_tokens: int,
@@ -88,7 +88,7 @@ class AssistantInferenceService:
         self._agent_loop = agent_loop
 
     @property
-    def circuit(self) -> ProviderCircuit:
+    def circuit(self) -> FailureCircuit[str]:
         """@brief 返回 circuit / Return the circuit.
 
         @return circuit / Circuit.

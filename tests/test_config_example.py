@@ -113,3 +113,32 @@ def test_runtime_settings_require_lease_strictly_longer_than_attempt(
 
     with pytest.raises(ValueError, match="lease_seconds must be >"):
         settings_type(lease_seconds=60, attempt_timeout_seconds=60)
+
+
+def test_working_memory_resilience_defaults_and_positive_bounds() -> None:
+    """@brief WorkingMemory 在线召回有独立 deadline 与冷却边界 / WorkingMemory online recall has independent deadline and cooldown bounds."""
+
+    settings = bot_config.WorkingMemorySettings()
+    assert settings.timeout_seconds == 5.0
+    assert settings.failure_cooldown_seconds == 60.0
+
+    with pytest.raises(ValueError, match="greater than 0"):
+        bot_config.WorkingMemorySettings(timeout_seconds=0.0)
+    with pytest.raises(ValueError, match="greater than 0"):
+        bot_config.WorkingMemorySettings(failure_cooldown_seconds=0.0)
+
+
+def test_runtime_shutdown_grace_covers_serial_durable_drain_phases() -> None:
+    """@brief shutdown grace 严格覆盖 phase 10、20、30 的超时下界 / Shutdown grace strictly covers the phase-10/20/30 timeout lower bound."""
+
+    settings = bot_config.RuntimeSettings()
+    assert settings.mailbox.shutdown_grace_seconds == 180.0
+
+    with pytest.raises(ValueError, match="serialized durable drain lower bound"):
+        bot_config.RuntimeSettings(
+            mailbox=bot_config.MailboxRuntimeSettings(shutdown_grace_seconds=155.0)
+        )
+    valid = bot_config.RuntimeSettings(
+        mailbox=bot_config.MailboxRuntimeSettings(shutdown_grace_seconds=156.0)
+    )
+    assert valid.mailbox.shutdown_grace_seconds == 156.0

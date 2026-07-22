@@ -11,6 +11,7 @@ from fogmoe_bot.domain.memory.models import (
     MAX_WORKING_MEMORY_MESSAGES,
     GroupMemoryScope,
     PersonalMemoryScope,
+    WorkingMemoryAvailability,
     WorkingMemoryMessage,
 )
 
@@ -53,12 +54,18 @@ async def search_memory(
     results: list[JsonObject] = []
     for message in working_memory.messages:
         entry = _result_entry(message)
-        if _fits(scope_payload, query, [*results, entry]):
+        if _fits(
+            scope_payload,
+            query,
+            working_memory.availability,
+            [*results, entry],
+        ):
             results.append(entry)
             continue
         prefix = _largest_fitting_prefix(
             scope_payload,
             query,
+            working_memory.availability,
             results,
             message,
         )
@@ -67,14 +74,25 @@ async def search_memory(
             entry["truncated"] = True
             results.append(entry)
         break
-    return _payload(scope_payload, query, results)
+    return _payload(
+        scope_payload,
+        query,
+        working_memory.availability,
+        results,
+    )
 
 
-def _payload(scope: JsonObject, query: str, results: list[JsonObject]) -> JsonObject:
+def _payload(
+    scope: JsonObject,
+    query: str,
+    availability: WorkingMemoryAvailability,
+    results: list[JsonObject],
+) -> JsonObject:
     """@brief 构造标准 Memory tool payload / Build the canonical Memory-tool payload.
 
     @param scope 已授权域 / Authorized scope.
     @param query 原始 Query / Raw query.
+    @param availability 本次召回可用性 / Availability of this recall attempt.
     @param results 已预算结果 / Budgeted results.
     @return JSON payload / JSON payload.
     """
@@ -82,6 +100,7 @@ def _payload(scope: JsonObject, query: str, results: list[JsonObject]) -> JsonOb
     return {
         "scope": scope,
         "query": query,
+        "availability": availability.value,
         "trust": "untrusted_historical_data",
         "results": cast(list[JsonValue], results),
     }
@@ -104,17 +123,23 @@ def _result_entry(message: WorkingMemoryMessage) -> JsonObject:
     }
 
 
-def _fits(scope: JsonObject, query: str, results: list[JsonObject]) -> bool:
+def _fits(
+    scope: JsonObject,
+    query: str,
+    availability: WorkingMemoryAvailability,
+    results: list[JsonObject],
+) -> bool:
     """@brief 判断 JSON 回填是否在预算内 / Test whether the JSON tool result fits its budget.
 
     @param scope 已授权域 / Authorized scope.
     @param query 原始 Query / Raw query.
+    @param availability 本次召回可用性 / Availability of this recall attempt.
     @param results 候选结果 / Candidate results.
     @return 未超预算为 True / True when within budget.
     """
 
     encoded = json.dumps(
-        _payload(scope, query, results),
+        _payload(scope, query, availability, results),
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -124,6 +149,7 @@ def _fits(scope: JsonObject, query: str, results: list[JsonObject]) -> bool:
 def _largest_fitting_prefix(
     scope: JsonObject,
     query: str,
+    availability: WorkingMemoryAvailability,
     results: list[JsonObject],
     message: WorkingMemoryMessage,
 ) -> str:
@@ -131,6 +157,7 @@ def _largest_fitting_prefix(
 
     @param scope 已授权域 / Authorized scope.
     @param query 原始 Query / Raw query.
+    @param availability 本次召回可用性 / Availability of this recall attempt.
     @param results 已接受结果 / Accepted results.
     @param message 当前消息 / Current message.
     @return 带省略号的前缀；无法容纳则为空 / Ellipsized prefix, or empty if none fits.
@@ -143,7 +170,7 @@ def _largest_fitting_prefix(
         entry = _result_entry(message)
         entry["content"] = message.content[:middle].rstrip() + "…"
         entry["truncated"] = True
-        if _fits(scope, query, [*results, entry]):
+        if _fits(scope, query, availability, [*results, entry]):
             low = middle
         else:
             high = middle - 1

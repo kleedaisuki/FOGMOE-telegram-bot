@@ -111,6 +111,16 @@ class EmbeddingContractError(RuntimeError):
     """@brief Provider 响应违反 embedding 契约 / Provider response violates the embedding contract."""
 
 
+class RetrievalIOError(RuntimeError):
+    """@brief 检索存储端口发生可用性故障 / Retrieval-store port encountered an availability failure.
+
+    @note Adapter 应仅把数据库驱动、连接或远程存储 I/O 错误翻译为该类型；
+        数据映射和业务不变量错误必须原样暴露。/ Adapters should translate only
+        database-driver, connection, or remote-store I/O errors to this type; data-mapping
+        and business-invariant errors must remain visible.
+    """
+
+
 class StaleVectorClaimError(RuntimeError):
     """@brief Passage vector claim 已被回收或替换 / Passage-vector claim was recovered or superseded."""
 
@@ -265,6 +275,7 @@ __all__ = [
     "EpisodicTurn",
     "PassageVectorClaim",
     "RetrievalStore",
+    "RetrievalIOError",
     "RetryableEmbeddingError",
     "StaleVectorClaimError",
 ]

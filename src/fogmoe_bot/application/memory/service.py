@@ -6,11 +6,13 @@ from fogmoe_bot.application.memory.ports import WorkingMemoryQuery
 from fogmoe_bot.application.retrieval.service import (
     SemanticRecallQuery,
     SemanticRecallReader,
+    SemanticRecallUnavailableError,
 )
 from fogmoe_bot.domain.memory.models import (
     GroupMemoryScope,
     PersonalMemoryScope,
     WorkingMemory,
+    WorkingMemoryAvailability,
     WorkingMemoryMessage,
 )
 from fogmoe_bot.domain.retrieval.models import RetrievalScope
@@ -34,13 +36,21 @@ class RetrievalWorkingMemory:
         @return 独立 WorkingMemory / Independent WorkingMemory.
         """
 
-        evidence = await self._recall.recall(
-            SemanticRecallQuery(
-                scope=_retrieval_scope(query.scope),
-                text=query.text,
-                limit=query.limit,
+        try:
+            evidence = await self._recall.recall(
+                SemanticRecallQuery(
+                    scope=_retrieval_scope(query.scope),
+                    text=query.text,
+                    limit=query.limit,
+                )
             )
-        )
+        except SemanticRecallUnavailableError:
+            return WorkingMemory(
+                scope=query.scope,
+                query=query.text,
+                messages=(),
+                availability=WorkingMemoryAvailability.UNAVAILABLE,
+            )
         return WorkingMemory(
             scope=query.scope,
             query=query.text,
@@ -55,6 +65,7 @@ class RetrievalWorkingMemory:
                 )
                 for item in evidence[: query.limit]
             ),
+            availability=WorkingMemoryAvailability.AVAILABLE,
         )
 
 

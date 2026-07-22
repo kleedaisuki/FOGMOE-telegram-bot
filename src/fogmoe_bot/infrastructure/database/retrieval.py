@@ -10,12 +10,14 @@ from typing import cast
 from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.exc import SQLAlchemyError
 
 from fogmoe_bot.application.retrieval import (
     CONVERSATION_TURN_SOURCE_KIND,
     EPISODIC_CORPUS_ID,
     EpisodicTurn,
     PassageVectorClaim,
+    RetrievalIOError,
     StaleVectorClaimError,
 )
 from fogmoe_bot.domain.temporal import ensure_utc
@@ -51,6 +53,11 @@ class PostgresEpisodicSource:
 
         @return 按完成时间稳定排序的 Turn / Turns stably ordered by completion time.
         @raise ValueError 参数越界 / Invalid arguments.
+        @note ``source_projections.source_id`` 是非空复合主键成员；非相关 ``NOT IN``
+            允许 PostgreSQL 一次构建 hashed SubPlan，避免对每个候选 Turn 重扫投影表。/
+            ``source_projections.source_id`` is a non-null composite-primary-key member;
+            the uncorrelated ``NOT IN`` lets PostgreSQL build one hashed SubPlan instead of
+            rescanning the projection table for every candidate turn.
         """
 
         if isinstance(format_version, bool) or format_version < 1:
@@ -93,11 +100,10 @@ class PostgresEpisodicSource:
             "WHERE source_message.turn_id = activity.turn_id "
             "AND source_message.role = 'assistant' "
             "AND jsonb_typeof(source_message.content -> 'text') = 'string') "
-            "AND NOT EXISTS ("
-            "SELECT 1 FROM retrieval.source_projections AS projection "
+            "AND activity.turn_id NOT IN ("
+            "SELECT projection.source_id FROM retrieval.source_projections AS projection "
             "WHERE projection.corpus_id = %s "
             "AND projection.source_kind = %s "
-            "AND projection.source_id = activity.turn_id "
             "AND projection.format_version = %s"
             ") ORDER BY activity.completed_at, activity.turn_id LIMIT %s"
             ") SELECT candidate.turn_id, candidate.scope_kind, candidate.scope_id, "
@@ -546,31 +552,35 @@ class PostgresRetrievalStore:
         if not 1 <= limit <= 384:
             raise ValueError("Retrieval limit must be between 1 and 384")
         query_vector.require_space(space)
-        rows = await db_connection.fetch_all(
-            "SELECT "
-            + ", ".join(
-                f"passage.{column.strip()}" for column in _PASSAGE_COLUMNS.split(",")
+        try:
+            rows = await db_connection.fetch_all(
+                "SELECT "
+                + ", ".join(
+                    f"passage.{column.strip()}"
+                    for column in _PASSAGE_COLUMNS.split(",")
+                )
+                + ", vector.embedding <=> CAST(%s AS vector) AS cosine_distance "
+                "FROM retrieval.passage_vectors AS vector "
+                "JOIN retrieval.passages AS passage ON passage.passage_id = vector.passage_id "
+                "WHERE vector.space_id = %s AND vector.status = 'completed' "
+                "AND passage.scope_kind = %s AND passage.scope_id = %s "
+                "AND passage.corpus_id = %s "
+                "AND passage.format_version = %s "
+                "ORDER BY vector.embedding <=> CAST(%s AS vector), passage.occurred_at DESC, "
+                "passage.passage_id LIMIT %s",
+                (
+                    _encode_vector(query_vector),
+                    space.space_id,
+                    scope.kind,
+                    scope.scope_id,
+                    corpus_id,
+                    space.passage_format_version,
+                    _encode_vector(query_vector),
+                    limit,
+                ),
             )
-            + ", vector.embedding <=> CAST(%s AS vector) AS cosine_distance "
-            "FROM retrieval.passage_vectors AS vector "
-            "JOIN retrieval.passages AS passage ON passage.passage_id = vector.passage_id "
-            "WHERE vector.space_id = %s AND vector.status = 'completed' "
-            "AND passage.scope_kind = %s AND passage.scope_id = %s "
-            "AND passage.corpus_id = %s "
-            "AND passage.format_version = %s "
-            "ORDER BY vector.embedding <=> CAST(%s AS vector), passage.occurred_at DESC, "
-            "passage.passage_id LIMIT %s",
-            (
-                _encode_vector(query_vector),
-                space.space_id,
-                scope.kind,
-                scope.scope_id,
-                corpus_id,
-                space.passage_format_version,
-                _encode_vector(query_vector),
-                limit,
-            ),
-        )
+        except SQLAlchemyError as error:
+            raise RetrievalIOError("Semantic retrieval store is unavailable") from error
         return tuple(
             RetrievalEvidence(
                 passage=_map_passage(_row_values(row, 12)[:11]),

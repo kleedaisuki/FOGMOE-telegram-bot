@@ -22,6 +22,7 @@ from fogmoe_bot.application.assistant.tools.catalog import (
     ToolDefinition,
 )
 from fogmoe_bot.application.memory.ports import WorkingMemoryQuery
+from fogmoe_bot.application.observability.telemetry import Telemetry, TelemetryBuffer
 from fogmoe_bot.domain.context import ContextState, ConversationScope, UserState
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -29,7 +30,12 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnId,
 )
 from fogmoe_bot.domain.conversation.payloads import JsonObject
-from fogmoe_bot.domain.memory import PersonalMemoryScope, WorkingMemory
+from fogmoe_bot.domain.memory import (
+    PersonalMemoryScope,
+    WorkingMemory,
+    WorkingMemoryAvailability,
+)
+from fogmoe_bot.domain.observability.signals import SpanSignal
 
 
 class _Checkpoints:
@@ -82,16 +88,28 @@ class _Completion:
 class _Memory:
     """@brief 记录每次 fresh WorkingMemory 查询 / Record every fresh WorkingMemory query."""
 
-    def __init__(self) -> None:
-        """@brief 初始化查询日志 / Initialize the query log."""
+    def __init__(
+        self,
+        availability: WorkingMemoryAvailability = WorkingMemoryAvailability.AVAILABLE,
+    ) -> None:
+        """@brief 初始化查询日志与可用性 / Initialize the query log and availability.
+
+        @param availability 返回的召回可用性 / Recall availability to return.
+        """
 
         self.queries: list[WorkingMemoryQuery] = []
+        self.availability = availability
 
     async def retrieve(self, query: WorkingMemoryQuery) -> WorkingMemory:
         """@brief 返回空但有作用域的工作记忆 / Return empty scoped working memory."""
 
         self.queries.append(query)
-        return WorkingMemory(scope=query.scope, query=query.text, messages=())
+        return WorkingMemory(
+            scope=query.scope,
+            query=query.text,
+            messages=(),
+            availability=self.availability,
+        )
 
 
 class _Receipts:
@@ -434,5 +452,50 @@ def test_ephemeral_tool_filter_never_persists_empty_tool_calls() -> None:
             for message in response.history_messages
             if "tool_calls" in message
         )
+
+    asyncio.run(scenario())
+
+
+def test_unavailable_working_memory_is_optional_and_observable() -> None:
+    """@brief WorkingMemory 不可用时继续推理、跳过注入并记录状态 / Unavailable WorkingMemory continues inference, skips injection, and records status."""
+
+    async def scenario() -> None:
+        """@brief 执行一次不可用召回的模型步骤 / Execute one model step with unavailable recall."""
+
+        order: list[str] = []
+        completion = _Completion(
+            [AssistantCompletion("done", {"role": "assistant", "content": "done"})],
+            order,
+        )
+        buffer = TelemetryBuffer(64)
+        response = await AgentLoop(
+            runtime=AgentRuntime(
+                catalog=DEFAULT_TOOL_CATALOG,
+                persistence=_Receipts(order),
+            ),
+            completion=completion,
+            checkpoints=_Checkpoints(order),
+            memory=_Memory(WorkingMemoryAvailability.UNAVAILABLE),
+            telemetry=Telemetry(buffer),
+        ).run(
+            _context(),
+            AgentExecutionConfig(provider="test", model="model", allow_tools=False),
+            tool_context=_tool_context(TurnId.new()),
+        )
+
+        assert response.text == "done"
+        model_messages = cast(
+            tuple[JsonObject, ...], completion.requests[0]["messages"]
+        )
+        assert model_messages == ({"role": "user", "content": "remember me"},)
+        spans = tuple(
+            signal
+            for signal in buffer.drain(64)
+            if isinstance(signal, SpanSignal)
+            and signal.name == "memory.working.retrieve"
+        )
+        assert len(spans) == 1
+        assert spans[0].attributes["memory.availability"] == "unavailable"
+        assert spans[0].attributes["memory.result.count"] == 0
 
     asyncio.run(scenario())

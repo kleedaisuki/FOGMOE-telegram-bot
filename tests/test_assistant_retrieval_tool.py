@@ -19,7 +19,11 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnId,
 )
 from fogmoe_bot.domain.context.token_estimator import estimate_tokens
-from fogmoe_bot.domain.memory import WorkingMemory, WorkingMemoryMessage
+from fogmoe_bot.domain.memory import (
+    WorkingMemory,
+    WorkingMemoryAvailability,
+    WorkingMemoryMessage,
+)
 from fogmoe_bot.infrastructure.assistant.tool_operations.memory import search_memory
 from fogmoe_bot.infrastructure.database import connection as db_connection
 from fogmoe_bot.infrastructure.database.assistant_tool_effects import (
@@ -62,7 +66,9 @@ def _request(*, group_id: int | None = None) -> ToolEffectRequest:
         context=ToolExecutionContext(
             turn_id=TurnId.new(),
             conversation_id=ConversationId(
-                "assistant-user:7" if group_id is None else f"assistant-group:{group_id}"
+                "assistant-user:7"
+                if group_id is None
+                else f"assistant-group:{group_id}"
             ),
             delivery_stream_id=DeliveryStreamId("telegram:user:7"),
             user_id=7,
@@ -89,11 +95,14 @@ def test_memory_tool_derives_personal_scope_and_returns_provenance() -> None:
 
         memory = _Memory()
         result = await search_memory(_request(), memory=memory)
-        assert memory.queries == [WorkingMemoryQuery(memory.queries[0].scope, "我以前喜欢喝什么？", 3)]
+        assert memory.queries == [
+            WorkingMemoryQuery(memory.queries[0].scope, "我以前喜欢喝什么？", 3)
+        ]
         assert memory.queries[0].scope.user_id == 7
         assert result == {
             "scope": {"kind": "personal", "id": 7},
             "query": "我以前喜欢喝什么？",
+            "availability": "available",
             "trust": "untrusted_historical_data",
             "results": [
                 {
@@ -108,6 +117,37 @@ def test_memory_tool_derives_personal_scope_and_returns_provenance() -> None:
                     "cosine_distance": 0.125,
                 }
             ],
+        }
+
+    asyncio.run(scenario())
+
+
+def test_memory_tool_exposes_unavailable_instead_of_claiming_empty_recall() -> None:
+    """@brief Tool payload 区分依赖不可用与成功空结果 / Tool payload distinguishes dependency unavailability from successful emptiness."""
+
+    class _UnavailableMemory:
+        """@brief 返回 typed unavailable WorkingMemory / Return typed unavailable WorkingMemory."""
+
+        async def retrieve(self, query: WorkingMemoryQuery) -> WorkingMemory:
+            """@brief 保留 scope/query 并标记不可用 / Preserve scope/query and mark unavailable."""
+
+            return WorkingMemory(
+                query.scope,
+                query.text,
+                (),
+                WorkingMemoryAvailability.UNAVAILABLE,
+            )
+
+    async def scenario() -> None:
+        """@brief 执行一次不可用工具召回 / Execute one unavailable tool recall."""
+
+        result = await search_memory(_request(), memory=_UnavailableMemory())
+        assert result == {
+            "scope": {"kind": "personal", "id": 7},
+            "query": "我以前喜欢喝什么？",
+            "availability": "unavailable",
+            "trust": "untrusted_historical_data",
+            "results": [],
         }
 
     asyncio.run(scenario())
@@ -188,13 +228,9 @@ def test_memory_tool_result_has_an_independent_hard_budget() -> None:
                 query.text,
                 tuple(
                     WorkingMemoryMessage(
-                        passage_id=UUID(
-                            f"30000000-0000-0000-0000-{index:012d}"
-                        ),
+                        passage_id=UUID(f"30000000-0000-0000-0000-{index:012d}"),
                         source_kind="conversation.turn",
-                        source_id=UUID(
-                            f"40000000-0000-0000-0000-{index:012d}"
-                        ),
+                        source_id=UUID(f"40000000-0000-0000-0000-{index:012d}"),
                         occurred_at=NOW,
                         content="敏感历史" * 2_000,
                         cosine_distance=index / 100,

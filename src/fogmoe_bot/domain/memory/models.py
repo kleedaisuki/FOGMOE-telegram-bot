@@ -6,6 +6,7 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from uuid import UUID
 
 from fogmoe_bot.domain.temporal import ensure_utc
@@ -16,6 +17,16 @@ _SOURCE_KIND_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,99}$")
 
 MAX_WORKING_MEMORY_MESSAGES = 128
 """@brief 单次 Query 的 WorkingMemory 条数硬上限 / Hard WorkingMemory row limit per query."""
+
+
+class WorkingMemoryAvailability(StrEnum):
+    """@brief WorkingMemory 召回可用性 / WorkingMemory recall availability."""
+
+    AVAILABLE = "available"
+    """@brief 召回成功，包括成功的空结果 / Recall succeeded, including an empty result."""
+
+    UNAVAILABLE = "unavailable"
+    """@brief 可选召回依赖暂时不可用 / Optional recall dependency is temporarily unavailable."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +121,7 @@ class WorkingMemory:
     @param scope 强隔离 Memory 域 / Strongly isolated Memory scope.
     @param query 未改写的当前 Query / Unrewritten current query.
     @param messages 按相关性排序的历史消息 / Historical messages ordered by relevance.
+    @param availability 本次召回是否成功 / Whether this recall attempt succeeded.
     @note WorkingMemory 既不属于 ContextState，也不能持久化进 Conversation 或参与 compaction。/
         WorkingMemory belongs to neither ContextState nor Conversation and must never participate
         in compaction.
@@ -118,6 +130,7 @@ class WorkingMemory:
     scope: MemoryScope
     query: str
     messages: tuple[WorkingMemoryMessage, ...]
+    availability: WorkingMemoryAvailability = WorkingMemoryAvailability.AVAILABLE
 
     def __post_init__(self) -> None:
         """@brief 校验 Query、容量与唯一性 / Validate query, capacity, and uniqueness.
@@ -128,6 +141,10 @@ class WorkingMemory:
 
         query = self.query.strip()
         messages = tuple(self.messages)
+        if not isinstance(self.availability, WorkingMemoryAvailability):
+            raise TypeError(
+                "WorkingMemory availability must be WorkingMemoryAvailability"
+            )
         if not query or len(query) > 20_000:
             raise ValueError("WorkingMemory query must contain 1-20000 characters")
         if len(messages) > MAX_WORKING_MEMORY_MESSAGES:
@@ -138,6 +155,8 @@ class WorkingMemory:
         passage_ids = tuple(message.passage_id for message in messages)
         if len(set(passage_ids)) != len(passage_ids):
             raise ValueError("WorkingMemory passage IDs must be unique")
+        if self.availability is WorkingMemoryAvailability.UNAVAILABLE and messages:
+            raise ValueError("Unavailable WorkingMemory cannot contain messages")
         object.__setattr__(self, "query", query)
         object.__setattr__(self, "messages", messages)
 
@@ -148,5 +167,6 @@ __all__ = [
     "MemoryScope",
     "PersonalMemoryScope",
     "WorkingMemory",
+    "WorkingMemoryAvailability",
     "WorkingMemoryMessage",
 ]

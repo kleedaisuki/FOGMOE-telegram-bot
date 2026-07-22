@@ -65,8 +65,8 @@
       "per_key_capacity": 8,
       // 空闲 mailbox 从内存回收前的秒数。
       "idle_ttl_seconds": 300.0,
-      // 关闭进程时等待在途工作的最长秒数。
-      "shutdown_grace_seconds": 30.0
+      // 关闭进程时等待串行 durable drain 阶段完成的最长秒数。
+      "shutdown_grace_seconds": 180.0
     },
     // 定时任务调度器。
     "scheduling": {
@@ -367,7 +367,11 @@
       // 单次查询最多返回的记忆条数。
       "result_limit": 64,
       // 为检索证据预留的 token 数。
-      "reserved_tokens": 16384
+      "reserved_tokens": 16384,
+      // 在线工作记忆召回（embedding 加向量查询）的独立 deadline 秒数。
+      "timeout_seconds": 5.0,
+      // 在线召回失败后的快速失败冷却秒数；不影响后台 embedding worker。
+      "failure_cooldown_seconds": 60.0
     },
     // 情景记忆嵌入、索引与查询策略。
     "retrieval": {

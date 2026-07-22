@@ -268,6 +268,9 @@ class AgentLoop:
                 memory_span.set_attribute(
                     "memory.result.count", len(working_memory.messages)
                 )
+                memory_span.set_attribute(
+                    "memory.availability", working_memory.availability.value
+                )
             model_messages = compose_model_messages(
                 state.messages,
                 working_memory,

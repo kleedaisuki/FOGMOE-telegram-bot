@@ -8,7 +8,11 @@ from typing import cast
 
 from fogmoe_bot.domain.context.token_estimator import estimate_message_tokens
 from fogmoe_bot.domain.conversation.payloads import JsonObject
-from fogmoe_bot.domain.memory.models import WorkingMemory, WorkingMemoryMessage
+from fogmoe_bot.domain.memory.models import (
+    WorkingMemory,
+    WorkingMemoryAvailability,
+    WorkingMemoryMessage,
+)
 
 
 _WORKING_MEMORY_POLICY = (
@@ -37,6 +41,8 @@ def render_working_memory(
 
     if isinstance(maximum_tokens, bool) or maximum_tokens < 256:
         raise ValueError("WorkingMemory maximum_tokens must be at least 256")
+    if working_memory.availability is WorkingMemoryAvailability.UNAVAILABLE:
+        raise ValueError("Unavailable WorkingMemory cannot be rendered")
     selected: list[tuple[WorkingMemoryMessage, str, bool]] = []
     for message in working_memory.messages:
         full = (*selected, (message, message.content, False))
@@ -137,10 +143,13 @@ def compose_model_messages(
     @param context_messages ContextState 当前消息 / Current ContextState messages.
     @param working_memory 本次新检索的 WorkingMemory / Fresh WorkingMemory for this query.
     @param maximum_tokens WorkingMemory 独立 token 预算 / Independent WorkingMemory token budget.
-    @return WorkingMemory 恰好出现一次的消息序列 / Messages containing WorkingMemory exactly once.
+    @return 可用时注入一次、不可用时不注入的消息序列 /
+        Messages containing WorkingMemory once when available and none when unavailable.
     """
 
     messages = tuple(cast(JsonObject, dict(message)) for message in context_messages)
+    if working_memory.availability is WorkingMemoryAvailability.UNAVAILABLE:
+        return messages
     memory_message = render_working_memory(
         working_memory,
         maximum_tokens=maximum_tokens,

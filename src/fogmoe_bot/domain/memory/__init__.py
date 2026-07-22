@@ -5,6 +5,7 @@ from .models import (
     MemoryScope,
     PersonalMemoryScope,
     WorkingMemory,
+    WorkingMemoryAvailability,
     WorkingMemoryMessage,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "MemoryScope",
     "PersonalMemoryScope",
     "WorkingMemory",
+    "WorkingMemoryAvailability",
     "WorkingMemoryMessage",
 ]

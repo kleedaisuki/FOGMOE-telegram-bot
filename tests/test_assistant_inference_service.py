@@ -3,8 +3,8 @@ from uuid import uuid4
 
 from fogmoe_bot.application.assistant.agent_loop import AgentResponse
 from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
+from fogmoe_bot.application.runtime import FailureCircuit, FailureCircuitPolicy
 from fogmoe_bot.domain.context import ContextState, ConversationScope, UserState
-from fogmoe_bot.domain.assistant.routing.circuit import ProviderCircuit
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
 
 
@@ -38,10 +38,12 @@ def _service(*, order, profiles, runner, text_only_patterns=()):
     return AssistantInferenceService(
         service_order=order,
         profiles=profiles,
-        circuit=ProviderCircuit(
-            failure_threshold=3,
-            window_seconds=300,
-            cooldown_seconds=1800,
+        circuit=FailureCircuit[str](
+            FailureCircuitPolicy(
+                failure_threshold=3,
+                failure_window_seconds=300,
+                cooldown_seconds=1800,
+            )
         ),
         text_only_model_patterns=text_only_patterns,
         working_memory_limit=4,
@@ -205,25 +207,6 @@ def test_image_messages_prioritize_the_vision_model_within_one_route():
 
     assert response.text == "ok"
     assert calls == [("qwen-vision", image_messages)]
-
-
-def test_provider_circuit_opens_after_three_failures_and_resets_on_success():
-    circuit = ProviderCircuit(
-        failure_threshold=3, window_seconds=300, cooldown_seconds=1800
-    )
-    circuit.record_failure("gemini", now=100.0)
-    circuit.record_failure("gemini", now=200.0)
-    circuit.record_success("gemini")
-    circuit.record_failure("gemini", now=300.0)
-
-    assert circuit.is_open("gemini", now=300.0) is False
-    assert circuit.failure_streaks["gemini"] == [300.0]
-
-    circuit.record_failure("gemini", now=301.0)
-    circuit.record_failure("gemini", now=302.0)
-
-    assert circuit.is_open("gemini", now=302.0) is True
-    assert circuit.is_open("gemini", now=2102.0) is False
 
 
 def test_open_circuit_skips_to_next_route(monkeypatch):

@@ -25,6 +25,10 @@ from fogmoe_bot.application.runtime.bot_runtime import (
     ServiceBinding,
 )
 from fogmoe_bot.application.runtime.rate_limit import ReplayAwareCooldownGate
+from fogmoe_bot.application.runtime.failure_circuit import (
+    FailureCircuit,
+    FailureCircuitPolicy,
+)
 
 EXECUTION_RUNTIME_DATA_KEY = "fogmoe.execution_runtime"
 """@brief 组合根保存执行运行时的稳定键 / Stable composition-root key for the execution runtime."""
@@ -39,6 +43,8 @@ __all__ = [
     "BotRuntime",
     "BotRuntimeState",
     "EXECUTION_RUNTIME_DATA_KEY",
+    "FailureCircuit",
+    "FailureCircuitPolicy",
     "KeyedMailboxRuntime",
     "Jitter",
     "Overloaded",

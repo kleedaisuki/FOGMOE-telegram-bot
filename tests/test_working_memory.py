@@ -14,12 +14,16 @@ from fogmoe_bot.application.memory.rendering import (
     render_working_memory,
 )
 from fogmoe_bot.application.memory.service import RetrievalWorkingMemory
-from fogmoe_bot.application.retrieval import SemanticRecallQuery
+from fogmoe_bot.application.retrieval import (
+    SemanticRecallQuery,
+    SemanticRecallUnavailableError,
+)
 from fogmoe_bot.domain.context.token_estimator import estimate_message_tokens
 from fogmoe_bot.domain.memory import (
     GroupMemoryScope,
     PersonalMemoryScope,
     WorkingMemory,
+    WorkingMemoryAvailability,
     WorkingMemoryMessage,
 )
 from fogmoe_bot.domain.retrieval import (
@@ -88,14 +92,48 @@ def test_working_memory_count_cap_is_high_but_finite() -> None:
         scope,
         query.text,
         tuple(
-            _message(ordinal=index, content=f"short {index}")
-            for index in range(1, 129)
+            _message(ordinal=index, content=f"short {index}") for index in range(1, 129)
         ),
     )
 
     assert len(memory.messages) == 128
     with pytest.raises(ValueError, match="between 1 and 128"):
         WorkingMemoryQuery(scope, "query", 129)
+
+
+def test_available_empty_is_distinct_from_unavailable_empty() -> None:
+    """@brief 成功空结果与依赖不可用是不同领域状态 / Successful emptiness and dependency unavailability are distinct domain states."""
+
+    scope = PersonalMemoryScope(7)
+    available = WorkingMemory(scope, "query", ())
+    unavailable = WorkingMemory(
+        scope,
+        "query",
+        (),
+        WorkingMemoryAvailability.UNAVAILABLE,
+    )
+
+    assert available.availability is WorkingMemoryAvailability.AVAILABLE
+    assert unavailable.availability is WorkingMemoryAvailability.UNAVAILABLE
+    available_projection = compose_model_messages(
+        ({"role": "user", "content": "query"},), available
+    )
+    assert any(
+        "<working_memory" in str(message.get("content"))
+        for message in available_projection
+    )
+    assert compose_model_messages(
+        ({"role": "user", "content": "query"},), unavailable
+    ) == ({"role": "user", "content": "query"},)
+    with pytest.raises(ValueError, match="cannot be rendered"):
+        render_working_memory(unavailable)
+    with pytest.raises(ValueError, match="cannot contain messages"):
+        WorkingMemory(
+            scope,
+            "query",
+            (_message(ordinal=1, content="evidence"),),
+            WorkingMemoryAvailability.UNAVAILABLE,
+        )
 
 
 class _Recall:
@@ -106,9 +144,7 @@ class _Recall:
 
         self.queries: list[SemanticRecallQuery] = []
 
-    async def recall(
-        self, query: SemanticRecallQuery
-    ) -> tuple[RetrievalEvidence, ...]:
+    async def recall(self, query: SemanticRecallQuery) -> tuple[RetrievalEvidence, ...]:
         """@brief 返回与请求 scope 相同的证据 / Return evidence in the requested scope."""
 
         self.queries.append(query)
@@ -142,10 +178,58 @@ def test_working_memory_maps_personal_and_group_scopes_exhaustively() -> None:
             result = await memory.retrieve(WorkingMemoryQuery(scope, "query", 2))
             assert result.scope == scope
             assert len(result.messages) == 1
+            assert result.availability is WorkingMemoryAvailability.AVAILABLE
         assert [query.scope for query in recall.queries] == [
             RetrievalScope("personal", 7),
             RetrievalScope("group", -1001),
             RetrievalScope("group", -1002),
         ]
+
+    asyncio.run(scenario())
+
+
+class _UnavailableRecall:
+    """@brief 显式报告 recall 依赖不可用 / Explicitly report an unavailable recall dependency."""
+
+    async def recall(
+        self,
+        query: SemanticRecallQuery,
+    ) -> tuple[RetrievalEvidence, ...]:
+        """@brief 抛出 typed unavailable 错误 / Raise the typed unavailable error."""
+
+        del query
+        raise SemanticRecallUnavailableError("recall unavailable")
+
+
+class _BuggyRecall:
+    """@brief 模拟未分类程序错误 / Simulate an unclassified programming error."""
+
+    async def recall(
+        self,
+        query: SemanticRecallQuery,
+    ) -> tuple[RetrievalEvidence, ...]:
+        """@brief 抛出普通 RuntimeError / Raise an ordinary RuntimeError."""
+
+        del query
+        raise RuntimeError("mapping bug")
+
+
+def test_working_memory_downgrades_only_explicit_recall_unavailability() -> None:
+    """@brief WorkingMemory 仅 fail-open 已分类可用性错误 / WorkingMemory fails open only for classified availability errors."""
+
+    async def scenario() -> None:
+        """@brief 对比 typed 故障与程序错误 / Compare a typed failure with a programming error."""
+
+        query = WorkingMemoryQuery(PersonalMemoryScope(7), "query", 2)
+        unavailable = await RetrievalWorkingMemory(
+            recall=_UnavailableRecall()
+        ).retrieve(query)
+        assert unavailable.scope == query.scope
+        assert unavailable.query == query.text
+        assert unavailable.messages == ()
+        assert unavailable.availability is WorkingMemoryAvailability.UNAVAILABLE
+
+        with pytest.raises(RuntimeError, match="mapping bug"):
+            await RetrievalWorkingMemory(recall=_BuggyRecall()).retrieve(query)
 
     asyncio.run(scenario())

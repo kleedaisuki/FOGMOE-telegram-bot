@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from math import isfinite
 from typing import Protocol
 
 from fogmoe_bot.application.observability.telemetry import Telemetry
-from fogmoe_bot.application.retrieval.ports import EmbeddingProvider, RetrievalStore
+from fogmoe_bot.application.retrieval.ports import (
+    EmbeddingContractError,
+    EmbeddingProvider,
+    RetrievalIOError,
+    RetrievalStore,
+    RetryableEmbeddingError,
+)
+from fogmoe_bot.application.runtime import FailureCircuit
 from fogmoe_bot.domain.observability.conventions import MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind
 from fogmoe_bot.domain.retrieval import (
@@ -18,6 +27,14 @@ from fogmoe_bot.domain.retrieval import (
 
 MAX_SEMANTIC_RECALL_RESULTS = 128
 """@brief 单次通用语义召回结果硬上限 / Hard result limit for one generic semantic recall."""
+
+
+type SemanticRecallCircuitKey = tuple[str, str]
+"""@brief 语料库与嵌入空间组成的断路隔离键 / Circuit-isolation key of corpus and embedding space."""
+
+
+class SemanticRecallUnavailableError(RuntimeError):
+    """@brief 可选语义召回依赖暂时不可用 / Optional semantic-recall dependency is temporarily unavailable."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +79,8 @@ class SemanticRecall:
         space: EmbeddingSpace,
         corpus_id: str,
         telemetry: Telemetry,
+        query_timeout_seconds: float,
+        failure_circuit: FailureCircuit[SemanticRecallCircuitKey],
     ) -> None:
         """@brief 注入检索依赖 / Inject retrieval dependencies.
 
@@ -70,6 +89,8 @@ class SemanticRecall:
         @param space 活跃嵌入空间 / Active embedding space.
         @param corpus_id 目标语料库 / Target corpus.
         @param telemetry 进程 typed telemetry / Process typed telemetry.
+        @param query_timeout_seconds 单次在线召回的独立 deadline / Independent deadline for one online recall.
+        @param failure_circuit 在线召回专用短路器 / Circuit dedicated to online recall.
         """
 
         self._embeddings = embeddings
@@ -77,6 +98,12 @@ class SemanticRecall:
         self._space = space
         self._corpus_id = corpus_id
         self._telemetry = telemetry
+        timeout_seconds = float(query_timeout_seconds)
+        if not isfinite(timeout_seconds) or timeout_seconds <= 0.0:
+            raise ValueError("query_timeout_seconds must be finite and positive")
+        self._query_timeout_seconds = timeout_seconds
+        self._failure_circuit = failure_circuit
+        self._circuit_key = (corpus_id, space.space_id)
 
     async def recall(self, query: SemanticRecallQuery) -> tuple[RetrievalEvidence, ...]:
         """@brief 返回有 provenance 的相关证据 / Return relevant evidence with provenance.
@@ -94,42 +121,36 @@ class SemanticRecall:
                     "retrieval.result.limit": query.limit,
                 },
             ) as recall_span:
-                with self._telemetry.span(
-                    "retrieval.query.embedding",
-                    kind=SpanKind.CLIENT,
-                ):
-                    vector = await self._embeddings.embed_query(
-                        query.text,
-                        space=self._space,
+                if self._failure_circuit.is_open(self._circuit_key):
+                    recall_span.set_attribute("retrieval.availability", "unavailable")
+                    recall_span.set_attribute(
+                        "retrieval.unavailable.reason", "circuit_open"
                     )
-                vector.require_space(self._space)
-                candidate_limit = min(384, query.limit * 3)
-                with self._telemetry.span(
-                    "retrieval.search",
-                    kind=SpanKind.CLIENT,
-                    attributes={"retrieval.candidate.limit": candidate_limit},
-                ) as search_span:
-                    evidence = await self._store.search(
-                        scope=query.scope,
-                        corpus_id=self._corpus_id,
-                        space=self._space,
-                        query_vector=vector,
-                        limit=candidate_limit,
+                    raise SemanticRecallUnavailableError(
+                        "Semantic recall circuit is open"
                     )
-                    search_span.set_attribute(
-                        "retrieval.candidate.count",
-                        len(evidence),
+                try:
+                    async with asyncio.timeout(self._query_timeout_seconds):
+                        selected = await self._execute(query)
+                except asyncio.CancelledError:
+                    raise
+                except (
+                    TimeoutError,
+                    RetryableEmbeddingError,
+                    EmbeddingContractError,
+                    RetrievalIOError,
+                ) as error:
+                    self._failure_circuit.record_failure(self._circuit_key)
+                    recall_span.set_attribute("retrieval.availability", "unavailable")
+                    recall_span.set_attribute(
+                        "retrieval.unavailable.reason",
+                        _unavailable_reason(error),
                     )
-                selected: list[RetrievalEvidence] = []
-                seen_sources: set[tuple[str, object]] = set()
-                for item in evidence:
-                    source = (item.passage.source_kind, item.passage.source_id)
-                    if source in seen_sources:
-                        continue
-                    seen_sources.add(source)
-                    selected.append(item)
-                    if len(selected) >= query.limit:
-                        break
+                    raise SemanticRecallUnavailableError(
+                        "Semantic recall dependency is unavailable"
+                    ) from error
+                self._failure_circuit.record_success(self._circuit_key)
+                recall_span.set_attribute("retrieval.availability", "available")
                 recall_span.set_attribute("retrieval.result.count", len(selected))
         except Exception:
             self._telemetry.counter(
@@ -143,6 +164,67 @@ class SemanticRecall:
         )
         return tuple(selected)
 
+    async def _execute(
+        self,
+        query: SemanticRecallQuery,
+    ) -> tuple[RetrievalEvidence, ...]:
+        """@brief 在调用方 deadline 内执行嵌入、搜索与去重 / Embed, search, and deduplicate within the caller deadline.
+
+        @param query 已验证查询 / Validated query.
+        @return 距离升序且来源唯一的证据 / Distance-ordered evidence with unique sources.
+        """
+
+        with self._telemetry.span(
+            "retrieval.query.embedding",
+            kind=SpanKind.CLIENT,
+        ):
+            vector = await self._embeddings.embed_query(
+                query.text,
+                space=self._space,
+            )
+        vector.require_space(self._space)
+        candidate_limit = min(384, query.limit * 3)
+        with self._telemetry.span(
+            "retrieval.search",
+            kind=SpanKind.CLIENT,
+            attributes={"retrieval.candidate.limit": candidate_limit},
+        ) as search_span:
+            evidence = await self._store.search(
+                scope=query.scope,
+                corpus_id=self._corpus_id,
+                space=self._space,
+                query_vector=vector,
+                limit=candidate_limit,
+            )
+            search_span.set_attribute("retrieval.candidate.count", len(evidence))
+        selected: list[RetrievalEvidence] = []
+        seen_sources: set[tuple[str, object]] = set()
+        for item in evidence:
+            source = (item.passage.source_kind, item.passage.source_id)
+            if source in seen_sources:
+                continue
+            seen_sources.add(source)
+            selected.append(item)
+            if len(selected) >= query.limit:
+                break
+        return tuple(selected)
+
+
+def _unavailable_reason(error: Exception) -> str:
+    """@brief 将已知可用性错误映射为低基数观测值 / Map known availability errors to low-cardinality telemetry.
+
+    @param error 已分类可用性错误 / Classified availability error.
+    @return 稳定原因名 / Stable reason name.
+    """
+
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    if isinstance(error, RetryableEmbeddingError):
+        return "embedding_transport"
+    if isinstance(error, EmbeddingContractError):
+        return "embedding_contract"
+    return "retrieval_io"
+
 
 class SemanticRecallReader(Protocol):
     """@brief Assistant 所需的语义召回端口 / Semantic-recall port required by Assistant."""
@@ -153,4 +235,10 @@ class SemanticRecallReader(Protocol):
         ...
 
 
-__all__ = ["SemanticRecall", "SemanticRecallQuery", "SemanticRecallReader"]
+__all__ = [
+    "SemanticRecall",
+    "SemanticRecallCircuitKey",
+    "SemanticRecallQuery",
+    "SemanticRecallReader",
+    "SemanticRecallUnavailableError",
+]

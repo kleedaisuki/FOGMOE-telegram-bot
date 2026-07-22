@@ -24,11 +24,11 @@ from fogmoe_bot.application.retrieval import (
     RetrievalWorker,
     SemanticRecall,
 )
+from fogmoe_bot.application.runtime import FailureCircuit, FailureCircuitPolicy
 from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.application.scheduling.service import SchedulingService
 from fogmoe_bot.application.user_profile.worker import DreamingWorker
 from fogmoe_bot.config import AssistantSettings, BotSettings, reveal_secret
-from fogmoe_bot.domain.assistant.routing.circuit import ProviderCircuit
 from fogmoe_bot.domain.context_window.budget import ContextTokenBudget, TokenCount
 from fogmoe_bot.domain.retrieval import EmbeddingSpace
 from fogmoe_bot.domain.temporal import TimeZoneId
@@ -145,12 +145,25 @@ def build_durable_assistant(
         telemetry=telemetry,
         proxy_url=settings.network.proxy_url,
     )
+    recall_circuit = FailureCircuit[tuple[str, str]](
+        FailureCircuitPolicy(
+            failure_threshold=1,
+            failure_window_seconds=(
+                assistant_settings.working_memory.failure_cooldown_seconds
+            ),
+            cooldown_seconds=(
+                assistant_settings.working_memory.failure_cooldown_seconds
+            ),
+        )
+    )
     recall = SemanticRecall(
         embeddings=embedding_client,
         store=retrieval_store,
         space=embedding_space,
         corpus_id=EPISODIC_CORPUS_ID,
         telemetry=telemetry,
+        query_timeout_seconds=assistant_settings.working_memory.timeout_seconds,
+        failure_circuit=recall_circuit,
     )
     working_memory = RetrievalWorkingMemory(recall=recall)
     retrieval_worker = assistant_settings.retrieval.worker
@@ -268,10 +281,12 @@ def build_durable_assistant(
         memory=working_memory,
         telemetry=telemetry,
     )
-    circuit = ProviderCircuit(
-        failure_threshold=3,
-        window_seconds=5 * 60,
-        cooldown_seconds=30 * 60,
+    circuit = FailureCircuit[str](
+        FailureCircuitPolicy(
+            failure_threshold=3,
+            failure_window_seconds=5 * 60,
+            cooldown_seconds=30 * 60,
+        )
     )
     service = AssistantInferenceService(
         service_order=configured_service_order(settings.ai),

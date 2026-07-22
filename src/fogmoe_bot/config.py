@@ -371,7 +371,7 @@ class MailboxRuntimeSettings(_FrozenSettings):
     global_capacity: PositiveInt = 512
     per_key_capacity: PositiveInt = 8
     idle_ttl_seconds: PositiveFloat = 300.0
-    shutdown_grace_seconds: PositiveFloat = 30.0
+    shutdown_grace_seconds: PositiveFloat = 180.0
 
     @model_validator(mode="after")
     def _validate_capacities(self) -> MailboxRuntimeSettings:
@@ -539,6 +539,35 @@ class RuntimeSettings(_FrozenSettings):
         default_factory=CompactionRuntimeSettings
     )
     dreaming: DreamingRuntimeSettings = Field(default_factory=DreamingRuntimeSettings)
+
+    @model_validator(mode="after")
+    def _validate_serial_shutdown_budget(self) -> RuntimeSettings:
+        """@brief 保证 shutdown grace 覆盖串行 durable drain 阶段 / Ensure shutdown grace covers serialized durable drain phases.
+
+        @return 已验证运行时设置 / Validated runtime settings.
+        @raise ValueError grace 不严格长于串行 drain 下界 / Grace is not strictly longer than the serialized drain lower bound.
+        @note phase 10 先排空 scheduling，phase 20 并行排空 inference、compaction、
+            dreaming，phase 30 再排空 outbox；因此总下界是前者加 phase 20 最大值再加
+            outbox。/ Phase 10 drains scheduling first, phase 20 drains inference,
+            compaction, and dreaming concurrently, and phase 30 drains outbox; the lower bound
+            is therefore scheduling plus the phase-20 maximum plus outbox.
+        """
+
+        minimum_seconds = (
+            self.scheduling.attempt_timeout_seconds
+            + max(
+                self.inference.attempt_timeout_seconds,
+                self.compaction.attempt_timeout_seconds,
+                self.dreaming.attempt_timeout_seconds,
+            )
+            + self.outbox.attempt_timeout_seconds
+        )
+        if self.mailbox.shutdown_grace_seconds <= minimum_seconds:
+            raise ValueError(
+                "mailbox.shutdown_grace_seconds must be > serialized durable drain "
+                f"lower bound ({minimum_seconds} seconds)"
+            )
+        return self
 
 
 class ProviderModels(_FrozenSettings):
@@ -793,6 +822,8 @@ class WorkingMemorySettings(_FrozenSettings):
 
     result_limit: PositiveInt = 64
     reserved_tokens: NonNegativeInt = 16_384
+    timeout_seconds: PositiveFloat = 5.0
+    failure_cooldown_seconds: PositiveFloat = 60.0
 
 
 class RetrievalEmbeddingSettings(_FrozenSettings):

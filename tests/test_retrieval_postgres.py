@@ -158,6 +158,49 @@ async def _cleanup(
         )
 
 
+def test_episodic_source_materializes_projection_exclusion_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief 投影排除使用非相关 hashed-SubPlan 友好形态 / Projection exclusion uses an uncorrelated hashed-SubPlan-friendly shape."""
+
+    captured: dict[str, object] = {}
+
+    async def fetch_all(
+        sql: str,
+        params: object = None,
+        **kwargs: object,
+    ) -> list[object]:
+        """@brief 捕获 source discovery SQL / Capture source-discovery SQL.
+
+        @param sql 查询文本 / Query text.
+        @param params 查询参数 / Query parameters.
+        @param kwargs 未使用数据库选项 / Unused database options.
+        @return 空结果 / Empty result.
+        """
+
+        del kwargs
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(db_connection, "fetch_all", fetch_all)
+
+    assert (
+        asyncio.run(
+            PostgresEpisodicSource().read_unprojected(format_version=7, limit=16)
+        )
+        == ()
+    )
+    sql = " ".join(str(captured["sql"]).split())
+    assert (
+        "activity.turn_id NOT IN (SELECT projection.source_id FROM "
+        "retrieval.source_projections AS projection WHERE projection.corpus_id = %s "
+        "AND projection.source_kind = %s AND projection.format_version = %s)" in sql
+    )
+    assert "projection.source_id = activity.turn_id" not in sql
+    assert captured["params"] == ("conversation.episodic", "conversation.turn", 7, 16)
+
+
 def test_real_pgvector_projection_fencing_and_privacy_scoped_exact_search(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

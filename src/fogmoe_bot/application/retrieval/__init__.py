@@ -12,6 +12,7 @@ from fogmoe_bot.application.retrieval.ports import (
     EpisodicSource,
     EpisodicTurn,
     PassageVectorClaim,
+    RetrievalIOError,
     RetrievalStore,
     RetryableEmbeddingError,
     StaleVectorClaimError,
@@ -20,6 +21,7 @@ from fogmoe_bot.application.retrieval.service import (
     SemanticRecall,
     SemanticRecallQuery,
     SemanticRecallReader,
+    SemanticRecallUnavailableError,
 )
 from fogmoe_bot.application.retrieval.worker import RetrievalWorker
 
@@ -34,10 +36,12 @@ __all__ = [
     "EpisodicTurn",
     "PassageVectorClaim",
     "RetrievalStore",
+    "RetrievalIOError",
     "RetrievalWorker",
     "RetryableEmbeddingError",
     "StaleVectorClaimError",
     "SemanticRecall",
     "SemanticRecallQuery",
     "SemanticRecallReader",
+    "SemanticRecallUnavailableError",
 ]
