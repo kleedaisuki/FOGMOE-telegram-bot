@@ -947,7 +947,10 @@ def _scope_key(creator_user_id: int, conversation_id: str) -> str:
     normalized = conversation_id.strip()
     if not normalized:
         raise ValueError("conversation_id cannot be empty")
-    return f"assistant_schedule\x00{creator_user_id}\x00{normalized}"
+    return (
+        f"assistant_schedule:{creator_user_id}:{len(normalized.encode('utf-8'))}:"
+        f"{normalized}"
+    )
 
 
 def _target_kind(target: ScheduleTarget) -> str:

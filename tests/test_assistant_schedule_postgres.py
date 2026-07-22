@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import UTC, date, datetime, time, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -12,7 +13,9 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.application.conversation.workflow import PreparedTurnAcceptance
+from fogmoe_bot.application.assistant.inference_command import DurableAssistantUser
 from fogmoe_bot.application.scheduling.assistant_ports import ScheduleDefinition
+from fogmoe_bot.application.scheduling.occurrence import prepare_scheduled_occurrence
 from fogmoe_bot.domain.conversation.identity import ConversationId, DeliveryStreamId
 from fogmoe_bot.domain.scheduling.assistant_schedule import (
     CalendarDaily,
@@ -26,6 +29,7 @@ from fogmoe_bot.domain.scheduling.assistant_schedule import (
 )
 from fogmoe_bot.domain.temporal import TimeZoneId
 from fogmoe_bot.infrastructure.database import connection as db_connection
+from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
     PostgresTurnRepository,
 )
@@ -35,10 +39,23 @@ from fogmoe_bot.infrastructure.scheduling.postgres import (
     PostgresScheduledOccurrenceAcceptance,
     PostgresScheduleQueue,
 )
+from postgres_test_support import configure_bot_database
 
 
 NOW = datetime(2030, 1, 2, 12, tzinfo=UTC)
 """@brief 测试共享 UTC 时刻 / UTC instant shared by tests."""
+
+
+def _postgres_url() -> str:
+    """@brief 读取显式真实 PostgreSQL DSN / Read an explicit real-PostgreSQL DSN.
+
+    @return async SQLAlchemy URL / Async SQLAlchemy URL.
+    """
+
+    explicit = os.environ.get("FOGMOE_TEST_DATABASE_URL")
+    if explicit:
+        return explicit
+    pytest.skip("set FOGMOE_TEST_DATABASE_URL to run the real PostgreSQL contract")
 
 
 class RecordingTransaction:
@@ -291,6 +308,20 @@ def test_calendar_storage_round_trip_and_weekday_bitmap_are_explicit() -> None:
     assert restored.cadence == cadence
     assert postgres._encode_weekdays(frozenset({1, 7})) == 65
     assert postgres._decode_weekdays(65) == frozenset({1, 7})
+
+
+def test_scope_lock_key_is_unambiguous_postgres_text() -> None:
+    """@brief Advisory-lock key 使用长度前缀且不含 PostgreSQL 禁止的 NUL / The advisory-lock key is length-prefixed and contains no PostgreSQL-forbidden NUL."""
+
+    first = postgres._scope_key(42, "a:bc")
+    second = postgres._scope_key(42, "a:b:c")
+    unicode_key = postgres._scope_key(42, "雾萌")
+
+    assert first == "assistant_schedule:42:4:a:bc"
+    assert second == "assistant_schedule:42:5:a:b:c"
+    assert unicode_key == "assistant_schedule:42:6:雾萌"
+    assert first != second
+    assert "\x00" not in first
 
 
 def test_claim_due_uses_skip_locked_head_of_line_and_distinct_uuid_token(
@@ -587,3 +618,135 @@ def test_misfire_expiration_is_terminal_and_token_fenced(
     assert claim.token in params
     assert ScheduleStatus.EXPIRED.value == "expired"
     assert MisfirePolicy.SKIP.value == "skip"
+
+
+def test_real_postgres_claim_and_turn_acceptance_advance_one_cursor() -> None:
+    """@brief 真实 PostgreSQL 中 claim、Turn 与 cursor 形成一个完整 occurrence / Claim, Turn, and cursor form one complete occurrence in real PostgreSQL."""
+
+    async def scenario() -> None:
+        """@brief 创建、领取并原子接受一个 fixed occurrence / Create, claim, and atomically accept one fixed occurrence."""
+
+        await db.dispose_current_engine()
+        configure_bot_database(_postgres_url())
+        suffix = uuid4().hex
+        user_id = 6_200_000_000_000_000_000 + int(suffix[:12], 16)
+        conversation_id = ConversationId(f"assistant-user:{user_id}")
+        target = ScheduleTarget(
+            conversation_id=conversation_id,
+            delivery_stream_id=DeliveryStreamId(
+                f"telegram:primary:chat:{user_id}:thread:0"
+            ),
+            chat_id=user_id,
+            is_group=False,
+        )
+        first_run_at = NOW + timedelta(hours=1)
+        definition = ScheduleDefinition(
+            creator_user_id=user_id,
+            target=target,
+            trigger_reason="real PostgreSQL contract",
+            instruction="Produce one durable scheduled turn",
+            cadence=FixedInterval(timedelta(hours=1)),
+            first_run_at=first_run_at,
+            time_zone=TimeZoneId("UTC"),
+        )
+        try:
+            async with db_connection.transaction() as connection:
+                await db_connection.execute(
+                    "INSERT INTO identity.users "
+                    "(id, tg_uid, provider, name, coins, coins_paid, user_plan) "
+                    "VALUES (%s, %s, 'telegram', %s, 0, 0, 'free')",
+                    (user_id, user_id, f"schedule_{suffix}"),
+                    connection=connection,
+                )
+                catalog = PostgresScheduleCatalog(connection)
+                await catalog.lock_scope(user_id, str(conversation_id))
+                schedule = await catalog.create(definition, created_at=NOW)
+
+            observed_at = first_run_at + timedelta(seconds=1)
+            claims = await PostgresScheduleQueue().claim_due(
+                now=observed_at,
+                limit=1,
+                lease_for=timedelta(seconds=30),
+            )
+            assert len(claims) == 1
+            claim = claims[0]
+            assert claim.schedule.schedule_id == schedule.schedule_id
+            prepared = prepare_scheduled_occurrence(
+                claim.schedule,
+                user=DurableAssistantUser(
+                    user_id=user_id,
+                    username=None,
+                    display_name="Schedule Contract",
+                    coins=0,
+                    plan="free",
+                    permission=0,
+                ),
+                observed_at=observed_at,
+            )
+            next_run_at = claim.schedule.next_occurrence(after=observed_at)
+            assert next_run_at == first_run_at + timedelta(hours=1)
+            await PostgresScheduledOccurrenceAcceptance(
+                PostgresTurnRepository()
+            ).accept(
+                claim,
+                prepared,
+                next_run_at=next_run_at,
+                accepted_at=observed_at,
+            )
+
+            schedule_row = await db_connection.fetch_one(
+                "SELECT status, next_run_at, last_accepted_for, last_accepted_at, "
+                "claim_token, lease_expires_at FROM scheduling.assistant_schedules "
+                "WHERE schedule_id = %s",
+                (schedule.schedule_id,),
+            )
+            assert schedule_row is not None
+            assert tuple(schedule_row) == (
+                "pending",
+                next_run_at,
+                first_run_at,
+                observed_at,
+                None,
+                None,
+            )
+            turn_row = await db_connection.fetch_one(
+                "SELECT state, conversation_id FROM conversation.conversation_turns "
+                "WHERE turn_id = CAST(%s AS UUID)",
+                (str(prepared.turn.turn_id),),
+            )
+            assert turn_row is not None
+            assert tuple(turn_row) == ("waiting_inference", str(conversation_id))
+        finally:
+            async with db_connection.transaction() as connection:
+                await db_connection.execute(
+                    "DELETE FROM conversation.inference_activities "
+                    "WHERE conversation_id = %s",
+                    (str(conversation_id),),
+                    connection=connection,
+                )
+                await db_connection.execute(
+                    "DELETE FROM conversation.conversation_messages "
+                    "WHERE conversation_id = %s",
+                    (str(conversation_id),),
+                    connection=connection,
+                )
+                await db_connection.execute(
+                    "DELETE FROM conversation.conversation_turns "
+                    "WHERE conversation_id = %s",
+                    (str(conversation_id),),
+                    connection=connection,
+                )
+                await db_connection.execute(
+                    "DELETE FROM scheduling.assistant_schedules "
+                    "WHERE creator_user_id = %s",
+                    (user_id,),
+                    connection=connection,
+                )
+                await db_connection.execute(
+                    "DELETE FROM identity.users WHERE id = %s",
+                    (user_id,),
+                    connection=connection,
+                )
+            await db.dispose_current_engine()
+
+    asyncio.run(scenario())
