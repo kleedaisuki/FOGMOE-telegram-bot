@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string>
 
 namespace {
@@ -104,6 +105,41 @@ void test_failure_clears_owner() {
            "failure clears owner and is explicit");
 }
 
+/** @brief 测试快照只能投影完整领域状态 / Test that snapshots can project only complete domain states. */
+void test_runtime_snapshots_preserve_lifecycle_invariants() {
+    const wspctl::domain::RuntimeId runtime_id = test_runtime_id();
+    const wspctl::domain::ActivationId activation = test_activation("snapshot-owner");
+    const auto dormant = wspctl::domain::RuntimeSnapshot::create(
+        runtime_id,
+        wspctl::domain::RuntimeState::dormant,
+        std::nullopt);
+    expect(dormant.has_value() && dormant->runtime() == runtime_id &&
+               dormant->state() == wspctl::domain::RuntimeState::dormant &&
+               !dormant->active_activation().has_value(),
+           "construct payload-free dormant snapshot");
+    expect(!wspctl::domain::RuntimeSnapshot::create(
+                runtime_id,
+                wspctl::domain::RuntimeState::ready,
+                std::nullopt)
+                .has_value(),
+           "reject ready snapshot without activation owner");
+    expect(!wspctl::domain::RuntimeSnapshot::create(
+                runtime_id,
+                wspctl::domain::RuntimeState::failed,
+                activation)
+                .has_value(),
+           "reject failed snapshot retaining an activation owner");
+
+    wspctl::domain::Runtime aggregate(runtime_id);
+    expect(aggregate.begin_activation(activation).has_value(), "begin aggregate activation for snapshot projection");
+    const wspctl::domain::RuntimeSnapshot activating = aggregate.snapshot();
+    expect(activating.state() == wspctl::domain::RuntimeState::activating &&
+               activating.active_activation() == activation,
+           "aggregate snapshot preserves active owner");
+    expect(wspctl::domain::runtime_state_name(wspctl::domain::RuntimeState::executing) == "executing",
+           "render stable runtime-state vocabulary");
+}
+
 }  // namespace
 
 /**
@@ -114,5 +150,6 @@ int main() {
     test_value_objects();
     test_activation_ownership();
     test_failure_clears_owner();
+    test_runtime_snapshots_preserve_lifecycle_invariants();
     return g_failures == 0U ? EXIT_SUCCESS : EXIT_FAILURE;
 }

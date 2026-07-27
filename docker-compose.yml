@@ -19,8 +19,9 @@ services:
       - no-new-privileges:true
     pids_limit: 512
     # 配置含有密钥；由操作者在仓库根目录维护，绝不烘焙进镜像。
-    # 开发态 host socket 只来自仓库相邻、被 .gitignore 排除的 .wspctl/run；
-    # 以只读目录 bind mount 仍允许 connect(2)，但阻止 Bot 替换 socket 或创建相邻目录项。
+    # 开发态 host socket 只来自仓库相邻、被 .gitignore 排除的 .wspctl/run/bot；
+    # operator socket 位于不可挂载给 Bot 的 sibling ``run/operator``。以只读目录 bind mount
+    # 仍允许 connect(2)，但阻止 Bot 替换 socket 或创建相邻目录项。
     # Production operators may replace source with a separately provisioned absolute directory,
     # but must keep it out of the container except for this read-only socket view.
     volumes:
@@ -31,8 +32,8 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ./.wspctl/run
-        target: /app/.wspctl/run
+        source: ./.wspctl/run/bot
+        target: /app/.wspctl/run/bot
         read_only: true
         bind:
           create_host_path: false

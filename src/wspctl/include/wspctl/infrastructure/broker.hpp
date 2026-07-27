@@ -1,7 +1,9 @@
 #pragma once
 
+#include "wspctl/application/operator_workspace.hpp"
 #include "wspctl/infrastructure/common.hpp"
 #include "wspctl/infrastructure/journal.hpp"
+#include "wspctl/infrastructure/protocol.hpp"
 #include "wspctl/infrastructure/runtime_gate.hpp"
 #include "wspctl/infrastructure/sandbox.hpp"
 
@@ -23,6 +25,10 @@ struct BrokerConfig final {
     std::filesystem::path socket_path;
     /** @brief 允许的 Bot UNIX UID / Permitted Bot UNIX UID. */
     uid_t client_uid{};
+    /** @brief 独立 operator UNIX SOCK_SEQPACKET 路径 / Independent operator UNIX SOCK_SEQPACKET path. */
+    std::filesystem::path operator_socket_path;
+    /** @brief 唯一允许的 operator UNIX UID；生产默认 root / Sole permitted operator UNIX UID; root by default in production. */
+    uid_t operator_uid{};
     /** @brief sandbox 配置 / Sandbox configuration. */
     SandboxConfig sandbox;
     /** @brief wsp-systemd 的受信任绝对路径 / Trusted absolute path to wsp-systemd. */
@@ -39,7 +45,7 @@ struct BrokerConfig final {
  * Python 只连接 socket；所有 namespace/mount/cgroup 操作均留在该进程。
  * Python only connects a socket; all namespace/mount/cgroup operations remain in this process.
  */
-class Broker final {
+class Broker final : private application::OperatorWorkspaceReadPort {
 public:
     /**
      * @brief 构造并执行 fail-closed 验证 / Construct and run fail-closed validation.
@@ -95,6 +101,14 @@ private:
     ino_t socket_inode_{};
     /** @brief 是否确实拥有 socket pathname / Whether this broker truly owns the socket pathname. */
     bool owns_socket_path_{false};
+    /** @brief 独立 operator 监听 FD / Independent operator listening FD. */
+    int operator_listen_fd_{-1};
+    /** @brief 本 broker 绑定的 operator socket 设备号 / Device number of the operator socket bound by this broker. */
+    dev_t operator_socket_device_{};
+    /** @brief 本 broker 绑定的 operator socket inode / Inode of the operator socket bound by this broker. */
+    ino_t operator_socket_inode_{};
+    /** @brief 是否确实拥有 operator socket pathname / Whether this broker truly owns the operator socket pathname. */
+    bool owns_operator_socket_path_{false};
     /** @brief 按 runtime key 维护的可同步惰性 activation / Synchronized lazy activations keyed by runtime. */
     std::unique_ptr<SharedState> state_;
 
@@ -105,6 +119,12 @@ private:
     [[nodiscard]] Result<void> bind_listener();
 
     /**
+     * @brief 绑定独立 operator 监听 socket / Bind the independent operator listening socket.
+     * @return 成功或 I/O 错误 / Success or an I/O error.
+     */
+    [[nodiscard]] Result<void> bind_operator_listener();
+
+    /**
      * @brief 服务一个经认证 client / Serve one authenticated client.
      * @param client_fd 已 accept 的 FD / Accepted FD.
      * @return 成功或连接错误 / Success or connection error.
@@ -112,11 +132,48 @@ private:
     [[nodiscard]] Result<void> serve_client(int client_fd);
 
     /**
+     * @brief 服务一个经 ACL 认证的 operator client / Serve one ACL-authenticated operator client.
+     * @param client_fd 已 accept 的 operator FD / Accepted operator FD.
+     * @return 成功或连接错误 / Success or a connection error.
+     * @note 此方法只接受独立 operator protocol；它绝不调用 Bot socket handler。
+     *       This method accepts only the independent operator protocol; it never invokes the Bot socket handler.
+     */
+    [[nodiscard]] Result<void> serve_operator_client(int client_fd);
+
+    /**
+     * @brief 读取 runtime 的 operator allowlisted 状态 / Read a runtime's operator allowlisted status.
+     * @param runtime 已验证长期 runtime 标识 / Validated long-lived runtime identity.
+     * @return 状态或应用层只读查询错误 / Status or an application-layer read-only query error.
+     */
+    [[nodiscard]] application::OperatorWorkspaceQueryResult<domain::OperatorWorkspaceStatus> status(
+        const domain::RuntimeId& runtime) const override;
+
+    /**
+     * @brief 列举 runtime 的一层 operator workspace 目录 / List one operator workspace directory level for a runtime.
+     * @param runtime 已验证长期 runtime 标识 / Validated long-lived runtime identity.
+     * @param path 已验证 `/workspace` 逻辑路径 / Validated `/workspace` logical path.
+     * @return 目录列举或应用层只读查询错误 / Directory listing or an application-layer read-only query error.
+     */
+    [[nodiscard]] application::OperatorWorkspaceQueryResult<domain::WorkspaceListing> list(
+        const domain::RuntimeId& runtime,
+        const domain::OperatorWorkspacePath& path) const override;
+
+    /**
      * @brief 转发给对应 supervisor / Forward to the corresponding supervisor.
      * @param request 已验证请求 / Validated request.
      * @return 命令结果 / Command result.
      */
     [[nodiscard]] Result<ExecutionResult> dispatch(const ExecuteRequest& request);
+
+    /**
+     * @brief 从共享读模型读取 runtime 状态 / Read runtime status from the shared read model.
+     * @param request 已验证的无副作用状态请求 / Validated side-effect-free status request.
+     * @return allowlisted 状态结果或错误 / Allowlisted status result or error.
+     * @note 此方法不得调用 acquire_session、quota provisioning、journal 或 supervisor control socket。
+     *       This method must not call acquire_session, quota provisioning, journal, or the
+     *       supervisor control socket.
+     */
+    [[nodiscard]] Result<RuntimeStatusResult> read_runtime_status(const RuntimeStatusRequest& request) const;
 
     /**
      * @brief 在必要时惰性激活并独占取得一个 runtime session / Lazily activate and exclusively acquire one runtime session.

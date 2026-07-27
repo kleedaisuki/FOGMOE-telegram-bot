@@ -8,10 +8,12 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace py = pybind11;
@@ -156,6 +158,74 @@ private:
 };
 
 /**
+ * @brief pybind 暴露的不可变 runtime 状态 DTO / Immutable runtime-status DTO exposed through pybind.
+ *
+ * ``dump`` 只构造固定 allowlist 的 Python ``dict``。它不透传 C++ 对象、``__dict__``、错误正文
+ * 或任何 command/payload/host 字段，因此 Python 日志调用点不会因未来内部字段增加而意外泄漏。
+ * ``dump`` constructs a Python ``dict`` from a fixed allowlist only. It never forwards a C++
+ * object, ``__dict__``, diagnostic message, or any command/payload/host field, so Python logging
+ * sites cannot accidentally disclose future internal fields.
+ */
+class RuntimeStatus final {
+public:
+    /**
+     * @brief 从 presentation 状态构造 Python DTO / Construct the Python DTO from presentation status.
+     * @param status 已验证的 allowlisted presentation 状态 / Validated allowlisted presentation status.
+     */
+    explicit RuntimeStatus(presentation::ClientRuntimeStatus status) noexcept : status_(std::move(status)) {}
+
+    /** @brief 取得 runtime UUID / Get the runtime UUID. */
+    [[nodiscard]] const std::string& runtime_key() const noexcept { return status_.runtime_key; }
+    /** @brief 取得稳定生命周期状态名 / Get the stable lifecycle-state name. */
+    [[nodiscard]] std::string state() const { return std::string(domain::runtime_state_name(status_.state)); }
+    /** @brief 取得当前 owner activation；不活跃时为空 / Get current owner activation; empty when inactive. */
+    [[nodiscard]] const std::optional<std::string>& active_activation_id() const noexcept { return status_.active_activation_id; }
+    /** @brief handle activation 是否匹配当前 owner / Whether the handle activation matches the current owner. */
+    [[nodiscard]] bool handle_activation_matches() const noexcept { return status_.handle_activation_matches; }
+    /** @brief 是否有健康、可复用 supervisor / Whether a healthy reusable supervisor exists. */
+    [[nodiscard]] bool supervisor_alive() const noexcept { return status_.supervisor_alive; }
+    /** @brief ready 状态空闲年龄（毫秒）；其他状态为空 / Idle age in milliseconds while ready; empty otherwise. */
+    [[nodiscard]] std::optional<std::int64_t> idle_for_ms() const noexcept {
+        if (!status_.idle_for.has_value()) {
+            return std::nullopt;
+        }
+        return status_.idle_for->count();
+    }
+    /** @brief broker idle 回收阈值（毫秒） / Broker idle-retirement threshold in milliseconds. */
+    [[nodiscard]] std::int64_t idle_ttl_ms() const noexcept { return status_.idle_ttl.count(); }
+    /** @brief 当前借用 session 的 broker dispatch 数 / Current broker dispatches borrowing the session. */
+    [[nodiscard]] std::uint64_t borrowed_dispatches() const noexcept { return status_.borrowed_dispatches; }
+    /** @brief 是否有已知清理/隔离待办 / Whether known cleanup/quarantine is pending. */
+    [[nodiscard]] bool cleanup_pending() const noexcept { return status_.cleanup_pending; }
+
+    /**
+     * @brief 显式序列化为固定 allowlist dict / Explicitly serialize into a fixed-allowlist dict.
+     * @return JSON-serializable 的平面字典 / JSON-serializable flat dictionary.
+     */
+    [[nodiscard]] py::dict dump() const {
+        py::dict dictionary;
+        dictionary["runtime_key"] = status_.runtime_key;
+        dictionary["state"] = state();
+        dictionary["active_activation_id"] = status_.active_activation_id.has_value()
+            ? py::cast(*status_.active_activation_id)
+            : py::none();
+        dictionary["handle_activation_matches"] = status_.handle_activation_matches;
+        dictionary["supervisor_alive"] = status_.supervisor_alive;
+        dictionary["idle_for_ms"] = status_.idle_for.has_value()
+            ? py::cast(status_.idle_for->count())
+            : py::none();
+        dictionary["idle_ttl_ms"] = status_.idle_ttl.count();
+        dictionary["borrowed_dispatches"] = status_.borrowed_dispatches;
+        dictionary["cleanup_pending"] = status_.cleanup_pending;
+        return dictionary;
+    }
+
+private:
+    /** @brief 被 allowlist 化的 presentation 状态 / Allowlisted presentation status. */
+    presentation::ClientRuntimeStatus status_;
+};
+
+/**
  * @brief 非特权 Python RuntimeProcess client / Unprivileged Python RuntimeProcess client.
  *
  * 对象缓存的只是 runtime identity 与 activation；每次控制操作使用一条短 SOCK_SEQPACKET 连接，
@@ -238,6 +308,33 @@ public:
         dictionary["replayed"] = result.replayed;
         dictionary["request_id"] = result.request_id;
         return dictionary;
+    }
+
+    /**
+     * @brief 读取无副作用 runtime 状态 / Read side-effect-free runtime status.
+     * @return 不可变状态 DTO / Immutable status DTO.
+     * @note 该调用不会启动、替换或 retire runtime；closed handle 在建立 socket 前本地失败。
+     *       This call never starts, replaces, or retires a runtime; a closed handle fails locally
+     *       before creating a socket.
+     */
+    [[nodiscard]] RuntimeStatus status() {
+        std::lock_guard lock(mutex_);
+        if (closed_) {
+            throw NativeFailure(make_error(ErrorCode::permission_denied, "RuntimeProcess is closed"), {});
+        }
+        presentation::ClientRuntimeStatus observed;
+        {
+            py::gil_scoped_release release;
+            const auto status = gateway_.status(presentation::ClientRuntimeStatusRequest{
+                .runtime_key = runtime_key_,
+                .activation_id = activation_id_,
+            });
+            if (!status) {
+                throw NativeFailure(status.error(), {});
+            }
+            observed = *status;
+        }
+        return RuntimeStatus(std::move(observed));
     }
 
     /**
@@ -383,6 +480,17 @@ PYBIND11_MODULE(_native, module) {
     wspctl::g_runtime_process_error_type = runtime_error_type.ptr();
     wspctl::g_invocation_in_doubt_error_type = in_doubt_type.ptr();
     py::register_exception_translator(&wspctl::translate_native_failure);
+    py::class_<wspctl::RuntimeStatus>(module, "RuntimeStatus")
+        .def_property_readonly("runtime_key", &wspctl::RuntimeStatus::runtime_key)
+        .def_property_readonly("state", &wspctl::RuntimeStatus::state)
+        .def_property_readonly("active_activation_id", &wspctl::RuntimeStatus::active_activation_id)
+        .def_property_readonly("handle_activation_matches", &wspctl::RuntimeStatus::handle_activation_matches)
+        .def_property_readonly("supervisor_alive", &wspctl::RuntimeStatus::supervisor_alive)
+        .def_property_readonly("idle_for_ms", &wspctl::RuntimeStatus::idle_for_ms)
+        .def_property_readonly("idle_ttl_ms", &wspctl::RuntimeStatus::idle_ttl_ms)
+        .def_property_readonly("borrowed_dispatches", &wspctl::RuntimeStatus::borrowed_dispatches)
+        .def_property_readonly("cleanup_pending", &wspctl::RuntimeStatus::cleanup_pending)
+        .def("dump", &wspctl::RuntimeStatus::dump);
     py::class_<wspctl::RuntimeProcess>(module, "RuntimeProcess")
         .def(
             py::init<std::string, std::string, std::string>(),
@@ -399,6 +507,7 @@ PYBIND11_MODULE(_native, module) {
             py::arg("output_limit") = 65'536,
             py::arg("request_id") = "",
             py::arg("request_hash") = "")
+        .def("status", &wspctl::RuntimeProcess::status)
         .def(
             "add_file",
             &wspctl::RuntimeProcess::add_file,

@@ -1,8 +1,14 @@
 #include "wspctl/infrastructure/broker.hpp"
 
+#include "wspctl/application/operator_workspace.hpp"
 #include "wspctl/application/runtime_activation.hpp"
+#include "wspctl/application/runtime_status.hpp"
+#include "wspctl/domain/operator_workspace.hpp"
 #include "wspctl/domain/runtime.hpp"
 #include "wspctl/infrastructure/detail/launcher_transport.hpp"
+#include "wspctl/infrastructure/operator_endpoint.hpp"
+#include "wspctl/infrastructure/operator_protocol.hpp"
+#include "wspctl/infrastructure/operator_workspace_reader.hpp"
 #include "wspctl/infrastructure/detail/payload_replay.hpp"
 #include "wspctl/infrastructure/detail/pidfd_control.hpp"
 #include "wspctl/infrastructure/protocol.hpp"
@@ -406,6 +412,44 @@ private:
     std::optional<Error> native_error_;
 };
 
+/**
+ * @brief 将 broker SharedState 读模型适配为 application 状态端口 / Adapt the broker SharedState read model to the application status port.
+ *
+ * 这个适配器只持有一个已构造的读取函数；它没有 activation、quota、journal 或 supervisor I/O
+ * 能力。/ This adapter holds only a preconstructed read function; it has no activation, quota,
+ * journal, or supervisor-I/O capability.
+ */
+class BrokerRuntimeStatusPort final : public application::RuntimeStatusPort {
+public:
+    /** @brief 一个无副作用 runtime 状态读取函数 / One side-effect-free runtime-status reader. */
+    using Reader = std::function<domain::Result<application::RuntimeStatus>(const application::RuntimeStatusQuery&)>;
+
+    /**
+     * @brief 以读取函数构造端口 / Construct the port from a read function.
+     * @param reader 已绑定 SharedState 的读取函数 / Reader bound to SharedState.
+     */
+    explicit BrokerRuntimeStatusPort(Reader reader) : reader_(std::move(reader)) {}
+
+    /**
+     * @brief 执行只读状态查询 / Perform the read-only status query.
+     * @param query 已验证 runtime/activation 查询 / Validated runtime/activation query.
+     * @return allowlisted 运行态或领域错误 / Allowlisted operating status or a domain error.
+     */
+    [[nodiscard]] domain::Result<application::RuntimeStatus> observe(
+        const application::RuntimeStatusQuery& query) const override {
+        if (!reader_) {
+            return std::unexpected(domain::make_error(
+                domain::ErrorCode::illegal_transition,
+                "runtime status port has no read model"));
+        }
+        return reader_(query);
+    }
+
+private:
+    /** @brief 已绑定 SharedState 的只读函数 / Read-only function bound to SharedState. */
+    Reader reader_;
+};
+
 /** @brief runtime supervisor 启动时固定保留的 FD / Fixed FDs retained while launching runtime supervisor. */
 enum class LaunchFd : int {
     control = 3,
@@ -417,10 +461,14 @@ enum class LaunchFd : int {
     task_cgroup_events = 9,
 };
 
-/** @brief 同时服务 client 的硬上限 / Hard cap for concurrently served clients. */
+/** @brief Bot endpoint 同时服务 client 的硬上限 / Hard cap for clients served from the Bot endpoint. */
 constexpr std::size_t kMaxClientWorkers{32U};
+/** @brief 为独立 operator endpoint 保留的 worker 数 / Workers reserved for the independent operator endpoint. */
+constexpr std::size_t kReservedOperatorWorkers{2U};
 /** @brief 等待 worker 的已 accept client 硬上限 / Hard cap for accepted clients waiting for a worker. */
 constexpr std::size_t kMaxQueuedClients{64U};
+/** @brief 为独立 operator endpoint 保留的已 accept client 硬上限 / Reserved accepted-client cap for the independent operator endpoint. */
+constexpr std::size_t kMaxQueuedOperatorClients{16U};
 
 /** @brief 关闭临时或借用 FD / Close a temporary or borrowed FD. */
 void close_fd(const int& fd) noexcept {
@@ -627,6 +675,147 @@ void close_range_from(const unsigned int first) noexcept {
     return send_frame(fd, *wire);
 }
 
+/** @brief 发送一个 allowlisted runtime 状态快照 / Send one allowlisted runtime-status snapshot. */
+[[nodiscard]] Result<void> send_runtime_status_frame(const int fd, const RuntimeStatusResult& result) {
+    const auto payload = encode_runtime_status_result(result);
+    if (!payload) {
+        return std::unexpected(payload.error());
+    }
+    const auto wire = encode_frame(MessageKind::runtime_status_result, *payload);
+    if (!wire) {
+        return std::unexpected(wire.error());
+    }
+    return send_frame(fd, *wire);
+}
+
+/**
+ * @brief 将 application operator 查询错误映射为不带文本的 operator wire 错误 / Map an application operator-query error to a text-free operator wire error.
+ * @param error 应用层查询错误 / Application query error.
+ * @return operator wire 错误码 / Operator wire error code.
+ */
+[[nodiscard]] operator_protocol::OperatorErrorCode operator_error_code(
+    const application::OperatorWorkspaceQueryError& error) noexcept {
+    switch (error.code) {
+        case application::OperatorWorkspaceQueryErrorCode::not_found:
+            return operator_protocol::OperatorErrorCode::not_found;
+        case application::OperatorWorkspaceQueryErrorCode::inconsistent:
+        case application::OperatorWorkspaceQueryErrorCode::unavailable:
+            return operator_protocol::OperatorErrorCode::unavailable;
+    }
+    return operator_protocol::OperatorErrorCode::unavailable;
+}
+
+/**
+ * @brief 发送不含诊断或 payload 的 operator 错误帧 / Send an operator error frame without diagnostics or payload.
+ * @param fd operator client FD / Operator client FD.
+ * @param code operator wire 错误码 / Operator wire error code.
+ * @return 成功或 transport 错误 / Success or a transport error.
+ */
+[[nodiscard]] Result<void> send_operator_error_frame(
+    const int fd,
+    const operator_protocol::OperatorErrorCode code) {
+    const auto payload = operator_protocol::encode_error_response(operator_protocol::ErrorResponse{.code = code});
+    if (!payload) {
+        return std::unexpected(payload.error());
+    }
+    const auto wire = operator_protocol::encode_operator_frame(
+        operator_protocol::OperatorMessageKind::error_response,
+        *payload);
+    if (!wire) {
+        return std::unexpected(wire.error());
+    }
+    return operator_protocol::send_operator_frame(fd, *wire);
+}
+
+/**
+ * @brief 发送 operator runtime 状态帧 / Send an operator runtime-status frame.
+ * @param fd operator client FD / Operator client FD.
+ * @param status allowlisted runtime 状态 / Allowlisted runtime status.
+ * @return 成功或 transport 错误 / Success or a transport error.
+ */
+[[nodiscard]] Result<void> send_operator_status_frame(
+    const int fd,
+    const domain::OperatorWorkspaceStatus& status) {
+    const auto payload = operator_protocol::encode_status_response(operator_protocol::StatusResponse{.status = status});
+    if (!payload) {
+        return std::unexpected(payload.error());
+    }
+    const auto wire = operator_protocol::encode_operator_frame(
+        operator_protocol::OperatorMessageKind::status_response,
+        *payload);
+    if (!wire) {
+        return std::unexpected(wire.error());
+    }
+    return operator_protocol::send_operator_frame(fd, *wire);
+}
+
+/**
+ * @brief 发送 operator workspace 目录帧 / Send an operator workspace-directory frame.
+ * @param fd operator client FD / Operator client FD.
+ * @param listing 有界目录列举 / Bounded directory listing.
+ * @return 成功或 transport 错误 / Success or a transport error.
+ */
+[[nodiscard]] Result<void> send_operator_list_frame(
+    const int fd,
+    const domain::WorkspaceListing& listing) {
+    const auto payload = operator_protocol::encode_list_response(operator_protocol::ListResponse{.listing = listing});
+    if (!payload) {
+        return std::unexpected(payload.error());
+    }
+    const auto wire = operator_protocol::encode_operator_frame(
+        operator_protocol::OperatorMessageKind::list_response,
+        *payload);
+    if (!wire) {
+        return std::unexpected(wire.error());
+    }
+    return operator_protocol::send_operator_frame(fd, *wire);
+}
+
+/**
+ * @brief 将 runtime 生命周期状态投影为 operator 活动状态 / Project a runtime lifecycle state into an operator activity state.
+ * @param state 已观察 runtime 生命周期状态 / Observed runtime lifecycle state.
+ * @return 不含 activation ID 的 operator 活动状态 / Operator activity state without an activation ID.
+ */
+[[nodiscard]] domain::WorkspaceActivity workspace_activity_from_runtime_state(
+    const domain::RuntimeState state) noexcept {
+    switch (state) {
+        case domain::RuntimeState::dormant:
+            return domain::WorkspaceActivity::inactive;
+        case domain::RuntimeState::activating:
+            return domain::WorkspaceActivity::activating;
+        case domain::RuntimeState::ready:
+            return domain::WorkspaceActivity::ready;
+        case domain::RuntimeState::executing:
+            return domain::WorkspaceActivity::executing;
+        case domain::RuntimeState::retiring:
+            return domain::WorkspaceActivity::retiring;
+        case domain::RuntimeState::failed:
+            return domain::WorkspaceActivity::failed;
+    }
+    return domain::WorkspaceActivity::failed;
+}
+
+/**
+ * @brief 将 native 只读失败归一化为 application operator 查询错误 / Normalize a native read-only failure into an application operator-query error.
+ * @param error native 失败 / Native failure.
+ * @return 不含 host path 的 application 查询错误 / Application query error without a host path.
+ */
+[[nodiscard]] application::OperatorWorkspaceQueryError normalize_operator_read_error(const Error& error) {
+    if (error.code == ErrorCode::not_found) {
+        return application::make_operator_workspace_query_error(
+            application::OperatorWorkspaceQueryErrorCode::not_found,
+            "operator workspace object was not found");
+    }
+    if (error.code == ErrorCode::invocation_in_doubt || error.code == ErrorCode::journal_conflict) {
+        return application::make_operator_workspace_query_error(
+            application::OperatorWorkspaceQueryErrorCode::inconsistent,
+            "operator workspace read model is inconsistent");
+    }
+    return application::make_operator_workspace_query_error(
+        application::OperatorWorkspaceQueryErrorCode::unavailable,
+        "operator workspace read model is unavailable");
+}
+
 /** @brief 发送一个文件传输阶段 ACK / Send one file-transfer phase acknowledgement. */
 [[nodiscard]] Result<void> send_payload_ack_frame(const int fd, const PayloadAck& acknowledgement) {
     const auto payload = encode_payload_ack(acknowledgement);
@@ -739,8 +928,8 @@ void close_range_from(const unsigned int first) noexcept {
     return std::optional<PayloadResult>{std::move(replay)};
 }
 
-/** @brief 验证 broker socket 目录为 root-owned 且不可被他人写 / Validate broker socket directory ownership and mode. */
-[[nodiscard]] Result<void> validate_socket_parent(
+/** @brief 验证并规范化 broker socket 目录为 root-owned 且不可被他人写 / Validate and canonicalize a root-owned non-writable broker socket directory. */
+[[nodiscard]] Result<std::filesystem::path> validate_socket_parent(
     const std::filesystem::path& socket_path,
     const bool allow_insecure_dev_root) {
     if (!socket_path.is_absolute() || socket_path.filename().empty()) {
@@ -753,6 +942,123 @@ void close_range_from(const unsigned int first) noexcept {
     }
     if (const auto secure = validate_secure_directory_ancestry(parent, allow_insecure_dev_root); !secure) {
         return std::unexpected(secure.error());
+    }
+    return parent;
+}
+
+/**
+ * @brief 判断一个已 canonical 的目录是否包含另一个目录 / Check whether one canonical directory contains another.
+ * @param ancestor 候选祖先目录 / Candidate ancestor directory.
+ * @param descendant 候选后代目录 / Candidate descendant directory.
+ * @return 相等或 ancestor 是 descendant 的祖先时为真 / True when equal or when ancestor contains descendant.
+ */
+[[nodiscard]] bool canonical_directory_contains(
+    const std::filesystem::path& ancestor,
+    const std::filesystem::path& descendant) noexcept {
+    auto ancestor_component = ancestor.begin();
+    auto descendant_component = descendant.begin();
+    while (ancestor_component != ancestor.end()) {
+        if (descendant_component == descendant.end() || *ancestor_component != *descendant_component) {
+            return false;
+        }
+        ++ancestor_component;
+        ++descendant_component;
+    }
+    return true;
+}
+
+/**
+ * @brief 在已验证私有父目录中回收一个无 listener 的 stale UNIX socket / Reclaim one stale UNIX socket below a verified private parent.
+ * @param socket_path 待绑定的受控 endpoint / Controlled endpoint about to be bound.
+ * @param description 仅供 host 诊断的 endpoint 名称 / Endpoint name used only for host diagnostics.
+ * @return 成功、路径不存在或已安全 unlink；活 listener/不确定状态返回 fail-closed 错误 /
+ *     Success, a missing path, or a safely unlinked stale socket; a live listener or uncertain
+ *     state returns a fail-closed error.
+ * @note 调用方必须已验证 parent 的 root ownership/non-writability。只会删除已通过 `lstat`
+ *       证明为 socket 且 nonblocking `connect` 明确返回 `ECONNREFUSED` 的同一 inode；绝不删除
+ *       regular file、directory、symlink 或可连通 listener。/ The caller must have validated root
+ *       ownership/non-writability of the parent. This removes only the same inode proven by
+ *       `lstat` to be a socket whose nonblocking `connect` explicitly returns `ECONNREFUSED`; it
+ *       never removes a regular file, directory, symlink, or connectable listener.
+ */
+[[nodiscard]] Result<void> reclaim_stale_listener_path(
+    const std::filesystem::path& socket_path,
+    const std::string_view description) {
+    struct stat original {};
+    if (lstat(socket_path.c_str(), &original) != 0) {
+        if (errno == ENOENT) {
+            return {};
+        }
+        return std::unexpected(errno_error(ErrorCode::io_failure, "lstat " + std::string(description) + " socket"));
+    }
+    if (!S_ISSOCK(original.st_mode)) {
+        return std::unexpected(make_error(
+            ErrorCode::already_exists,
+            std::string(description) + " socket path names a non-socket object"));
+    }
+    const int probe_fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (probe_fd < 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "create stale " + std::string(description) + " probe"));
+    }
+    sockaddr_un address {};
+    address.sun_family = AF_UNIX;
+    std::strncpy(address.sun_path, socket_path.c_str(), sizeof(address.sun_path) - 1U);
+    int connection_error{0};
+    if (connect(probe_fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
+        connection_error = errno;
+        if (connection_error == EINPROGRESS || connection_error == EALREADY) {
+            pollfd readiness{.fd = probe_fd, .events = POLLOUT, .revents = 0};
+            const int ready = poll(&readiness, 1U, 250);
+            if (ready < 0) {
+                const Error error = errno_error(ErrorCode::io_failure, "poll stale " + std::string(description) + " probe");
+                close_fd(probe_fd);
+                return std::unexpected(error);
+            }
+            if (ready == 0 || (readiness.revents & POLLNVAL) != 0) {
+                close_fd(probe_fd);
+                return std::unexpected(make_error(
+                    ErrorCode::already_exists,
+                    std::string(description) + " socket liveness is indeterminate; refusing unlink"));
+            }
+            socklen_t error_size = sizeof(connection_error);
+            if (getsockopt(probe_fd, SOL_SOCKET, SO_ERROR, &connection_error, &error_size) != 0) {
+                const Error error = errno_error(ErrorCode::io_failure, "read stale " + std::string(description) + " probe status");
+                close_fd(probe_fd);
+                return std::unexpected(error);
+            }
+            if (error_size != sizeof(connection_error)) {
+                close_fd(probe_fd);
+                return std::unexpected(make_error(
+                    ErrorCode::io_failure,
+                    "stale " + std::string(description) + " probe returned an invalid status size"));
+            }
+        }
+    }
+    close_fd(probe_fd);
+    if (connection_error == 0) {
+        return std::unexpected(make_error(
+            ErrorCode::already_exists,
+            std::string(description) + " socket has a live listener; refusing replacement"));
+    }
+    if (connection_error != ECONNREFUSED) {
+        return std::unexpected(make_error(
+            ErrorCode::already_exists,
+            std::string(description) + " socket probe did not prove a stale listener; refusing unlink"));
+    }
+    struct stat current {};
+    if (lstat(socket_path.c_str(), &current) != 0) {
+        if (errno == ENOENT) {
+            return {};
+        }
+        return std::unexpected(errno_error(ErrorCode::io_failure, "recheck stale " + std::string(description) + " socket"));
+    }
+    if (!S_ISSOCK(current.st_mode) || current.st_dev != original.st_dev || current.st_ino != original.st_ino) {
+        return std::unexpected(make_error(
+            ErrorCode::already_exists,
+            std::string(description) + " socket path changed during stale recovery; refusing unlink"));
+    }
+    if (unlink(socket_path.c_str()) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "unlink stale " + std::string(description) + " socket"));
     }
     return {};
 }
@@ -1662,8 +1968,8 @@ struct Broker::SharedState final {
     std::mutex sessions_mutex;
     /** @brief runtime 到可共享 session 的映射 / Mapping from runtime to shareable session. */
     std::unordered_map<std::string, std::shared_ptr<RuntimeSession>> sessions;
-    /** @brief 正在进行慢 activation 的 runtime / Runtimes currently undergoing slow activation. */
-    std::unordered_set<std::string> activating;
+    /** @brief 正在进行慢 activation 的 runtime 及其强类型 owner / Runtimes undergoing slow activation and their typed owners. */
+    std::unordered_map<std::string, domain::ActivationId> activating;
     /** @brief fork-server unknown outcome 后禁止复用的 runtime / Runtimes blocked after an unknown fork-server outcome. */
     std::unordered_set<std::string> launch_unknown;
     /** @brief 串行化对单个 fork-server socket 的 RPC / Serialize RPCs over the single fork-server socket. */
@@ -2049,6 +2355,10 @@ Broker::Broker(Broker&& other) noexcept
       socket_device_(other.socket_device_),
       socket_inode_(other.socket_inode_),
       owns_socket_path_(std::exchange(other.owns_socket_path_, false)),
+      operator_listen_fd_(std::exchange(other.operator_listen_fd_, -1)),
+      operator_socket_device_(other.operator_socket_device_),
+      operator_socket_inode_(other.operator_socket_inode_),
+      owns_operator_socket_path_(std::exchange(other.owns_operator_socket_path_, false)),
       state_(std::move(other.state_)) {}
 
 Broker& Broker::operator=(Broker&& other) noexcept {
@@ -2082,6 +2392,7 @@ Broker::~Broker() {
     }
     stop_launcher_server();
     close_fd(listen_fd_);
+    close_fd(operator_listen_fd_);
     if (owns_socket_path_ && !config_.socket_path.empty()) {
         struct stat metadata {};
         if (lstat(config_.socket_path.c_str(), &metadata) == 0 && S_ISSOCK(metadata.st_mode) &&
@@ -2089,11 +2400,28 @@ Broker::~Broker() {
             static_cast<void>(unlink(config_.socket_path.c_str()));
         }
     }
+    if (owns_operator_socket_path_ && !config_.operator_socket_path.empty()) {
+        struct stat metadata {};
+        if (lstat(config_.operator_socket_path.c_str(), &metadata) == 0 && S_ISSOCK(metadata.st_mode) &&
+            metadata.st_dev == operator_socket_device_ && metadata.st_ino == operator_socket_inode_) {
+            static_cast<void>(unlink(config_.operator_socket_path.c_str()));
+        }
+    }
 }
 
 Result<Broker> Broker::create(BrokerConfig config) {
-    if (config.client_uid == 0U || config.idle_ttl.count() <= 0) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "broker client_uid and idle_ttl must be set"));
+    if (config.client_uid == 0U || config.operator_socket_path.empty() || config.idle_ttl.count() <= 0) {
+        return std::unexpected(make_error(
+            ErrorCode::invalid_argument,
+            "broker Bot UID, independent operator endpoint, and idle TTL must be set"));
+    }
+    if (const auto separated = validate_operator_endpoint_separation(
+            config.socket_path,
+            config.client_uid,
+            config.operator_socket_path,
+            config.operator_uid);
+        !separated) {
+        return std::unexpected(separated.error());
     }
     if (const auto preflight = preflight_sandbox(config.sandbox); !preflight) {
         return std::unexpected(preflight.error());
@@ -2109,8 +2437,21 @@ Result<Broker> Broker::create(BrokerConfig config) {
     if (const auto supervisor = validate_supervisor_path(config); !supervisor) {
         return std::unexpected(supervisor.error());
     }
-    if (const auto socket_parent = validate_socket_parent(config.socket_path, config.allow_insecure_dev_root); !socket_parent) {
+    const auto socket_parent = validate_socket_parent(config.socket_path, config.allow_insecure_dev_root);
+    if (!socket_parent) {
         return std::unexpected(socket_parent.error());
+    }
+    const auto operator_socket_parent = validate_socket_parent(
+        config.operator_socket_path,
+        config.allow_insecure_dev_root);
+    if (!operator_socket_parent) {
+        return std::unexpected(operator_socket_parent.error());
+    }
+    if (canonical_directory_contains(*socket_parent, *operator_socket_parent) ||
+        canonical_directory_contains(*operator_socket_parent, *socket_parent)) {
+        return std::unexpected(make_error(
+            ErrorCode::invalid_argument,
+            "Bot and operator socket parent directories resolve to overlapping host views"));
     }
     if (config.allow_insecure_dev_root) {
         std::fputs(
@@ -2134,6 +2475,9 @@ Result<Broker> Broker::create(BrokerConfig config) {
     if (const auto bound = broker.bind_listener(); !bound) {
         return std::unexpected(bound.error());
     }
+    if (const auto operator_bound = broker.bind_operator_listener(); !operator_bound) {
+        return std::unexpected(operator_bound.error());
+    }
     return broker;
 }
 
@@ -2141,11 +2485,8 @@ Result<void> Broker::bind_listener() {
     if (config_.socket_path.string().size() >= sizeof(sockaddr_un::sun_path)) {
         return std::unexpected(make_error(ErrorCode::invalid_argument, "broker socket path exceeds AF_UNIX limit"));
     }
-    struct stat existing {};
-    if (lstat(config_.socket_path.c_str(), &existing) == 0) {
-        return std::unexpected(make_error(ErrorCode::already_exists, "broker socket pathname already exists; refusing destructive replacement"));
-    } else if (errno != ENOENT) {
-        return std::unexpected(errno_error(ErrorCode::io_failure, "lstat broker socket"));
+    if (const auto stale = reclaim_stale_listener_path(config_.socket_path, "Bot"); !stale) {
+        return std::unexpected(stale.error());
     }
     listen_fd_ = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
     if (listen_fd_ < 0) {
@@ -2154,19 +2495,74 @@ Result<void> Broker::bind_listener() {
     sockaddr_un address {};
     address.sun_family = AF_UNIX;
     std::strncpy(address.sun_path, config_.socket_path.c_str(), sizeof(address.sun_path) - 1U);
-    if (bind(listen_fd_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0 || listen(listen_fd_, 32) != 0) {
-        return std::unexpected(errno_error(ErrorCode::io_failure, "bind/listen broker socket"));
-    }
-    if (chown(config_.socket_path.c_str(), config_.client_uid, static_cast<gid_t>(-1)) != 0 || chmod(config_.socket_path.c_str(), 0600) != 0) {
-        return std::unexpected(errno_error(ErrorCode::permission_denied, "protect broker socket"));
+    if (bind(listen_fd_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "bind broker socket"));
     }
     struct stat bound_metadata {};
     if (lstat(config_.socket_path.c_str(), &bound_metadata) != 0 || !S_ISSOCK(bound_metadata.st_mode)) {
+        // `bind` just created this pathname below a validated private parent.  If it cannot be
+        // re-observed, best-effort unlink prevents this failed half-bind from becoming a durable
+        // restart blocker; no untrusted peer can replace this path in the validated parent.
+        static_cast<void>(unlink(config_.socket_path.c_str()));
         return std::unexpected(make_error(ErrorCode::io_failure, "cannot prove ownership of bound broker socket"));
     }
     socket_device_ = bound_metadata.st_dev;
     socket_inode_ = bound_metadata.st_ino;
     owns_socket_path_ = true;
+    if (chown(config_.socket_path.c_str(), config_.client_uid, static_cast<gid_t>(-1)) != 0 ||
+        chmod(config_.socket_path.c_str(), 0600) != 0) {
+        return std::unexpected(errno_error(ErrorCode::permission_denied, "protect broker socket"));
+    }
+    if (lstat(config_.socket_path.c_str(), &bound_metadata) != 0 || !S_ISSOCK(bound_metadata.st_mode) ||
+        bound_metadata.st_dev != socket_device_ || bound_metadata.st_ino != socket_inode_ ||
+        bound_metadata.st_uid != config_.client_uid || (bound_metadata.st_mode & 0777) != 0600) {
+        return std::unexpected(make_error(ErrorCode::io_failure, "cannot prove protection of bound broker socket"));
+    }
+    if (listen(listen_fd_, 32) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "listen broker socket"));
+    }
+    return {};
+}
+
+Result<void> Broker::bind_operator_listener() {
+    if (config_.operator_socket_path.string().size() >= sizeof(sockaddr_un::sun_path)) {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, "operator socket path exceeds AF_UNIX limit"));
+    }
+    if (const auto stale = reclaim_stale_listener_path(config_.operator_socket_path, "operator"); !stale) {
+        return std::unexpected(stale.error());
+    }
+    operator_listen_fd_ = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (operator_listen_fd_ < 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "create operator SOCK_SEQPACKET"));
+    }
+    sockaddr_un address {};
+    address.sun_family = AF_UNIX;
+    std::strncpy(address.sun_path, config_.operator_socket_path.c_str(), sizeof(address.sun_path) - 1U);
+    if (bind(operator_listen_fd_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "bind operator socket"));
+    }
+    struct stat bound_metadata {};
+    if (lstat(config_.operator_socket_path.c_str(), &bound_metadata) != 0 || !S_ISSOCK(bound_metadata.st_mode)) {
+        // See the Bot endpoint equivalent: this is a just-created path under a verified private
+        // parent, so a best-effort unlink avoids retaining an unprotected half-bind.
+        static_cast<void>(unlink(config_.operator_socket_path.c_str()));
+        return std::unexpected(make_error(ErrorCode::io_failure, "cannot prove ownership of bound operator socket"));
+    }
+    operator_socket_device_ = bound_metadata.st_dev;
+    operator_socket_inode_ = bound_metadata.st_ino;
+    owns_operator_socket_path_ = true;
+    if (chown(config_.operator_socket_path.c_str(), config_.operator_uid, static_cast<gid_t>(-1)) != 0 ||
+        chmod(config_.operator_socket_path.c_str(), 0600) != 0) {
+        return std::unexpected(errno_error(ErrorCode::permission_denied, "protect operator socket"));
+    }
+    if (lstat(config_.operator_socket_path.c_str(), &bound_metadata) != 0 || !S_ISSOCK(bound_metadata.st_mode) ||
+        bound_metadata.st_dev != operator_socket_device_ || bound_metadata.st_ino != operator_socket_inode_ ||
+        bound_metadata.st_uid != config_.operator_uid || (bound_metadata.st_mode & 0777) != 0600) {
+        return std::unexpected(make_error(ErrorCode::io_failure, "cannot prove protection of bound operator socket"));
+    }
+    if (listen(operator_listen_fd_, 16) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "listen operator socket"));
+    }
     return {};
 }
 
@@ -2365,7 +2761,7 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
             if (existing != state_->sessions.end()) {
                 session = existing->second;
                 static_cast<void>(session->dispatch_references.fetch_add(1U, std::memory_order_acq_rel));
-            } else if (!state_->activating.insert(runtime_key).second) {
+            } else if (!state_->activating.try_emplace(runtime_key, *typed_activation_id).second) {
                 return std::unexpected(make_error(ErrorCode::busy, "runtime activation is already in progress"));
             } else {
                 activate = true;
@@ -2462,6 +2858,188 @@ Result<ExecutionResult> Broker::dispatch(const ExecuteRequest& request) {
     }
     session.last_used = std::chrono::steady_clock::now();
     return *result;
+}
+
+Result<RuntimeStatusResult> Broker::read_runtime_status(const RuntimeStatusRequest& request) const {
+    if (const auto valid = validate_runtime_status_request(request); !valid) {
+        return std::unexpected(valid.error());
+    }
+    const auto runtime = domain::RuntimeId::parse(request.runtime_key);
+    const auto activation = domain::ActivationId::parse(request.activation_id);
+    if (!runtime || !activation) {
+        const domain::Error& error = !runtime ? runtime.error() : activation.error();
+        return std::unexpected(transport_error(error));
+    }
+    const application::RuntimeStatusQuery query(*runtime, *activation);
+    BrokerRuntimeStatusPort port([this](const application::RuntimeStatusQuery& observed_query)
+        -> domain::Result<application::RuntimeStatus> {
+        std::shared_ptr<RuntimeSession> session;
+        std::optional<domain::ActivationId> activating_owner;
+        bool launch_quarantined = false;
+        {
+            // Do not take a session mutex while holding sessions_mutex: retirement takes the
+            // inverse (session -> map) order after slow cleanup. Copying the shared_ptr keeps the
+            // session alive after this map observation without adding a dispatch reference.
+            std::lock_guard map_lock(state_->sessions_mutex);
+            const auto existing = state_->sessions.find(observed_query.runtime().value());
+            if (existing != state_->sessions.end()) {
+                session = existing->second;
+            } else if (const auto activating = state_->activating.find(observed_query.runtime().value());
+                       activating != state_->activating.end()) {
+                activating_owner = activating->second;
+            } else {
+                launch_quarantined = state_->launch_unknown.contains(observed_query.runtime().value());
+            }
+        }
+        if (!session) {
+            const domain::RuntimeState state = launch_quarantined
+                ? domain::RuntimeState::failed
+                : activating_owner.has_value()
+                ? domain::RuntimeState::activating
+                : domain::RuntimeState::dormant;
+            const auto snapshot = domain::RuntimeSnapshot::create(
+                observed_query.runtime(),
+                state,
+                std::move(activating_owner));
+            if (!snapshot) {
+                return std::unexpected(snapshot.error());
+            }
+            return application::RuntimeStatus::create(
+                observed_query,
+                *snapshot,
+                false,
+                std::nullopt,
+                config_.idle_ttl,
+                0U,
+                launch_quarantined);
+        }
+
+        std::lock_guard session_lock(session->mutex);
+        const domain::RuntimeSnapshot snapshot = session->runtime.snapshot();
+        std::optional<std::chrono::milliseconds> idle_for;
+        if (snapshot.state() == domain::RuntimeState::ready) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - session->last_used);
+            idle_for = std::max(std::chrono::milliseconds::zero(), elapsed);
+        }
+        // "alive" means healthy and reusable, not merely that an untrusted PID might still exist
+        // during a failed cleanup. `cleanup_pending` is the explicit signal for that latter case.
+        const bool supervisor_alive = !session->poisoned &&
+            snapshot.state() != domain::RuntimeState::failed &&
+            !launcher_exited(session->launcher_pidfd);
+        return application::RuntimeStatus::create(
+            observed_query,
+            snapshot,
+            supervisor_alive,
+            idle_for,
+            config_.idle_ttl,
+            static_cast<std::uint64_t>(session->dispatch_references.load(std::memory_order_acquire)),
+            session->poisoned);
+    });
+    application::RuntimeStatusService service;
+    const auto observed = service.inspect(query, port);
+    if (!observed) {
+        return std::unexpected(transport_error(observed.error()));
+    }
+    RuntimeStatusResult result{
+        .runtime_key = observed->snapshot().runtime().value(),
+        .state = observed->snapshot().state(),
+        .active_activation_id = {},
+        .handle_activation_matches = observed->handle_activation_matches(),
+        .supervisor_alive = observed->supervisor_alive(),
+        .idle_for = observed->idle_for(),
+        .idle_ttl = observed->idle_ttl(),
+        .borrowed_dispatches = observed->borrowed_dispatches(),
+        .cleanup_pending = observed->cleanup_pending(),
+    };
+    if (observed->snapshot().active_activation().has_value()) {
+        result.active_activation_id = observed->snapshot().active_activation()->value();
+    }
+    if (const auto valid = validate_runtime_status_result(result); !valid) {
+        return std::unexpected(valid.error());
+    }
+    return result;
+}
+
+application::OperatorWorkspaceQueryResult<domain::OperatorWorkspaceStatus> Broker::status(
+    const domain::RuntimeId& runtime) const {
+    if (!state_) {
+        return std::unexpected(application::make_operator_workspace_query_error(
+            application::OperatorWorkspaceQueryErrorCode::unavailable,
+            "operator workspace read model is unavailable"));
+    }
+    std::shared_ptr<RuntimeSession> session;
+    domain::WorkspaceActivity activity{domain::WorkspaceActivity::inactive};
+    {
+        std::lock_guard map_lock(state_->sessions_mutex);
+        const auto existing = state_->sessions.find(runtime.value());
+        if (existing != state_->sessions.end()) {
+            session = existing->second;
+        } else if (state_->activating.contains(runtime.value())) {
+            activity = domain::WorkspaceActivity::activating;
+        } else if (state_->launch_unknown.contains(runtime.value())) {
+            activity = domain::WorkspaceActivity::failed;
+        }
+    }
+    if (session) {
+        std::lock_guard session_lock(session->mutex);
+        activity = session->poisoned
+            ? domain::WorkspaceActivity::failed
+            : workspace_activity_from_runtime_state(session->runtime.state());
+    }
+
+    const auto binding = quota_.find_ready_runtime(runtime.value());
+    if (!binding) {
+        if (binding.error().code == ErrorCode::not_found && activity == domain::WorkspaceActivity::inactive) {
+            const auto status = domain::OperatorWorkspaceStatus::create(
+                runtime,
+                domain::WorkspacePersistence::absent,
+                activity,
+                std::nullopt);
+            if (!status) {
+                return std::unexpected(application::make_operator_workspace_query_error(
+                    application::OperatorWorkspaceQueryErrorCode::inconsistent,
+                    "inactive operator workspace status violates the domain contract"));
+            }
+            return *status;
+        }
+        if (binding.error().code == ErrorCode::not_found) {
+            return std::unexpected(application::make_operator_workspace_query_error(
+                application::OperatorWorkspaceQueryErrorCode::inconsistent,
+                "active runtime has no persistent workspace binding"));
+        }
+        return std::unexpected(normalize_operator_read_error(binding.error()));
+    }
+    const auto quota_usage = quota_.read_workspace_quota_usage(*binding);
+    if (!quota_usage) {
+        return std::unexpected(normalize_operator_read_error(quota_usage.error()));
+    }
+    const auto status = domain::OperatorWorkspaceStatus::create(
+        runtime,
+        domain::WorkspacePersistence::ready,
+        activity,
+        *quota_usage);
+    if (!status) {
+        return std::unexpected(application::make_operator_workspace_query_error(
+            application::OperatorWorkspaceQueryErrorCode::inconsistent,
+            "ready operator workspace status violates the domain contract"));
+    }
+    return *status;
+}
+
+application::OperatorWorkspaceQueryResult<domain::WorkspaceListing> Broker::list(
+    const domain::RuntimeId& runtime,
+    const domain::OperatorWorkspacePath& path) const {
+    const auto binding = quota_.find_ready_runtime(runtime.value());
+    if (!binding) {
+        return std::unexpected(normalize_operator_read_error(binding.error()));
+    }
+    OperatorWorkspaceReader reader;
+    const auto listing = reader.list(*binding, path);
+    if (!listing) {
+        return std::unexpected(normalize_operator_read_error(listing.error()));
+    }
+    return *listing;
 }
 
 Result<PayloadResult> Broker::replay_payload(const PayloadReplayRequest& request) {
@@ -2783,6 +3361,102 @@ Result<void> Broker::dispatch_payload_stream(
     }
 }
 
+Result<void> Broker::serve_operator_client(const int client_fd) {
+    ucred credentials {};
+    socklen_t credential_size = sizeof(credentials);
+    if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &credentials, &credential_size) != 0 ||
+        credential_size != sizeof(credentials) ||
+        !is_authorized_operator_peer(credentials.uid, config_.operator_uid)) {
+        return std::unexpected(make_error(ErrorCode::authentication_failed, "operator client UID is not authorized"));
+    }
+    if (const auto configured = configure_control_socket(client_fd, std::chrono::seconds(5)); !configured) {
+        return std::unexpected(configured.error());
+    }
+    const auto wire = operator_protocol::receive_operator_frame(client_fd);
+    if (!wire) {
+        return wire.error().code == ErrorCode::io_failure ? Result<void>{} : std::unexpected(wire.error());
+    }
+    const auto frame = operator_protocol::decode_operator_frame(*wire);
+    if (!frame) {
+        if (const auto sent = send_operator_error_frame(
+                client_fd,
+                operator_protocol::OperatorErrorCode::protocol_violation);
+            !sent) {
+            return std::unexpected(sent.error());
+        }
+        return {};
+    }
+    application::OperatorWorkspaceQueryService service;
+    if (frame->kind == operator_protocol::OperatorMessageKind::status_request) {
+        const auto request = operator_protocol::decode_status_request(frame->payload);
+        if (!request) {
+            if (const auto sent = send_operator_error_frame(
+                    client_fd,
+                    operator_protocol::OperatorErrorCode::invalid_request);
+                !sent) {
+                return std::unexpected(sent.error());
+            }
+            return {};
+        }
+        const auto runtime = domain::RuntimeId::parse(request->runtime_key);
+        if (!runtime) {
+            if (const auto sent = send_operator_error_frame(
+                    client_fd,
+                    operator_protocol::OperatorErrorCode::invalid_request);
+                !sent) {
+                return std::unexpected(sent.error());
+            }
+            return {};
+        }
+        const auto status = service.status(*runtime, *this);
+        if (!status) {
+            if (const auto sent = send_operator_error_frame(client_fd, operator_error_code(status.error())); !sent) {
+                return std::unexpected(sent.error());
+            }
+            return {};
+        }
+        return send_operator_status_frame(client_fd, *status);
+    }
+    if (frame->kind == operator_protocol::OperatorMessageKind::list_request) {
+        const auto request = operator_protocol::decode_list_request(frame->payload);
+        if (!request) {
+            if (const auto sent = send_operator_error_frame(
+                    client_fd,
+                    operator_protocol::OperatorErrorCode::invalid_request);
+                !sent) {
+                return std::unexpected(sent.error());
+            }
+            return {};
+        }
+        const auto runtime = domain::RuntimeId::parse(request->runtime_key);
+        const auto path = domain::OperatorWorkspacePath::parse(request->path);
+        if (!runtime || !path) {
+            if (const auto sent = send_operator_error_frame(
+                    client_fd,
+                    operator_protocol::OperatorErrorCode::invalid_request);
+                !sent) {
+                return std::unexpected(sent.error());
+            }
+            return {};
+        }
+        const auto listing = service.list(*runtime, *path, *this);
+        if (!listing) {
+            if (const auto sent = send_operator_error_frame(client_fd, operator_error_code(listing.error())); !sent) {
+                return std::unexpected(sent.error());
+            }
+            return {};
+        }
+        return send_operator_list_frame(client_fd, *listing);
+    }
+    if (const auto sent = send_operator_error_frame(
+            client_fd,
+            operator_protocol::OperatorErrorCode::protocol_violation);
+        !sent) {
+        return std::unexpected(sent.error());
+    }
+    return {};
+}
+
 Result<void> Broker::serve_client(const int client_fd) {
     ucred credentials {};
     socklen_t credential_size = sizeof(credentials);
@@ -2804,6 +3478,26 @@ Result<void> Broker::serve_client(const int client_fd) {
         const auto frame = decode_frame(*wire);
         if (!frame) {
             if (const auto sent = send_error_frame(client_fd, frame.error()); !sent) {
+                return std::unexpected(sent.error());
+            }
+            continue;
+        }
+        if (frame->kind == MessageKind::runtime_status) {
+            const auto request = decode_runtime_status_request(frame->payload);
+            if (!request) {
+                if (const auto sent = send_error_frame(client_fd, request.error()); !sent) {
+                    return std::unexpected(sent.error());
+                }
+                continue;
+            }
+            const auto status = read_runtime_status(*request);
+            if (!status) {
+                if (const auto sent = send_error_frame(client_fd, status.error()); !sent) {
+                    return std::unexpected(sent.error());
+                }
+                continue;
+            }
+            if (const auto sent = send_runtime_status_frame(client_fd, *status); !sent) {
                 return std::unexpected(sent.error());
             }
             continue;
@@ -2884,7 +3578,7 @@ Result<void> Broker::serve_client(const int client_fd) {
             return {};
         }
         if (frame->kind != MessageKind::execute) {
-            if (const auto sent = send_error_frame(client_fd, make_error(ErrorCode::protocol_violation, "broker accepts execute, file ingress, or file replay only")); !sent) {
+            if (const auto sent = send_error_frame(client_fd, make_error(ErrorCode::protocol_violation, "broker accepts execute, file ingress, file replay, or runtime status only")); !sent) {
                 return std::unexpected(sent.error());
             }
             continue;
@@ -3020,44 +3714,95 @@ void Broker::reap_expired_sessions() noexcept {
 }
 
 Result<void> Broker::serve_forever() {
-    if (listen_fd_ < 0) {
-        return std::unexpected(make_error(ErrorCode::internal, "broker listener is not bound"));
+    if (listen_fd_ < 0 || operator_listen_fd_ < 0) {
+        return std::unexpected(make_error(ErrorCode::internal, "Bot or operator broker listener is not bound"));
     }
+    /** @brief 已 accept client 所属 control-plane endpoint / Control-plane endpoint of one accepted client. */
+    enum class ClientEndpoint : std::uint8_t {
+        /** @brief Bot 专属 endpoint / Bot-exclusive endpoint. */
+        bot,
+        /** @brief 独立 operator endpoint / Independent operator endpoint. */
+        operator_plane,
+    };
+    /** @brief 等待专属 worker 的已 accept client / Accepted client waiting for its dedicated worker pool. */
+    struct QueuedClient final {
+        /** @brief 已 accept 的 client FD / Accepted client FD. */
+        int fd{-1};
+    };
     std::mutex queue_mutex;
-    std::condition_variable queue_ready;
-    std::deque<int> queued_clients;
+    /** @brief Bot worker 的专属唤醒条件 / Dedicated wake condition for Bot workers. */
+    std::condition_variable bot_queue_ready;
+    /** @brief operator worker 的专属唤醒条件 / Dedicated wake condition for operator workers. */
+    std::condition_variable operator_queue_ready;
+    std::deque<QueuedClient> queued_bot_clients;
+    std::deque<QueuedClient> queued_operator_clients;
     bool stopping = false;
-    const auto worker = [this, &queue_mutex, &queue_ready, &queued_clients, &stopping]() {
+    // Do not share this pool with the Bot endpoint. A Bot connection can deliberately withhold
+    // its first packet until the five-second I/O deadline, or run a much longer task dispatch;
+    // queue priority cannot recover an operator worker after every shared worker is blocked.
+    const auto bot_worker = [this,
+                             &queue_mutex,
+                             &bot_queue_ready,
+                             &queued_bot_clients,
+                             &stopping]() {
         for (;;) {
-            int client = -1;
+            QueuedClient client;
             {
                 std::unique_lock queue_lock(queue_mutex);
-                queue_ready.wait(queue_lock, [&]() { return stopping || !queued_clients.empty(); });
-                if (queued_clients.empty()) {
+                bot_queue_ready.wait(queue_lock, [&]() { return stopping || !queued_bot_clients.empty(); });
+                if (queued_bot_clients.empty()) {
                     return;
                 }
-                client = queued_clients.front();
-                queued_clients.pop_front();
+                client = queued_bot_clients.front();
+                queued_bot_clients.pop_front();
             }
-            const auto served = serve_client(client);
-            close_fd(client);
+            const auto served = serve_client(client.fd);
+            close_fd(client.fd);
             // An untrusted client can only lose its own short-lived connection, never a worker
             // or the broker. Errors are intentionally contained to this client.
             static_cast<void>(served);
         }
     };
+    // This separately reserved pool is the liveness boundary for recovery and inspection. Its
+    // work is one bounded WOP1 read-only request, and Bot-originated work cannot occupy it.
+    const auto operator_worker = [this,
+                                  &queue_mutex,
+                                  &operator_queue_ready,
+                                  &queued_operator_clients,
+                                  &stopping]() {
+        for (;;) {
+            QueuedClient client;
+            {
+                std::unique_lock queue_lock(queue_mutex);
+                operator_queue_ready.wait(queue_lock, [&]() { return stopping || !queued_operator_clients.empty(); });
+                if (queued_operator_clients.empty()) {
+                    return;
+                }
+                client = queued_operator_clients.front();
+                queued_operator_clients.pop_front();
+            }
+            const auto served = serve_operator_client(client.fd);
+            close_fd(client.fd);
+            // A malformed or disconnected operator client can only lose its own bounded request.
+            static_cast<void>(served);
+        }
+    };
     std::vector<std::thread> workers;
-    workers.reserve(kMaxClientWorkers);
+    workers.reserve(kMaxClientWorkers + kReservedOperatorWorkers);
     try {
         for (std::size_t index = 0; index < kMaxClientWorkers; ++index) {
-            workers.emplace_back(worker);
+            workers.emplace_back(bot_worker);
+        }
+        for (std::size_t index = 0; index < kReservedOperatorWorkers; ++index) {
+            workers.emplace_back(operator_worker);
         }
     } catch (const std::system_error&) {
         {
             std::lock_guard queue_lock(queue_mutex);
             stopping = true;
         }
-        queue_ready.notify_all();
+        bot_queue_ready.notify_all();
+        operator_queue_ready.notify_all();
         for (std::thread& thread : workers) {
             if (thread.joinable()) {
                 thread.join();
@@ -3068,51 +3813,83 @@ Result<void> Broker::serve_forever() {
     Result<void> terminal{};
     for (;;) {
         reap_expired_sessions();
-        pollfd listening{.fd = listen_fd_, .events = POLLIN, .revents = 0};
-        const int ready = poll(&listening, 1U, 250);
+        std::array<pollfd, 2> listening{
+            pollfd{.fd = listen_fd_, .events = POLLIN, .revents = 0},
+            pollfd{.fd = operator_listen_fd_, .events = POLLIN, .revents = 0},
+        };
+        const int ready = poll(listening.data(), static_cast<nfds_t>(listening.size()), 250);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
             }
-            terminal = std::unexpected(errno_error(ErrorCode::io_failure, "poll broker listener"));
+            terminal = std::unexpected(errno_error(ErrorCode::io_failure, "poll broker listeners"));
             break;
         }
         if (ready == 0) {
             continue;
         }
-        const int client = accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
-        if (client < 0) {
-            if (errno == EINTR) {
+        for (std::size_t index = 0U; index < listening.size(); ++index) {
+            const short events = listening[index].revents;
+            if ((events & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+                terminal = std::unexpected(make_error(ErrorCode::io_failure, "broker listener became unusable"));
+                break;
+            }
+            if ((events & POLLIN) == 0) {
                 continue;
             }
-            terminal = std::unexpected(errno_error(ErrorCode::io_failure, "accept broker client"));
-            break;
-        }
-        bool queued = false;
-        {
-            std::lock_guard queue_lock(queue_mutex);
-            if (queued_clients.size() < kMaxQueuedClients) {
-                queued_clients.push_back(client);
-                queued = true;
+            const int accepted = accept4(listening[index].fd, nullptr, nullptr, SOCK_CLOEXEC);
+            if (accepted < 0) {
+                if (errno == EINTR || errno == ECONNABORTED) {
+                    continue;
+                }
+                terminal = std::unexpected(errno_error(ErrorCode::io_failure, "accept broker client"));
+                break;
+            }
+            const ClientEndpoint endpoint = index == 0U ? ClientEndpoint::bot : ClientEndpoint::operator_plane;
+            bool queued = false;
+            {
+                std::lock_guard queue_lock(queue_mutex);
+                std::deque<QueuedClient>& queue = endpoint == ClientEndpoint::operator_plane
+                    ? queued_operator_clients
+                    : queued_bot_clients;
+                const std::size_t limit = endpoint == ClientEndpoint::operator_plane
+                    ? kMaxQueuedOperatorClients
+                    : kMaxQueuedClients;
+                if (queue.size() < limit) {
+                    queue.push_back(QueuedClient{.fd = accepted});
+                    queued = true;
+                }
+            }
+            if (queued) {
+                if (endpoint == ClientEndpoint::operator_plane) {
+                    operator_queue_ready.notify_one();
+                } else {
+                    bot_queue_ready.notify_one();
+                }
+            } else {
+                // Each endpoint has an independent bounded overload policy. A Bot flood cannot
+                // consume operator queue capacity, and neither plane allocates an unbounded thread.
+                close_fd(accepted);
             }
         }
-        if (queued) {
-            queue_ready.notify_one();
-        } else {
-            // A full bounded queue is an explicit overload policy. Do not allocate a thread or
-            // retain the client indefinitely; the caller receives a failed short connection.
-            close_fd(client);
+        if (!terminal) {
+            break;
         }
     }
     {
         std::lock_guard queue_lock(queue_mutex);
         stopping = true;
-        for (const int client : queued_clients) {
-            close_fd(client);
+        for (const QueuedClient& client : queued_bot_clients) {
+            close_fd(client.fd);
         }
-        queued_clients.clear();
+        for (const QueuedClient& client : queued_operator_clients) {
+            close_fd(client.fd);
+        }
+        queued_bot_clients.clear();
+        queued_operator_clients.clear();
     }
-    queue_ready.notify_all();
+    bot_queue_ready.notify_all();
+    operator_queue_ready.notify_all();
     for (std::thread& thread : workers) {
         if (thread.joinable()) {
             thread.join();

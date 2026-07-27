@@ -367,7 +367,7 @@ private:
 /** @brief 校验 MessageKind 枚举值 / Validate a MessageKind enum value. */
 [[nodiscard]] bool is_known_kind(const std::uint16_t raw_kind) {
     return raw_kind >= static_cast<std::uint16_t>(MessageKind::execute) &&
-           raw_kind <= static_cast<std::uint16_t>(MessageKind::payload_replay);
+           raw_kind <= static_cast<std::uint16_t>(MessageKind::runtime_status_result);
 }
 
 /** @brief 校验 execution result 可安全编码 / Validate an execution result before encoding. */
@@ -433,6 +433,47 @@ Result<void> validate_execute_request(const ExecuteRequest& request) {
     }
     if (request.output_limit == 0U || request.output_limit > kMaxOutputBytes) {
         return std::unexpected(make_error(ErrorCode::invalid_argument, "output_limit is outside quota"));
+    }
+    return {};
+}
+
+Result<void> validate_runtime_status_request(const RuntimeStatusRequest& request) {
+    if (!is_safe_identifier(request.runtime_key) || !is_safe_identifier(request.activation_id)) {
+        return std::unexpected(make_error(
+            ErrorCode::invalid_argument,
+            "invalid runtime or activation identifier for runtime status"));
+    }
+    return {};
+}
+
+Result<void> validate_runtime_status_result(const RuntimeStatusResult& result) {
+    const auto runtime = domain::RuntimeId::parse(result.runtime_key);
+    if (!runtime) {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, runtime.error().message));
+    }
+    std::optional<domain::ActivationId> active_activation;
+    if (result.active_activation_id.has_value()) {
+        const auto parsed = domain::ActivationId::parse(*result.active_activation_id);
+        if (!parsed) {
+            return std::unexpected(make_error(ErrorCode::invalid_argument, parsed.error().message));
+        }
+        active_activation = *parsed;
+    }
+    if (const auto snapshot = domain::RuntimeSnapshot::create(*runtime, result.state, std::move(active_activation)); !snapshot) {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, snapshot.error().message));
+    }
+    if (result.idle_ttl.count() <= 0 ||
+        result.idle_ttl.count() > std::numeric_limits<std::int64_t>::max() ||
+        (result.idle_for.has_value() && result.idle_for->count() < 0) ||
+        (result.idle_for.has_value() && result.state != domain::RuntimeState::ready)) {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid runtime status timing"));
+    }
+    if (result.supervisor_alive &&
+        (result.state == domain::RuntimeState::dormant || result.state == domain::RuntimeState::failed)) {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, "inactive runtime cannot report a live supervisor"));
+    }
+    if (result.handle_activation_matches && !result.active_activation_id.has_value()) {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, "activation match requires an active activation"));
     }
     return {};
 }
@@ -590,6 +631,113 @@ Result<ExecuteRequest> decode_execute_request(const std::span<const std::byte> p
         return std::unexpected(valid.error());
     }
     return request;
+}
+
+Result<std::vector<std::byte>> encode_runtime_status_request(const RuntimeStatusRequest& request) {
+    if (const auto valid = validate_runtime_status_request(request); !valid) {
+        return std::unexpected(valid.error());
+    }
+    Writer writer;
+    writer.string(request.runtime_key);
+    writer.string(request.activation_id);
+    return writer.take();
+}
+
+Result<RuntimeStatusRequest> decode_runtime_status_request(const std::span<const std::byte> payload) {
+    Reader reader(payload);
+    const auto runtime_key = reader.string(128U);
+    const auto activation_id = reader.string(128U);
+    if (!runtime_key || !activation_id || !reader.finished()) {
+        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid runtime status request"));
+    }
+    RuntimeStatusRequest request{
+        .runtime_key = *runtime_key,
+        .activation_id = *activation_id,
+    };
+    if (const auto valid = validate_runtime_status_request(request); !valid) {
+        return std::unexpected(valid.error());
+    }
+    return request;
+}
+
+Result<std::vector<std::byte>> encode_runtime_status_result(const RuntimeStatusResult& result) {
+    if (const auto valid = validate_runtime_status_result(result); !valid) {
+        return std::unexpected(valid.error());
+    }
+    Writer writer;
+    writer.string(result.runtime_key);
+    writer.u8(static_cast<std::uint8_t>(result.state));
+    writer.u8(result.active_activation_id.has_value() ? 1U : 0U);
+    if (result.active_activation_id.has_value()) {
+        writer.string(*result.active_activation_id);
+    }
+    writer.u8(result.handle_activation_matches ? 1U : 0U);
+    writer.u8(result.supervisor_alive ? 1U : 0U);
+    writer.u8(result.idle_for.has_value() ? 1U : 0U);
+    if (result.idle_for.has_value()) {
+        writer.u64(static_cast<std::uint64_t>(result.idle_for->count()));
+    }
+    writer.u64(static_cast<std::uint64_t>(result.idle_ttl.count()));
+    writer.u64(result.borrowed_dispatches);
+    writer.u8(result.cleanup_pending ? 1U : 0U);
+    return writer.take();
+}
+
+Result<RuntimeStatusResult> decode_runtime_status_result(const std::span<const std::byte> payload) {
+    Reader reader(payload);
+    const auto runtime_key = reader.string(128U);
+    const auto raw_state = reader.u8();
+    const auto has_active_activation = reader.u8();
+    if (!runtime_key || !raw_state || !has_active_activation || *has_active_activation > 1U ||
+        *raw_state > static_cast<std::uint8_t>(domain::RuntimeState::failed)) {
+        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid runtime status header"));
+    }
+    std::optional<std::string> active_activation_id;
+    if (*has_active_activation == 1U) {
+        const auto active_activation = reader.string(128U);
+        if (!active_activation) {
+            return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid runtime status activation"));
+        }
+        active_activation_id = *active_activation;
+    }
+    const auto handle_activation_matches = reader.u8();
+    const auto supervisor_alive = reader.u8();
+    const auto has_idle_for = reader.u8();
+    if (!handle_activation_matches || !supervisor_alive || !has_idle_for ||
+        *handle_activation_matches > 1U || *supervisor_alive > 1U || *has_idle_for > 1U) {
+        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid runtime status flags"));
+    }
+    std::optional<std::chrono::milliseconds> idle_for;
+    if (*has_idle_for == 1U) {
+        const auto idle_for_ms = reader.u64();
+        if (!idle_for_ms || *idle_for_ms > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+            return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid runtime status idle age"));
+        }
+        idle_for = std::chrono::milliseconds(static_cast<std::int64_t>(*idle_for_ms));
+    }
+    const auto idle_ttl_ms = reader.u64();
+    const auto borrowed_dispatches = reader.u64();
+    const auto cleanup_pending = reader.u8();
+    if (!idle_ttl_ms || !borrowed_dispatches || !cleanup_pending || *cleanup_pending > 1U ||
+        *idle_ttl_ms > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
+        !reader.finished()) {
+        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid runtime status tail"));
+    }
+    RuntimeStatusResult result{
+        .runtime_key = *runtime_key,
+        .state = static_cast<domain::RuntimeState>(*raw_state),
+        .active_activation_id = std::move(active_activation_id),
+        .handle_activation_matches = *handle_activation_matches == 1U,
+        .supervisor_alive = *supervisor_alive == 1U,
+        .idle_for = std::move(idle_for),
+        .idle_ttl = std::chrono::milliseconds(static_cast<std::int64_t>(*idle_ttl_ms)),
+        .borrowed_dispatches = *borrowed_dispatches,
+        .cleanup_pending = *cleanup_pending == 1U,
+    };
+    if (const auto valid = validate_runtime_status_result(result); !valid) {
+        return std::unexpected(valid.error());
+    }
+    return result;
 }
 
 Result<std::vector<std::byte>> encode_payload_begin_request(const PayloadBeginRequest& request) {

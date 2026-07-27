@@ -35,6 +35,8 @@ BUILD_DIRECTORY="$REPOSITORY_ROOT/build/wspctld-dev"
 SERVICE_NAME="wspctld.service"
 # @brief expected client UID; default is direct host runBot user / Expected client UID; default is the direct-host runBot user.
 CLIENT_UID="${WSPCTL_CLIENT_UID:-$(id -u)}"
+# @brief 独立 operator UID；默认 root，绝不能与 Bot UID 相同 / Independent operator UID; defaults to root and must never equal the Bot UID.
+OPERATOR_UID="${WSPCTL_OPERATOR_UID:-0}"
 # @brief 可选的 operator 指定 generation 名 / Optional operator-specified generation name.
 GENERATION="${WSPCTL_GENERATION:-}"
 # @brief checkout-local lifecycle lock / Checkout-local lifecycle lock.
@@ -45,8 +47,10 @@ FINGERPRINT_FILE="$REPOSITORY_ROOT/.runtime/wspctld-fingerprint"
 EDITABLE_FINGERPRINT_FILE="$REPOSITORY_ROOT/.runtime/wspctl-editable-fingerprint"
 # @brief 由本 checkout 安装的 host artifacts 清单 / Manifest of host artifacts installed by this checkout.
 INSTALL_MANIFEST_FILE="$WORK_ROOT/install-manifest"
-# @brief daemon socket path / Daemon socket path.
-SOCKET_PATH="$WORK_ROOT/run/wspctld.sock"
+# @brief Bot 专属 daemon socket 路径 / Bot-exclusive daemon socket path.
+SOCKET_PATH="$WORK_ROOT/run/bot/wspctld.sock"
+# @brief root/operator 专属 daemon socket 路径 / Root/operator-exclusive daemon socket path.
+OPERATOR_SOCKET_PATH="$WORK_ROOT/run/operator/wspctld.sock"
 # @brief 本次启动是否必须重启 service / Whether this invocation must restart the service.
 BROKER_RESTART_REQUIRED=false
 # @brief 等待健康检查成功后记录的配置 fingerprint / Configuration fingerprint recorded only after a healthy check.
@@ -67,8 +71,9 @@ note() {
 
 # @brief 检验一个只允许十进制 UID 的值 / Validate a decimal-only UID value.
 # @param $1 UID 文本 / UID text.
+# @param $2 环境变量名 / Environment-variable name.
 require_uid() {
-    [[ "$1" =~ ^[0-9]+$ ]] || die "WSPCTL_CLIENT_UID 必须是十进制 UID"
+    [[ "$1" =~ ^[0-9]+$ ]] || die "$2 必须是十进制 UID"
 }
 
 # @brief 检验 generation 仅能作为单一路径成员 / Validate that generation can only be one path component.
@@ -141,7 +146,7 @@ ensure_editable_client() {
 
 # @brief 配置、编译并安装 host broker 工件 / Configure, build, and install host-broker artifacts.
 ensure_host_artifacts() {
-    note "配置并构建 wspctld / wsp-systemd / wspctl-image"
+    note "配置并构建 wspctld / wsp-systemd / wspctl-image / wspctl operator shell"
     cmake -S "$REPOSITORY_ROOT" -B "$BUILD_DIRECTORY" \
         -DPython_EXECUTABLE="$PYTHON_EXECUTABLE" \
         -DWSPCTL_INSTALL_HOST_TOOLS=ON \
@@ -157,6 +162,8 @@ ensure_host_artifacts() {
         || die "CMake 没有产生 wsp-systemd"
     [[ -x "$BUILD_DIRECTORY/src/wspctl/wspctl-image" ]] \
         || die "CMake 没有产生 wspctl-image"
+    [[ -x "$BUILD_DIRECTORY/src/wspctl/wspctl" ]] \
+        || die "CMake 没有产生 operator wspctl"
     write_install_manifest
 }
 
@@ -171,6 +178,7 @@ write_install_manifest() {
     local artifact_checksum
     local artifact_paths=(
         /usr/local/bin/wspctld
+        /usr/local/bin/wspctl
         /usr/local/bin/wspctl-image
         /usr/local/libexec/wspctl/wsp-systemd
         /usr/local/share/fogmoe-wspctl/systemd/wspctld.service
@@ -282,6 +290,9 @@ require_state_mount() {
 # @brief 为开发机 root-owned control-plane 目录准备安全权限 / Prepare root-owned control-plane directories for development.
 prepare_control_plane_directories() {
     sudo install -d -o root -g root -m 0711 "$WORK_ROOT"
+    # Bot may traverse only this view; the operator endpoint stays below the root-only sibling.
+    sudo install -d -o root -g root -m 0711 "$WORK_ROOT/run" "$WORK_ROOT/run/bot"
+    sudo install -d -o root -g root -m 0700 "$WORK_ROOT/run/operator"
     sudo install -d -o root -g root -m 0700 "$IMAGES_ROOT" "$ARTIFACT_ROOT"
 }
 
@@ -356,6 +367,12 @@ install_service_configuration() {
         "s|^WSPCTL_CLIENT_UID=.*$|WSPCTL_CLIENT_UID=$CLIENT_UID|" \
         "$environment_file"
     sudo sed --in-place --regexp-extended \
+        "s|^WSPCTL_OPERATOR_SOCKET=.*$|WSPCTL_OPERATOR_SOCKET=$OPERATOR_SOCKET_PATH|" \
+        "$environment_file"
+    sudo sed --in-place --regexp-extended \
+        "s|^WSPCTL_OPERATOR_UID=.*$|WSPCTL_OPERATOR_UID=$OPERATOR_UID|" \
+        "$environment_file"
+    sudo sed --in-place --regexp-extended \
         "s|^WSPCTL_BASE_ROOT=.*$|WSPCTL_BASE_ROOT=$base_root|" \
         "$environment_file"
     # Loopback image 的容量是显式上限，不能沿用生产模板的 50 GiB admission budget。
@@ -394,7 +411,8 @@ broker_fingerprint() {
     local environment_file="$WORK_ROOT/wspctld.env"
 
     {
-        printf 'generation=%s\nclient_uid=%s\n' "$GENERATION" "$CLIENT_UID"
+        printf 'generation=%s\nclient_uid=%s\noperator_uid=%s\noperator_socket=%s\n' \
+            "$GENERATION" "$CLIENT_UID" "$OPERATOR_UID" "$OPERATOR_SOCKET_PATH"
         sha256sum "$BUILD_DIRECTORY/src/wspctl/wspctld" "$unit_source"
         sudo sha256sum "$environment_file"
     } | sha256sum | awk '{print $1}'
@@ -425,10 +443,15 @@ record_applied_fingerprint() {
 
 # @brief 判定 service 与 socket 是否均可用 / Determine whether both service and socket are usable.
 # @return 0 表示健康 / Zero if healthy.
+# @note operator parent is intentionally root-only (0700), so all socket metadata probes run
+#       through sudo. Otherwise an unprivileged caller would restart a healthy daemon on every
+#       no-op invocation merely because it cannot traverse the operator directory.
 broker_is_healthy() {
     sudo systemctl is-active --quiet "$SERVICE_NAME" \
-        && [[ -S "$SOCKET_PATH" ]] \
-        && [[ "$(stat --format='%u:%a' "$SOCKET_PATH")" == "$CLIENT_UID:600" ]]
+        && sudo test -S "$SOCKET_PATH" \
+        && [[ "$(sudo stat --format='%u:%a' "$SOCKET_PATH")" == "$CLIENT_UID:600" ]] \
+        && sudo test -S "$OPERATOR_SOCKET_PATH" \
+        && [[ "$(sudo stat --format='%u:%a' "$OPERATOR_SOCKET_PATH")" == "$OPERATOR_UID:600" ]]
 }
 
 # @brief 启动或恢复 systemd broker / Start or recover the systemd broker.
@@ -465,7 +488,10 @@ stop_service() {
 
 # @brief 执行启动流程 / Execute the start flow.
 start() {
-    require_uid "$CLIENT_UID"
+    require_uid "$CLIENT_UID" "WSPCTL_CLIENT_UID"
+    require_uid "$OPERATOR_UID" "WSPCTL_OPERATOR_UID"
+    [[ "$CLIENT_UID" != "$OPERATOR_UID" ]] \
+        || die "WSPCTL_OPERATOR_UID 必须与 WSPCTL_CLIENT_UID 不同；不要给 Bot operator 权限"
     require_loop_size "$LOOP_SIZE"
     require_commands
     mkdir -p "$REPOSITORY_ROOT/.runtime"
@@ -494,6 +520,7 @@ immutable generation，再确保 systemd 的 wspctld.service 和 socket 可用�
 
 环境变量：
   WSPCTL_CLIENT_UID   broker 接受的 Bot UID；默认当前运行 runBot.sh 的 UID。
+  WSPCTL_OPERATOR_UID 独立 operator UID；默认 root。使用 sudo wspctl 查询，且不得等于 Bot UID。
   WSPCTL_GENERATION   可选 immutable generation 名；默认 rootfs 输入指纹的 dev-<hash>。
   WSPCTL_LOOP_SIZE    首次创建 image 的容量；默认 32G，已有 image 不会自动 resize。
 EOF

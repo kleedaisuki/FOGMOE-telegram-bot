@@ -68,7 +68,7 @@ def test_bot_image_builds_native_client_but_excludes_host_broker_programs() -> N
     )
     assert (
         re.search(
-            r"install\(TARGETS\s+wspctld\s+wspctl-image\s+RUNTIME DESTINATION bin\)",
+            r"install\(TARGETS\s+wspctld\s+wspctl-image\s+wspctl\s+RUNTIME DESTINATION bin\)",
             cmake,
         )
         is not None
@@ -98,8 +98,10 @@ def test_compose_exposes_only_a_nonprivileged_bot_client_to_the_socket() -> None
     assert "- ALL" in compose
     assert "cap_add:" not in compose
     assert "- no-new-privileges:true" in compose
-    assert "source: ./.wspctl/run" in compose
-    assert "target: /app/.wspctl/run" in compose
+    assert "source: ./.wspctl/run/bot" in compose
+    assert "target: /app/.wspctl/run/bot" in compose
+    assert "source: ./.wspctl/run/operator" not in compose
+    assert "target: /app/.wspctl/run/operator" not in compose
     assert "/var/run/docker.sock" not in compose
     assert "/run/containerd/containerd.sock" not in compose
     assert "/sys/fs/cgroup" not in compose
@@ -132,11 +134,15 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_generation_mount() -> 
     assert "ConditionPathIsMountPoint=@WSPCTL_HOST_STATE_ROOT@" in unit
     assert "--mode=0700 @WSPCTL_HOST_STATE_ROOT@" not in unit
     assert "ReadWritePaths=@WSPCTL_HOST_WORKDIR@ /sys/fs/cgroup" in unit
+    assert "@WSPCTL_HOST_SOCKET_ROOT_DIRECTORY@" in unit
     assert "@WSPCTL_HOST_SOCKET_DIRECTORY@" in unit
+    assert "@WSPCTL_HOST_OPERATOR_SOCKET_DIRECTORY@" in unit
     assert "ExecStartPre=/usr/bin/test -d ${WSPCTL_BASE_ROOT}" in unit
     assert "findmnt --noheadings --output OPTIONS --target" in unit
     assert "grep --extended-regexp --quiet" in unit
     assert "--client-uid ${WSPCTL_CLIENT_UID}" in unit
+    assert "--operator-socket ${WSPCTL_OPERATOR_SOCKET}" in unit
+    assert "--operator-uid ${WSPCTL_OPERATOR_UID}" in unit
     assert "--cpu-max-us ${WSPCTL_CPU_MAX_US}" in unit
     assert "--cpu-period-us ${WSPCTL_CPU_PERIOD_US}" in unit
     assert "--memory-high ${WSPCTL_MEMORY_HIGH}" in unit
@@ -154,6 +160,8 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_generation_mount() -> 
     assert "--xfs-global-admission-bytes ${WSPCTL_XFS_GLOBAL_ADMISSION_BYTES}" in unit
     assert "--xfs-system-reserve-inodes ${WSPCTL_XFS_SYSTEM_RESERVE_INODES}" in unit
     assert "WSPCTL_SOCKET=@WSPCTL_HOST_SOCKET_PATH@" in environment
+    assert "WSPCTL_OPERATOR_SOCKET=@WSPCTL_HOST_OPERATOR_SOCKET_PATH@" in environment
+    assert "WSPCTL_OPERATOR_UID=0" in environment
     assert "WSPCTL_STATE_ROOT=@WSPCTL_HOST_STATE_ROOT@" in environment
     assert "WSPCTL_IMAGES_ROOT=@WSPCTL_HOST_IMAGES_ROOT@" in environment
     assert "WSPCTL_XFS_QUOTA_MOUNT=@WSPCTL_HOST_STATE_ROOT@" in environment
@@ -165,6 +173,7 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_generation_mount() -> 
     assert "WSPCTL_XFS_GLOBAL_ADMISSION_BYTES=53687091200" in environment
     assert "WSPCTL_XFS_SYSTEM_RESERVE_INODES=262144" in environment
     assert "WSPCTL_CLIENT_UID=65532" in environment
+    assert "WSPCTL_OPERATOR_UID=0" in environment
     assert "WSPCTL_SUPERVISOR=/usr/local/libexec/wspctl/wsp-systemd" in environment
     assert "WSPCTL_CPU_MAX_US=50000" in environment
     assert "WSPCTL_CPU_PERIOD_US=100000" in environment
@@ -194,6 +203,15 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_generation_mount() -> 
         in deployment_cmake
     )
     assert "local developer 纳入 trusted control plane" in deployment_guide
+    assert "WSPCTL_OPERATOR_SOCKET" in deployment_guide
+    assert "workspace ls" in deployment_guide
+    assert "OverlayFS upper layer" in deployment_guide
+    assert "run/bot" in deployment_guide
+    assert "run/operator" in deployment_guide
+    assert "target_compile_definitions(\n    wspctl" in deployment_cmake
+    assert "WSPCTL_DEFAULT_OPERATOR_SOCKET" in deployment_cmake
+    assert 'set(WSPCTL_HOST_SOCKET_DIRECTORY "${WSPCTL_HOST_SOCKET_ROOT_DIRECTORY}/bot")' in deployment_cmake
+    assert 'set(WSPCTL_HOST_OPERATOR_SOCKET_DIRECTORY "${WSPCTL_HOST_SOCKET_ROOT_DIRECTORY}/operator")' in deployment_cmake
 
 
 def _run_contract_tests() -> None:

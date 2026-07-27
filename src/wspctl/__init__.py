@@ -5,6 +5,7 @@ from ._native import (
     NativeError,
     RuntimeProcess,
     RuntimeProcessError,
+    RuntimeStatus,
 )
 
 __all__ = (
@@ -12,4 +13,5 @@ __all__ = (
     "NativeError",
     "RuntimeProcess",
     "RuntimeProcessError",
+    "RuntimeStatus",
 )

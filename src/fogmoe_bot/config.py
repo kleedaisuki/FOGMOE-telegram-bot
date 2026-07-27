@@ -48,7 +48,7 @@ MAX_SHUTDOWN_GRACE_SECONDS: Final[int] = 190
 DEVELOPMENT_WSPCTL_WORK_ROOT: Final[Path] = Path(__file__).resolve().parents[2] / ".wspctl"
 #: @brief 源码树开发态 broker socket 路径 / Source-tree development broker socket path.
 DEVELOPMENT_WSPCTL_SOCKET_PATH: Final[str] = str(
-    DEVELOPMENT_WSPCTL_WORK_ROOT / "run" / "wspctld.sock"
+    DEVELOPMENT_WSPCTL_WORK_ROOT / "run" / "bot" / "wspctld.sock"
 )
 
 

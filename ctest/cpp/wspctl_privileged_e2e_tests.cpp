@@ -12,6 +12,7 @@
  */
 
 #include "wspctl/infrastructure/image.hpp"
+#include "wspctl/presentation/operator_gateway.hpp"
 #include "wspctl/presentation/unix_gateway.hpp"
 
 #include <openssl/sha.h>
@@ -27,6 +28,7 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -189,8 +191,10 @@ struct E2eFixture final {
 struct BrokerLaunch final {
     /** @brief broker 可执行文件的 host 路径 / Host path of the broker executable. */
     std::filesystem::path executable;
-    /** @brief 本次实例独占的 socket 路径 / Socket path exclusive to this instance. */
-    std::filesystem::path socket_path;
+    /** @brief 本次实例的 Bot 专属 socket 路径 / Bot-exclusive socket path for this instance. */
+    std::filesystem::path bot_socket_path;
+    /** @brief 本次实例的 operator 专属 socket 路径 / Operator-exclusive socket path for this instance. */
+    std::filesystem::path operator_socket_path;
 };
 
 /**
@@ -603,6 +607,48 @@ private:
 }
 
 /**
+ * @brief 在 self-created socket root 中建立一个固定权限的 endpoint 子目录 / Create a fixed-mode endpoint child beneath a self-created socket root.
+ * @param parent 本测试创建、root-owned 且不可被他人写的 socket root / Test-created root-owned socket root not writable by others.
+ * @param leaf 固定单分量 endpoint 目录名 / Fixed single-component endpoint-directory name.
+ * @param mode endpoint 目录期望的 POSIX mode / Required POSIX mode of the endpoint directory.
+ * @param reason 失败时的可操作诊断 / Actionable diagnostic on failure.
+ * @return 已建立的 endpoint 目录或空值 / Created endpoint directory or no value.
+ * @note 这不是 production directory factory；它只服务于本测试已经控制的 parent，目的是让真实
+ *       broker 经过与部署相同的 Bot/operator sibling-directory preflight。/ This is not a
+ *       production directory factory. It only serves a parent already controlled by this test,
+ *       so the real broker traverses the same Bot/operator sibling-directory preflight as deployment.
+ */
+[[nodiscard]] std::optional<std::filesystem::path> create_endpoint_directory(
+    const std::filesystem::path& parent,
+    const std::string_view leaf,
+    const mode_t mode,
+    std::string& reason) {
+    if (leaf.empty() || leaf == "." || leaf == ".." || leaf.find('/') != std::string_view::npos ||
+        leaf.find('\0') != std::string_view::npos) {
+        reason = "test endpoint directory leaf is not a safe single path component";
+        return std::nullopt;
+    }
+    const std::filesystem::path child = parent / std::string(leaf);
+    if (mkdir(child.c_str(), mode) != 0) {
+        reason = "mkdir test endpoint directory failed: " + std::string(std::strerror(errno));
+        return std::nullopt;
+    }
+    if (chmod(child.c_str(), mode) != 0) {
+        reason = "chmod test endpoint directory failed: " + std::string(std::strerror(errno));
+        static_cast<void>(rmdir(child.c_str()));
+        return std::nullopt;
+    }
+    struct stat metadata {};
+    if (lstat(child.c_str(), &metadata) != 0 || !S_ISDIR(metadata.st_mode) || metadata.st_uid != 0U ||
+        (metadata.st_mode & 0777U) != mode) {
+        reason = "test endpoint directory does not have the requested root-owned mode";
+        static_cast<void>(rmdir(child.c_str()));
+        return std::nullopt;
+    }
+    return child;
+}
+
+/**
  * @brief 仅删除严格匹配 self-created contract 的普通目录树 / Remove only a directory tree matching the self-created contract.
  * @param parent operator 给定且绝不删除的 parent / Operator-provided parent that is never deleted.
  * @param child 测试创建的精确 child / Exact child created by this test.
@@ -911,11 +957,13 @@ private:
     /** @brief 传给 broker 的完整 argv 文本 / Complete argv text passed to broker. */
     std::vector<std::string> arguments{
         launch.executable.string(),
-        "--socket", launch.socket_path.string(),
+        "--socket", launch.bot_socket_path.string(),
+        "--operator-socket", launch.operator_socket_path.string(),
         "--state-root", fixture.state_root.string(),
         "--base-root", fixture.environment.base_root.string(),
         "--images-root", fixture.environment.images_root.string(),
         "--client-uid", std::to_string(kClientUid),
+        "--operator-uid", "0",
         "--cgroup-root", fixture.cgroup_root.string(),
         "--supervisor", fixture.environment.supervisor_path,
         "--sandbox-uid", std::to_string(kClientUid),
@@ -968,19 +1016,27 @@ private:
 }
 
 /**
- * @brief 等待 broker 绑定并保护其 Unix socket / Wait for broker binding and protecting its Unix socket.
+ * @brief 等待 broker 绑定并保护其两个 Unix socket / Wait for broker binding and protecting both Unix sockets.
  * @param fixture 包含 broker PID 的 fixture / Fixture containing the broker PID.
- * @param socket_path 期待出现的 socket / Expected socket path.
- * @return socket 就绪且 client UID 可见时为真 / True when the socket is ready and visible to the client UID.
+ * @param bot_socket_path 期待出现的 Bot socket / Expected Bot socket path.
+ * @param operator_socket_path 期待出现的 root-owned operator socket / Expected root-owned operator socket path.
+ * @return 两 socket 均以预期 owner/mode 就绪时为真 / True when both sockets are ready with expected owner/mode.
  */
-[[nodiscard]] bool wait_for_broker_socket(E2eFixture& fixture, const std::filesystem::path& socket_path) {
+[[nodiscard]] bool wait_for_broker_sockets(
+    E2eFixture& fixture,
+    const std::filesystem::path& bot_socket_path,
+    const std::filesystem::path& operator_socket_path) {
     /** @brief 启动等待绝对截止 / Absolute startup deadline. */
     const auto deadline = std::chrono::steady_clock::now() + kBrokerStartDeadline;
     do {
-        /** @brief socket metadata / socket 元数据。 */
-        struct stat metadata {};
-        if (lstat(socket_path.c_str(), &metadata) == 0 && S_ISSOCK(metadata.st_mode) && metadata.st_uid == kClientUid &&
-            (metadata.st_mode & 0777) == 0600) {
+        /** @brief Bot socket metadata / Bot socket 元数据。 */
+        struct stat bot_metadata {};
+        /** @brief operator socket metadata / operator socket 元数据。 */
+        struct stat operator_metadata {};
+        if (lstat(bot_socket_path.c_str(), &bot_metadata) == 0 && S_ISSOCK(bot_metadata.st_mode) &&
+            bot_metadata.st_uid == kClientUid && (bot_metadata.st_mode & 0777) == 0600 &&
+            lstat(operator_socket_path.c_str(), &operator_metadata) == 0 && S_ISSOCK(operator_metadata.st_mode) &&
+            operator_metadata.st_uid == 0U && (operator_metadata.st_mode & 0777) == 0600) {
             return true;
         }
         /** @brief broker 的非阻塞 wait 状态 / Nonblocking wait state for broker. */
@@ -997,7 +1053,7 @@ private:
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     } while (std::chrono::steady_clock::now() < deadline);
-    std::cerr << "FAIL: wspctld did not bind a protected socket before deadline\n";
+    std::cerr << "FAIL: wspctld did not bind protected Bot/operator sockets before deadline\n";
     return false;
 }
 
@@ -1087,6 +1143,107 @@ private:
     if (result.timed_out || result.replayed || !result.exit_code.has_value() || *result.exit_code != 0 ||
         result.stdout_data.find(marker) == std::string::npos) {
         std::cerr << "FAIL: " << operation << " did not return the expected successful task result\n";
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief 验收 operator status 不会为缺失 runtime 激活 RuntimeProcess / Accept that operator status does not activate a missing runtime.
+ * @param operator_socket root-only operator endpoint / Root-only operator endpoint.
+ * @return 返回 absent/inactive/no-quota 读模型时为真 / True when the result is absent, inactive, and quota-free.
+ */
+[[nodiscard]] bool run_operator_absent_read_phase(const std::filesystem::path& operator_socket) {
+    const auto runtime = wspctl::domain::RuntimeId::parse(std::string(kRuntimeKey));
+    if (!runtime) {
+        std::cerr << "FAIL: cannot parse fixed operator runtime key\n";
+        return false;
+    }
+    const wspctl::presentation::OperatorGatewayClient client(operator_socket.string());
+    const auto status = client.status(*runtime);
+    if (!status) {
+        std::cerr << "FAIL: root operator status before activation: " << status.error().message << '\n';
+        return false;
+    }
+    if (status->persistence() != wspctl::domain::WorkspacePersistence::absent ||
+        status->activity() != wspctl::domain::WorkspaceActivity::inactive || status->quota().has_value()) {
+        std::cerr << "FAIL: operator status unexpectedly activated or materialized a missing runtime\n";
+        return false;
+    }
+    const auto root = wspctl::domain::OperatorWorkspacePath::parse("/workspace");
+    if (!root) {
+        std::cerr << "FAIL: cannot parse fixed operator workspace root\n";
+        return false;
+    }
+    const auto listing = client.list(*runtime, *root);
+    if (listing || listing.error().code != wspctl::ErrorCode::not_found) {
+        std::cerr << "FAIL: operator list for an absent workspace must fail without activation\n";
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief 验收 operator 能只读查看已持久化的 upper layer / Accept that the operator can read a persisted upper layer.
+ * @param operator_socket root-only operator endpoint / Root-only operator endpoint.
+ * @return status/list 都符合只读 workspace 合同则为真 / True when both status and list satisfy the readonly workspace contract.
+ */
+[[nodiscard]] bool run_operator_ready_read_phase(const std::filesystem::path& operator_socket) {
+    const auto runtime = wspctl::domain::RuntimeId::parse(std::string(kRuntimeKey));
+    const auto root = wspctl::domain::OperatorWorkspacePath::parse("/workspace");
+    if (!runtime || !root) {
+        std::cerr << "FAIL: cannot construct fixed operator read inputs\n";
+        return false;
+    }
+    const wspctl::presentation::OperatorGatewayClient client(operator_socket.string());
+    const auto status = client.status(*runtime);
+    if (!status || status->persistence() != wspctl::domain::WorkspacePersistence::ready ||
+        !status->quota().has_value()) {
+        if (!status) {
+            std::cerr << "FAIL: root operator status after persistence: " << status.error().message << '\n';
+        } else {
+            std::cerr << "FAIL: operator status omitted ready workspace quota\n";
+        }
+        return false;
+    }
+    const auto listing = client.list(*runtime, *root);
+    if (!listing) {
+        std::cerr << "FAIL: root operator workspace listing: " << listing.error().message << '\n';
+        return false;
+    }
+    const bool contains_persisted_file = std::any_of(
+        listing->entries.begin(),
+        listing->entries.end(),
+        [](const wspctl::domain::WorkspaceEntry& entry) { return entry.encoded_name() == "e2e-persist.txt"; });
+    if (!contains_persisted_file) {
+        std::cerr << "FAIL: operator upper-layer listing omitted persisted workspace file\n";
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief 验收 Bot UID 不能访问 root-only operator endpoint / Accept that the Bot UID cannot access the root-only operator endpoint.
+ * @param fixture 未使用的 fixture / Unused fixture.
+ * @param operator_socket root-only operator endpoint / Root-only operator endpoint.
+ * @return 降权后的连接无法读取 status 时为真 / True when the identity-dropped client cannot read status.
+ */
+[[nodiscard]] bool run_operator_denial_phase(
+    const E2eFixture& fixture,
+    const std::filesystem::path& operator_socket) {
+    static_cast<void>(fixture);
+    if (!drop_to_client_identity()) {
+        return false;
+    }
+    const auto runtime = wspctl::domain::RuntimeId::parse(std::string(kRuntimeKey));
+    if (!runtime) {
+        std::cerr << "FAIL: cannot parse fixed operator denial runtime key\n";
+        return false;
+    }
+    const wspctl::presentation::OperatorGatewayClient client(operator_socket.string());
+    const auto status = client.status(*runtime);
+    if (status) {
+        std::cerr << "FAIL: Bot UID unexpectedly read root-only operator status\n";
         return false;
     }
     return true;
@@ -1226,7 +1383,7 @@ private:
 
 /**
  * @brief 运行 restart 后的恢复验证 / Run recovery verification after broker restart.
- * @param socket_path 第二个 broker 的 socket / Second broker socket.
+ * @param socket_path 崩溃重启后重新绑定的 broker socket / Broker socket rebound after a crash restart.
  * @return workspace upper、payload mode 与 PID namespace 均恢复时为真 / True when workspace upper, payload mode, and PID namespace recover.
  */
 [[nodiscard]] bool run_recovery_client_phase(const std::filesystem::path& socket_path) {
@@ -1296,7 +1453,7 @@ private:
 /**
  * @brief 将只需 socket 的恢复 phase 适配为统一 phase 签名 / Adapt the socket-only recovery phase to the common phase signature.
  * @param fixture 未使用的 fixture / Unused fixture.
- * @param socket_path recovery socket / Recovery socket.
+ * @param socket_path crash-recovered socket / Socket recovered after a broker crash.
  * @return recovery phase 的结果 / Result of the recovery phase.
  */
 [[nodiscard]] bool run_recovery_phase_adapter(const E2eFixture& fixture, const std::filesystem::path& socket_path) {
@@ -1400,25 +1557,55 @@ private:
     }
     fixture.socket_directory = socket_directory->path;
     fixture.socket_directory_identity = socket_directory->identity;
+    const auto bot_socket_directory = create_endpoint_directory(fixture.socket_directory, "bot", 0711, reason);
+    const auto operator_socket_directory = create_endpoint_directory(fixture.socket_directory, "operator", 0700, reason);
+    if (!bot_socket_directory.has_value() || !operator_socket_directory.has_value()) {
+        std::cerr << "FAIL: cannot create disjoint self-owned Bot/operator socket directories: " << reason << '\n';
+        return EXIT_FAILURE;
+    }
     /** @brief 首次 broker socket / First broker socket. */
-    const std::filesystem::path first_socket = fixture.socket_directory / "broker-one.sock";
-    if (!launch_broker(fixture, BrokerLaunch{.executable = broker_executable, .socket_path = first_socket}) ||
-        !wait_for_broker_socket(fixture, first_socket)) {
+    const std::filesystem::path first_socket = *bot_socket_directory / "wspctld.sock";
+    /** @brief 首次 root-only operator socket / First root-only operator socket. */
+    const std::filesystem::path first_operator_socket = *operator_socket_directory / "wspctld.sock";
+    if (!launch_broker(
+            fixture,
+            BrokerLaunch{
+                .executable = broker_executable,
+                .bot_socket_path = first_socket,
+                .operator_socket_path = first_operator_socket,
+            }) ||
+        !wait_for_broker_sockets(fixture, first_socket, first_operator_socket)) {
+        return EXIT_FAILURE;
+    }
+    if (!run_operator_absent_read_phase(first_operator_socket) ||
+        !run_client_phase(run_operator_denial_phase, fixture, first_operator_socket)) {
         return EXIT_FAILURE;
     }
     if (!run_client_phase(run_first_client_phase, fixture, first_socket)) {
         return EXIT_FAILURE;
     }
-    // SIGTERM is deliberately an ungraceful broker restart here: the next broker must kill any
-    // stale cgroup and reconstruct a new activation from the persistent upper layer.
+    if (!run_operator_ready_read_phase(first_operator_socket)) {
+        return EXIT_FAILURE;
+    }
+    // SIGTERM is deliberately an ungraceful broker restart here: the next broker must reclaim
+    // the stale Bot and operator socket names, kill stale cgroup state, and reconstruct a new
+    // activation from the persistent upper layer.
     if (!stop_broker(fixture, true) || !wait_for_empty_cgroup(fixture.cgroup_root, kCgroupDrainDeadline)) {
         std::cerr << "FAIL: first broker restart did not prove cgroup drain\n";
         return EXIT_FAILURE;
     }
-    /** @brief restart 后使用的第二 socket，避免删除 broker 遗留的第一个 socket / Second socket after restart, avoiding deletion of broker's first stale socket. */
-    const std::filesystem::path second_socket = fixture.socket_directory / "broker-two.sock";
-    if (!launch_broker(fixture, BrokerLaunch{.executable = broker_executable, .socket_path = second_socket}) ||
-        !wait_for_broker_socket(fixture, second_socket)) {
+    /** @brief 重启后复用的 Bot socket，直接验收 stale listener pathname 回收 / Bot socket reused after restart to directly accept stale listener pathname recovery. */
+    const std::filesystem::path second_socket = first_socket;
+    /** @brief 重启后复用的 operator socket，直接验收独立 endpoint 回收 / Operator socket reused after restart to directly accept independent endpoint recovery. */
+    const std::filesystem::path second_operator_socket = first_operator_socket;
+    if (!launch_broker(
+            fixture,
+            BrokerLaunch{
+                .executable = broker_executable,
+                .bot_socket_path = second_socket,
+                .operator_socket_path = second_operator_socket,
+            }) ||
+        !wait_for_broker_sockets(fixture, second_socket, second_operator_socket)) {
         return EXIT_FAILURE;
     }
     if (!run_client_phase(run_recovery_phase_adapter, fixture, second_socket)) {

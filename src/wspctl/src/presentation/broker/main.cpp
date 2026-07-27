@@ -32,10 +32,12 @@ int main(const int argc, char *argv[])
 {
     wspctl::BrokerConfig config;
     bool have_socket = false;
+    bool have_operator_socket = false;
     bool have_state = false;
     bool have_base = false;
     bool have_images = false;
     bool have_client_uid = false;
+    bool have_operator_uid = false;
     bool have_cgroup = false;
     bool have_supervisor = false;
     bool have_sandbox_uid = false;
@@ -77,6 +79,11 @@ int main(const int argc, char *argv[])
             config.socket_path = value;
             have_socket = true;
         }
+        else if (option == "--operator-socket")
+        {
+            config.operator_socket_path = value;
+            have_operator_socket = true;
+        }
         else if (option == "--state-root")
         {
             config.sandbox.state_root = value;
@@ -95,6 +102,10 @@ int main(const int argc, char *argv[])
         else if (option == "--client-uid")
         {
             have_client_uid = parse_unsigned(value, config.client_uid);
+        }
+        else if (option == "--operator-uid")
+        {
+            have_operator_uid = parse_unsigned(value, config.operator_uid);
         }
         else if (option == "--cgroup-root")
         {
@@ -224,7 +235,8 @@ int main(const int argc, char *argv[])
         }
         index += 2;
     }
-    if (!have_socket || !have_state || !have_base || !have_images || !have_client_uid || !have_cgroup ||
+    if (!have_socket || !have_operator_socket || !have_state || !have_base || !have_images || !have_client_uid ||
+        !have_operator_uid || !have_cgroup ||
         !have_supervisor || !have_sandbox_uid || !have_sandbox_gid || !have_memory || !have_cpu_quota || !have_cpu_period ||
         !have_pids || !have_idle || !have_quota_backend || !have_quota_mount || !have_project_id_min || !have_project_id_max ||
         !have_control_hard_bytes || !have_control_hard_inodes || !have_workspace_hard_bytes || !have_workspace_hard_inodes ||

@@ -68,19 +68,32 @@ target_link_libraries(wspctl_presentation_tests PRIVATE wspctl_presentation)
 target_compile_options(wspctl_presentation_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2 -Werror=return-type)
 add_test(NAME wspctl.presentation COMMAND wspctl_presentation_tests)
 
+add_executable(wspctl_operator_tests cpp/wspctl_operator_tests.cpp)
+target_link_libraries(wspctl_operator_tests PRIVATE wspctl_presentation)
+target_compile_options(wspctl_operator_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2 -Werror=return-type)
+add_test(NAME wspctl.operator COMMAND wspctl_operator_tests)
+
+add_executable(wspctl_operator_cli_tests cpp/wspctl_operator_cli_tests.cpp)
+target_compile_options(wspctl_operator_cli_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2 -Werror=return-type)
+add_dependencies(wspctl_operator_cli_tests wspctl)
+add_test(NAME wspctl.operator_cli COMMAND wspctl_operator_cli_tests $<TARGET_FILE:wspctl>)
+
 file(GLOB WSPCTL_PYTHON_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/python/test_*.py")
 foreach(WSPCTL_PYTHON_TEST IN LISTS WSPCTL_PYTHON_TESTS)
     get_filename_component(WSPCTL_PYTHON_TEST_NAME "${WSPCTL_PYTHON_TEST}" NAME_WE)
+    set(WSPCTL_PYTHONPATH "${CMAKE_SOURCE_DIR}/src")
+    set(WSPCTL_PYTHON_COMMAND "${Python_EXECUTABLE}" "${WSPCTL_PYTHON_TEST}")
+    if(WSPCTL_PYTHON_TEST_NAME STREQUAL "test_native_binding")
+        # Run without site initialization: a scikit-build editable finder can otherwise intercept
+        # ``wspctl`` ahead of PYTHONPATH and silently load an older installed extension.  The ABI
+        # contract needs to exercise exactly the freshly built package and no source/site fallback.
+        set(WSPCTL_PYTHONPATH "${CMAKE_BINARY_DIR}/python")
+        set(WSPCTL_PYTHON_COMMAND "${Python_EXECUTABLE}" "-S" "${WSPCTL_PYTHON_TEST}")
+    endif()
     add_test(
         NAME "wspctl.python.${WSPCTL_PYTHON_TEST_NAME}"
-        COMMAND "${Python_EXECUTABLE}" "${WSPCTL_PYTHON_TEST}"
+        COMMAND ${WSPCTL_PYTHON_COMMAND}
     )
-    set(WSPCTL_PYTHONPATH "${CMAKE_SOURCE_DIR}/src")
-    if(WSPCTL_PYTHON_TEST_NAME STREQUAL "test_native_binding")
-        # This is intentionally the built package first: a source-only import would not prove
-        # that pybind11 exports the documented exception ABI.
-        set(WSPCTL_PYTHONPATH "${CMAKE_BINARY_DIR}/python:${CMAKE_SOURCE_DIR}/src")
-    endif()
     set_tests_properties(
         "wspctl.python.${WSPCTL_PYTHON_TEST_NAME}"
         PROPERTIES

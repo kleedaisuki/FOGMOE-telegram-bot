@@ -1,6 +1,34 @@
 """@brief wspctl pybind ABI 的静态类型契约 / Static type contract for the wspctl pybind ABI."""
 
 from collections.abc import Iterable, Mapping
+from typing import TypedDict
+
+
+class RuntimeStatusDump(TypedDict):
+    """@brief RuntimeStatus.dump 的固定 allowlist / Fixed allowlist returned by RuntimeStatus.dump.
+
+    @note 该形状不包含 command、request、payload、host path/PID、mount/cgroup 或 socket 字段。
+        This shape contains no command, request, payload, host path/PID, mount/cgroup, or socket field.
+    """
+
+    runtime_key: str
+    """@brief 被观察的 runtime UUID / Observed runtime UUID."""
+    state: str
+    """@brief 生命周期状态受限词表 / Constrained lifecycle-state vocabulary."""
+    active_activation_id: str | None
+    """@brief 当前 owner activation；不活跃时为空 / Current owner activation; empty when inactive."""
+    handle_activation_matches: bool
+    """@brief 此 handle 是否拥有当前 activation / Whether this handle owns the current activation."""
+    supervisor_alive: bool
+    """@brief 是否有健康可复用 supervisor / Whether a healthy reusable supervisor exists."""
+    idle_for_ms: int | None
+    """@brief ready 状态空闲年龄；其他状态为空 / Idle age while ready; empty otherwise."""
+    idle_ttl_ms: int
+    """@brief broker 空闲回收阈值 / Broker idle-retirement threshold."""
+    borrowed_dispatches: int
+    """@brief 当前借用 session 的 broker dispatch 数 / Current broker dispatches borrowing the session."""
+    cleanup_pending: bool
+    """@brief 是否有已知清理/隔离待办 / Whether known cleanup/quarantine is pending."""
 
 
 class NativeError(RuntimeError):
@@ -25,6 +53,42 @@ class RuntimeProcessError(NativeError):
 
 class InvocationInDoubtError(RuntimeProcessError):
     """@brief 中断后不可安全重放的调用 / Invocation that cannot safely be replayed after interruption."""
+
+
+class RuntimeStatus:
+    """@brief 无副作用 runtime 状态快照 / Side-effect-free runtime-status snapshot.
+
+    @note 此对象是不可变、allowlisted 的 pybind DTO。它只表达生命周期与有界健康指标，
+        不暴露 command/payload/host 细节。/ This is an immutable, allowlisted pybind DTO. It
+        expresses only lifecycle and bounded health indicators and exposes no command/payload/host detail.
+    """
+
+    runtime_key: str
+    """@brief 被观察的 runtime UUID / Observed runtime UUID."""
+    state: str
+    """@brief ``dormant|activating|ready|executing|retiring|failed`` / Stable lifecycle state."""
+    active_activation_id: str | None
+    """@brief 当前 owner activation；不活跃时为空 / Current owner activation; empty when inactive."""
+    handle_activation_matches: bool
+    """@brief 调用 handle activation 是否为当前 owner / Whether the calling handle activation is current owner."""
+    supervisor_alive: bool
+    """@brief 是否有健康可复用 supervisor / Whether a healthy reusable supervisor exists."""
+    idle_for_ms: int | None
+    """@brief ready 状态空闲年龄；其他状态为空 / Idle age while ready; empty otherwise."""
+    idle_ttl_ms: int
+    """@brief broker 空闲回收阈值 / Broker idle-retirement threshold."""
+    borrowed_dispatches: int
+    """@brief 当前借用 session 的 broker dispatch 数 / Current broker dispatches borrowing the session."""
+    cleanup_pending: bool
+    """@brief 是否有已知清理/隔离待办 / Whether known cleanup/quarantine is pending."""
+
+    def dump(self) -> RuntimeStatusDump:
+        """@brief 显式导出为固定字段 dict / Explicitly export as a fixed-field dict.
+
+        @return JSON-serializable allowlisted 状态字典 / JSON-serializable allowlisted status dictionary.
+        """
+
+        ...
 
 
 class RuntimeProcess:
@@ -68,6 +132,18 @@ class RuntimeProcess:
         @return 完整 native result mapping / Complete native result mapping.
         @raise NativeError broker 返回结构化失败时抛出 / Raised for a structured broker failure.
         """
+        ...
+
+    def status(self) -> RuntimeStatus:
+        """@brief 读取 runtime 的无副作用状态 / Read side-effect-free runtime status.
+
+        @return 不可变、allowlisted 的状态 DTO / Immutable allowlisted status DTO.
+        @raise NativeError broker 不可达或返回无效状态时抛出 / Raised when the broker is unreachable or returns invalid status.
+        @note 此调用不会激活、替换或 retire runtime；closed handle 在本地拒绝且不连接 broker。
+            This call never activates, replaces, or retires a runtime; a closed handle is rejected
+            locally without connecting to the broker.
+        """
+
         ...
 
     def add_file(

@@ -70,10 +70,10 @@
     },
     // wspctl 的无特权 Bot client；host mount、base image 与 cgroup 策略只能由 wspctld 服务配置。
     "workspace": {
-      // 开发态由 root-owned wspctld 在本配置文件相邻 .wspctl/run/ 下创建的 Unix SOCK_SEQPACKET socket。
+      // 开发态由 root-owned wspctld 在本配置文件相邻 .wspctl/run/bot/ 下创建的 Unix SOCK_SEQPACKET socket。
       // 相对路径只在 JSONC 读取时解析；Docker 生产态保持这个 container-visible 路径，
-      // 只需把 root-owned host socket 目录映射到 /app/.wspctl/run。直接 host client 才写绝对路径。
-      "broker_socket_path": ".wspctl/run/wspctld.sock",
+      // 只需把 root-owned host bot socket 目录映射到 /app/.wspctl/run/bot。直接 host client 才写绝对路径。
+      "broker_socket_path": ".wspctl/run/bot/wspctld.sock",
       // 固定为 15 分钟：Bot 的本地 RuntimeProcess handle 与 broker activation 的空闲缓存期限。
       "client_idle_cache_seconds": 900,
       // 单次 run_bash 合并 stdout/stderr 可返回给 Agent 的最大字节数。

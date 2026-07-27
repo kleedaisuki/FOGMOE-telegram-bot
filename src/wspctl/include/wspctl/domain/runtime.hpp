@@ -211,6 +211,70 @@ enum class RuntimeState : std::uint8_t {
     failed,
 };
 
+/**
+ * @brief 取得稳定的生命周期状态名称 / Get a stable lifecycle-state name.
+ * @param state 待渲染的生命周期状态 / Lifecycle state to render.
+ * @return 仅含 ASCII 的稳定状态名称 / Stable ASCII-only state name.
+ * @note 该名称是给 presentation/telemetry 的受限词表，不承载错误文本、命令或用户数据。
+ *       This name is a constrained vocabulary for presentation/telemetry; it carries no error
+ *       text, command, or user data.
+ */
+[[nodiscard]] std::string_view runtime_state_name(RuntimeState state) noexcept;
+
+/**
+ * @brief runtime 聚合的无载荷观察快照 / Payload-free observation snapshot of a runtime aggregate.
+ *
+ * 快照只表达可公开的生命周期事实：长期身份、状态与当前 activation 所有权。它刻意不含命令、
+ * stdin/stdout/stderr、文件 ingress 元数据、mount、cgroup 或 host PID。/ The snapshot expresses
+ * only publishable lifecycle facts: long-lived identity, state, and current activation ownership.
+ * It deliberately contains no command, stdin/stdout/stderr, file-ingress metadata, mount, cgroup,
+ * or host PID.
+ */
+class RuntimeSnapshot final {
+public:
+    /**
+     * @brief 验证并创建一个生命周期快照 / Validate and create a lifecycle snapshot.
+     * @param runtime 长期 runtime 身份 / Long-lived runtime identity.
+     * @param state 聚合生命周期状态 / Aggregate lifecycle state.
+     * @param active_activation 当前 activation 所有权；dormant/failed 必须为空 /
+     *     Current activation ownership; it must be empty for dormant/failed.
+     * @return 已验证快照或领域不变量错误 / Validated snapshot or a domain-invariant error.
+     */
+    [[nodiscard]] static Result<RuntimeSnapshot> create(
+        RuntimeId runtime,
+        RuntimeState state,
+        std::optional<ActivationId> active_activation);
+
+    /** @brief 取得长期 runtime 身份 / Get the long-lived runtime identity. */
+    [[nodiscard]] const RuntimeId& runtime() const noexcept;
+    /** @brief 取得观察到的生命周期状态 / Get the observed lifecycle state. */
+    [[nodiscard]] RuntimeState state() const noexcept;
+    /** @brief 取得当前 activation 所有权 / Get current activation ownership. */
+    [[nodiscard]] const std::optional<ActivationId>& active_activation() const noexcept;
+
+private:
+    /** @brief 聚合可直接投影自身已验证状态 / The aggregate may directly project its validated state. */
+    friend class Runtime;
+
+    /**
+     * @brief 从已验证字段构造快照 / Construct a snapshot from validated fields.
+     * @param runtime 已验证长期 runtime 身份 / Validated long-lived runtime identity.
+     * @param state 已验证生命周期状态 / Validated lifecycle state.
+     * @param active_activation 已验证 activation 所有权 / Validated activation ownership.
+     */
+    RuntimeSnapshot(
+        RuntimeId runtime,
+        RuntimeState state,
+        std::optional<ActivationId> active_activation) noexcept;
+
+    /** @brief 长期 runtime 身份 / Long-lived runtime identity. */
+    RuntimeId runtime_;
+    /** @brief 观察到的生命周期状态 / Observed lifecycle state. */
+    RuntimeState state_;
+    /** @brief 当前 activation 所有权 / Current activation ownership. */
+    std::optional<ActivationId> active_activation_;
+};
+
 /** @brief journal 对调用的确定性决定 / Deterministic journal decision for an invocation. */
 enum class CommandJournalDecision : std::uint8_t {
     /** @brief 首次执行 / Execute for the first time. */
@@ -243,6 +307,8 @@ public:
     [[nodiscard]] const RuntimeId& id() const noexcept;
     /** @brief 取得当前 activation；dormant/failed 时为空 / Get the active activation; empty while dormant/failed. */
     [[nodiscard]] const std::optional<ActivationId>& active_activation() const noexcept;
+    /** @brief 取得满足聚合不变量的无载荷观察快照 / Get a payload-free snapshot satisfying aggregate invariants. */
+    [[nodiscard]] RuntimeSnapshot snapshot() const;
 
     /**
      * @brief 请求新的 activation / Request a new activation.

@@ -327,7 +327,7 @@ source .venv/bin/activate
 
 无需在容器内运行 PostgreSQL，Compose 也**绝不**运行 `wspctld`；它只容器化无特权 Bot
 client。先按 [wspctl 部署说明](docs/wspctl-deployment.md) 在 Linux host 安装并验证 root-owned
-`wspctld.service`、只读 base generation 与开发态仓库 `.wspctl/run/wspctld.sock`（生产环境则为
+`wspctld.service`、只读 base generation 与开发态仓库 `.wspctl/run/bot/wspctld.sock`（生产环境则为
 root-owned host socket 的 container-visible 映射），再启动 Compose。checkout 内 `.wspctl` 仅可在显式
 development opt-in 下使用；它不是 production 的特权 host root。
 

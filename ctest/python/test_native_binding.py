@@ -2,7 +2,23 @@
 
 from __future__ import annotations
 
-from wspctl import NativeError, RuntimeProcess
+from pathlib import Path
+
+from wspctl import NativeError, RuntimeProcess, RuntimeStatus
+
+
+#: @brief 仓库根目录 / Repository root directory.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+#: @brief pybind 实现路径 / pybind implementation path.
+BINDINGS_SOURCE = (
+    REPOSITORY_ROOT
+    / "src"
+    / "wspctl"
+    / "src"
+    / "presentation"
+    / "python"
+    / "bindings.cpp"
+)
 
 
 def test_constructor_exposes_structured_native_error() -> None:
@@ -51,6 +67,100 @@ def test_connection_error_exposes_structured_native_error() -> None:
         )
 
 
+def test_status_is_read_only_native_abi_without_activation_override() -> None:
+    """@brief status 必须是无 activation override 的只读 RPC / status must be a read-only RPC without activation override.
+
+    @return None / None.
+    """
+
+    process = RuntimeProcess(
+        "/tmp/wspctl-no-such-broker.sock",
+        "123e4567-e89b-12d3-a456-426614174000",
+        "activation-native-status",
+    )
+    try:
+        process.status()
+    except NativeError as error:
+        assert error.code == "io_failure"
+        assert error.request_id == ""
+    else:
+        raise AssertionError("RuntimeProcess.status unexpectedly connected to a nonexistent broker")
+    try:
+        process.status(activation_id="activation-other")
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("RuntimeProcess.status accepted an activation override")
+    assert hasattr(RuntimeStatus, "dump")
+
+
+def test_closed_status_fails_locally_before_broker_connection() -> None:
+    """@brief closed handle 的 status 必须本地 permission_denied / status on a closed handle must be local permission_denied.
+
+    @return None / None.
+    """
+
+    process = RuntimeProcess(
+        "/tmp/wspctl-no-such-broker.sock",
+        "123e4567-e89b-12d3-a456-426614174000",
+        "activation-native-closed-status",
+    )
+    process.close()
+    try:
+        process.status()
+    except NativeError as error:
+        assert error.code == "permission_denied"
+        assert error.request_id == ""
+    else:
+        raise AssertionError("closed RuntimeProcess.status did not fail locally")
+
+
+def test_runtime_status_dump_has_a_fixed_non_sensitive_allowlist() -> None:
+    """@brief dump 只能写入固定 telemetry 字段 / dump may write only fixed telemetry fields.
+
+    这个测试直接固定 pybind serialization boundary，而不是假设 C++ 私有字段不会增多。
+    It pins the pybind serialization boundary directly rather than assuming C++ private fields
+    will never grow.
+
+    @return None / None.
+    """
+
+    source = BINDINGS_SOURCE.read_text(encoding="utf-8")
+    dump_start = source.index("[[nodiscard]] py::dict dump() const")
+    dump_end = source.index("private:", dump_start)
+    dump_block = source[dump_start:dump_end]
+    expected_keys = {
+        "runtime_key",
+        "state",
+        "active_activation_id",
+        "handle_activation_matches",
+        "supervisor_alive",
+        "idle_for_ms",
+        "idle_ttl_ms",
+        "borrowed_dispatches",
+        "cleanup_pending",
+    }
+    actual_keys = {
+        line.split('dictionary["', 1)[1].split('"]', 1)[0]
+        for line in dump_block.splitlines()
+        if 'dictionary["' in line
+    }
+    assert actual_keys == expected_keys
+    for forbidden in (
+        "argv",
+        "stdin",
+        "stdout",
+        "stderr",
+        "request_id",
+        "request_hash",
+        "payload",
+        "path",
+        "pid",
+        "cgroup",
+        "mount",
+        "socket_path",
+    ):
+        assert forbidden not in dump_block, f"RuntimeStatus.dump leaked {forbidden}"
 def test_constructor_binds_one_valid_activation() -> None:
     """@brief 构造函数必须验证并永久绑定 activation / The constructor must validate and permanently bind an activation.
 
@@ -189,3 +299,29 @@ def test_add_file_rejects_one_raw_binary_buffer_as_chunks() -> None:
     raise AssertionError(
         "RuntimeProcess.add_file accepted one raw bytes buffer as the chunk iterable"
     )
+
+
+def _run_contract_tests() -> None:
+    """@brief 以 CTest 直接运行 pybind ABI 契约 / Run pybind ABI contracts directly under CTest.
+
+    pytest 仍可发现同一批 ``test_*`` 函数；这个显式 runner 避免 CTest 把仅导入模块误报为
+    通过。/ pytest can still discover the same ``test_*`` functions; this explicit runner prevents
+    CTest from treating an import-only module execution as a pass.
+
+    @return None / None.
+    """
+
+    test_constructor_exposes_structured_native_error()
+    test_connection_error_exposes_structured_native_error()
+    test_status_is_read_only_native_abi_without_activation_override()
+    test_closed_status_fails_locally_before_broker_connection()
+    test_runtime_status_dump_has_a_fixed_non_sensitive_allowlist()
+    test_constructor_binds_one_valid_activation()
+    test_execute_cannot_override_handle_activation()
+    test_add_file_is_the_only_public_mutating_file_ingress_method()
+    test_replay_file_has_no_activation_or_chunk_source_abi()
+    test_add_file_rejects_one_raw_binary_buffer_as_chunks()
+
+
+if __name__ == "__main__":
+    _run_contract_tests()

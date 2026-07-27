@@ -1,5 +1,6 @@
 #pragma once
 
+#include "wspctl/domain/runtime.hpp"
 #include "wspctl/infrastructure/common.hpp"
 
 #include <chrono>
@@ -15,7 +16,7 @@ namespace wspctl {
 /** @brief 协议魔数 / Control protocol magic number. */
 inline constexpr std::uint32_t kProtocolMagic = 0x31505357U;  // "WSP1" in little endian.
 /** @brief 当前协议版本 / Current control protocol version. */
-inline constexpr std::uint16_t kProtocolVersion = 2;
+inline constexpr std::uint16_t kProtocolVersion = 3;
 /** @brief 固定帧头长度 / Fixed wire-frame header length. */
 inline constexpr std::size_t kFrameHeaderBytes = 12;
 /** @brief 单个 SOCK_SEQPACKET 消息的硬上限 / Hard maximum one SOCK_SEQPACKET message. */
@@ -60,6 +61,54 @@ enum class MessageKind : std::uint16_t {
     payload_result = 11,
     /** @brief 已完成文件收据的只读恢复查询 / Read-only recovery lookup for a completed file receipt. */
     payload_replay = 12,
+    /** @brief 无副作用 runtime 状态查询 / Side-effect-free runtime-status query. */
+    runtime_status = 13,
+    /** @brief allowlisted runtime 状态快照 / Allowlisted runtime-status snapshot. */
+    runtime_status_result = 14,
+};
+
+/**
+ * @brief RuntimeProcess 的无副作用状态请求 / Side-effect-free RuntimeProcess status request.
+ *
+ * 此请求只携带 handle 已有的身份，不携带调用、文件或任何 payload 元数据；broker 必须以
+ * SharedState 的读模型回答，绝不能走 lazy activation 路径。/ This request carries only identities
+ * already held by the handle, never an invocation, file, or payload metadata; the broker must
+ * answer from the SharedState read model and must never take the lazy-activation path.
+ */
+struct RuntimeStatusRequest final {
+    /** @brief 持久 runtime UUID / Persistent runtime UUID. */
+    std::string runtime_key;
+    /** @brief 调用 handle 绑定的 activation / Activation bound to the calling handle. */
+    std::string activation_id;
+};
+
+/**
+ * @brief 跨 control protocol 的 allowlisted runtime 状态 / Allowlisted runtime status across the control protocol.
+ *
+ * 这是固定、平面的遥测形状。它刻意不含 host 路径、PID、mount/cgroup、command、request ID/hash、
+ * stdin/stdout/stderr 或 payload 任何字段。/ This is a fixed, flat telemetry shape. It deliberately
+ * contains no host path, PID, mount/cgroup, command, request ID/hash, stdin/stdout/stderr, or any
+ * payload field.
+ */
+struct RuntimeStatusResult final {
+    /** @brief 被观察的持久 runtime UUID / Persistent runtime UUID observed. */
+    std::string runtime_key;
+    /** @brief 聚合生命周期状态 / Aggregate lifecycle state. */
+    domain::RuntimeState state{domain::RuntimeState::dormant};
+    /** @brief 当前 owner activation；dormant/failed 时为空 / Current owner activation; empty while dormant/failed. */
+    std::optional<std::string> active_activation_id;
+    /** @brief 此 handle activation 是否是当前 owner / Whether this handle activation is the current owner. */
+    bool handle_activation_matches{false};
+    /** @brief supervisor 是否可观察为存活 / Whether the supervisor is observably alive. */
+    bool supervisor_alive{false};
+    /** @brief ready 状态的空闲年龄；其他状态为空 / Idle age while ready; empty for other states. */
+    std::optional<std::chrono::milliseconds> idle_for;
+    /** @brief broker idle 回收阈值 / Broker idle-retirement threshold. */
+    std::chrono::milliseconds idle_ttl{1};
+    /** @brief 当前借用 session 的 broker dispatch 数 / Current broker dispatches borrowing the session. */
+    std::uint64_t borrowed_dispatches{};
+    /** @brief 是否有已知的清理/隔离待办 / Whether known cleanup/quarantine is pending. */
+    bool cleanup_pending{false};
 };
 
 /**
@@ -223,6 +272,20 @@ struct Frame final {
 [[nodiscard]] Result<void> validate_execute_request(const ExecuteRequest& request);
 
 /**
+ * @brief 校验无副作用 runtime 状态请求 / Validate a side-effect-free runtime-status request.
+ * @param request 待校验请求 / Request to validate.
+ * @return 成功或精确错误 / Success or a precise error.
+ */
+[[nodiscard]] Result<void> validate_runtime_status_request(const RuntimeStatusRequest& request);
+
+/**
+ * @brief 校验 allowlisted runtime 状态结果 / Validate an allowlisted runtime-status result.
+ * @param result 待校验状态结果 / Status result to validate.
+ * @return 成功或精确错误 / Success or a precise error.
+ */
+[[nodiscard]] Result<void> validate_runtime_status_result(const RuntimeStatusResult& result);
+
+/**
  * @brief 校验文件开始请求的 capability 与资源上限 / Validate file-begin capability and resource caps.
  * @param request 待校验文件开始请求 / File-begin request to validate.
  * @return 成功或精确错误 / Success or precise error.
@@ -295,6 +358,15 @@ struct Frame final {
  * @return 已校验的请求 / Validated request.
  */
 [[nodiscard]] Result<ExecuteRequest> decode_execute_request(std::span<const std::byte> payload);
+
+/** @brief 编码无副作用 runtime 状态请求 / Encode a side-effect-free runtime-status request. */
+[[nodiscard]] Result<std::vector<std::byte>> encode_runtime_status_request(const RuntimeStatusRequest& request);
+/** @brief 解码无副作用 runtime 状态请求 / Decode a side-effect-free runtime-status request. */
+[[nodiscard]] Result<RuntimeStatusRequest> decode_runtime_status_request(std::span<const std::byte> payload);
+/** @brief 编码 allowlisted runtime 状态结果 / Encode an allowlisted runtime-status result. */
+[[nodiscard]] Result<std::vector<std::byte>> encode_runtime_status_result(const RuntimeStatusResult& result);
+/** @brief 解码 allowlisted runtime 状态结果 / Decode an allowlisted runtime-status result. */
+[[nodiscard]] Result<RuntimeStatusResult> decode_runtime_status_result(std::span<const std::byte> payload);
 
 /** @brief 编码文件开始请求 / Encode a file-begin request. */
 [[nodiscard]] Result<std::vector<std::byte>> encode_payload_begin_request(const PayloadBeginRequest& request);

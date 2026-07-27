@@ -9,7 +9,8 @@ Bot 容器的授权视图刻意很小：
 
 | 对象 | Bot 是否可见 | 约束 |
 | --- | --- | --- |
-| 开发态 `./.wspctl/run/wspctld.sock`（容器内 `/app/.wspctl/run/wspctld.sock`） | 是 | 仅以只读目录 bind mount 暴露；socket 是 UID `65532` 的 `0600` 文件 |
+| 开发态 `./.wspctl/run/bot/wspctld.sock`（容器内 `/app/.wspctl/run/bot/wspctld.sock`） | 是 | 仅将 `run/bot` 以只读 bind mount 暴露；socket 是 UID `65532` 的 `0600` 文件 |
+| operator socket `./.wspctl/run/operator/wspctld.sock` | 否 | root-only `0700` sibling directory；绝不 bind mount 给 Bot |
 | Docker/containerd socket | 否 | 不挂载 `/var/run/docker.sock`、`/run/containerd/containerd.sock` 或其父目录 |
 | host cgroup control | 否（可写） | 不显式 bind mount `/sys/fs/cgroup`，更不允许可写 cgroup delegation；container runtime 的普通只读自身 cgroup metadata 不构成控制权 |
 | host kernel/modules | 否（特权视图） | 不挂载 `/lib/modules`、`/usr/lib/modules` 或 `/dev/kvm`；container runtime 的普通受限 sysfs 视图不授予 module/control 权限 |
@@ -150,14 +151,47 @@ checkout 与其他服务 state 不得位于该 filesystem。生成的 unit 使�
 
 当前 broker 的认证契约是精确 UID，而不是组 ACL：它会将
 `WSPCTL_SOCKET` 设为 owner `65532`、mode `0600`，并用 `SO_PEERCRED` 只接受 UID `65532`。
-生成的 unit 以固定的 `ReadWritePaths=` 和 `ExecStartPre=install` 准备 root-owned `0711` socket
-父目录；不要将 socket 改成 group/world writable 来“修复”连接问题。Compose 因而固定运行 Bot
-为 `65532:65532`。
+生成的 unit 以固定的 `ReadWritePaths=` 和 `ExecStartPre=install` 准备 root-owned `run/bot`
+`0711`、`run/operator` `0700` 两个 sibling socket directory；不要将 socket 改成 group/world
+writable 来“修复”连接问题。Compose 因而固定运行 Bot 为 `65532:65532`，且只挂载前者。
+
+## Operator 只读 shell
+
+`wspctld` 同时绑定一个**独立**的 `WSPCTL_OPERATOR_SOCKET`。它与 `WSPCTL_SOCKET` 必须是不同
+路径，且 `WSPCTL_OPERATOR_UID` 必须不同于 `WSPCTL_CLIENT_UID`；native broker 在启动时 fail
+closed，并分别用 socket 的 `0600` ownership 和 `SO_PEERCRED` 精确验证。生产与开发模板都将
+operator UID 默认设为 `0`，所以该 socket 不进入 Compose、不会 bind mount 给 Bot，也不能从 Bot
+的 `config.json` 推导出来。
+
+安装后的 `wspctl` 是 operator inspection（运维只读检查）CLI。host build 在 CMake configure
+阶段把唯一的 operator socket 固定为默认 endpoint；日常命令因此是：
+
+```bash
+sudo wspctl status --runtime 123e4567-e89b-12d3-a456-426614174000
+sudo wspctl workspace ls --runtime 123e4567-e89b-12d3-a456-426614174000 --path /workspace
+```
+
+也可仅在明确排障时覆盖 endpoint：
+
+```bash
+sudo wspctl --socket /srv/fogmoe-wspctl/run/operator/wspctld.sock status \
+  --runtime 123e4567-e89b-12d3-a456-426614174000
+```
+
+这两个命令都不会创建 quota binding、启动/替换 `RuntimeProcess`、发送 Bot protocol、写 journal、
+执行 command 或读取文件内容。`status` 通过 XFS `Q_XGETQUOTA` 返回 workspace 的 bytes/inodes
+hard limit 与当前 kernel accounting；它不是 `du` 的猜测。`workspace ls` 只观察持久
+OverlayFS upper layer（而非 synthetic merged lower+upper filesystem），从已验证的 upper directory
+FD 逐级使用 `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_XDEV)`。
+因此 symlink traversal、magic link 和跨 mount traversal 均 fail closed。列表中的 `encoded_name`
+是可逆 percent encoding：原始 filename 可能含换行、ANSI escape 或非 UTF-8 bytes，CLI/wire 永不
+直接输出它们。
 
 Bot `config.json` 只描述 **client-visible** socket 路径，绝不描述 `WSPCTL_HOST_WORKDIR`。默认
-`.wspctl/run/wspctld.sock` 在容器中会相对于 `/app/config.json` 解析为
-`/app/.wspctl/run/wspctld.sock`；production Compose 应只把其 `source` 改为
-`/srv/fogmoe-wspctl/run`（或其他 root-owned host directory），仍挂到这个 target。因此通常无需
+`.wspctl/run/bot/wspctld.sock` 在容器中会相对于 `/app/config.json` 解析为
+`/app/.wspctl/run/bot/wspctld.sock`；production Compose 应只把 `run/bot` 的 `source` 改为
+`/srv/fogmoe-wspctl/run/bot`（或其他 root-owned host directory），仍挂到这个 target；`run/operator`
+永不进入 container。因此通常无需
 在 Bot JSONC 写 host `/srv/...` 路径；只有不经容器、直接运行 Bot client 时才配置 host 可见的绝对
 socket 路径。
 
@@ -458,10 +492,10 @@ wheel 和 Bot 源/静态资源。wheel build 显式设置 `WSPCTL_INSTALL_HOST_T
 的 `wspctld`、`wsp-systemd`、`wspctl-image` 根本不会被安装到最终镜像。这样即使 Bot 被攻破，
 也没有可被误启动的 privileged broker binary。
 
-Compose 在开发态以只读方式把 `./.wspctl/run` 挂到 `/app/.wspctl/run`，而非单独 socket；Unix
-socket 的 `connect(2)` 仍可工作，而容器无法在相邻路径创建、替换或 unlink 条目。生产 operator
-可将 Compose source 改为其 root-owned absolute socket directory，但不得把 state/image root 送入
-容器。它还使用只读 root filesystem、空
+Compose 在开发态以只读方式只把 `./.wspctl/run/bot` 挂到 `/app/.wspctl/run/bot`，而非单独 socket；
+Unix socket 的 `connect(2)` 仍可工作，而容器无法在相邻路径创建、替换或 unlink 条目，也无法看见
+root-only sibling `run/operator`。生产 operator 可将 Compose source 改为其 root-owned absolute
+**bot socket** directory，但不得把 operator socket、state/image root 送入容器。它还使用只读 root filesystem、空
 capability bounding set、`no-new-privileges`、受限 `/tmp`、非 root UID 和 PID 限额。socket、base
 generation、state root 和 delegated cgroup 均不进入容器。
 
@@ -476,9 +510,12 @@ docker compose logs -f bot
 ```bash
 sudo systemctl status wspctld.service
 work_root=/srv/fogmoe-wspctl # Substitute the CMake-configured production work root.
-sudo stat -c '%U %G %a %n' "$work_root/run" "$work_root/run/wspctld.sock"
+sudo stat -c '%U %G %a %n' "$work_root/run" "$work_root/run/bot" \
+  "$work_root/run/bot/wspctld.sock" "$work_root/run/operator" \
+  "$work_root/run/operator/wspctld.sock"
 docker compose exec bot id
-docker compose exec bot test -S /app/.wspctl/run/wspctld.sock
+docker compose exec bot test -S /app/.wspctl/run/bot/wspctld.sock
+docker compose exec bot test ! -e /app/.wspctl/run/operator
 docker compose exec bot python -c 'from wspctl import RuntimeProcess; print("native client import ok")'
 ```
 

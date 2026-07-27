@@ -1,5 +1,6 @@
 #pragma once
 
+#include "wspctl/domain/runtime.hpp"
 #include "wspctl/infrastructure/common.hpp"
 
 #include <chrono>
@@ -55,6 +56,42 @@ struct ClientExecutionResult final {
     std::string stdout_data;
     /** @brief 已规范化 stderr / Normalized stderr. */
     std::string stderr_data;
+};
+
+/** @brief Bot 到 Unix gateway 的无副作用状态查询 DTO / Side-effect-free status-query DTO from the Bot to the Unix gateway. */
+struct ClientRuntimeStatusRequest final {
+    /** @brief 长期 runtime UUID / Long-lived runtime UUID. */
+    std::string runtime_key;
+    /** @brief 调用 handle 绑定的 activation / Activation bound to the calling handle. */
+    std::string activation_id;
+};
+
+/**
+ * @brief Unix gateway 返回给 Bot 的 allowlisted 运行态 DTO / Allowlisted operating-status DTO returned by the Unix gateway.
+ *
+ * 此 DTO 是 protocol 结果的 presentation 投影；不添加 host 路径、PID、command 或 payload
+ * 字段。/ This DTO is a presentation projection of the protocol result; it adds no host path,
+ * PID, command, or payload fields.
+ */
+struct ClientRuntimeStatus final {
+    /** @brief 被观察的持久 runtime UUID / Persistent runtime UUID observed. */
+    std::string runtime_key;
+    /** @brief 聚合生命周期状态 / Aggregate lifecycle state. */
+    domain::RuntimeState state{domain::RuntimeState::dormant};
+    /** @brief 当前 owner activation；不活跃时为空 / Current owner activation; empty when inactive. */
+    std::optional<std::string> active_activation_id;
+    /** @brief 此 handle activation 是否是当前 owner / Whether this handle activation is the current owner. */
+    bool handle_activation_matches{false};
+    /** @brief 是否有健康、可复用的 supervisor / Whether a healthy reusable supervisor exists. */
+    bool supervisor_alive{false};
+    /** @brief ready 状态空闲年龄；其他状态为空 / Idle age while ready; empty for other states. */
+    std::optional<std::chrono::milliseconds> idle_for;
+    /** @brief broker idle 回收阈值 / Broker idle-retirement threshold. */
+    std::chrono::milliseconds idle_ttl{1};
+    /** @brief 当前借用 session 的 broker dispatch 数 / Current broker dispatches borrowing the session. */
+    std::uint64_t borrowed_dispatches{};
+    /** @brief 是否有已知清理/隔离待办 / Whether known cleanup/quarantine is pending. */
+    bool cleanup_pending{false};
 };
 
 /**
@@ -162,6 +199,16 @@ public:
      * @return presentation 结果 DTO 或 transport 错误 / Presentation result DTO or transport error.
      */
     [[nodiscard]] Result<ClientExecutionResult> execute(const ClientExecuteRequest& request) const;
+
+    /**
+     * @brief 经一条短连接读取 runtime 状态 / Read runtime status over one short connection.
+     * @param request presentation 状态查询 DTO / Presentation status-query DTO.
+     * @return allowlisted 运行态或 transport 错误 / Allowlisted operating status or a transport error.
+     * @note 此调用不会激活、替换或 retire RuntimeProcess，也不读取 journal/payload。
+     *       This call neither activates, replaces, nor retires a RuntimeProcess and reads no
+     *       journal/payload.
+     */
+    [[nodiscard]] Result<ClientRuntimeStatus> status(const ClientRuntimeStatusRequest& request) const;
 
     /**
      * @brief 经一条短连接流式写入文件 / Stream a file over one short connection.

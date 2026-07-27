@@ -1,7 +1,10 @@
 #include "wspctl/application/runtime_activation.hpp"
+#include "wspctl/application/runtime_status.hpp"
 
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -112,6 +115,38 @@ public:
     }
 };
 
+/** @brief 记录无副作用状态读取的 fake port / Fake port recording a side-effect-free status read. */
+class RecordingStatusPort final : public wspctl::application::RuntimeStatusPort {
+public:
+    /**
+     * @brief 返回一个 ready runtime 的 allowlisted 状态 / Return allowlisted status for a ready runtime.
+     * @param query 已验证只读查询 / Validated read-only query.
+     * @return ready 状态或领域错误 / Ready status or a domain error.
+     */
+    [[nodiscard]] wspctl::domain::Result<wspctl::application::RuntimeStatus> observe(
+        const wspctl::application::RuntimeStatusQuery& query) const override {
+        ++calls;
+        const auto snapshot = wspctl::domain::RuntimeSnapshot::create(
+            query.runtime(),
+            wspctl::domain::RuntimeState::ready,
+            query.handle_activation());
+        if (!snapshot) {
+            return std::unexpected(snapshot.error());
+        }
+        return wspctl::application::RuntimeStatus::create(
+            query,
+            *snapshot,
+            true,
+            std::chrono::milliseconds(123),
+            std::chrono::minutes(15),
+            2U,
+            false);
+    }
+
+    /** @brief 被调用次数 / Invocation count. */
+    mutable unsigned int calls{0U};
+};
+
 /** @brief 测试正常的激活/退役编排 / Test successful activation/retirement orchestration. */
 void test_lifecycle_orchestration() {
     wspctl::domain::Runtime runtime = test_runtime();
@@ -142,6 +177,47 @@ void test_failure_compensation() {
            "failed establish clears owner instead of leaving half-ready state");
 }
 
+/** @brief 测试应用状态查询只使用 read port 且验证 health 不变量 / Test status query uses only the read port and validates health invariants. */
+void test_status_query_use_case() {
+    const auto runtime = wspctl::domain::RuntimeId::parse("123e4567-e89b-12d3-a456-426614174000");
+    const wspctl::domain::ActivationId activation = test_activation();
+    expect(runtime.has_value(), "parse runtime for status query");
+    if (!runtime) {
+        return;
+    }
+    const wspctl::application::RuntimeStatusQuery query(*runtime, activation);
+    RecordingStatusPort port;
+    wspctl::application::RuntimeStatusService service;
+    const auto observed = service.inspect(query, port);
+    expect(observed.has_value(), "inspect runtime through read-only status port");
+    expect(port.calls == 1U, "status use case invokes the read port exactly once");
+    if (observed) {
+        expect(observed->snapshot().state() == wspctl::domain::RuntimeState::ready &&
+                   observed->handle_activation_matches() && observed->supervisor_alive() &&
+                   observed->idle_for() == std::chrono::milliseconds(123) &&
+                   observed->idle_ttl() == std::chrono::minutes(15) &&
+                   observed->borrowed_dispatches() == 2U && !observed->cleanup_pending(),
+               "status preserves allowlisted operating indicators");
+    }
+
+    const auto dormant = wspctl::domain::RuntimeSnapshot::create(
+        *runtime,
+        wspctl::domain::RuntimeState::dormant,
+        std::nullopt);
+    expect(dormant.has_value(), "construct dormant status snapshot");
+    if (dormant) {
+        const auto invalid = wspctl::application::RuntimeStatus::create(
+            query,
+            *dormant,
+            true,
+            std::nullopt,
+            std::chrono::minutes(15),
+            0U,
+            false);
+        expect(!invalid.has_value(), "reject dormant runtime claiming a live reusable supervisor");
+    }
+}
+
 }  // namespace
 
 /**
@@ -151,5 +227,6 @@ void test_failure_compensation() {
 int main() {
     test_lifecycle_orchestration();
     test_failure_compensation();
+    test_status_query_use_case();
     return g_failures == 0U ? EXIT_SUCCESS : EXIT_FAILURE;
 }

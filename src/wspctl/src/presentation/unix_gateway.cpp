@@ -88,6 +88,37 @@ void close_fd(const int fd) noexcept {
 }
 
 /**
+ * @brief 将 presentation DTO 转换为只读状态请求 / Convert a presentation DTO into a read-only status request.
+ * @param request presentation 状态查询 DTO / Presentation status-query DTO.
+ * @return control-plane 状态查询 / Control-plane status query.
+ */
+[[nodiscard]] RuntimeStatusRequest to_runtime_status_request(const ClientRuntimeStatusRequest& request) {
+    return RuntimeStatusRequest{
+        .runtime_key = request.runtime_key,
+        .activation_id = request.activation_id,
+    };
+}
+
+/**
+ * @brief 将 control-plane 状态转换为 presentation DTO / Convert control-plane status into a presentation DTO.
+ * @param result control-plane 状态结果 / Control-plane status result.
+ * @return presentation 状态 DTO / Presentation status DTO.
+ */
+[[nodiscard]] ClientRuntimeStatus to_client_runtime_status(const RuntimeStatusResult& result) {
+    return ClientRuntimeStatus{
+        .runtime_key = result.runtime_key,
+        .state = result.state,
+        .active_activation_id = result.active_activation_id,
+        .handle_activation_matches = result.handle_activation_matches,
+        .supervisor_alive = result.supervisor_alive,
+        .idle_for = result.idle_for,
+        .idle_ttl = result.idle_ttl,
+        .borrowed_dispatches = result.borrowed_dispatches,
+        .cleanup_pending = result.cleanup_pending,
+    };
+}
+
+/**
  * @brief 将文件 DTO 转换为 control-plane 开始请求 / Convert a file DTO into a control-plane begin request.
  * @param request presentation 文件写入 DTO / Presentation file-ingress DTO.
  * @return control-plane 文件开始请求 / Control-plane file-begin request.
@@ -333,6 +364,60 @@ Result<ClientExecutionResult> UnixGatewayClient::execute(const ClientExecuteRequ
         return std::unexpected(make_error(ErrorCode::protocol_violation, "broker result identity mismatch"));
     }
     return to_client_result(*result);
+}
+
+Result<ClientRuntimeStatus> UnixGatewayClient::status(const ClientRuntimeStatusRequest& client_request) const {
+    if (const auto endpoint = validate_socket_path(socket_path_); !endpoint) {
+        return std::unexpected(endpoint.error());
+    }
+    const RuntimeStatusRequest request = to_runtime_status_request(client_request);
+    if (const auto valid = validate_runtime_status_request(request); !valid) {
+        return std::unexpected(valid.error());
+    }
+    /** @brief 单个只读 runtime 状态查询的本机 I/O deadline / Local I/O deadline for one read-only runtime-status query. */
+    constexpr auto kStatusIoDeadline = std::chrono::seconds(5);
+    const auto connected = connect_authenticated_broker(socket_path_, kStatusIoDeadline);
+    if (!connected) {
+        return std::unexpected(connected.error());
+    }
+    const int fd = *connected;
+    const auto close_with_error = [fd](const Error& error) -> Result<ClientRuntimeStatus> {
+        close_fd(fd);
+        return std::unexpected(error);
+    };
+    const auto payload = encode_runtime_status_request(request);
+    if (!payload) {
+        return close_with_error(payload.error());
+    }
+    const auto outbound = encode_frame(MessageKind::runtime_status, *payload);
+    if (!outbound) {
+        return close_with_error(outbound.error());
+    }
+    if (const auto sent = send_frame(fd, *outbound); !sent) {
+        return close_with_error(sent.error());
+    }
+    const auto inbound = receive_decoded_frame(fd);
+    if (!inbound) {
+        return close_with_error(inbound.error());
+    }
+    close_fd(fd);
+    if (inbound->kind == MessageKind::error) {
+        const auto error = return_broker_error(*inbound);
+        return std::unexpected(error.error());
+    }
+    if (inbound->kind != MessageKind::runtime_status_result) {
+        return std::unexpected(make_error(ErrorCode::protocol_violation, "broker returned an unexpected runtime status frame"));
+    }
+    const auto result = decode_runtime_status_result(inbound->payload);
+    if (!result || result->runtime_key != request.runtime_key) {
+        return std::unexpected(make_error(ErrorCode::protocol_violation, "broker returned a runtime status for another runtime"));
+    }
+    const bool derived_activation_match = result->active_activation_id.has_value() &&
+        *result->active_activation_id == request.activation_id;
+    if (result->handle_activation_matches != derived_activation_match) {
+        return std::unexpected(make_error(ErrorCode::protocol_violation, "broker returned an inconsistent runtime activation match"));
+    }
+    return to_client_runtime_status(*result);
 }
 
 Result<ClientAddFileResult> UnixGatewayClient::add_file(

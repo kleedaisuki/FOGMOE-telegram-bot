@@ -39,7 +39,7 @@ class WorkspaceConfigurationPathTests(unittest.TestCase):
             self.assertEqual(
                 settings.runtime.workspace.broker_socket_path,
                 str(
-                    (Path(temporary_directory) / ".wspctl" / "run" / "wspctld.sock").resolve(
+                    (Path(temporary_directory) / ".wspctl" / "run" / "bot" / "wspctld.sock").resolve(
                         strict=False
                     )
                 ),
@@ -55,7 +55,7 @@ class WorkspaceConfigurationPathTests(unittest.TestCase):
             configuration_path = Path(temporary_directory) / "config.json"
             configuration_path.write_text(
                 EXAMPLE_CONFIGURATION_PATH.read_text(encoding="utf-8").replace(
-                    '"broker_socket_path": ".wspctl/run/wspctld.sock"',
+                    '"broker_socket_path": ".wspctl/run/bot/wspctld.sock"',
                     '"broker_socket_path": "../wspctld.sock"',
                     1,
                 ),
@@ -75,7 +75,7 @@ class WorkspaceConfigurationPathTests(unittest.TestCase):
             configuration_path = Path(temporary_directory) / "config.json"
             configuration_path.write_text(
                 EXAMPLE_CONFIGURATION_PATH.read_text(encoding="utf-8").replace(
-                    '"broker_socket_path": ".wspctl/run/wspctld.sock"',
+                    '"broker_socket_path": ".wspctl/run/bot/wspctld.sock"',
                     '"broker_socket_path": "/client-visible/wspctld.sock"',
                     1,
                 ),

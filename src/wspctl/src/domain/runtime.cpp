@@ -42,6 +42,16 @@ namespace {
     return make_error(ErrorCode::illegal_transition, "illegal runtime lifecycle transition: " + std::string(operation));
 }
 
+/**
+ * @brief 判断状态是否必须拥有 activation / Check whether a state must own an activation.
+ * @param state 待检查生命周期状态 / Lifecycle state to inspect.
+ * @return 状态是否必须带 activation / Whether the state must carry an activation.
+ */
+[[nodiscard]] bool state_requires_activation(const RuntimeState state) noexcept {
+    return state == RuntimeState::activating || state == RuntimeState::ready ||
+           state == RuntimeState::executing || state == RuntimeState::retiring;
+}
+
 }  // namespace
 
 Error make_error(const ErrorCode code, std::string message) {
@@ -129,6 +139,48 @@ std::size_t ExecutionBudget::output_bytes() const noexcept {
     return output_bytes_;
 }
 
+std::string_view runtime_state_name(const RuntimeState state) noexcept {
+    switch (state) {
+        case RuntimeState::dormant: return "dormant";
+        case RuntimeState::activating: return "activating";
+        case RuntimeState::ready: return "ready";
+        case RuntimeState::executing: return "executing";
+        case RuntimeState::retiring: return "retiring";
+        case RuntimeState::failed: return "failed";
+    }
+    return "failed";
+}
+
+RuntimeSnapshot::RuntimeSnapshot(
+    RuntimeId runtime,
+    const RuntimeState state,
+    std::optional<ActivationId> active_activation) noexcept
+    : runtime_(std::move(runtime)), state_(state), active_activation_(std::move(active_activation)) {}
+
+Result<RuntimeSnapshot> RuntimeSnapshot::create(
+    RuntimeId runtime,
+    const RuntimeState state,
+    std::optional<ActivationId> active_activation) {
+    if (state_requires_activation(state) != active_activation.has_value()) {
+        return std::unexpected(make_error(
+            ErrorCode::illegal_transition,
+            "runtime snapshot state and activation ownership disagree"));
+    }
+    return RuntimeSnapshot(std::move(runtime), state, std::move(active_activation));
+}
+
+const RuntimeId& RuntimeSnapshot::runtime() const noexcept {
+    return runtime_;
+}
+
+RuntimeState RuntimeSnapshot::state() const noexcept {
+    return state_;
+}
+
+const std::optional<ActivationId>& RuntimeSnapshot::active_activation() const noexcept {
+    return active_activation_;
+}
+
 Runtime::Runtime(RuntimeId id) : id_(std::move(id)) {}
 
 RuntimeState Runtime::state() const noexcept {
@@ -141,6 +193,13 @@ const RuntimeId& Runtime::id() const noexcept {
 
 const std::optional<ActivationId>& Runtime::active_activation() const noexcept {
     return active_activation_;
+}
+
+RuntimeSnapshot Runtime::snapshot() const {
+    // Runtime owns the state machine, so its state/activation pair already satisfies
+    // RuntimeSnapshot::create's invariant. Keeping this construction here also prevents a
+    // caller from accidentally projecting half a lifecycle transition as a public observation.
+    return RuntimeSnapshot(id_, state_, active_activation_);
 }
 
 Result<void> Runtime::begin_activation(const ActivationId& activation) {

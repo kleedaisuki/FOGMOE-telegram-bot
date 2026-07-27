@@ -56,6 +56,15 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
     assert "mount -o remount,bind,ro" in script
     assert "systemctl start" in script
     assert "WSPCTL_CLIENT_UID" in script
+    assert 'OPERATOR_UID="${WSPCTL_OPERATOR_UID:-0}"' in script
+    assert 'SOCKET_PATH="$WORK_ROOT/run/bot/wspctld.sock"' in script
+    assert 'OPERATOR_SOCKET_PATH="$WORK_ROOT/run/operator/wspctld.sock"' in script
+    assert '"$WORK_ROOT/run" "$WORK_ROOT/run/bot"' in script
+    assert '"$WORK_ROOT/run/operator"' in script
+    assert '"$CLIENT_UID" != "$OPERATOR_UID"' in script
+    assert 'sudo test -S "$OPERATOR_SOCKET_PATH"' in script
+    assert 'sudo stat --format=\'%u:%a\' "$OPERATOR_SOCKET_PATH"' in script
+    assert "/usr/local/bin/wspctl" in script
     assert "require_generation" in script
     assert "write_install_manifest" in script
     assert "install-manifest" in script
@@ -108,6 +117,8 @@ def test_root_status_script_is_readonly_and_reports_operational_boundaries() -> 
     assert "WSPCTL_STATUS=healthy" in script
     assert "WSPCTL_STATUS=degraded" in script
     assert "persistent runtime aggregates" in script
+    assert 'report_socket "operator control"' in script
+    assert "OPERATOR_SOCKET_PATH" in script
     assert "run_bash" not in script
     assert " add_file" not in script
     assert "rm -" not in script

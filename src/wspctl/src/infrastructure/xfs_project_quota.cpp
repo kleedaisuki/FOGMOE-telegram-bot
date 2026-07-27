@@ -869,6 +869,40 @@ struct ActivationStagingParent final {
 }
 
 /**
+ * @brief 以 FD 读取一个 XFS project quota 的实际 accounting / Read actual accounting for one XFS project quota through an FD.
+ * @param mount_path 已配置 XFS mountpoint / Configured XFS mountpoint.
+ * @param project_id 待读取 project ID / Project ID to read.
+ * @return 内核填充的 XFS quota 结构或错误 / Kernel-populated XFS quota structure or an error.
+ */
+[[nodiscard]] Result<fs_disk_quota_t> read_project_quota_accounting(
+    const std::filesystem::path& mount_path,
+    const std::uint32_t project_id) {
+    /** @brief 将由内核填充的 XFS quota 结构 / XFS quota structure populated by the kernel. */
+    fs_disk_quota_t quota{};
+    quota.d_version = FS_DQUOT_VERSION;
+    quota.d_flags = FS_PROJ_QUOTA;
+    quota.d_id = project_id;
+    /** @brief 已挂载 XFS 目录 FD / Mounted XFS directory FD. */
+    FileDescriptor mount_fd(open(mount_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    if (mount_fd.get() < 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "open XFS quota mount FD for operator usage"));
+    }
+#ifdef SYS_quotactl_fd
+    if (syscall(SYS_quotactl_fd, mount_fd.get(), Q_XGETQUOTA, static_cast<int>(project_id), &quota) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "Q_XGETQUOTA XFS workspace usage"));
+    }
+#else
+    return std::unexpected(make_error(
+        ErrorCode::io_failure,
+        "kernel headers do not expose quotactl_fd; refusing a quota path fallback"));
+#endif
+    if (quota.d_id != project_id) {
+        return std::unexpected(make_error(ErrorCode::io_failure, "Q_XGETQUOTA returned a different project ID"));
+    }
+    return quota;
+}
+
+/**
  * @brief 设置一个目录的 project ID 和 PROJINHERIT 并读回 / Set and read back a directory's project ID and PROJINHERIT.
  * @param path root-owned directory / Root-owned directory.
  * @param project_id expected project ID / Expected project ID.
@@ -2105,6 +2139,34 @@ Result<RuntimeQuotaBinding> XfsProjectQuota::find_ready_runtime(const std::strin
             "ready XFS quota binding failed read-only verification: " + verified.error().message));
     }
     return binding;
+}
+
+Result<domain::WorkspaceQuotaUsage> XfsProjectQuota::read_workspace_quota_usage(
+    const RuntimeQuotaBinding& binding) const {
+    if (const auto verified = verify_ready_binding(state_root_, config_, binding); !verified) {
+        return std::unexpected(make_error(
+            ErrorCode::invocation_in_doubt,
+            "workspace quota binding failed read-only verification before usage query"));
+    }
+    const auto quota = read_project_quota_accounting(config_.mount_path, binding.workspace_project_id);
+    if (!quota) {
+        return std::unexpected(quota.error());
+    }
+    if (quota->d_bcount > std::numeric_limits<std::uint64_t>::max() / kQuotaBasicBlockBytes ||
+        quota->d_blk_hardlimit > std::numeric_limits<std::uint64_t>::max() / kQuotaBasicBlockBytes) {
+        return std::unexpected(make_error(ErrorCode::io_failure, "XFS workspace quota byte count overflows uint64"));
+    }
+    const auto usage = domain::WorkspaceQuotaUsage::create(
+        static_cast<std::uint64_t>(quota->d_bcount) * kQuotaBasicBlockBytes,
+        static_cast<std::uint64_t>(quota->d_blk_hardlimit) * kQuotaBasicBlockBytes,
+        static_cast<std::uint64_t>(quota->d_icount),
+        static_cast<std::uint64_t>(quota->d_ino_hardlimit));
+    if (!usage) {
+        return std::unexpected(make_error(
+            ErrorCode::io_failure,
+            "XFS workspace quota accounting violates the operator domain contract"));
+    }
+    return *usage;
 }
 
 Result<RuntimeActivationLease> XfsProjectQuota::acquire_activation_lease(const std::string_view runtime_key) const {

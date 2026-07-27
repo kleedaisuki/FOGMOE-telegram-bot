@@ -19,6 +19,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -250,6 +251,57 @@ void test_protocol() {
     std::vector<std::byte> truncated = *frame;
     truncated.pop_back();
     expect(!wspctl::decode_frame(truncated).has_value(), "reject truncated frame");
+
+    const wspctl::RuntimeStatusRequest status_request{
+        .runtime_key = original.runtime_key,
+        .activation_id = "activation-status-test",
+    };
+    const auto encoded_status_request = wspctl::encode_runtime_status_request(status_request);
+    expect(encoded_status_request.has_value(), "encode side-effect-free runtime status request");
+    if (encoded_status_request) {
+        const auto decoded_status_request = wspctl::decode_runtime_status_request(*encoded_status_request);
+        expect(decoded_status_request.has_value() &&
+                   decoded_status_request->runtime_key == status_request.runtime_key &&
+                   decoded_status_request->activation_id == status_request.activation_id,
+               "round-trip side-effect-free runtime status request");
+    }
+    const wspctl::RuntimeStatusResult status_result{
+        .runtime_key = original.runtime_key,
+        .state = wspctl::domain::RuntimeState::ready,
+        .active_activation_id = status_request.activation_id,
+        .handle_activation_matches = true,
+        .supervisor_alive = true,
+        .idle_for = std::chrono::milliseconds(42),
+        .idle_ttl = std::chrono::minutes(15),
+        .borrowed_dispatches = 2U,
+        .cleanup_pending = false,
+    };
+    const auto encoded_status_result = wspctl::encode_runtime_status_result(status_result);
+    expect(encoded_status_result.has_value(), "encode allowlisted runtime status result");
+    if (encoded_status_result) {
+        const auto decoded_status_result = wspctl::decode_runtime_status_result(*encoded_status_result);
+        expect(decoded_status_result.has_value() &&
+                   decoded_status_result->state == wspctl::domain::RuntimeState::ready &&
+                   decoded_status_result->active_activation_id == status_result.active_activation_id &&
+                   decoded_status_result->handle_activation_matches &&
+                   decoded_status_result->supervisor_alive &&
+                   decoded_status_result->idle_for == status_result.idle_for &&
+                   decoded_status_result->idle_ttl == status_result.idle_ttl &&
+                   decoded_status_result->borrowed_dispatches == 2U &&
+                   !decoded_status_result->cleanup_pending,
+               "round-trip fixed allowlisted runtime status result");
+        const auto status_frame = wspctl::encode_frame(wspctl::MessageKind::runtime_status_result, *encoded_status_result);
+        const auto decoded_status_frame = status_frame ? wspctl::decode_frame(*status_frame)
+                                                       : wspctl::Result<wspctl::Frame>{std::unexpected(status_frame.error())};
+        expect(decoded_status_frame.has_value() &&
+                   decoded_status_frame->kind == wspctl::MessageKind::runtime_status_result,
+               "recognize runtime status result frame kind");
+    }
+    wspctl::RuntimeStatusResult invalid_status = status_result;
+    invalid_status.state = wspctl::domain::RuntimeState::failed;
+    invalid_status.active_activation_id.reset();
+    expect(!wspctl::validate_runtime_status_result(invalid_status).has_value(),
+           "reject failed runtime claiming a live reusable supervisor");
 
     const wspctl::PayloadBeginRequest file = file_request();
     const auto encoded_file_begin = wspctl::encode_payload_begin_request(file);

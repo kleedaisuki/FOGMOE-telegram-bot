@@ -1,5 +1,6 @@
 #pragma once
 
+#include "wspctl/domain/operator_workspace.hpp"
 #include "wspctl/infrastructure/common.hpp"
 
 #include <cstdint>
@@ -174,6 +175,17 @@ public:
      *       and reads it under a shared ``flock``.
      */
     [[nodiscard]] Result<RuntimeQuotaBinding> find_ready_runtime(std::string_view runtime_key) const;
+
+    /**
+     * @brief 只读读取一个 verified workspace project 的 kernel quota 用量 / Read kernel quota usage for one verified workspace project.
+     * @param binding 已由 `find_ready_runtime` 返回的 ready binding / Ready binding returned by `find_ready_runtime`.
+     * @return XFS `Q_XGETQUOTA` 的 bytes/inodes 用量与 hard limits / XFS `Q_XGETQUOTA` byte/inode usage and hard limits.
+     * @note 此 API 会再次 read-back 验证 binding，且只使用 `quotactl_fd`；它绝不递归扫描
+     *       directory 或以 `du` 猜测用量。/ This API read-back verifies the binding again and uses
+     *       only `quotactl_fd`; it never recursively scans directories or guesses usage via `du`.
+     */
+    [[nodiscard]] Result<domain::WorkspaceQuotaUsage> read_workspace_quota_usage(
+        const RuntimeQuotaBinding& binding) const;
 
     /**
      * @brief 取得一个 runtime 的非阻塞 activation 排他租约 / Acquire a nonblocking exclusive activation lease for one runtime.

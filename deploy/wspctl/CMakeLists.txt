@@ -57,10 +57,38 @@ endif()
 
 #: @brief 规范化后的 host 工作根 / Normalized host work root.
 get_filename_component(WSPCTL_HOST_WORKDIR "${WSPCTL_HOST_WORKDIR}" ABSOLUTE)
-#: @brief host socket 目录 / Host socket directory.
-set(WSPCTL_HOST_SOCKET_DIRECTORY "${WSPCTL_HOST_WORKDIR}/run")
+#: @brief host socket 根目录 / Host socket-root directory.
+set(WSPCTL_HOST_SOCKET_ROOT_DIRECTORY "${WSPCTL_HOST_WORKDIR}/run")
+#: @brief Bot 专属 host socket 目录 / Bot-exclusive host socket directory.
+#:
+#: 此目录是唯一允许 bind mount 到 Bot container 的 host object view。/
+#: This is the sole host-object view permitted to be bind-mounted into the Bot container.
+set(WSPCTL_HOST_SOCKET_DIRECTORY "${WSPCTL_HOST_SOCKET_ROOT_DIRECTORY}/bot")
 #: @brief host broker socket 路径 / Host broker socket path.
 set(WSPCTL_HOST_SOCKET_PATH "${WSPCTL_HOST_SOCKET_DIRECTORY}/wspctld.sock")
+#: @brief operator 专属 host socket 目录 / Operator-exclusive host socket directory.
+#:
+#: 它与 Bot view 处于不同目录，因此即使 container 获得 Bot socket directory 的只读 mount，也
+#: 无法枚举或引用 operator endpoint。/ It is a different directory from the Bot view, so even a
+#: read-only mount of the Bot socket directory cannot enumerate or reference the operator endpoint.
+set(WSPCTL_HOST_OPERATOR_SOCKET_DIRECTORY "${WSPCTL_HOST_SOCKET_ROOT_DIRECTORY}/operator")
+#: @brief host operator broker socket 路径 / Host operator broker socket path.
+#:
+#: 此路径绝不被 Bot 配置或容器 bind mount 引用；它是 root/operator 专属的独立 control-plane
+#: endpoint。/ This path is never referenced by Bot configuration or a container bind mount; it is
+#: an independent control-plane endpoint exclusive to root/the operator.
+set(WSPCTL_HOST_OPERATOR_SOCKET_PATH "${WSPCTL_HOST_OPERATOR_SOCKET_DIRECTORY}/wspctld.sock")
+#: @brief 安装后的 operator CLI 默认 endpoint / Default endpoint compiled into the installed operator CLI.
+#:
+#: 这是 configure-time 固定的 host control-plane path；CLI 可以以 `--socket` 显式覆盖，但绝不
+#: 从 cwd、Bot 配置或环境变量猜测 endpoint。/ This is a configure-time fixed host-control-plane
+#: path. The CLI may explicitly override it with `--socket`, but never guesses an endpoint from a
+#: cwd, Bot configuration, or environment variable.
+target_compile_definitions(
+    wspctl
+    PRIVATE
+        WSPCTL_DEFAULT_OPERATOR_SOCKET="${WSPCTL_HOST_OPERATOR_SOCKET_PATH}"
+)
 #: @brief root-owned host broker 环境文件路径 / Root-owned host broker environment-file path.
 set(WSPCTL_HOST_ENVIRONMENT_PATH "${WSPCTL_HOST_WORKDIR}/wspctld.env")
 #: @brief 持久 Overlay/journal 状态根 / Persistent Overlay/journal state root.

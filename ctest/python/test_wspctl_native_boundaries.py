@@ -23,6 +23,25 @@ APPLICATION_HEADER = (
     / "application"
     / "runtime_activation.hpp"
 )
+#: @brief RuntimeProcess 状态查询用例头路径 / RuntimeProcess status-query use-case header path.
+RUNTIME_STATUS_HEADER = (
+    REPOSITORY_ROOT
+    / "src"
+    / "wspctl"
+    / "include"
+    / "wspctl"
+    / "application"
+    / "runtime_status.hpp"
+)
+#: @brief RuntimeProcess 状态查询用例实现路径 / RuntimeProcess status-query use-case implementation path.
+RUNTIME_STATUS_SOURCE = (
+    REPOSITORY_ROOT
+    / "src"
+    / "wspctl"
+    / "src"
+    / "application"
+    / "runtime_status.cpp"
+)
 #: @brief sandbox 实现路径 / Sandbox implementation path.
 SANDBOX_SOURCE = (
     REPOSITORY_ROOT / "src" / "wspctl" / "src" / "infrastructure" / "sandbox.cpp"
@@ -232,6 +251,46 @@ def test_broker_uses_application_lifecycle_port_in_real_paths() -> None:
     assert "PRIVATE\n        wspctl_application" in infrastructure_block
 
 
+def test_runtime_status_is_a_read_only_application_query() -> None:
+    """@brief status 必须经过 application read port，且不启动 runtime / status must go through an application read port and must not activate a runtime.
+
+    该断言保护 ``RuntimeProcess.status()`` 的关键语义：它只报告已存在的快照，不能因观测
+    而创建 session、配置配额、写 journal、操作 OverlayFS 或向 PID1 发送控制命令。
+    This protects the essential ``RuntimeProcess.status()`` meaning: it reports an existing
+    snapshot only; observation cannot create a session, provision quota, write a journal, operate
+    OverlayFS, or send a PID1 control command.
+
+    @return None / None.
+    """
+
+    domain = DOMAIN_HEADER.read_text(encoding="utf-8")
+    application = RUNTIME_STATUS_HEADER.read_text(encoding="utf-8") + RUNTIME_STATUS_SOURCE.read_text(
+        encoding="utf-8"
+    )
+    broker = BROKER_SOURCE.read_text(encoding="utf-8")
+    assert "class RuntimeSnapshot" in domain
+    assert "RuntimeSnapshot snapshot() const;" in domain
+    assert "class RuntimeStatusPort" in application
+    assert "class RuntimeStatusService" in application
+    assert "domain::Result<RuntimeStatus> inspect(" in application
+    for prohibited in ("<sys/", "<filesystem>", "infrastructure/"):
+        assert prohibited not in application, f"status application layer leaked {prohibited}"
+    status_start = broker.index("Result<RuntimeStatusResult> Broker::read_runtime_status(")
+    status_end = broker.index("Result<PayloadResult> Broker::replay_payload(", status_start)
+    status_block = broker[status_start:status_end]
+    assert "RuntimeStatusService service" in status_block
+    assert "service.inspect(query, port)" in status_block
+    for forbidden in (
+        "acquire_session(",
+        "ensure_runtime(",
+        "journal_",
+        "dispatch_payload_stream(",
+        "send_frame(session->control_fd",
+        "overlay",
+    ):
+        assert forbidden not in status_block, f"status query must not perform {forbidden}"
+
+
 def test_payload_replay_never_activates_or_provisions_state() -> None:
     """@brief attachment replay 只能读取既有回执/binding/object，绝不能激活 Runtime 或 provision XFS 状态 / Attachment replay may only read existing receipt/binding/object; it must never activate a Runtime or provision XFS state.
 
@@ -394,6 +453,7 @@ def _run_contract_tests() -> None:
     test_task_seccomp_preserves_broker_owned_xfs_project_quota()
     test_payload_resource_limits_are_irreversible_and_scoped()
     test_broker_uses_application_lifecycle_port_in_real_paths()
+    test_runtime_status_is_a_read_only_application_query()
     test_payload_replay_never_activates_or_provisions_state()
     test_helper_cleanup_uses_pidfd_not_reusable_pid1_number()
     test_launcher_self_joins_supervisor_cgroup_before_forking_pid1()

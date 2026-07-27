@@ -20,8 +20,12 @@ STATE_ROOT="$WORK_ROOT/state"
 LOOP_IMAGE="$WORK_ROOT/state.xfs.img"
 # @brief readonly generation publication root / Readonly generation publication root.
 IMAGES_ROOT="$WORK_ROOT/images"
-# @brief daemon socket path / Daemon socket path.
-SOCKET_PATH="$WORK_ROOT/run/wspctld.sock"
+# @brief Bot 专属 daemon socket 路径 / Bot-exclusive daemon socket path.
+SOCKET_PATH="$WORK_ROOT/run/bot/wspctld.sock"
+# @brief root/operator 专属 daemon socket 路径 / Root/operator-exclusive daemon socket path.
+OPERATOR_SOCKET_PATH="$WORK_ROOT/run/operator/wspctld.sock"
+# @brief root-owned broker environment 文件 / Root-owned broker environment file.
+ENVIRONMENT_FILE="$WORK_ROOT/wspctld.env"
 # @brief broker service name / Broker service name.
 SERVICE_NAME="wspctld.service"
 # @brief 整体健康状态 / Aggregate health status.
@@ -72,21 +76,58 @@ report_service() {
     fi
 }
 
-# @brief 报告 Unix socket 权限 / Report Unix-socket permissions.
+# @brief 报告一个 Unix socket 权限 / Report one Unix-socket permission boundary.
+# @param $1 显示名称 / Display name.
+# @param $2 socket 路径 / Socket path.
+# @param $3 期望 owner UID；空值表示只报告 / Expected owner UID; empty means report only.
 report_socket() {
+    local label="$1"
+    local socket_path="$2"
+    local expected_uid="$3"
     local socket_metadata
+    local actual_uid
+    local actual_mode
 
-    heading "control socket"
-    if [[ ! -S "$SOCKET_PATH" ]]; then
-        warning "socket missing: $SOCKET_PATH"
+    heading "$label socket"
+    if ! sudo test -S "$socket_path"; then
+        warning "socket missing: $socket_path"
         return 0
     fi
-    socket_metadata="$(stat --format='uid=%u gid=%g mode=%a size=%s' "$SOCKET_PATH" 2>/dev/null || true)"
+    socket_metadata="$(sudo stat --format='uid=%u gid=%g mode=%a size=%s' "$socket_path" 2>/dev/null || true)"
     [[ -n "$socket_metadata" ]] || {
         warning "无法读取 socket metadata"
         return 0
     }
-    ok "$SOCKET_PATH ($socket_metadata)"
+    actual_uid="$(sudo stat --format='%u' "$socket_path" 2>/dev/null || true)"
+    actual_mode="$(sudo stat --format='%a' "$socket_path" 2>/dev/null || true)"
+    if [[ "$actual_mode" != 600 || ( -n "$expected_uid" && "$actual_uid" != "$expected_uid" ) ]]; then
+        warning "$socket_path has unexpected ownership/mode ($socket_metadata)"
+        return 0
+    fi
+    ok "$socket_path ($socket_metadata)"
+}
+
+# @brief 从 root-owned broker 配置读取精确 Bot UID / Read the exact Bot UID from root-owned broker configuration.
+# @return 成功时输出十进制 UID；缺失或非法时非零 / Prints a decimal UID on success; nonzero when missing or invalid.
+configured_client_uid() {
+    local client_uid
+
+    sudo test -f "$ENVIRONMENT_FILE" || return 1
+    client_uid="$(sudo awk -F= '$1 == "WSPCTL_CLIENT_UID" { value = $2 } END { print value }' "$ENVIRONMENT_FILE" 2>/dev/null)"
+    [[ "$client_uid" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$client_uid"
+}
+
+# @brief 同时报告 Bot 与 operator socket 的独立 ACL 边界 / Report the independent ACL boundaries of Bot and operator sockets.
+report_sockets() {
+    local client_uid
+
+    if ! client_uid="$(configured_client_uid)"; then
+        warning "无法从 $ENVIRONMENT_FILE 读取有效 WSPCTL_CLIENT_UID"
+        return 0
+    fi
+    report_socket "Bot control" "$SOCKET_PATH" "$client_uid"
+    report_socket "operator control" "$OPERATOR_SOCKET_PATH" "0"
 }
 
 # @brief 报告 loop image、关联 device 与 XFS mount / Report loop image, associated device, and XFS mount.
@@ -141,7 +182,7 @@ report_runtime_aggregates() {
 }
 
 report_service
-report_socket
+report_sockets
 report_storage
 report_runtime_aggregates
 

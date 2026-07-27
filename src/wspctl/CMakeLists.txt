@@ -55,6 +55,7 @@ endfunction()
 # Dependency direction is intentionally one way: domain -> application -> infrastructure -> presentation.
 # The domain target is pure C++ and must never acquire host, Linux, filesystem, socket, or pybind headers.
 add_library(wspctl_domain STATIC
+    src/domain/operator_workspace.cpp
     src/domain/runtime.cpp
 )
 set_target_properties(wspctl_domain PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -65,7 +66,9 @@ target_include_directories(wspctl_domain
 wspctl_enable_warnings(wspctl_domain)
 
 add_library(wspctl_application STATIC
+    src/application/operator_workspace.cpp
     src/application/runtime_activation.cpp
+    src/application/runtime_status.cpp
 )
 set_target_properties(wspctl_application PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(wspctl_application
@@ -82,6 +85,9 @@ add_library(wspctl_infrastructure STATIC
     src/infrastructure/broker.cpp
     src/infrastructure/image.cpp
     src/infrastructure/journal.cpp
+    src/infrastructure/operator_endpoint.cpp
+    src/infrastructure/operator_protocol.cpp
+    src/infrastructure/operator_workspace_reader.cpp
     src/infrastructure/payload_replay.cpp
     src/infrastructure/pidfd_control.cpp
     src/infrastructure/protocol.cpp
@@ -110,6 +116,7 @@ wspctl_enable_warnings(wspctl_infrastructure)
 
 # Presentation owns process entry points and Python/Unix-facing adapters.  It only depends downwards.
 add_library(wspctl_presentation STATIC
+    src/presentation/operator_gateway.cpp
     src/presentation/unix_gateway.cpp
 )
 set_target_properties(wspctl_presentation PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -135,6 +142,10 @@ wspctl_enable_warnings(wsp-systemd)
 add_executable(wspctl-image src/presentation/image/main.cpp)
 target_link_libraries(wspctl-image PRIVATE wspctl_presentation)
 wspctl_enable_warnings(wspctl-image)
+
+add_executable(wspctl src/presentation/operator/main.cpp)
+target_link_libraries(wspctl PRIVATE wspctl_presentation)
+wspctl_enable_warnings(wspctl)
 
 pybind11_add_module(_native MODULE src/presentation/python/bindings.cpp)
 target_link_libraries(_native PRIVATE wspctl_presentation)
@@ -167,6 +178,6 @@ install(FILES __init__.py _native.pyi py.typed DESTINATION wspctl)
 if(WSPCTL_INSTALL_HOST_TOOLS)
     # wsp-systemd is copied by the immutable-image build into the same logical in-image
     # path. wspctld never executes a host path after pivot_root.
-    install(TARGETS wspctld wspctl-image RUNTIME DESTINATION bin)
+    install(TARGETS wspctld wspctl-image wspctl RUNTIME DESTINATION bin)
     install(TARGETS wsp-systemd RUNTIME DESTINATION libexec/wspctl)
 endif()
