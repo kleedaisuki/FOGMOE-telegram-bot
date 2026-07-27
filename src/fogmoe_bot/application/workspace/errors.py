@@ -2,17 +2,67 @@
 
 from __future__ import annotations
 
+import re
+
 from fogmoe_bot.domain.workspace.runtime import WorkspaceRequestId
+
+_DIAGNOSTIC_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+"""@brief Workspace 机器诊断码的安全格式 / Safe format for Workspace machine diagnostic codes."""
+_DIAGNOSTIC_MESSAGE_LIMIT = 1000
+"""@brief Workspace 安全诊断消息字符上限 / Character limit for safe Workspace diagnostic messages."""
 
 
 class WorkspaceRuntimeUnavailableError(RuntimeError):
     """@brief 隔离 runtime 无法安全使用 / The isolated runtime cannot be used safely.
 
+    @param message 调用方安全的稳定错误摘要 / Stable caller-safe error summary.
+    @param diagnostic_code 可选机器诊断码 / Optional machine diagnostic code.
+    @param diagnostic_message 可选、受控且有界的运维诊断 / Optional controlled and bounded operator diagnostic.
     @note 包括 native module 缺失、supervisor 连接失败和执行期间的 host-side transport
         失败。调用方不得回退到宿主机 Bash/Python。/ This includes a missing native module,
         supervisor connection failures, and host-side transport failures during execution.
         Callers must not fall back to host Bash/Python.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostic_code: str | None = None,
+        diagnostic_message: str | None = None,
+    ) -> None:
+        """@brief 构造带安全运维诊断的 unavailable 错误 / Construct an unavailable error with safe operator diagnostics.
+
+        @param message 调用方可见的稳定摘要 / Stable caller-visible summary.
+        @param diagnostic_code native binding 明确声明的机器码 / Machine code explicitly declared by the native binding.
+        @param diagnostic_message native binding 明确声明的安全消息 / Safe message explicitly declared by the native binding.
+        @return None / None.
+        @note 诊断字段只接受受控 native metadata；不得放入 Bash 命令、stdin 或 payload。/
+            Diagnostic fields accept only controlled native metadata and must never contain Bash
+            commands, stdin, or payload bytes.
+        """
+
+        self.diagnostic_code = _normalize_diagnostic_code(diagnostic_code)
+        """@brief 可用于 span/receipt 的稳定机器码 / Stable machine code suitable for spans and receipts."""
+        self.diagnostic_message = _normalize_diagnostic_message(diagnostic_message)
+        """@brief 可用于受限运维面的安全消息 / Safe message suitable for bounded operator surfaces."""
+        super().__init__(message)
+
+    def diagnostic_summary(self) -> str | None:
+        """@brief 生成不含请求载荷的有界诊断摘要 / Build a bounded diagnostic summary without request payloads.
+
+        @return 可持久化摘要；没有结构化诊断时为 None /
+            Persistable summary, or None when no structured diagnostic is available.
+        """
+
+        if self.diagnostic_code is None:
+            return None
+        if self.diagnostic_message is None:
+            return f"workspace native error [{self.diagnostic_code}]"
+        return (
+            f"workspace native error [{self.diagnostic_code}]: "
+            f"{self.diagnostic_message}"
+        )
 
 
 class WorkspaceRuntimeProtocolError(WorkspaceRuntimeUnavailableError):
@@ -81,6 +131,34 @@ class WorkspaceInvocationOutcomeUnknownError(RuntimeError):
         self.request_id = request_id
         """@brief 结果不可判定的稳定请求标识 / Stable request ID with indeterminate outcome."""
         super().__init__(f"Workspace invocation outcome is unknown: {request_id}")
+
+
+def _normalize_diagnostic_code(value: str | None) -> str | None:
+    """@brief 校验 native 机器诊断码 / Validate a native machine diagnostic code.
+
+    @param value 候选机器码 / Candidate machine code.
+    @return 安全机器码；非法或缺失时为 None / Safe machine code, or None when absent or invalid.
+    """
+
+    if value is None or _DIAGNOSTIC_CODE_PATTERN.fullmatch(value) is None:
+        return None
+    return value
+
+
+def _normalize_diagnostic_message(value: str | None) -> str | None:
+    """@brief 规范化 native 运维消息并移除控制字符 / Normalize a native operator message and remove control characters.
+
+    @param value native binding 显式提供的候选消息 / Candidate message explicitly supplied by the native binding.
+    @return 单行有界消息；缺失或空白时为 None / Bounded single-line message, or None when absent or blank.
+    """
+
+    if value is None:
+        return None
+    normalized = "".join(
+        character if character.isprintable() else " " for character in value
+    )
+    normalized = " ".join(normalized.split())
+    return normalized[:_DIAGNOSTIC_MESSAGE_LIMIT] or None
 
 
 __all__ = [

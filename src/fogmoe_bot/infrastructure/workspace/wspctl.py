@@ -221,7 +221,9 @@ class WspctlRuntimeProcessFactory:
             process = process_type(self._socket_path, str(key), activation_id)
         except Exception as error:
             raise WorkspaceRuntimeUnavailableError(
-                "wspctl native runtime is unavailable"
+                "wspctl native runtime is unavailable",
+                diagnostic_code=_native_error_code(error),
+                diagnostic_message=_native_error_message(error),
             ) from error
         if (
             not callable(getattr(process, "execute", None))
@@ -1057,8 +1059,13 @@ class WspctlRuntimeProcess(RuntimeProcess):
             raise WorkspaceRuntimeUnavailableError(
                 "wspctl RuntimeProcess creation failed without an error"
             )
+        diagnostic_code, diagnostic_message = _workspace_error_diagnostics(
+            outcome.error
+        )
         raise WorkspaceRuntimeUnavailableError(
-            "wspctl RuntimeProcess creation failed"
+            "wspctl RuntimeProcess creation failed",
+            diagnostic_code=diagnostic_code,
+            diagnostic_message=diagnostic_message,
         ) from outcome.error
 
     async def _execute_entry(
@@ -1288,7 +1295,9 @@ def _execute_native_process(
         if _native_error_code(error) == "invocation_in_doubt":
             raise WorkspaceInvocationOutcomeUnknownError(command.request_id) from error
         raise WorkspaceRuntimeUnavailableError(
-            "wspctl RuntimeProcess execution failed"
+            "wspctl RuntimeProcess execution failed",
+            diagnostic_code=_native_error_code(error),
+            diagnostic_message=_native_error_message(error),
         ) from error
     return _decode_native_result(raw_result, command)
 
@@ -1324,7 +1333,9 @@ def _add_file_native_process(
         if _native_error_code(error) == "invocation_in_doubt":
             raise WorkspaceInvocationOutcomeUnknownError(command.request_id) from error
         raise WorkspaceRuntimeUnavailableError(
-            "wspctl RuntimeProcess payload ingress failed"
+            "wspctl RuntimeProcess payload ingress failed",
+            diagnostic_code=_native_error_code(error),
+            diagnostic_message=_native_error_message(error),
         ) from error
     return _decode_native_file_result(raw_result, command)
 
@@ -1366,7 +1377,9 @@ def _replay_file_native_process(
         if error_code == "invocation_in_doubt":
             raise WorkspaceInvocationOutcomeUnknownError(command.request_id) from error
         raise WorkspaceRuntimeUnavailableError(
-            "wspctl RuntimeProcess payload replay failed"
+            "wspctl RuntimeProcess payload replay failed",
+            diagnostic_code=error_code,
+            diagnostic_message=_native_error_message(error),
         ) from error
     return _decode_native_file_result(raw_result, command, require_replayed=True)
 
@@ -1507,6 +1520,35 @@ def _native_error_code(error: Exception) -> str | None:
 
     code = getattr(error, "code", None)
     return code if isinstance(code, str) else None
+
+
+def _native_error_message(error: Exception) -> str | None:
+    """@brief 读取 pybind 专用异常显式声明的安全消息 / Read the safe message explicitly declared by a pybind exception.
+
+    @param error native client 抛出的异常 / Exception raised by the native client.
+    @return binding 显式提供的消息；普通异常为 None /
+        Message explicitly provided by the binding, or None for ordinary exceptions.
+    @note 不回退到 ``str(error)``，避免把任意 SDK 异常或请求载荷提升为可信诊断。/
+        This deliberately does not fall back to ``str(error)`` so arbitrary SDK exceptions or
+        request payloads cannot be promoted to trusted diagnostics.
+    """
+
+    message = getattr(error, "message", None)
+    return message if isinstance(message, str) else None
+
+
+def _workspace_error_diagnostics(
+    error: Exception,
+) -> tuple[str | None, str | None]:
+    """@brief 从已翻译 Workspace 错误复制结构化诊断 / Copy structured diagnostics from a translated Workspace error.
+
+    @param error runtime 创建路径捕获的异常 / Exception captured by the runtime creation path.
+    @return 机器码与安全消息 / Machine code and safe message.
+    """
+
+    if not isinstance(error, WorkspaceRuntimeUnavailableError):
+        return None, None
+    return error.diagnostic_code, error.diagnostic_message
 
 
 def _utf8_byte_length(value: str) -> int:

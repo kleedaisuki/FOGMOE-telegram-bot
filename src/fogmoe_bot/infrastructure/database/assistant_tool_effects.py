@@ -24,6 +24,7 @@ from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectConflictError,
     ToolEffectRequest,
 )
+from fogmoe_bot.application.workspace.errors import WorkspaceRuntimeUnavailableError
 from fogmoe_bot.domain.assistant.messages import (
     CanonicalMessage,
     CanonicalMessageError,
@@ -243,8 +244,8 @@ class PostgresAssistantToolStore:
             # Cancellation may not stop an offloaded SDK call.  Keep the fencing
             # lease so a second process cannot immediately duplicate the effect.
             raise
-        except Exception:
-            await self._release_failed_claim(request, token=token)
+        except Exception as error:
+            await self._release_failed_claim(request, token=token, error=error)
             raise
 
     async def _claim(
@@ -389,22 +390,26 @@ class PostgresAssistantToolStore:
         request: ToolEffectRequest,
         *,
         token: uuid.UUID,
+        error: Exception,
     ) -> None:
         """@brief 释放显式失败 claim；kill-9 由 lease 回收 / Release an explicit failure; leases recover kill-9.
 
         @param request 工具请求 / Tool request.
         @param token fencing token / Fencing token.
+        @param error operation 抛出的失败 / Failure raised by the operation.
         @return None / None.
         """
 
+        failure_detail = _safe_failure_detail(error)
         try:
             await db.execute(
                 "UPDATE assistant.tool_effect_receipts SET status = 'pending', claim_token = NULL, "
-                "lease_expires_at = NULL, updated_at = %s, last_error = 'operation failed' "
+                "lease_expires_at = NULL, updated_at = %s, last_error = %s "
                 "WHERE turn_id = CAST(%s AS UUID) AND invocation_id = %s AND effect_kind = %s "
                 "AND status = 'processing' AND claim_token = CAST(%s AS UUID)",
                 (
                     _aware(self._now()),
+                    failure_detail,
                     str(request.context.turn_id),
                     request.invocation_id,
                     request.effect_kind,
@@ -493,6 +498,23 @@ async def _mark_succeeded(
         raise ToolEffectBusyError(
             f"Stale tool receipt claim for {request.invocation_id}"
         )
+
+
+def _safe_failure_detail(error: Exception) -> str:
+    """@brief 为 receipt 选择不含请求载荷的失败摘要 / Select a receipt failure summary without request payloads.
+
+    @param error operation 抛出的失败 / Failure raised by the operation.
+    @return 有界安全摘要 / Bounded safe summary.
+    @note 任意异常文本默认不可信；只有 Workspace error 显式声明的结构化诊断可进入
+        receipt。/ Arbitrary exception text is untrusted by default; only structured diagnostics
+        explicitly declared by a Workspace error may enter the receipt.
+    """
+
+    if isinstance(error, WorkspaceRuntimeUnavailableError):
+        summary = error.diagnostic_summary()
+        if summary is not None:
+            return summary
+    return "operation failed"
 
 
 def _checkpoint(

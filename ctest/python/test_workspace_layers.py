@@ -518,15 +518,17 @@ class _RecordingRuntimeProcess:
 class _NativeRuntimeProcessError(RuntimeError):
     """@brief pybind 结构化 native 错误替身 / Double for a structured pybind native error."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, message: str | None = None) -> None:
         """@brief 保存机器错误码 / Store the machine error code.
 
         @param code native binding 的稳定错误码 / Stable error code from the native binding.
+        @param message native binding 的安全诊断消息 / Safe diagnostic message from the native binding.
         @return None / None.
         """
 
         self.code = code
-        super().__init__(code)
+        self.message = code if message is None else message
+        super().__init__(self.message)
 
 
 class _FakeTransaction:
@@ -1501,6 +1503,46 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
             result,
             {"status": "outcome_unknown", "replayed_by_runtime": False},
         )
+
+    async def test_structured_native_failure_preserves_safe_diagnostics(self) -> None:
+        """@brief native 机器码与安全消息穿过应用异常 / Native machine code and safe message survive application translation.
+
+        @return None / None.
+        """
+
+        native_error = _NativeRuntimeProcessError(
+            "sandbox_preflight_failed",
+            "  cannot mount overlay\nfor runtime  ",
+        )
+        runner = WspctlRuntimeProcess(
+            registry=_StaticRegistry(WorkspaceRuntimeKey.new()),
+            process_factory=_FakeFactory(
+                _FakeNativeProcess(execute_error=native_error)
+            ),
+        )
+
+        with self.assertRaises(WorkspaceRuntimeUnavailableError) as captured:
+            await runner.run_bash(_command())
+
+        self.assertEqual(
+            str(captured.exception),
+            "wspctl RuntimeProcess execution failed",
+        )
+        self.assertEqual(
+            captured.exception.diagnostic_code,
+            "sandbox_preflight_failed",
+        )
+        self.assertEqual(
+            captured.exception.diagnostic_message,
+            "cannot mount overlay for runtime",
+        )
+        self.assertEqual(
+            captured.exception.diagnostic_summary(),
+            "workspace native error [sandbox_preflight_failed]: "
+            "cannot mount overlay for runtime",
+        )
+        self.assertIs(captured.exception.__cause__, native_error)
+        await runner.close()
 
     def test_missing_pybind_module_fails_closed(self) -> None:
         """@brief pybind module 缺失不会回退到 host subprocess / A missing pybind module never falls back to a host subprocess.

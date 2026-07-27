@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -23,7 +24,8 @@ from fogmoe_bot.application.memory.ports import (
     WorkingMemoryReader,
 )
 from fogmoe_bot.application.memory.rendering import compose_model_messages
-from fogmoe_bot.application.observability.telemetry import Telemetry
+from fogmoe_bot.application.observability.telemetry import SpanScope, Telemetry
+from fogmoe_bot.application.workspace.errors import WorkspaceRuntimeUnavailableError
 from fogmoe_bot.domain.assistant.messages import (
     CanonicalMessage,
     FrozenJsonValue,
@@ -186,6 +188,10 @@ class AgentExecutionState:
             base_messages=messages,
             messages=list(messages),
         )
+
+
+_LOGGER = logging.getLogger(__name__)
+"""@brief Agent 工具执行诊断日志器 / Diagnostic logger for Agent tool execution."""
 
 
 class AgentLoop:
@@ -413,7 +419,14 @@ class AgentLoop:
                         tool_name=call.name,
                         raw_arguments=call.arguments,
                     )
-                except Exception:
+                except Exception as error:
+                    _annotate_workspace_failure(span, error)
+                    _LOGGER.exception(
+                        "Assistant tool execution failed tool_name=%s step=%s ordinal=%s",
+                        call.name,
+                        state.step,
+                        ordinal,
+                    )
                     self._telemetry.counter(
                         MetricName.TOOL_OUTCOMES,
                         attributes={
@@ -544,6 +557,25 @@ def _completion_request_hash(
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _annotate_workspace_failure(span: SpanScope, error: Exception) -> None:
+    """@brief 把受控 Workspace 诊断加入当前工具 span / Add controlled Workspace diagnostics to the current tool span.
+
+    @param span 当前 ``agent.tool.execute`` span / Current ``agent.tool.execute`` span.
+    @param error 工具执行异常 / Tool execution exception.
+    @return None / None.
+    @note 只记录 Workspace 异常显式暴露的安全字段，不读取命令、stdin、参数或任意
+        ``str(error)``。/ Only safe fields explicitly exposed by Workspace exceptions are
+        recorded; commands, stdin, arguments, and arbitrary ``str(error)`` values are never read.
+    """
+
+    if not isinstance(error, WorkspaceRuntimeUnavailableError):
+        return
+    if error.diagnostic_code is not None:
+        span.set_attribute("workspace.error.code", error.diagnostic_code)
+    if error.diagnostic_message is not None:
+        span.set_attribute("workspace.error.message", error.diagnostic_message)
 
 
 def _route_fingerprint(route: ProviderRoute) -> JsonObject:
