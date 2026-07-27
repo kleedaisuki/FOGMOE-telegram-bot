@@ -143,6 +143,15 @@ private:
         const PayloadBeginRequest& request);
 
     /**
+     * @brief 只读恢复已完成文件 ingress 的 durable receipt / Read-only replay of a completed file-ingress durable receipt.
+     * @param request 不含 activation 的已验证 replay 查询 / Validated activation-free replay query.
+     * @return ``replayed=true`` 的已验证收据，或 not-found/conflict/in-doubt / Verified receipt with ``replayed=true``, or not-found/conflict/in-doubt.
+     * @note 此路径不得创建 journal、不得传输 chunks，且不得调用 lazy session activation。
+     *       This path must not create a journal, transfer chunks, or call lazy session activation.
+     */
+    [[nodiscard]] Result<PayloadResult> replay_payload(const PayloadReplayRequest& request);
+
+    /**
      * @brief 在 worker 启动前创建单线程 fork-server / Create the single-threaded fork server before workers start.
      * @return 成功或 fail-closed 错误 / Success or a fail-closed error.
      */

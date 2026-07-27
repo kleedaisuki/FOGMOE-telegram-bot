@@ -3,6 +3,8 @@
 #include "wspctl/application/runtime_activation.hpp"
 #include "wspctl/domain/runtime.hpp"
 #include "wspctl/infrastructure/detail/launcher_transport.hpp"
+#include "wspctl/infrastructure/detail/payload_replay.hpp"
+#include "wspctl/infrastructure/detail/pidfd_control.hpp"
 #include "wspctl/infrastructure/protocol.hpp"
 
 #include <algorithm>
@@ -19,6 +21,7 @@
 #include <functional>
 #include <linux/close_range.h>
 #include <linux/magic.h>
+#include <memory>
 #include <poll.h>
 #include <mutex>
 #include <optional>
@@ -250,6 +253,52 @@ struct TypedPayloadAdmission final {
     return TypedPayloadAdmission{
         .runtime = std::move(*runtime),
         .activation = std::move(*activation),
+        .command = std::move(*command),
+        .request_hash = std::move(*request_hash),
+        .content_hash = std::move(*content_hash),
+    };
+}
+
+/**
+ * @brief 已通过领域值对象验证的只读文件恢复 admission / Read-only file-replay admission validated by domain value objects.
+ *
+ * 和写入 admission 分开表达，以类型系统禁止 replay 路径依赖 activation。/ This is represented
+ * separately from write admission so the type system prevents the replay path from depending on
+ * an activation.
+ */
+struct TypedPayloadReplayAdmission final {
+    /** @brief canonical long-lived runtime identity / Canonical long-lived runtime identity. */
+    domain::RuntimeId runtime;
+    /** @brief durable original ingress invocation identity / Durable original ingress invocation identity. */
+    domain::CommandId command;
+    /** @brief caller-supplied original semantic digest / Caller-supplied original semantic digest. */
+    domain::Sha256Digest request_hash;
+    /** @brief declared original complete-content digest / Declared original complete-content digest. */
+    domain::Sha256Digest content_hash;
+};
+
+/**
+ * @brief 在任何 durable storage 或 runtime session 前执行 typed replay admission / Perform typed replay admission before durable storage or a runtime session.
+ * @param request 已通过 wire parser 的 activation-free replay 请求 / Activation-free replay request accepted by the wire parser.
+ * @return 强类型 admission 或 transport error / Typed admission or a transport error.
+ */
+[[nodiscard]] Result<TypedPayloadReplayAdmission> admit_payload_replay_request(const PayloadReplayRequest& request) {
+    const auto runtime = domain::RuntimeId::parse(request.runtime_key);
+    const auto command = domain::CommandId::parse(request.request_id);
+    const auto request_hash = domain::Sha256Digest::parse(request.request_hash);
+    const auto content_hash = domain::Sha256Digest::parse(request.sha256);
+    if (!runtime || !command || !request_hash || !content_hash) {
+        const domain::Error* const error = !runtime
+            ? &runtime.error()
+            : !command
+            ? &command.error()
+            : !request_hash
+            ? &request_hash.error()
+            : &content_hash.error();
+        return std::unexpected(transport_error(*error));
+    }
+    return TypedPayloadReplayAdmission{
+        .runtime = std::move(*runtime),
         .command = std::move(*command),
         .request_hash = std::move(*request_hash),
         .content_hash = std::move(*content_hash),
@@ -1221,27 +1270,6 @@ enum class LauncherTerminalState : std::uint16_t {
     return std::unexpected(ready == 0 ? make_error(ErrorCode::timeout, "launcher did not exit after cgroup cleanup") : errno_error(ErrorCode::child_failure, "poll launcher pidfd"));
 }
 
-/**
- * @brief 以 pidfd 发送信号，避免 host PID reuse / Send a signal through a pidfd to avoid host PID reuse.
- * @param pidfd 目标 pidfd / Target pidfd.
- * @param signal 待发送信号 / Signal to send.
- * @return 目标已收到信号或已经退出时为真 / True when the target received the signal or has already exited.
- */
-[[nodiscard]] bool signal_pidfd(const int pidfd, const int signal) noexcept {
-    if (pidfd < 0) {
-        return false;
-    }
-#ifdef SYS_pidfd_send_signal
-    if (syscall(SYS_pidfd_send_signal, pidfd, signal, nullptr, 0U) == 0) {
-        return true;
-    }
-    return errno == ESRCH;
-#else
-    static_cast<void>(signal);
-    return false;
-#endif
-}
-
 /** @brief helper 保存的 launch 表 / Launch table retained by the helper. */
 using HelperLaunches = std::unordered_map<std::uint64_t, HelperLaunchRecord>;
 
@@ -1268,12 +1296,15 @@ void on_launcher_stop_signal(const int signal) {
 /** @brief 取消未 commit launch，并取得 helper 的 terminal/reap 状态 / Cancel an uncommitted launch and reach helper terminal/reap state. */
 [[nodiscard]] bool cancel_helper_launch(HelperLaunchRecord& record) noexcept {
     close_fd(record.retained_release_fd);
-    // Once a broker has released PID 1, closing the pipe alone is no longer sufficient.  PID 1
-    // is the namespace init, so terminating it asks the kernel to tear down the namespace task
-    // tree before the helper reaps its direct launcher child.  A raw host PID is deliberately
-    // never used here: PID reuse would let a privileged helper signal an unrelated process.
-    const bool pid1_terminal = signal_pidfd(record.pid1_pidfd, SIGTERM);
-    close_fd(record.pid1_pidfd);
+    // Once a broker has released PID 1, closing the pipe alone is no longer sufficient. Linux
+    // treats namespace PID 1 specially: a SIGTERM with no installed handler may be ignored, and
+    // wsp-systemd deliberately does not install an async teardown handler. This helper path is
+    // only broker-loss/launch-cancellation recovery, not the normal graceful retirement path;
+    // SIGKILL through the identity-stable pidfd therefore provides the required namespace-wide
+    // termination guarantee before the helper reaps its direct launcher child. A raw host PID is
+    // deliberately never used here: PID reuse would let a privileged helper signal an unrelated
+    // process.
+    const bool pid1_terminal = detail::signal_and_close_pidfd(record.pid1_pidfd, SIGKILL);
     static_cast<void>(kill(record.launcher_pid, SIGTERM));
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -1585,6 +1616,8 @@ struct Broker::RuntimeSession final {
     domain::ActivationId activation;
     /** @brief 仅该 activation 可删除的 transient staging 层 / Transient staging layer deletable only for this activation. */
     TaskLayer layer;
+    /** @brief 覆盖存活 PID 1 与 cgroup 的 runtime activation 排他租约 / Runtime activation lease covering the live PID 1 and cgroup. */
+    std::optional<RuntimeActivationLease> activation_lease;
     /** @brief 最近使用时刻 / Last use time. */
     std::chrono::steady_clock::time_point last_used;
 
@@ -1925,7 +1958,11 @@ Result<void> Broker::retire_session(
             session->poisoned = true;
             return std::unexpected(exited.error());
         }
-        if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, session->layer); !cleaned) {
+        if (!session->activation_lease.has_value()) {
+            session->poisoned = true;
+            return std::unexpected(make_error(ErrorCode::internal, "running runtime session lost its activation lease"));
+        }
+        if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, *session->activation_lease, session->layer); !cleaned) {
             session->poisoned = true;
             return std::unexpected(cleaned.error());
         }
@@ -2148,11 +2185,22 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
     const auto activate_session = [&]() -> Result<std::shared_ptr<RuntimeSession>> {
         auto created = std::make_shared<RuntimeSession>(*runtime_id, *typed_activation_id);
         const auto establish = [this, &runtime_key, &activation_id, &created]() -> Result<void> {
-            const auto cgroup = prepare_runtime_cgroup(config_.sandbox, runtime_key);
+            auto activation_lease = quota_.acquire_activation_lease(runtime_key);
+            if (!activation_lease) {
+                return std::unexpected(activation_lease.error());
+            }
+            auto cgroup = prepare_runtime_cgroup(config_.sandbox, runtime_key);
             if (!cgroup) {
                 return std::unexpected(cgroup.error());
             }
-            const auto layer = prepare_task_layer(config_.sandbox, quota_, runtime_key, activation_id);
+            if (const auto reclaimed = reclaim_dead_task_layers(config_.sandbox, quota_, *activation_lease, runtime_key); !reclaimed) {
+                close_fd(cgroup->supervisor_procs_fd);
+                close_fd(cgroup->procs_fd);
+                close_fd(cgroup->kill_fd);
+                close_fd(cgroup->events_fd);
+                return std::unexpected(reclaimed.error());
+            }
+            const auto layer = prepare_task_layer(config_.sandbox, quota_, *activation_lease, activation_id);
             if (!layer) {
                 close_fd(cgroup->supervisor_procs_fd);
                 close_fd(cgroup->procs_fd);
@@ -2162,6 +2210,11 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
                     return std::unexpected(make_error(
                         ErrorCode::invocation_in_doubt,
                         "runtime cgroup could not be proven empty after task-layer preparation failure"));
+                }
+                if (const auto reclaimed = reclaim_dead_task_layers(config_.sandbox, quota_, *activation_lease, runtime_key); !reclaimed) {
+                    return std::unexpected(make_error(
+                        ErrorCode::invocation_in_doubt,
+                        "runtime task-layer preparation failed and transient staging recovery could not be proven"));
                 }
                 return std::unexpected(layer.error());
             }
@@ -2177,7 +2230,7 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
             const auto abort_prelaunch = [&](const Error& error) -> Result<void> {
                 close_controls();
                 const auto killed = kill_runtime_cgroup(config_.sandbox, runtime_key);
-                const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, *layer);
+                const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, *activation_lease, *layer);
                 if (!killed || !cleaned) {
                     return std::unexpected(make_error(
                         ErrorCode::invocation_in_doubt,
@@ -2210,7 +2263,7 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
                         "runtime launch failed and cgroup cleanup could not be proven"));
                 }
                 if (launched.error().code != ErrorCode::invocation_in_doubt) {
-                    if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, *layer); !cleaned) {
+                    if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, *activation_lease, *layer); !cleaned) {
                         return std::unexpected(make_error(
                             ErrorCode::invocation_in_doubt,
                             "runtime launch failed and activation staging cleanup could not be proven"));
@@ -2229,7 +2282,7 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
                         ErrorCode::invocation_in_doubt,
                         "runtime activation cleanup could not prove launcher and cgroup termination"));
                 }
-                if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, *layer); !cleaned) {
+                if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, *activation_lease, *layer); !cleaned) {
                     return std::unexpected(make_error(
                         ErrorCode::invocation_in_doubt,
                         "runtime activation staging cleanup could not be proven"));
@@ -2261,6 +2314,7 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
             created->launcher_pidfd = std::exchange(launched->launcher_pidfd, -1);
             created->control_fd = control[0];
             created->layer = *layer;
+            created->activation_lease.emplace(std::move(*activation_lease));
             created->last_used = std::chrono::steady_clock::now();
             return {};
         };
@@ -2278,7 +2332,10 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
             if (const auto exited = wait_launcher_exit(created->launcher_pidfd, std::chrono::seconds(5)); !exited) {
                 return std::unexpected(exited.error());
             }
-            if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, created->layer); !cleaned) {
+            if (!created->activation_lease.has_value()) {
+                return std::unexpected(make_error(ErrorCode::internal, "established runtime session lost its activation lease"));
+            }
+            if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, *created->activation_lease, created->layer); !cleaned) {
                 return std::unexpected(cleaned.error());
             }
             return {};
@@ -2405,6 +2462,40 @@ Result<ExecutionResult> Broker::dispatch(const ExecuteRequest& request) {
     }
     session.last_used = std::chrono::steady_clock::now();
     return *result;
+}
+
+Result<PayloadResult> Broker::replay_payload(const PayloadReplayRequest& request) {
+    if (const auto valid = validate_payload_replay_request(request); !valid) {
+        return std::unexpected(valid.error());
+    }
+    const auto admission = admit_payload_replay_request(request);
+    if (!admission) {
+        return std::unexpected(admission.error());
+    }
+    // This first read is deliberately before quota/session work. A missing record is the one
+    // normal signal for the Python import-intent workflow to download again, and it must leave
+    // no journal, RuntimeSession, cgroup, mount, or staging side effect behind.
+    const auto receipt = detail::resolve_payload_replay_receipt(journal_, request);
+    if (!receipt) {
+        return std::unexpected(receipt.error());
+    }
+    // The gate excludes an in-flight broker command or add_file stream from changing the same
+    // persistent upper tree while its no-follow object is hashed. It does not activate, replace,
+    // or otherwise inspect a RuntimeSession.
+    const auto gate = execution_gate_.try_acquire(admission->runtime.value());
+    if (!gate) {
+        return std::unexpected(gate.error());
+    }
+    const auto binding = quota_.find_ready_runtime(admission->runtime.value());
+    if (!binding) {
+        return std::unexpected(make_error(
+            ErrorCode::invocation_in_doubt,
+            "completed file receipt exists but its persistent quota binding cannot be proven: " + binding.error().message));
+    }
+    if (const auto object = detail::verify_replayable_payload_object(*binding, request, *receipt); !object) {
+        return std::unexpected(object.error());
+    }
+    return *receipt;
 }
 
 Result<void> Broker::dispatch_payload_stream(
@@ -2717,6 +2808,26 @@ Result<void> Broker::serve_client(const int client_fd) {
             }
             continue;
         }
+        if (frame->kind == MessageKind::payload_replay) {
+            const auto request = decode_payload_replay_request(frame->payload);
+            if (!request) {
+                if (const auto sent = send_error_frame(client_fd, request.error()); !sent) {
+                    return std::unexpected(sent.error());
+                }
+                continue;
+            }
+            const auto replay = replay_payload(*request);
+            if (!replay) {
+                if (const auto sent = send_error_frame(client_fd, replay.error()); !sent) {
+                    return std::unexpected(sent.error());
+                }
+                continue;
+            }
+            if (const auto sent = send_payload_result_frame(client_fd, *replay); !sent) {
+                return std::unexpected(sent.error());
+            }
+            continue;
+        }
         if (frame->kind == MessageKind::payload_begin) {
             const auto request = decode_payload_begin_request(frame->payload);
             if (!request) {
@@ -2773,7 +2884,7 @@ Result<void> Broker::serve_client(const int client_fd) {
             return {};
         }
         if (frame->kind != MessageKind::execute) {
-            if (const auto sent = send_error_frame(client_fd, make_error(ErrorCode::protocol_violation, "broker accepts execute or file ingress only")); !sent) {
+            if (const auto sent = send_error_frame(client_fd, make_error(ErrorCode::protocol_violation, "broker accepts execute, file ingress, or file replay only")); !sent) {
                 return std::unexpected(sent.error());
             }
             continue;

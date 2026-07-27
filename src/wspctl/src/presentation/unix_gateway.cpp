@@ -105,6 +105,22 @@ void close_fd(const int fd) noexcept {
 }
 
 /**
+ * @brief 将 presentation DTO 转换为只读 replay control request / Convert a presentation DTO into a read-only replay control request.
+ * @param request presentation 文件恢复 DTO / Presentation file-replay DTO.
+ * @return control-plane 文件恢复查询 / Control-plane file-replay query.
+ */
+[[nodiscard]] PayloadReplayRequest to_payload_replay_request(const ClientReplayFileRequest& request) {
+    return PayloadReplayRequest{
+        .runtime_key = request.runtime_key,
+        .request_id = request.request_id,
+        .request_hash = request.request_hash,
+        .opaque_id = request.opaque_id,
+        .byte_size = request.byte_size,
+        .sha256 = request.sha256,
+    };
+}
+
+/**
  * @brief 将 control-plane 文件收据转换为 presentation DTO / Convert a control-plane file receipt into a presentation DTO.
  * @param result control-plane 文件收据 / Control-plane file receipt.
  * @return presentation 文件收据 / Presentation file receipt.
@@ -475,6 +491,57 @@ Result<ClientAddFileResult> UnixGatewayClient::add_file(
         return close_with_error(make_error(ErrorCode::protocol_violation, "broker returned an invalid file receipt"));
     }
     transfer_guard.disarm();
+    return to_client_file_result(*result);
+}
+
+Result<ClientAddFileResult> UnixGatewayClient::replay_file(const ClientReplayFileRequest& client_request) const {
+    if (const auto endpoint = validate_socket_path(socket_path_); !endpoint) {
+        return std::unexpected(endpoint.error());
+    }
+    const PayloadReplayRequest request = to_payload_replay_request(client_request);
+    if (const auto valid = validate_payload_replay_request(request); !valid) {
+        return std::unexpected(valid.error());
+    }
+    /** @brief 单个只读 recovery lookup 的本机 I/O deadline / Local I/O deadline for one read-only recovery lookup. */
+    constexpr auto kReplayIoDeadline = std::chrono::seconds(5);
+    const auto connected = connect_authenticated_broker(socket_path_, kReplayIoDeadline);
+    if (!connected) {
+        return std::unexpected(connected.error());
+    }
+    const int fd = *connected;
+    const auto close_with_error = [fd](const Error& error) -> Result<ClientAddFileResult> {
+        close_fd(fd);
+        return std::unexpected(error);
+    };
+    const auto payload = encode_payload_replay_request(request);
+    if (!payload) {
+        return close_with_error(payload.error());
+    }
+    const auto outbound = encode_frame(MessageKind::payload_replay, *payload);
+    if (!outbound) {
+        return close_with_error(outbound.error());
+    }
+    if (const auto sent = send_frame(fd, *outbound); !sent) {
+        return close_with_error(sent.error());
+    }
+    const auto inbound = receive_decoded_frame(fd);
+    if (!inbound) {
+        return close_with_error(inbound.error());
+    }
+    close_fd(fd);
+    if (inbound->kind == MessageKind::error) {
+        const auto error = return_broker_error(*inbound);
+        return std::unexpected(error.error());
+    }
+    if (inbound->kind != MessageKind::payload_result) {
+        return std::unexpected(make_error(ErrorCode::protocol_violation, "broker returned an unexpected file replay frame"));
+    }
+    const auto result = decode_payload_result(inbound->payload);
+    const std::string expected_path = "/workspace/uploads/" + request.opaque_id + "/payload";
+    if (!result || !result->replayed || result->request_id != request.request_id || result->path != expected_path ||
+        result->byte_size != request.byte_size || result->sha256 != request.sha256) {
+        return std::unexpected(make_error(ErrorCode::protocol_violation, "broker returned an invalid file replay receipt"));
+    }
     return to_client_file_result(*result);
 }
 

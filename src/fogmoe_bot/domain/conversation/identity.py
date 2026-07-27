@@ -19,6 +19,9 @@ _OUTBOUND_MESSAGE_ID_NAMESPACE = UUID("1b753d09-b330-55c9-8354-3d47cf7c9999")
 _INFERENCE_ACTIVITY_ID_NAMESPACE = UUID("0aa627d4-6ea0-5a5d-92bd-91aca8c09175")
 """@brief Turn→Inference Activity UUIDv5 命名空间 / UUIDv5 namespace for Turn-to-Inference-Activity mapping."""
 
+CURRENT_USER_MESSAGE_SEMANTIC_KEY = "user.input"
+"""@brief 每个主 Turn 唯一用户输入消息的语义键 / Semantic key of the sole user-input message of a primary Turn."""
+
 
 @dataclass(frozen=True, slots=True, order=True)
 class _UuidIdentifier:

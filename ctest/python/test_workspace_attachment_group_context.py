@@ -215,6 +215,66 @@ class WorkspaceAttachmentGroupContextTests(unittest.TestCase):
                         "caption": forbidden_caption,
                     },
                 ),
+                _update(
+                    update_id=4,
+                    message_id=4,
+                    media={
+                        "voice": {
+                            "file_id": forbidden_file_id,
+                            "file_unique_id": "voice-unique",
+                            "mime_type": "audio/ogg",
+                        },
+                        "caption": forbidden_caption,
+                    },
+                ),
+                _update(
+                    update_id=5,
+                    message_id=5,
+                    media={
+                        "audio": {
+                            "file_id": forbidden_file_id,
+                            "file_unique_id": "audio-unique",
+                            "file_name": forbidden_file_name,
+                        },
+                        "caption": forbidden_caption,
+                    },
+                ),
+                _update(
+                    update_id=6,
+                    message_id=6,
+                    media={
+                        "video": {
+                            "file_id": forbidden_file_id,
+                            "file_unique_id": "video-unique",
+                            "file_name": forbidden_file_name,
+                        },
+                        "caption": forbidden_caption,
+                    },
+                ),
+                _update(
+                    update_id=7,
+                    message_id=7,
+                    media={
+                        "animation": {
+                            "file_id": forbidden_file_id,
+                            "file_unique_id": "animation-unique",
+                            "file_name": forbidden_file_name,
+                        },
+                        "caption": forbidden_caption,
+                    },
+                ),
+                _update(
+                    update_id=8,
+                    message_id=8,
+                    media={
+                        "video_note": {
+                            "file_id": forbidden_file_id,
+                            "file_unique_id": "video-note-unique",
+                            "length": 240,
+                        },
+                        "caption": forbidden_caption,
+                    },
+                ),
             )
             messages = tuple(_as_group_message(update) for update in updates)
             self.assertTrue(

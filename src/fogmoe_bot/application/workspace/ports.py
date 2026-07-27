@@ -8,6 +8,7 @@ from fogmoe_bot.domain.workspace.scope import RuntimeScope
 from .models import (
     AddFileCommand,
     AddFileResult,
+    ReplayFileCommand,
     RunBashCommand,
     RunBashResult,
 )
@@ -65,6 +66,28 @@ class RuntimeProcess(Protocol):
             Implementations must share the same runtime cache entry, per-runtime execution lock,
             and global admission slot with ``run_bash``; otherwise a file ingress and a command could
             concurrently modify the same OverlayFS workspace.
+        """
+
+        ...
+
+    async def replay_file(self, command: ReplayFileCommand) -> AddFileResult:
+        """@brief 只读回放已完成的 payload journal / Read-only replay of a completed payload journal.
+
+        @param command 只含 immutable intent 元数据的 journal 查询 / Journal lookup containing only immutable intent metadata.
+        @return 已完成 payload 的规范文件收据；``replayed`` 必须为 ``True`` /
+            Canonical receipt of a completed payload; ``replayed`` must be ``True``.
+        @raise WorkspaceFileReplayNotFoundError 仅当 native 明确证实没有该 journal 时抛出 /
+            Raised only when native explicitly proves that this journal does not exist.
+        @raise WorkspaceInvocationOutcomeUnknownError 存在 pending journal 或 payload 对象不可验证时抛出 /
+            Raised when a pending journal exists or the payload object cannot be verified.
+        @raise WorkspaceRuntimeUnavailableError native runtime 无法安全使用时抛出 /
+            Raised when the native runtime cannot be used safely.
+        @note 该方法绝不创建 journal、不消费 bytes，也不对 Workspace 作任何写入；它与
+            ``add_file`` 共享 cache、串行锁及 admission，只是因为同一 broker session 的
+            payload 恢复检查必须和其他 Workspace mutation 有序。/ This method never creates a
+            journal, consumes bytes, or writes the Workspace; it shares ``add_file``'s cache,
+            serialization lock, and admission because payload recovery checks for one broker
+            session must remain ordered with other Workspace mutations.
         """
 
         ...

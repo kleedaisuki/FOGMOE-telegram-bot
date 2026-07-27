@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0070_workspace_attachment_model_boundary
--- Alembic head: 0070_workspace_attachment_model_boundary
+-- Source migrations: 0001_initial through 0072_workspace_attachment_import_intents
+-- Alembic head: 0072_workspace_attachment_import_intents
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and retired user-plan backfill) and the
@@ -1601,6 +1601,637 @@ $$;
 CREATE TRIGGER workspace_runtimes_immutable_tr
 BEFORE UPDATE OR DELETE ON workspace.runtimes
 FOR EACH ROW EXECUTE FUNCTION workspace.forbid_runtime_mutation();
+
+-- A receipt is the durable witness between native RuntimeProcess.add_file publication and
+-- ordinary model visibility.  It intentionally carries no provider capability or payload bytes.
+CREATE TABLE workspace.attachment_import_receipts (
+  turn_id UUID PRIMARY KEY
+    REFERENCES conversation.conversation_turns(turn_id) ON DELETE RESTRICT,
+  conversation_id TEXT NOT NULL CHECK (char_length(conversation_id) BETWEEN 1 AND 512),
+  source_message_id UUID NOT NULL UNIQUE
+    REFERENCES conversation.conversation_messages(message_id) ON DELETE RESTRICT,
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('personal', 'group')),
+  scope_id BIGINT NOT NULL,
+  request_id TEXT NOT NULL CHECK (
+    request_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:attachment-import$'
+  ),
+  request_hash CHAR(64) NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+  runtime_path TEXT NOT NULL CHECK (
+    runtime_path ~ '^/workspace/uploads/attachment-[0-9a-f]{64}/payload$'
+  ),
+  byte_size BIGINT NOT NULL CHECK (byte_size >= 0 AND byte_size <= 8388608),
+  sha256 CHAR(64) NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+  imported_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT workspace_attachment_import_receipts_scope_ck CHECK (
+    (scope_kind = 'personal' AND scope_id > 0)
+    OR (scope_kind = 'group' AND scope_id <> 0)
+  ),
+  CONSTRAINT workspace_attachment_import_receipts_request_id_ck CHECK (
+    request_id = turn_id::TEXT || ':attachment-import'
+  )
+);
+
+COMMENT ON TABLE workspace.attachment_import_receipts IS
+  'Immutable witness that a current-turn payload was published by RuntimeProcess.add_file before the path became model-visible.';
+COMMENT ON COLUMN workspace.attachment_import_receipts.runtime_path IS
+  'Runtime-internal fixed upload path, never a host path or user-controlled filename.';
+
+CREATE FUNCTION workspace.validate_attachment_import_receipt()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  source_row RECORD;
+  activity_request JSONB;
+  expected_scope_kind TEXT;
+  expected_scope_id BIGINT;
+BEGIN
+  SELECT message.turn_id, message.conversation_id, message.role, message.content
+  INTO source_row
+  FROM conversation.conversation_messages AS message
+  WHERE message.message_id = NEW.source_message_id;
+
+  IF NOT FOUND
+     OR source_row.turn_id IS DISTINCT FROM NEW.turn_id
+     OR source_row.conversation_id IS DISTINCT FROM NEW.conversation_id
+     OR source_row.role IS DISTINCT FROM 'user'
+     OR EXISTS (
+       SELECT 1
+       FROM conversation.conversation_messages AS other_user
+       WHERE other_user.turn_id = NEW.turn_id
+         AND other_user.role = 'user'
+         AND other_user.message_id <> NEW.source_message_id
+     ) THEN
+    RAISE EXCEPTION
+      'workspace attachment receipt source message does not own the stated turn/conversation'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF jsonb_typeof(source_row.content -> 'workspace_attachment') IS DISTINCT FROM 'object'
+     OR jsonb_typeof(source_row.content #> '{workspace_attachment,version}') IS DISTINCT FROM 'number'
+     OR source_row.content #>> '{workspace_attachment,version}' IS DISTINCT FROM '1'
+     OR jsonb_typeof(source_row.content #> '{workspace_attachment,state}') IS DISTINCT FROM 'string'
+     OR source_row.content #>> '{workspace_attachment,state}' IS DISTINCT FROM 'pending'
+     OR source_row.content ->> 'text' IS DISTINCT FROM format('<workspace_file path="%s" />', NEW.runtime_path)
+     OR source_row.content -> 'model_message' IS DISTINCT FROM jsonb_build_object(
+       'schema_version', 2,
+       'role', 'user',
+       'parts', jsonb_build_array(jsonb_build_object(
+         'type', 'text',
+         'text', format('<workspace_file path="%s" />', NEW.runtime_path)
+       )),
+       'policy', jsonb_build_object('include_in_context', TRUE),
+       'meta', '{}'::JSONB
+     ) THEN
+    RAISE EXCEPTION
+      'workspace attachment receipt requires the exact pending source placeholder and canonical model message'
+      USING ERRCODE = '23514';
+  END IF;
+
+  SELECT activity.request INTO activity_request
+  FROM conversation.inference_activities AS activity
+  WHERE activity.turn_id = NEW.turn_id
+    AND activity.conversation_id = NEW.conversation_id;
+  IF NOT FOUND
+     OR jsonb_typeof(activity_request -> 'current_turn_upload') IS DISTINCT FROM 'object'
+     OR jsonb_typeof(activity_request #> '{scope,is_group}') IS DISTINCT FROM 'boolean'
+     OR jsonb_typeof(activity_request #> '{scope,message_id}') IS DISTINCT FROM 'number'
+     OR jsonb_typeof(activity_request #> '{current_turn_upload,source_message_id}') IS DISTINCT FROM 'number'
+     OR (activity_request #>> '{scope,message_id}' ~ '^[1-9][0-9]*$') IS NOT TRUE
+     OR (activity_request #>> '{current_turn_upload,source_message_id}' ~ '^[1-9][0-9]*$') IS NOT TRUE
+     OR activity_request #>> '{scope,message_id}'
+        IS DISTINCT FROM activity_request #>> '{current_turn_upload,source_message_id}' THEN
+    RAISE EXCEPTION
+      'workspace attachment receipt requires a matching durable current_turn_upload request'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF activity_request #>> '{scope,is_group}' = 'true' THEN
+    IF jsonb_typeof(activity_request #> '{scope,group_id}') IS DISTINCT FROM 'number'
+       OR (activity_request #>> '{scope,group_id}' ~ '^-?[1-9][0-9]*$') IS NOT TRUE THEN
+      RAISE EXCEPTION
+        'workspace attachment receipt group scope is malformed'
+        USING ERRCODE = '23514';
+    END IF;
+    expected_scope_kind := 'group';
+    expected_scope_id := CAST(activity_request #>> '{scope,group_id}' AS BIGINT);
+  ELSE
+    IF jsonb_typeof(activity_request #> '{user,user_id}') IS DISTINCT FROM 'number'
+       OR (activity_request #>> '{user,user_id}' ~ '^[1-9][0-9]*$') IS NOT TRUE THEN
+      RAISE EXCEPTION
+        'workspace attachment receipt personal scope is malformed'
+        USING ERRCODE = '23514';
+    END IF;
+    expected_scope_kind := 'personal';
+    expected_scope_id := CAST(activity_request #>> '{user,user_id}' AS BIGINT);
+  END IF;
+
+  IF NEW.scope_kind IS DISTINCT FROM expected_scope_kind
+     OR NEW.scope_id IS DISTINCT FROM expected_scope_id THEN
+    RAISE EXCEPTION
+      'workspace attachment receipt scope does not match its durable command'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER workspace_attachment_import_receipts_validate_tr
+BEFORE INSERT ON workspace.attachment_import_receipts
+FOR EACH ROW EXECUTE FUNCTION workspace.validate_attachment_import_receipt();
+
+CREATE FUNCTION workspace.forbid_attachment_import_receipt_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION
+    'workspace.attachment_import_receipts is immutable'
+    USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER workspace_attachment_import_receipts_immutable_tr
+BEFORE UPDATE OR DELETE ON workspace.attachment_import_receipts
+FOR EACH ROW EXECUTE FUNCTION workspace.forbid_attachment_import_receipt_mutation();
+
+CREATE FUNCTION workspace.require_imported_attachment_receipt_source()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  source_content JSONB;
+BEGIN
+  SELECT message.content INTO source_content
+  FROM conversation.conversation_messages AS message
+  WHERE message.message_id = NEW.source_message_id
+    AND message.turn_id = NEW.turn_id
+    AND message.conversation_id = NEW.conversation_id;
+
+  IF NOT FOUND
+     OR jsonb_typeof(source_content -> 'workspace_attachment') IS DISTINCT FROM 'object'
+     OR jsonb_typeof(source_content #> '{workspace_attachment,version}') IS DISTINCT FROM 'number'
+     OR source_content #>> '{workspace_attachment,version}' IS DISTINCT FROM '1'
+     OR jsonb_typeof(source_content #> '{workspace_attachment,state}') IS DISTINCT FROM 'string'
+     OR source_content #>> '{workspace_attachment,state}' IS DISTINCT FROM 'imported'
+     OR source_content ->> 'text' IS DISTINCT FROM format('<workspace_file path="%s" />', NEW.runtime_path)
+     OR source_content -> 'model_message' IS DISTINCT FROM jsonb_build_object(
+       'schema_version', 2,
+       'role', 'user',
+       'parts', jsonb_build_array(jsonb_build_object(
+         'type', 'text',
+         'text', format('<workspace_file path="%s" />', NEW.runtime_path)
+       )),
+       'policy', jsonb_build_object('include_in_context', TRUE),
+       'meta', '{}'::JSONB
+     ) THEN
+    RAISE EXCEPTION
+      'workspace attachment receipt must commit with its source marker imported and canonical model message'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER workspace_attachment_import_receipts_commit_tr
+AFTER INSERT ON workspace.attachment_import_receipts
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION workspace.require_imported_attachment_receipt_source();
+
+CREATE FUNCTION workspace.guard_attachment_visibility_transition()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.content = NEW.content THEN
+    RETURN NEW;
+  END IF;
+
+  IF OLD.role IS DISTINCT FROM 'user'
+     OR NEW.role IS DISTINCT FROM 'user'
+     OR OLD.turn_id IS NULL
+     OR NEW.turn_id IS DISTINCT FROM OLD.turn_id
+     OR NEW.conversation_id IS DISTINCT FROM OLD.conversation_id
+     OR EXISTS (
+       SELECT 1
+       FROM conversation.conversation_messages AS other_user
+       WHERE other_user.turn_id = NEW.turn_id
+         AND other_user.role = 'user'
+         AND other_user.message_id <> NEW.message_id
+     ) THEN
+    RAISE EXCEPTION
+      'workspace attachment marker requires the sole user source message of its turn'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF jsonb_typeof(OLD.content -> 'workspace_attachment') IS DISTINCT FROM 'object'
+     OR jsonb_typeof(OLD.content #> '{workspace_attachment,version}') IS DISTINCT FROM 'number'
+     OR OLD.content #>> '{workspace_attachment,version}' IS DISTINCT FROM '1'
+     OR jsonb_typeof(OLD.content #> '{workspace_attachment,state}') IS DISTINCT FROM 'string'
+     OR OLD.content #>> '{workspace_attachment,state}' IS DISTINCT FROM 'pending' THEN
+    RAISE EXCEPTION
+      'workspace attachment marker is immutable outside a valid pending transition'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF NEW.content = jsonb_set(
+       OLD.content,
+       '{workspace_attachment,state}',
+       to_jsonb('imported'::TEXT),
+       false
+     ) THEN
+    PERFORM 1
+    FROM workspace.attachment_import_receipts AS receipt
+    WHERE receipt.turn_id = NEW.turn_id
+      AND receipt.conversation_id = NEW.conversation_id
+      AND receipt.source_message_id = NEW.message_id
+      AND NEW.content ->> 'text' = format('<workspace_file path="%s" />', receipt.runtime_path);
+    IF NOT FOUND THEN
+      RAISE EXCEPTION
+        'workspace attachment imported marker requires its matching durable receipt'
+        USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.content = jsonb_set(
+       OLD.content,
+       '{workspace_attachment,state}',
+       to_jsonb('unavailable'::TEXT),
+       false
+     ) THEN
+    PERFORM 1
+    FROM conversation.inference_activities AS activity
+    WHERE activity.turn_id = NEW.turn_id
+      AND activity.conversation_id = NEW.conversation_id
+      AND activity.status = 'failed'
+      AND jsonb_typeof(activity.request -> 'current_turn_upload') IS NOT DISTINCT FROM 'object'
+      AND jsonb_typeof(activity.request #> '{scope,is_group}') IS NOT DISTINCT FROM 'boolean'
+      AND jsonb_typeof(activity.request #> '{scope,message_id}') IS NOT DISTINCT FROM 'number'
+      AND jsonb_typeof(activity.request #> '{current_turn_upload,source_message_id}')
+          IS NOT DISTINCT FROM 'number'
+      AND (activity.request #>> '{scope,message_id}' ~ '^[1-9][0-9]*$') IS TRUE
+      AND (activity.request #>> '{current_turn_upload,source_message_id}' ~ '^[1-9][0-9]*$') IS TRUE
+      AND activity.request #>> '{scope,message_id}'
+          IS NOT DISTINCT FROM activity.request #>> '{current_turn_upload,source_message_id}'
+      AND (
+        (
+          activity.request #>> '{scope,is_group}' = 'true'
+          AND jsonb_typeof(activity.request #> '{scope,group_id}') = 'number'
+          AND (activity.request #>> '{scope,group_id}' ~ '^-?[1-9][0-9]*$') IS TRUE
+        )
+        OR (
+          activity.request #>> '{scope,is_group}' = 'false'
+          AND jsonb_typeof(activity.request #> '{user,user_id}') = 'number'
+          AND (activity.request #>> '{user,user_id}' ~ '^[1-9][0-9]*$') IS TRUE
+        )
+      );
+    IF NOT FOUND OR EXISTS (
+      SELECT 1
+      FROM workspace.attachment_import_receipts AS receipt
+      WHERE receipt.turn_id = NEW.turn_id
+    ) THEN
+      RAISE EXCEPTION
+        'workspace attachment unavailable marker requires final attachment failure without a receipt'
+        USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  RAISE EXCEPTION
+    'workspace attachment marker permits only pending-to-imported or pending-to-unavailable'
+    USING ERRCODE = '23514';
+END;
+$$;
+
+CREATE TRIGGER conversation_messages_workspace_attachment_visibility_tr
+BEFORE UPDATE OF content ON conversation.conversation_messages
+FOR EACH ROW
+WHEN (OLD.content ? 'workspace_attachment' OR NEW.content ? 'workspace_attachment')
+EXECUTE FUNCTION workspace.guard_attachment_visibility_transition();
+
+-- An AttachmentImportIntent is committed before native payload ingress.  It is a durable
+-- recovery bridge, not a provider-capability cache and not a payload-byte store.
+CREATE TABLE workspace.attachment_import_intents (
+  turn_id UUID PRIMARY KEY
+    REFERENCES conversation.conversation_turns(turn_id) ON DELETE RESTRICT,
+  conversation_id TEXT NOT NULL CHECK (char_length(conversation_id) BETWEEN 1 AND 512),
+  source_message_id UUID NOT NULL UNIQUE
+    REFERENCES conversation.conversation_messages(message_id) ON DELETE RESTRICT,
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('personal', 'group')),
+  scope_id BIGINT NOT NULL,
+  request_id TEXT NOT NULL CHECK (
+    request_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:attachment-import$'
+  ),
+  request_hash CHAR(64) NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+  runtime_path TEXT NOT NULL CHECK (
+    runtime_path ~ '^/workspace/uploads/attachment-[0-9a-f]{64}/payload$'
+  ),
+  byte_size BIGINT NOT NULL CHECK (byte_size >= 0 AND byte_size <= 8388608),
+  sha256 CHAR(64) NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+  prepared_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT workspace_attachment_import_intents_scope_ck CHECK (
+    (scope_kind = 'personal' AND scope_id > 0)
+    OR (scope_kind = 'group' AND scope_id <> 0)
+  ),
+  CONSTRAINT workspace_attachment_import_intents_request_id_ck CHECK (
+    request_id = turn_id::TEXT || ':attachment-import'
+  )
+);
+
+COMMENT ON TABLE workspace.attachment_import_intents IS
+  'Immutable AttachmentImportIntent aggregate committed before RuntimeProcess.add_file; bridges durable source semantics to native payload-journal recovery.';
+COMMENT ON COLUMN workspace.attachment_import_intents.runtime_path IS
+  'Runtime-internal fixed upload path, never a host path or user-controlled filename.';
+COMMENT ON COLUMN workspace.attachment_import_intents.prepared_at IS
+  'Intent preparation time; legacy receipt-derived rows use the already durable receipt timestamp during 0072 backfill.';
+
+CREATE FUNCTION workspace.validate_attachment_import_binding(
+  import_turn_id UUID,
+  import_conversation_id TEXT,
+  import_source_message_id UUID,
+  import_scope_kind TEXT,
+  import_scope_id BIGINT,
+  import_runtime_path TEXT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  source_row RECORD;
+  activity_request JSONB;
+  expected_scope_kind TEXT;
+  expected_scope_id BIGINT;
+BEGIN
+  SELECT message.turn_id, message.conversation_id, message.role, message.content
+  INTO source_row
+  FROM conversation.conversation_messages AS message
+  WHERE message.message_id = import_source_message_id;
+
+  IF NOT FOUND
+     OR source_row.turn_id IS DISTINCT FROM import_turn_id
+     OR source_row.conversation_id IS DISTINCT FROM import_conversation_id
+     OR source_row.role IS DISTINCT FROM 'user'
+     OR EXISTS (
+       SELECT 1
+       FROM conversation.conversation_messages AS other_user
+       WHERE other_user.turn_id = import_turn_id
+         AND other_user.role = 'user'
+         AND other_user.message_id <> import_source_message_id
+     ) THEN
+    RAISE EXCEPTION
+      'workspace attachment import source message does not own the stated turn/conversation'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF jsonb_typeof(source_row.content -> 'workspace_attachment') IS DISTINCT FROM 'object'
+     OR jsonb_typeof(source_row.content #> '{workspace_attachment,version}') IS DISTINCT FROM 'number'
+     OR source_row.content #>> '{workspace_attachment,version}' IS DISTINCT FROM '1'
+     OR jsonb_typeof(source_row.content #> '{workspace_attachment,state}') IS DISTINCT FROM 'string'
+     OR source_row.content #>> '{workspace_attachment,state}' IS DISTINCT FROM 'pending'
+     OR source_row.content ->> 'text' IS DISTINCT FROM format('<workspace_file path="%s" />', import_runtime_path)
+     OR source_row.content -> 'model_message' IS DISTINCT FROM jsonb_build_object(
+       'schema_version', 2,
+       'role', 'user',
+       'parts', jsonb_build_array(jsonb_build_object(
+         'type', 'text',
+         'text', format('<workspace_file path="%s" />', import_runtime_path)
+       )),
+       'policy', jsonb_build_object('include_in_context', TRUE),
+       'meta', '{}'::JSONB
+     ) THEN
+    RAISE EXCEPTION
+      'workspace attachment import requires the exact pending source placeholder and canonical model message'
+      USING ERRCODE = '23514';
+  END IF;
+
+  SELECT activity.request INTO activity_request
+  FROM conversation.inference_activities AS activity
+  WHERE activity.turn_id = import_turn_id
+    AND activity.conversation_id = import_conversation_id;
+  IF NOT FOUND
+     OR jsonb_typeof(activity_request -> 'current_turn_upload') IS DISTINCT FROM 'object'
+     OR jsonb_typeof(activity_request #> '{scope,is_group}') IS DISTINCT FROM 'boolean'
+     OR jsonb_typeof(activity_request #> '{scope,message_id}') IS DISTINCT FROM 'number'
+     OR jsonb_typeof(activity_request #> '{current_turn_upload,source_message_id}') IS DISTINCT FROM 'number'
+     OR (activity_request #>> '{scope,message_id}' ~ '^[1-9][0-9]*$') IS NOT TRUE
+     OR (activity_request #>> '{current_turn_upload,source_message_id}' ~ '^[1-9][0-9]*$') IS NOT TRUE
+     OR activity_request #>> '{scope,message_id}'
+        IS DISTINCT FROM activity_request #>> '{current_turn_upload,source_message_id}' THEN
+    RAISE EXCEPTION
+      'workspace attachment import requires a matching durable current_turn_upload request'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF activity_request #>> '{scope,is_group}' = 'true' THEN
+    IF jsonb_typeof(activity_request #> '{scope,group_id}') IS DISTINCT FROM 'number'
+       OR (activity_request #>> '{scope,group_id}' ~ '^-?[1-9][0-9]*$') IS NOT TRUE THEN
+      RAISE EXCEPTION
+        'workspace attachment import group scope is malformed'
+        USING ERRCODE = '23514';
+    END IF;
+    expected_scope_kind := 'group';
+    expected_scope_id := CAST(activity_request #>> '{scope,group_id}' AS BIGINT);
+  ELSE
+    IF jsonb_typeof(activity_request #> '{user,user_id}') IS DISTINCT FROM 'number'
+       OR (activity_request #>> '{user,user_id}' ~ '^[1-9][0-9]*$') IS NOT TRUE THEN
+      RAISE EXCEPTION
+        'workspace attachment import personal scope is malformed'
+        USING ERRCODE = '23514';
+    END IF;
+    expected_scope_kind := 'personal';
+    expected_scope_id := CAST(activity_request #>> '{user,user_id}' AS BIGINT);
+  END IF;
+
+  IF import_scope_kind IS DISTINCT FROM expected_scope_kind
+     OR import_scope_id IS DISTINCT FROM expected_scope_id THEN
+    RAISE EXCEPTION
+      'workspace attachment import scope does not match its durable command'
+      USING ERRCODE = '23514';
+  END IF;
+END;
+$$;
+
+CREATE FUNCTION workspace.validate_attachment_import_intent()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM workspace.validate_attachment_import_binding(
+    NEW.turn_id,
+    NEW.conversation_id,
+    NEW.source_message_id,
+    NEW.scope_kind,
+    NEW.scope_id,
+    NEW.runtime_path
+  );
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER workspace_attachment_import_intents_validate_tr
+BEFORE INSERT ON workspace.attachment_import_intents
+FOR EACH ROW EXECUTE FUNCTION workspace.validate_attachment_import_intent();
+
+CREATE FUNCTION workspace.forbid_attachment_import_intent_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION
+    'workspace.attachment_import_intents is immutable'
+    USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER workspace_attachment_import_intents_immutable_tr
+BEFORE UPDATE OR DELETE ON workspace.attachment_import_intents
+FOR EACH ROW EXECUTE FUNCTION workspace.forbid_attachment_import_intent_mutation();
+
+CREATE OR REPLACE FUNCTION workspace.validate_attachment_import_receipt()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM workspace.validate_attachment_import_binding(
+    NEW.turn_id,
+    NEW.conversation_id,
+    NEW.source_message_id,
+    NEW.scope_kind,
+    NEW.scope_id,
+    NEW.runtime_path
+  );
+
+  PERFORM 1
+  FROM workspace.attachment_import_intents AS intent
+  WHERE intent.turn_id = NEW.turn_id
+    AND intent.conversation_id = NEW.conversation_id
+    AND intent.source_message_id = NEW.source_message_id
+    AND intent.scope_kind = NEW.scope_kind
+    AND intent.scope_id = NEW.scope_id
+    AND intent.request_id = NEW.request_id
+    AND intent.request_hash = NEW.request_hash
+    AND intent.runtime_path = NEW.runtime_path
+    AND intent.byte_size = NEW.byte_size
+    AND intent.sha256 = NEW.sha256;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION
+      'workspace attachment receipt requires its exact previously prepared import intent'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION workspace.guard_attachment_visibility_transition()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.content = NEW.content THEN
+    RETURN NEW;
+  END IF;
+
+  IF OLD.role IS DISTINCT FROM 'user'
+     OR NEW.role IS DISTINCT FROM 'user'
+     OR OLD.turn_id IS NULL
+     OR NEW.turn_id IS DISTINCT FROM OLD.turn_id
+     OR NEW.conversation_id IS DISTINCT FROM OLD.conversation_id
+     OR EXISTS (
+       SELECT 1
+       FROM conversation.conversation_messages AS other_user
+       WHERE other_user.turn_id = NEW.turn_id
+         AND other_user.role = 'user'
+         AND other_user.message_id <> NEW.message_id
+     ) THEN
+    RAISE EXCEPTION
+      'workspace attachment marker requires the sole user source message of its turn'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF jsonb_typeof(OLD.content -> 'workspace_attachment') IS DISTINCT FROM 'object'
+     OR jsonb_typeof(OLD.content #> '{workspace_attachment,version}') IS DISTINCT FROM 'number'
+     OR OLD.content #>> '{workspace_attachment,version}' IS DISTINCT FROM '1'
+     OR jsonb_typeof(OLD.content #> '{workspace_attachment,state}') IS DISTINCT FROM 'string'
+     OR OLD.content #>> '{workspace_attachment,state}' IS DISTINCT FROM 'pending' THEN
+    RAISE EXCEPTION
+      'workspace attachment marker is immutable outside a valid pending transition'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF NEW.content = jsonb_set(
+       OLD.content,
+       '{workspace_attachment,state}',
+       to_jsonb('imported'::TEXT),
+       false
+     ) THEN
+    PERFORM 1
+    FROM workspace.attachment_import_receipts AS receipt
+    WHERE receipt.turn_id = NEW.turn_id
+      AND receipt.conversation_id = NEW.conversation_id
+      AND receipt.source_message_id = NEW.message_id
+      AND NEW.content ->> 'text' = format('<workspace_file path="%s" />', receipt.runtime_path);
+    IF NOT FOUND THEN
+      RAISE EXCEPTION
+        'workspace attachment imported marker requires its matching durable receipt'
+        USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.content = jsonb_set(
+       OLD.content,
+       '{workspace_attachment,state}',
+       to_jsonb('unavailable'::TEXT),
+       false
+     ) THEN
+    PERFORM 1
+    FROM conversation.inference_activities AS activity
+    WHERE activity.turn_id = NEW.turn_id
+      AND activity.conversation_id = NEW.conversation_id
+      AND activity.status = 'failed'
+      AND jsonb_typeof(activity.request -> 'current_turn_upload') IS NOT DISTINCT FROM 'object'
+      AND jsonb_typeof(activity.request #> '{scope,is_group}') IS NOT DISTINCT FROM 'boolean'
+      AND jsonb_typeof(activity.request #> '{scope,message_id}') IS NOT DISTINCT FROM 'number'
+      AND jsonb_typeof(activity.request #> '{current_turn_upload,source_message_id}')
+          IS NOT DISTINCT FROM 'number'
+      AND (activity.request #>> '{scope,message_id}' ~ '^[1-9][0-9]*$') IS TRUE
+      AND (activity.request #>> '{current_turn_upload,source_message_id}' ~ '^[1-9][0-9]*$') IS TRUE
+      AND activity.request #>> '{scope,message_id}'
+          IS NOT DISTINCT FROM activity.request #>> '{current_turn_upload,source_message_id}'
+      AND (
+        (
+          activity.request #>> '{scope,is_group}' = 'true'
+          AND jsonb_typeof(activity.request #> '{scope,group_id}') = 'number'
+          AND (activity.request #>> '{scope,group_id}' ~ '^-?[1-9][0-9]*$') IS TRUE
+        )
+        OR (
+          activity.request #>> '{scope,is_group}' = 'false'
+          AND jsonb_typeof(activity.request #> '{user,user_id}') = 'number'
+          AND (activity.request #>> '{user,user_id}' ~ '^[1-9][0-9]*$') IS TRUE
+        )
+      );
+    IF NOT FOUND OR EXISTS (
+      SELECT 1
+      FROM workspace.attachment_import_receipts AS receipt
+      WHERE receipt.turn_id = NEW.turn_id
+    ) OR EXISTS (
+      SELECT 1
+      FROM workspace.attachment_import_intents AS intent
+      WHERE intent.turn_id = NEW.turn_id
+    ) THEN
+      RAISE EXCEPTION
+        'workspace attachment unavailable marker requires final attachment failure without a receipt or prepared intent'
+        USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  RAISE EXCEPTION
+    'workspace attachment marker permits only pending-to-imported or pending-to-unavailable'
+    USING ERRCODE = '23514';
+END;
+$$;
 
 CREATE TABLE economy.user_lottery (
   user_id BIGINT NOT NULL PRIMARY KEY,

@@ -14,6 +14,7 @@ directory on the artifact store filesystem, delegates the authoritative manifest
 from __future__ import annotations
 
 import argparse
+import ast
 import ctypes
 import errno
 import json
@@ -25,6 +26,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -44,12 +46,28 @@ _RUNTIME_SUPERVISOR: Final = PurePosixPath("/usr/local/libexec/wspctl/wsp-system
 _MANIFEST_NAME: Final = ".wspctl-image-manifest"
 #: @brief 单次重写文本的最大大小 / Maximum size of one rewritten text file.
 _MAX_REWRITTEN_TEXT_BYTES: Final = 2 * 1024 * 1024
+#: @brief 不复制进不可变镜像的 Python bytecode cache 后缀 / Python bytecode-cache suffixes omitted from immutable images.
+_PYTHON_BYTECODE_CACHE_SUFFIXES: Final = frozenset({".pyc", ".pyo"})
+#: @brief 不支持的 ``.pth`` startup hook 错误 / Error for an unsupported ``.pth`` startup hook.
+_EXECUTABLE_PTH_ERROR: Final = (
+    "venv contains an unsupported executable .pth startup hook; the controlled production image accepts only "
+    "path-only .pth files or the verified scikit-build-core PEP 660 exception"
+)
+#: @brief 受支持 scikit-build-core PEP 660 helper 的模块名 / Module-name pattern for the supported scikit-build-core PEP 660 helper.
+_SCIKIT_BUILD_EDITABLE_MODULE_PATTERN: Final = re.compile(
+    r"_editable_skbc_[a-z][a-z0-9_]*\Z"
+)
+#: @brief 受支持 scikit-build-core ``.pth`` 的唯一语句 / Sole statement allowed in a supported scikit-build-core ``.pth``.
+_SCIKIT_BUILD_EDITABLE_PTH_PATTERN: Final = re.compile(
+    r"import (?P<module>[A-Za-z_][A-Za-z0-9_]*)\Z"
+)
 #: @brief 显式允许进入 runtime 的 GNU 基础工具 basename / GNU basic-tool basenames explicitly allowed into the runtime.
 _ALLOWED_GNU_COMMANDS: Final = frozenset(
     {
         "awk",
         "basename",
         "cat",
+        "chmod",
         "cksum",
         "cmp",
         "comm",
@@ -110,9 +128,13 @@ _GENERATION_PATTERN: Final = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
 #: @brief ELF DT_NEEDED 行解析器 / Parser for an ELF DT_NEEDED line.
 _NEEDED_PATTERN: Final = re.compile(r"\(NEEDED\).*?\[(?P<name>[^]\n]+)\]")
 #: @brief ELF RPATH/RUNPATH 行解析器 / Parser for an ELF RPATH or RUNPATH line.
-_SEARCH_PATH_PATTERN: Final = re.compile(r"\((?P<kind>RPATH|RUNPATH)\).*?\[(?P<paths>[^]\n]*)\]")
+_SEARCH_PATH_PATTERN: Final = re.compile(
+    r"\((?P<kind>RPATH|RUNPATH)\).*?\[(?P<paths>[^]\n]*)\]"
+)
 #: @brief ELF PT_INTERP 行解析器 / Parser for an ELF PT_INTERP line.
-_INTERPRETER_PATTERN: Final = re.compile(r"Requesting program interpreter: (?P<path>[^]\n]+)")
+_INTERPRETER_PATTERN: Final = re.compile(
+    r"Requesting program interpreter: (?P<path>[^]\n]+)"
+)
 #: @brief ldconfig cache 行解析器 / Parser for one ``ldconfig -p`` cache line.
 _LDCONFIG_PATTERN: Final = re.compile(r"^\s*(?P<name>\S+)\s+.*?=>\s+(?P<path>/\S+)\s*$")
 #: @brief 解析 ABI 所需的最短 ELF header 字节数 / Minimum ELF-header bytes needed to parse the ABI.
@@ -149,6 +171,494 @@ _SYSTEM_LIBRARY_ROOTS: Final = (
 
 class ImageBuildError(RuntimeError):
     """@brief 可信 image build 的 fail-closed 错误 / Fail-closed error raised by the trusted image build."""
+
+
+def _is_executable_pth_line(line: str) -> bool:
+    """@brief 判断一行是否会被 Python ``site`` 当作可执行 ``.pth`` hook / Determine whether Python ``site`` executes a line as a ``.pth`` hook.
+
+    @param line 未修改的 UTF-8 ``.pth`` 单行 / One unmodified UTF-8 ``.pth`` line.
+    @return 以 Python ``site`` 的 ``import`` 规则执行时为真 / True when Python ``site`` executes it under its ``import`` rule.
+
+    @note 不先 ``strip``：``site`` 只将首字符就是 ``import``，且紧随空格或 tab 的行解释为
+        code。/ Do not ``strip`` first: ``site`` treats a line as code only when its first
+        characters are ``import`` followed by a space or tab.
+    """
+
+    return line.startswith("import ") or line.startswith("import\t")
+
+
+def _is_omitted_python_cache_entry(path: Path) -> bool:
+    """@brief 判断递归复制时是否应忽略 Python bytecode cache / Determine whether recursive copying must omit a Python bytecode cache.
+
+    @param path 当前正在枚举的 source entry / Source entry currently being enumerated.
+    @return ``__pycache__`` 目录或 legacy/current bytecode 文件时为真 /
+        True for a ``__pycache__`` directory or a legacy/current bytecode file.
+
+    @note ``.pyc`` code object 的 ``co_filename`` 通常保留构建 host 的绝对 source path。它们
+        在只读 lower layer 中既非运行所需，也会把 host checkout 细节带进 runtime；因此对
+        CPython stdlib、venv 和显式 ``--python-source`` 的所有递归复制一视同仁地跳过。/
+        A ``.pyc`` code object's ``co_filename`` usually retains the build host's absolute source
+        path. It is neither required in a read-only lower layer nor safe to carry host checkout
+        details into the runtime, so every recursive copy—CPython stdlib, venv, and explicit
+        ``--python-source`` alike—omits it.
+    """
+
+    return path.name == "__pycache__" or path.suffix in _PYTHON_BYTECODE_CACHE_SUFFIXES
+
+
+@dataclass(frozen=True, slots=True)
+class ScikitBuildEditableHook:
+    """@brief 已验证、可重定位的 scikit-build-core PEP 660 hook / Verified relocatable scikit-build-core PEP 660 hook.
+
+    @param pth Python ``site`` 读取的单行 ``.pth`` 文件 / Single-line ``.pth`` file read by Python ``site``.
+    @param helper 与 ``.pth`` 同目录的 helper module / Helper module next to the ``.pth`` file.
+    @param module helper 的安全 Python module 名 / Safe Python module name of the helper.
+    @param source_roots helper terminal mapping 实际引用的显式 source roots /
+        Explicit source roots actually referenced by the helper terminal mapping.
+    """
+
+    pth: Path
+    helper: Path
+    module: str
+    source_roots: tuple[Path, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class EditableDirectUrlRelocation:
+    """@brief 一个与已验证 PEP 660 helper 绑定的 direct-url 重写 / Direct-url rewrite bound to a verified PEP 660 helper.
+
+    @param metadata PEP 610 ``direct_url.json`` 路径 / Path of the PEP 610 ``direct_url.json``.
+    @param source_root 被重写为 runtime URL 的显式 source root / Explicit source root rewritten into the runtime URL.
+    """
+
+    metadata: Path
+    source_root: Path
+
+
+@dataclass(frozen=True, slots=True)
+class VenvRelocationPlan:
+    """@brief 一次 venv 重定位的已验证 executable-hook 例外 / Verified executable-hook exceptions for one venv relocation.
+
+    @param scikit_build_hooks 仅允许的 scikit-build-core PEP 660 hooks / The only permitted scikit-build-core PEP 660 hooks.
+    @param editable_direct_urls 与上述 hooks 一一绑定的 editable direct-url metadata /
+        Editable direct-url metadata bound one-to-one to the hooks above.
+    """
+
+    scikit_build_hooks: tuple[ScikitBuildEditableHook, ...] = ()
+    editable_direct_urls: tuple[EditableDirectUrlRelocation, ...] = ()
+
+
+def _read_bounded_regular_text(path: Path, description: str) -> str:
+    """@brief 以 no-follow 语义读取一个有界 UTF-8 regular file / Read one bounded UTF-8 regular file with no-follow semantics.
+
+    @param path 待读取的可信输入路径 / Trusted input path to read.
+    @param description 诊断中的文件语义 / File role used in diagnostics.
+    @return 完整 UTF-8 文本 / Complete UTF-8 text.
+    @raise ImageBuildError 文件不是 regular inode、过大、不可读取或非 UTF-8 时抛出 /
+        Raised when the file is not a regular inode, is too large, cannot be read, or is not UTF-8.
+    """
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as error:
+        raise ImageBuildError(
+            f"cannot open {description} without following links"
+        ) from error
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size < 0
+            or metadata.st_size > _MAX_REWRITTEN_TEXT_BYTES
+        ):
+            raise ImageBuildError(f"{description} is not a bounded regular file")
+        chunks: list[bytes] = []
+        remaining = _MAX_REWRITTEN_TEXT_BYTES + 1
+        while remaining > 0:
+            try:
+                chunk = os.read(descriptor, min(64 * 1024, remaining))
+            except InterruptedError:
+                continue
+            except OSError as error:
+                raise ImageBuildError(f"cannot read {description}") from error
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > _MAX_REWRITTEN_TEXT_BYTES:
+            raise ImageBuildError(f"{description} exceeds the relocatable-text limit")
+    finally:
+        os.close(descriptor)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ImageBuildError(f"{description} must be UTF-8") from error
+
+
+def _normalized_distribution_name(value: str) -> str:
+    """@brief 归一化 Python distribution 名称 / Normalize a Python distribution name.
+
+    @param value 原始 distribution 或 helper suffix / Raw distribution name or helper suffix.
+    @return 小写、以 ``_`` 连接的比较键 / Lowercase comparison key joined by ``_``.
+    """
+
+    return re.sub(r"[-_.]+", "_", value).strip("_").lower()
+
+
+def _parse_scikit_build_editable_hook(
+    pth: Path,
+    data: str,
+    source_roots: tuple[Path, ...],
+) -> ScikitBuildEditableHook:
+    """@brief 解析一个严格受限的 scikit-build-core PEP 660 hook / Parse one strictly constrained scikit-build-core PEP 660 hook.
+
+    @param pth 已 no-follow 读取的 ``.pth`` 路径 / ``.pth`` path already read with no-follow semantics.
+    @param data ``.pth`` 的 UTF-8 文本 / UTF-8 text of the ``.pth``.
+    @param source_roots operator 显式批准的 canonical source roots / Canonical source roots explicitly approved by the operator.
+    @return 只含显式 source mapping 的已验证 hook / Verified hook containing explicit source mappings only.
+    @raise ImageBuildError hook 不是已支持格式、helper 不在同一 site-packages 或 host mapping
+        未被 ``--python-source`` 承认时抛出 / Raised when the hook is not a supported shape, the
+        helper is outside the site-packages directory, or a host mapping is not admitted by
+        ``--python-source``.
+    @note 这里不执行 helper。它只接受本项目实际使用的 ``_editable_skbc_*`` 单行 import
+        形式，检查 helper 的 terminal ``install(...)`` mapping，并只重写其中已经存在的绝对
+        source 路径。/ This never executes the helper. It accepts only the single-line
+        ``_editable_skbc_*`` import form used by this project, checks the helper's terminal
+        ``install(...)`` mapping, and rewrites only pre-existing absolute source paths.
+    """
+
+    lines = data.splitlines()
+    match = _SCIKIT_BUILD_EDITABLE_PTH_PATTERN.fullmatch(lines[0]) if lines else None
+    if match is None:
+        raise ImageBuildError(_EXECUTABLE_PTH_ERROR)
+    module = match.group("module")
+    if (
+        _SCIKIT_BUILD_EDITABLE_MODULE_PATTERN.fullmatch(module) is None
+        or pth.stem != module
+    ):
+        raise ImageBuildError(
+            "unsupported executable .pth hook; only _editable_skbc_* single-import hooks are admitted"
+        )
+    helper = pth.with_name(f"{module}.py")
+    helper_text = _read_bounded_regular_text(helper, "scikit-build editable helper")
+    try:
+        parsed = ast.parse(helper_text, filename=str(helper), mode="exec")
+    except SyntaxError as error:
+        raise ImageBuildError(
+            "scikit-build editable helper is not valid Python"
+        ) from error
+    if not any(
+        isinstance(statement, ast.ClassDef)
+        and statement.name == "ScikitBuildRedirectingFinder"
+        for statement in parsed.body
+    ):
+        raise ImageBuildError(
+            "scikit-build editable helper lacks ScikitBuildRedirectingFinder"
+        )
+    if not any(
+        isinstance(statement, ast.FunctionDef) and statement.name == "install"
+        for statement in parsed.body
+    ):
+        raise ImageBuildError("scikit-build editable helper lacks install")
+    if (
+        not parsed.body
+        or not isinstance(parsed.body[-1], ast.Expr)
+        or not isinstance(parsed.body[-1].value, ast.Call)
+    ):
+        raise ImageBuildError(
+            "scikit-build editable helper lacks a terminal install call"
+        )
+    terminal_call = parsed.body[-1].value
+    if (
+        not isinstance(terminal_call.func, ast.Name)
+        or terminal_call.func.id != "install"
+        or terminal_call.keywords
+    ):
+        raise ImageBuildError(
+            "scikit-build editable helper terminal call is unsupported"
+        )
+    arguments = terminal_call.args
+    if (
+        len(arguments) != 10
+        or not all(isinstance(arguments[index], ast.Dict) for index in range(3))
+        or not isinstance(arguments[3], ast.List)
+        or not isinstance(arguments[4], ast.Constant)
+        or arguments[4].value is not None
+        or not isinstance(arguments[5], ast.Constant)
+        or not isinstance(arguments[5].value, bool)
+        or not isinstance(arguments[6], ast.Constant)
+        or not isinstance(arguments[6].value, bool)
+        or not isinstance(arguments[7], ast.List)
+        or not isinstance(arguments[8], ast.List)
+        or not isinstance(arguments[9], ast.Constant)
+        or arguments[9].value not in {None, ""}
+    ):
+        raise ImageBuildError(
+            "scikit-build editable helper install signature is unsupported"
+        )
+    source_files = arguments[0]
+    wheel_files = arguments[1]
+    source_directories = arguments[2]
+    packages = arguments[3]
+    for key, value in zip(source_files.keys, source_files.values, strict=True):
+        if (
+            not isinstance(key, ast.Constant)
+            or not isinstance(key.value, str)
+            or not isinstance(value, ast.Constant)
+            or not isinstance(value.value, str)
+        ):
+            raise ImageBuildError(
+                "scikit-build editable helper source-file mapping must contain only string literals"
+            )
+    for key, value in zip(wheel_files.keys, wheel_files.values, strict=True):
+        if (
+            not isinstance(key, ast.Constant)
+            or not isinstance(key.value, str)
+            or not isinstance(value, ast.Constant)
+            or not isinstance(value.value, str)
+        ):
+            raise ImageBuildError(
+                "scikit-build editable helper wheel mapping must contain only string literals"
+            )
+        wheel_path = PurePosixPath(value.value)
+        if (
+            not value.value
+            or wheel_path.is_absolute()
+            or ".." in wheel_path.parts
+            or "\\" in value.value
+            or "\x00" in value.value
+        ):
+            raise ImageBuildError(
+                "scikit-build editable helper wheel mapping must be runtime-relative"
+            )
+    for key, value in zip(
+        source_directories.keys, source_directories.values, strict=True
+    ):
+        if (
+            not isinstance(key, ast.Constant)
+            or not isinstance(key.value, str)
+            or not isinstance(value, ast.List)
+            or not all(
+                isinstance(item, ast.Constant) and isinstance(item.value, str)
+                for item in value.elts
+            )
+        ):
+            raise ImageBuildError(
+                "scikit-build editable helper source-directory mapping must contain only string literals"
+            )
+    if not all(
+        isinstance(item, ast.Constant) and isinstance(item.value, str)
+        for item in packages.elts
+    ):
+        raise ImageBuildError(
+            "scikit-build editable helper package list must contain only string literals"
+        )
+    used_roots: set[Path] = set()
+    for line in lines[1:]:
+        if _is_executable_pth_line(line):
+            raise ImageBuildError(_EXECUTABLE_PTH_ERROR)
+        if not line.startswith("/") or line != line.strip():
+            raise ImageBuildError(
+                "scikit-build editable .pth may contain only absolute path-only source lines after its import"
+            )
+        try:
+            resolved = Path(line).resolve(strict=True)
+        except OSError as error:
+            raise ImageBuildError(
+                "scikit-build editable .pth references a missing source path"
+            ) from error
+        matches = tuple(
+            root for root in source_roots if _is_relative_to(resolved, root)
+        )
+        if len(matches) != 1:
+            raise ImageBuildError(
+                "scikit-build editable .pth source is not uniquely admitted by --python-source"
+            )
+        used_roots.add(matches[0])
+    for node in ast.walk(parsed):
+        if (
+            not isinstance(node, ast.Constant)
+            or not isinstance(node.value, str)
+            or node.value in {"", "/"}
+        ):
+            continue
+        literal = node.value
+        if not literal.startswith("/"):
+            continue
+        try:
+            resolved = Path(literal).resolve(strict=True)
+        except OSError as error:
+            raise ImageBuildError(
+                "scikit-build editable helper references a missing absolute path"
+            ) from error
+        matches = tuple(
+            root for root in source_roots if _is_relative_to(resolved, root)
+        )
+        if len(matches) != 1:
+            raise ImageBuildError(
+                "scikit-build editable helper absolute mapping is not uniquely admitted by --python-source"
+            )
+        used_roots.add(matches[0])
+    if not used_roots:
+        raise ImageBuildError(
+            "scikit-build editable helper contains no admitted source mapping"
+        )
+    return ScikitBuildEditableHook(
+        pth=pth,
+        helper=helper,
+        module=module,
+        source_roots=tuple(sorted(used_roots, key=str)),
+    )
+
+
+def _distribution_name_from_metadata(metadata_directory: Path) -> str:
+    """@brief 读取一个 dist-info 的 distribution Name / Read the distribution Name from one dist-info directory.
+
+    @param metadata_directory ``*.dist-info`` directory / ``*.dist-info`` directory.
+    @return 归一化 distribution comparison key / Normalized distribution comparison key.
+    @raise ImageBuildError ``METADATA`` 缺失、格式不安全或没有 Name 字段时抛出 /
+        Raised when ``METADATA`` is missing, malformed, or has no Name field.
+    """
+
+    if not metadata_directory.name.endswith(".dist-info"):
+        raise ImageBuildError(
+            "editable direct_url metadata is not inside a dist-info directory"
+        )
+    metadata = _read_bounded_regular_text(
+        metadata_directory / "METADATA", "editable distribution METADATA"
+    )
+    for line in metadata.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.lower() == "name" and value.strip():
+            return _normalized_distribution_name(value.strip())
+    raise ImageBuildError("editable distribution METADATA has no Name")
+
+
+def _validate_relocatable_venv(
+    venv: Path,
+    *,
+    python_sources: Sequence[Path] = (),
+) -> VenvRelocationPlan:
+    """@brief 校验并计划一个可封闭重定位的 Python virtual environment / Validate and plan a closed relocatable Python virtual environment.
+
+    @param venv 已规范化的可信 virtual-environment 根 / Canonical trusted virtual-environment root.
+    @param python_sources 显式批准、会复制到 runtime 的 source roots / Explicit approved source roots copied into the runtime.
+    @return path-only 文件及受限 PEP 660 exceptions 的重定位计划 / Relocation plan for path-only files and constrained PEP 660 exceptions.
+    @raise ImageBuildError 未知 startup hook、不可归属的 editable metadata 或 host path 未受批准时抛出 /
+        Raised on an unknown startup hook, unbound editable metadata, or a host path outside approved sources.
+
+    @note Python ``site`` 会在每次解释器启动时执行以 ``import`` 开头的 ``.pth`` 行。通用
+        startup code 仍一律拒绝；唯一例外是可静态识别为 scikit-build-core PEP 660 helper 的
+        `_editable_skbc_*` hook，且其 terminal mapping 的每个绝对路径都必须落在
+        ``--python-source``。/ Python ``site`` executes ``.pth`` lines beginning with ``import``
+        at every interpreter startup. Generic startup code remains rejected; the sole exception is
+        a statically recognizable scikit-build-core PEP 660 `_editable_skbc_*` hook whose every
+        terminal-mapping absolute path lies below ``--python-source``.
+    """
+
+    site_packages = venv / "lib"
+    if not site_packages.is_dir():
+        raise ImageBuildError("venv must contain a lib directory")
+    try:
+        source_roots = tuple(
+            sorted({source.resolve(strict=True) for source in python_sources}, key=str)
+        )
+    except OSError as error:
+        raise ImageBuildError("cannot resolve an admitted python source") from error
+    if any(not source.is_dir() for source in source_roots):
+        raise ImageBuildError("admitted python source must be a directory")
+    hooks: list[ScikitBuildEditableHook] = []
+    for pth in sorted(site_packages.rglob("*.pth"), key=lambda item: str(item)):
+        data = _read_bounded_regular_text(pth, "venv .pth file")
+        lines = data.splitlines()
+        executable_lines = [line for line in lines if _is_executable_pth_line(line)]
+        if not executable_lines:
+            continue
+        if len(executable_lines) != 1:
+            raise ImageBuildError(_EXECUTABLE_PTH_ERROR)
+        hooks.append(_parse_scikit_build_editable_hook(pth, data, source_roots))
+    hook_by_distribution: dict[str, ScikitBuildEditableHook] = {}
+    for hook in hooks:
+        distribution = _normalized_distribution_name(
+            hook.module.removeprefix("_editable_skbc_")
+        )
+        if not distribution or distribution in hook_by_distribution:
+            raise ImageBuildError(
+                "multiple scikit-build editable helpers claim one distribution"
+            )
+        hook_by_distribution[distribution] = hook
+    direct_url_relocations: list[EditableDirectUrlRelocation] = []
+    for direct_url in sorted(
+        site_packages.rglob("direct_url.json"), key=lambda item: str(item)
+    ):
+        try:
+            metadata = json.loads(
+                _read_bounded_regular_text(direct_url, "venv direct_url metadata")
+            )
+        except json.JSONDecodeError as error:
+            raise ImageBuildError("cannot parse venv direct_url metadata") from error
+        if not isinstance(metadata, dict):
+            raise ImageBuildError("venv direct_url metadata must be an object")
+        url = metadata.get("url")
+        directory_info = metadata.get("dir_info")
+        editable = (
+            isinstance(directory_info, dict) and directory_info.get("editable") is True
+        )
+        direct_local = isinstance(url, str) and url.lower().startswith("file:")
+        if not editable and not direct_local:
+            continue
+        try:
+            distribution = _distribution_name_from_metadata(direct_url.parent)
+        except ImageBuildError as error:
+            raise ImageBuildError(
+                "venv contains an editable or direct-local distribution outside the supported scikit-build relocation contract"
+            ) from error
+        hook = hook_by_distribution.get(distribution)
+        if (
+            hook is None
+            or not editable
+            or not isinstance(url, str)
+            or set(metadata) != {"url", "dir_info"}
+            or directory_info != {"editable": True}
+        ):
+            raise ImageBuildError(
+                "venv contains an editable or direct-local distribution outside the supported scikit-build relocation contract"
+            )
+        parsed_url = urllib.parse.urlsplit(url)
+        if (
+            parsed_url.scheme != "file"
+            or parsed_url.netloc
+            or parsed_url.query
+            or parsed_url.fragment
+        ):
+            raise ImageBuildError(
+                "supported editable direct_url must be a local file URL without query or fragment"
+            )
+        try:
+            checkout_root = Path(urllib.parse.unquote(parsed_url.path)).resolve(
+                strict=True
+            )
+        except OSError as error:
+            raise ImageBuildError(
+                "supported editable direct_url does not resolve to an existing checkout root"
+            ) from error
+        candidates = tuple(
+            source_root
+            for source_root in hook.source_roots
+            if checkout_root == source_root or checkout_root == source_root.parent
+        )
+        if len(candidates) != 1:
+            raise ImageBuildError(
+                "editable direct_url checkout root does not match the helper's admitted source root"
+            )
+        direct_url_relocations.append(
+            EditableDirectUrlRelocation(metadata=direct_url, source_root=candidates[0])
+        )
+    return VenvRelocationPlan(
+        scikit_build_hooks=tuple(hooks),
+        editable_direct_urls=tuple(direct_url_relocations),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,13 +724,14 @@ class BuildSpec:
     @param generation 不含路径语义的 generation 名称 / Generation name without path semantics.
     @param output_root root-owned artifact store 根 / Root-owned artifact-store root.
     @param venv 可信项目 Python venv / Trusted project Python venv.
-    @param python_sources 显式允许的 editable Python source roots / Explicitly admitted editable Python-source roots.
+    @param python_sources 显式允许的 path-only ``.pth`` Python source roots / Explicitly admitted path-only ``.pth`` Python-source roots.
     @param bash 可信 Bash executable / Trusted Bash executable.
     @param gnu_commands 显式 allowlisted GNU command executables / Explicitly allowlisted GNU-command executables.
     @param supervisor 已构建的 wsp-systemd / Built wsp-systemd executable.
     @param sealer 已构建的 wspctl-image / Built wspctl-image executable.
     @param readelf 只读 ELF metadata reader / Read-only ELF metadata reader.
     @param ldconfig 动态 loader cache reader / Dynamic-loader cache reader.
+    @param venv_relocation 已验证的 venv startup-hook 重定位计划 / Verified venv startup-hook relocation plan.
     """
 
     generation: str
@@ -233,6 +744,7 @@ class BuildSpec:
     sealer: Path
     readelf: Path
     ldconfig: Path
+    venv_relocation: VenvRelocationPlan = VenvRelocationPlan()
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -250,7 +762,9 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
     return True
 
 
-def _require_absolute_existing(path_text: str, description: str, *, directory: bool) -> Path:
+def _require_absolute_existing(
+    path_text: str, description: str, *, directory: bool
+) -> Path:
     """@brief 解析一个明确的可信绝对输入 / Resolve one explicit trusted absolute input.
 
     @param path_text CLI 提供的路径文本 / Path text supplied on the CLI.
@@ -289,7 +803,9 @@ def _validate_generation(generation: str) -> str:
     """
 
     if generation in {".", ".."} or _GENERATION_PATTERN.fullmatch(generation) is None:
-        raise ImageBuildError("generation must match [A-Za-z0-9_.-]{1,128} and cannot be . or ..")
+        raise ImageBuildError(
+            "generation must match [A-Za-z0-9_.-]{1,128} and cannot be . or .."
+        )
     return generation
 
 
@@ -322,10 +838,12 @@ def _validate_controlled_directory(
         if not stat.S_ISDIR(metadata.st_mode):
             raise ImageBuildError(f"{description} ancestor is not a directory")
         terminal = current == resolved
-        if (metadata.st_uid != 0 or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)) and (
-            terminal or not allow_insecure_development_ancestors
-        ):
-            raise ImageBuildError(f"{description} and every ancestor must be root-owned and non-group/world-writable")
+        if (
+            metadata.st_uid != 0 or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ) and (terminal or not allow_insecure_development_ancestors):
+            raise ImageBuildError(
+                f"{description} and every ancestor must be root-owned and non-group/world-writable"
+            )
         if current == current.parent:
             return resolved
         current = current.parent
@@ -342,7 +860,9 @@ def _runtime_path(path_text: str | PurePosixPath) -> PurePosixPath:
 
     result = PurePosixPath(path_text)
     if not result.is_absolute() or ".." in result.parts or str(result) == "/":
-        raise ImageBuildError("runtime destination must be an absolute non-root POSIX path without ..")
+        raise ImageBuildError(
+            "runtime destination must be an absolute non-root POSIX path without .."
+        )
     return result
 
 
@@ -356,7 +876,9 @@ def _runtime_relative_link(source: PurePosixPath, target: PurePosixPath) -> str:
 
     source_path = _runtime_path(source)
     target_path = _runtime_path(target)
-    return posixpath.relpath(target_path.as_posix(), start=source_path.parent.as_posix())
+    return posixpath.relpath(
+        target_path.as_posix(), start=source_path.parent.as_posix()
+    )
 
 
 def _is_elf(path: Path) -> bool:
@@ -388,7 +910,9 @@ def _read_elf_abi(path: Path) -> ElfAbi:
 
     no_follow = getattr(os, "O_NOFOLLOW", 0)
     if no_follow == 0:
-        raise ImageBuildError("host platform does not expose O_NOFOLLOW for ELF ABI inspection")
+        raise ImageBuildError(
+            "host platform does not expose O_NOFOLLOW for ELF ABI inspection"
+        )
     flags = os.O_RDONLY | os.O_CLOEXEC | no_follow
     try:
         descriptor = os.open(path, flags)
@@ -466,7 +990,9 @@ def _sanitized_mode(source_mode: int, *, directory: bool) -> int:
 
     if directory:
         return 0o755
-    return 0o755 if source_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH) else 0o644
+    return (
+        0o755 if source_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH) else 0o644
+    )
 
 
 def _write_all(descriptor: int, data: bytes) -> None:
@@ -513,7 +1039,9 @@ def _read_all(descriptor: int, maximum: int) -> bytes:
             return b"".join(chunks)
         total += len(chunk)
         if total > maximum:
-            raise ImageBuildError("text file needing relocation exceeds the safe size limit")
+            raise ImageBuildError(
+                "text file needing relocation exceeds the safe size limit"
+            )
         chunks.append(chunk)
 
 
@@ -524,6 +1052,11 @@ def _parse_python_layout(venv: Path) -> PythonRuntimeLayout:
     @return 可复制的 CPython layout / Copyable CPython layout.
     @raise ImageBuildError venv 缺少解释器、probe 失败或布局越界时抛出 /
         Raised when the venv lacks an interpreter, probing fails, or layout escapes its base prefix.
+    @note ``-I`` 只隔离 user environment，仍会导入 venv ``site-packages`` 并执行 ``.pth``。
+        probe 必须同时传入 ``-S``，使 layout discovery 永远不执行待验证的 startup hook。/
+        ``-I`` isolates only the user environment; it still imports venv ``site-packages`` and
+        executes ``.pth`` files. The probe must also pass ``-S`` so layout discovery never runs an
+        as-yet-unvalidated startup hook.
     """
 
     executable = venv / "bin" / "python"
@@ -537,7 +1070,7 @@ def _parse_python_layout(venv: Path) -> PythonRuntimeLayout:
     )
     try:
         completed = subprocess.run(
-            [str(executable), "-I", "-c", probe],
+            [str(executable), "-I", "-S", "-c", probe],
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -553,19 +1086,33 @@ def _parse_python_layout(venv: Path) -> PythonRuntimeLayout:
         raise ImageBuildError("trusted venv Python probe failed")
     try:
         values = json.loads(completed.stdout)
-        base_prefix = _require_absolute_existing(str(values["base_prefix"]), "CPython base prefix", directory=True)
-        interpreter = _require_absolute_existing(str(values["executable"]), "CPython interpreter", directory=False)
-        standard_library = _require_absolute_existing(str(values["stdlib"]), "CPython standard library", directory=True)
-        library_directory = _require_absolute_existing(str(values["libdir"]), "CPython library directory", directory=True)
+        base_prefix = _require_absolute_existing(
+            str(values["base_prefix"]), "CPython base prefix", directory=True
+        )
+        interpreter = _require_absolute_existing(
+            str(values["executable"]), "CPython interpreter", directory=False
+        )
+        standard_library = _require_absolute_existing(
+            str(values["stdlib"]), "CPython standard library", directory=True
+        )
+        library_directory = _require_absolute_existing(
+            str(values["libdir"]), "CPython library directory", directory=True
+        )
         version = str(values["version"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-        raise ImageBuildError("trusted venv Python probe returned an invalid layout") from error
+        raise ImageBuildError(
+            "trusted venv Python probe returned an invalid layout"
+        ) from error
     if re.fullmatch(r"\d+\.\d+", version) is None:
         raise ImageBuildError("CPython version must be a major.minor ABI string")
     if not _is_relative_to(interpreter, base_prefix):
         raise ImageBuildError("CPython interpreter must be inside sys.base_prefix")
-    if not _is_relative_to(standard_library, base_prefix) or not _is_relative_to(library_directory, base_prefix):
-        raise ImageBuildError("CPython standard library and LIBDIR must be inside sys.base_prefix")
+    if not _is_relative_to(standard_library, base_prefix) or not _is_relative_to(
+        library_directory, base_prefix
+    ):
+        raise ImageBuildError(
+            "CPython standard library and LIBDIR must be inside sys.base_prefix"
+        )
     return PythonRuntimeLayout(
         venv=venv,
         base_prefix=base_prefix,
@@ -594,14 +1141,16 @@ class RootfsAssembler:
         python_sources: Sequence[Path],
         readelf: Path,
         ldconfig: Path,
+        venv_relocation: VenvRelocationPlan = VenvRelocationPlan(),
     ) -> None:
         """@brief 初始化一个尚未 seal 的 rootfs assembler / Initialize an as-yet-unsealed rootfs assembler.
 
         @param rootfs staging 内新建的 rootfs 目录 / Newly created rootfs directory inside staging.
         @param layout 已探测的 CPython layout / Probed CPython layout.
-        @param python_sources 允许复制的 editable source roots / Editable source roots admitted for copying.
+        @param python_sources 允许复制的 path-only ``.pth`` source roots / Path-only ``.pth`` source roots admitted for copying.
         @param readelf 可信 readelf binary / Trusted readelf binary.
         @param ldconfig 可信 ldconfig binary / Trusted ldconfig binary.
+        @param venv_relocation 已验证的 venv startup-hook 重定位计划 / Verified venv startup-hook relocation plan.
         @return None / None.
         """
 
@@ -609,6 +1158,7 @@ class RootfsAssembler:
         self._layout = layout
         self._readelf = readelf
         self._ldconfig = ldconfig
+        self._venv_relocation = venv_relocation
         self._source_maps: list[tuple[Path, PurePosixPath]] = [
             (layout.venv, _RUNTIME_VENV),
             (layout.base_prefix, PurePosixPath("/usr/local")),
@@ -616,7 +1166,21 @@ class RootfsAssembler:
         for index, source in enumerate(python_sources, start=1):
             name = source.name or f"source-{index}"
             safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
-            self._source_maps.append((source, _RUNTIME_PYTHON_SOURCES / f"{index}-{safe_name}"))
+            self._source_maps.append(
+                (source, _RUNTIME_PYTHON_SOURCES / f"{index}-{safe_name}")
+            )
+        self._editable_hooks_by_pth: dict[Path, ScikitBuildEditableHook] = {
+            hook.pth.resolve(strict=True): hook
+            for hook in venv_relocation.scikit_build_hooks
+        }
+        self._editable_hooks_by_helper: dict[Path, ScikitBuildEditableHook] = {
+            hook.helper.resolve(strict=True): hook
+            for hook in venv_relocation.scikit_build_hooks
+        }
+        self._editable_direct_urls: dict[Path, EditableDirectUrlRelocation] = {
+            relocation.metadata.resolve(strict=True): relocation
+            for relocation in venv_relocation.editable_direct_urls
+        }
         self._base_interpreter = _RUNTIME_CPYTHON_DIRECTORY / f"cpython{layout.version}"
         self._special_source_destinations: dict[Path, PurePosixPath] = {
             layout.interpreter: self._base_interpreter,
@@ -711,7 +1275,9 @@ class RootfsAssembler:
         try:
             result.relative_to(self._rootfs)
         except ValueError as error:
-            raise ImageBuildError("runtime destination escaped staging rootfs") from error
+            raise ImageBuildError(
+                "runtime destination escaped staging rootfs"
+            ) from error
         return result
 
     def _ensure_directory(self, runtime_path: PurePosixPath, mode: int) -> None:
@@ -741,13 +1307,17 @@ class RootfsAssembler:
             except OSError as error:
                 raise ImageBuildError("cannot inspect rootfs directory") from error
             if not stat.S_ISDIR(metadata.st_mode):
-                raise ImageBuildError("rootfs destination parent is not a real directory")
+                raise ImageBuildError(
+                    "rootfs destination parent is not a real directory"
+                )
             if index == len(relative_parts) - 1:
                 try:
                     os.chown(current, 0, 0)
                     os.chmod(current, mode)
                 except OSError as error:
-                    raise ImageBuildError("cannot fix rootfs directory ownership or mode") from error
+                    raise ImageBuildError(
+                        "cannot fix rootfs directory ownership or mode"
+                    ) from error
 
     def _ensure_parent(self, runtime_path: PurePosixPath) -> None:
         """@brief 确保 file/symlink destination 的父目录存在 / Ensure a file/symlink destination parent exists.
@@ -807,9 +1377,13 @@ class RootfsAssembler:
         if known_source is not None:
             if known_source == checked_source:
                 return
-            raise ImageBuildError(f"two distinct trusted inputs collide at runtime path {checked_runtime}")
+            raise ImageBuildError(
+                f"two distinct trusted inputs collide at runtime path {checked_runtime}"
+            )
         if os.path.lexists(destination):
-            raise ImageBuildError(f"unexpected pre-existing rootfs destination {checked_runtime}")
+            raise ImageBuildError(
+                f"unexpected pre-existing rootfs destination {checked_runtime}"
+            )
         try:
             source_metadata = os.lstat(checked_source)
         except OSError as error:
@@ -818,9 +1392,13 @@ class RootfsAssembler:
             raise ImageBuildError("trusted source must resolve to a regular file")
         self._ensure_parent(checked_runtime)
         try:
-            source_fd = os.open(checked_source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            source_fd = os.open(
+                checked_source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+            )
         except OSError as error:
-            raise ImageBuildError("cannot open trusted source file without following links") from error
+            raise ImageBuildError(
+                "cannot open trusted source file without following links"
+            ) from error
         try:
             opened_metadata = os.fstat(source_fd)
             if (
@@ -836,10 +1414,14 @@ class RootfsAssembler:
                     0o600,
                 )
             except OSError as error:
-                raise ImageBuildError("cannot create rootfs file destination") from error
+                raise ImageBuildError(
+                    "cannot create rootfs file destination"
+                ) from error
             try:
                 if transform is not None:
-                    rewritten = transform(_read_all(source_fd, _MAX_REWRITTEN_TEXT_BYTES))
+                    rewritten = transform(
+                        _read_all(source_fd, _MAX_REWRITTEN_TEXT_BYTES)
+                    )
                     _write_all(destination_fd, rewritten)
                 else:
                     while True:
@@ -848,11 +1430,16 @@ class RootfsAssembler:
                         except InterruptedError:
                             continue
                         except OSError as error:
-                            raise ImageBuildError("cannot read trusted source file") from error
+                            raise ImageBuildError(
+                                "cannot read trusted source file"
+                            ) from error
                         if not chunk:
                             break
                         _write_all(destination_fd, chunk)
-                os.fchmod(destination_fd, _sanitized_mode(source_metadata.st_mode, directory=False))
+                os.fchmod(
+                    destination_fd,
+                    _sanitized_mode(source_metadata.st_mode, directory=False),
+                )
                 os.fchown(destination_fd, 0, 0)
                 os.fsync(destination_fd)
             finally:
@@ -863,7 +1450,9 @@ class RootfsAssembler:
         if _is_elf(checked_source):
             self._elf_queue.append((checked_source, checked_runtime))
 
-    def _create_symlink(self, runtime_path: PurePosixPath, target: PurePosixPath) -> None:
+    def _create_symlink(
+        self, runtime_path: PurePosixPath, target: PurePosixPath
+    ) -> None:
         """@brief 创建一个 rootfs-contained relative symlink / Create one rootfs-contained relative symlink.
 
         @param runtime_path symlink 的 runtime 位置 / Runtime location of the symlink.
@@ -880,10 +1469,16 @@ class RootfsAssembler:
             try:
                 existing_target = os.readlink(destination)
             except OSError as error:
-                raise ImageBuildError(f"unexpected non-symlink rootfs destination {checked_runtime}") from error
-            if existing_target == _runtime_relative_link(checked_runtime, checked_target):
+                raise ImageBuildError(
+                    f"unexpected non-symlink rootfs destination {checked_runtime}"
+                ) from error
+            if existing_target == _runtime_relative_link(
+                checked_runtime, checked_target
+            ):
                 return
-            raise ImageBuildError(f"two distinct rootfs symlinks collide at runtime path {checked_runtime}")
+            raise ImageBuildError(
+                f"two distinct rootfs symlinks collide at runtime path {checked_runtime}"
+            )
         self._ensure_parent(checked_runtime)
         relative_target = _runtime_relative_link(checked_runtime, checked_target)
         try:
@@ -912,6 +1507,8 @@ class RootfsAssembler:
         """
 
         checked_runtime = _runtime_path(runtime_path)
+        if _is_omitted_python_cache_entry(source):
+            return
         try:
             metadata = os.lstat(source)
         except OSError as error:
@@ -922,11 +1519,15 @@ class RootfsAssembler:
         if stat.S_ISDIR(metadata.st_mode):
             self._copying.add(identity)
             try:
-                self._ensure_directory(checked_runtime, _sanitized_mode(metadata.st_mode, directory=True))
+                self._ensure_directory(
+                    checked_runtime, _sanitized_mode(metadata.st_mode, directory=True)
+                )
                 try:
                     entries = sorted(os.scandir(source), key=lambda entry: entry.name)
                 except OSError as error:
-                    raise ImageBuildError("cannot enumerate trusted source directory") from error
+                    raise ImageBuildError(
+                        "cannot enumerate trusted source directory"
+                    ) from error
                 for entry in entries:
                     child_source = Path(entry.path)
                     child_runtime = checked_runtime / entry.name
@@ -940,10 +1541,13 @@ class RootfsAssembler:
                 self._copying.remove(identity)
             return
         if stat.S_ISREG(metadata.st_mode):
-            should_transform = transform is not None and (transform_when is None or transform_when(source))
+            should_transform = transform is not None and (
+                transform_when is None or transform_when(source)
+            )
             if not should_transform:
                 self._copy_regular_file(source, checked_runtime)
             else:
+
                 def file_transform(data: bytes) -> bytes:
                     """@brief 将当前 regular file 交给 tree transform / Send the current regular file to the tree transform.
 
@@ -953,7 +1557,9 @@ class RootfsAssembler:
 
                     return transform(source, data)
 
-                self._copy_regular_file(source, checked_runtime, transform=file_transform)
+                self._copy_regular_file(
+                    source, checked_runtime, transform=file_transform
+                )
             return
         if stat.S_ISLNK(metadata.st_mode):
             self._copy_symlink(
@@ -963,7 +1569,9 @@ class RootfsAssembler:
                 transform_when=transform_when,
             )
             return
-        raise ImageBuildError("trusted input tree contains an unsupported special inode")
+        raise ImageBuildError(
+            "trusted input tree contains an unsupported special inode"
+        )
 
     def _copy_tree(
         self,
@@ -984,7 +1592,9 @@ class RootfsAssembler:
 
         if not source.is_dir():
             raise ImageBuildError("trusted tree source must be a directory")
-        self._copy_entry(source, runtime_path, transform=transform, transform_when=transform_when)
+        self._copy_entry(
+            source, runtime_path, transform=transform, transform_when=transform_when
+        )
 
     def _copy_symlink(
         self,
@@ -1011,9 +1621,13 @@ class RootfsAssembler:
             resolved_target = (source.parent / raw_target).resolve(strict=True)
         except OSError as error:
             raise ImageBuildError("cannot resolve trusted symlink target") from error
+        if _is_omitted_python_cache_entry(resolved_target):
+            return
         target_runtime = self._map_source_to_runtime(resolved_target)
         if target_runtime is None:
-            raise ImageBuildError(f"trusted symlink target is outside admitted image inputs: {source}")
+            raise ImageBuildError(
+                f"trusted symlink target is outside admitted image inputs: {source}"
+            )
         if not self._runtime_exists(target_runtime):
             self._copy_entry(
                 resolved_target,
@@ -1034,15 +1648,25 @@ class RootfsAssembler:
         """
 
         self._copy_regular_file(self._layout.interpreter, self._base_interpreter)
-        stdlib_runtime = PurePosixPath("/usr/local") / self._layout.standard_library.relative_to(self._layout.base_prefix).as_posix()
+        stdlib_runtime = (
+            PurePosixPath("/usr/local")
+            / self._layout.standard_library.relative_to(
+                self._layout.base_prefix
+            ).as_posix()
+        )
         self._copy_tree(self._layout.standard_library, stdlib_runtime)
         pattern = f"libpython{self._layout.version}.so*"
-        for library in sorted(self._layout.library_directory.glob(pattern), key=lambda item: item.name):
-            runtime_library = PurePosixPath("/usr/local") / library.relative_to(self._layout.base_prefix).as_posix()
+        for library in sorted(
+            self._layout.library_directory.glob(pattern), key=lambda item: item.name
+        ):
+            runtime_library = (
+                PurePosixPath("/usr/local")
+                / library.relative_to(self._layout.base_prefix).as_posix()
+            )
             self._copy_entry(library, runtime_library)
 
     def _copy_admitted_python_sources(self) -> None:
-        """@brief 复制显式允许的 editable Python sources / Copy explicitly admitted editable Python sources.
+        """@brief 复制显式允许的 path-only ``.pth`` Python sources / Copy explicitly admitted path-only ``.pth`` Python sources.
 
         @return None / None.
         """
@@ -1058,7 +1682,9 @@ class RootfsAssembler:
 
         venv_python = _RUNTIME_VENV / "bin" / f"python{self._layout.version}"
         if not self._runtime_exists(venv_python):
-            raise ImageBuildError("relocated venv did not contain its versioned python entrypoint")
+            raise ImageBuildError(
+                "relocated venv did not contain its versioned python entrypoint"
+            )
         for entrypoint in (
             PurePosixPath("/usr/local/bin/python"),
             PurePosixPath("/usr/local/bin/python3"),
@@ -1077,10 +1703,22 @@ class RootfsAssembler:
         @return 只引用 runtime 内路径的替换字节 / Replacement bytes referring only to runtime paths.
         """
 
+        try:
+            resolved = source.resolve(strict=True)
+        except OSError as error:
+            raise ImageBuildError(
+                "cannot resolve venv file selected for relocation"
+            ) from error
         if source == self._layout.venv / "pyvenv.cfg":
             return self._rewrite_pyvenv_configuration(data)
+        helper = self._editable_hooks_by_helper.get(resolved)
+        if helper is not None:
+            return self._rewrite_scikit_build_editable_helper(helper, data)
+        direct_url = self._editable_direct_urls.get(resolved)
+        if direct_url is not None:
+            return self._rewrite_editable_direct_url(direct_url, data)
         if source.suffix == ".pth":
-            return self._rewrite_pth(data)
+            return self._rewrite_pth(data, source=resolved)
         try:
             relative = source.relative_to(self._layout.venv)
         except ValueError:
@@ -1102,7 +1740,18 @@ class RootfsAssembler:
             every ``bin`` file as text would incorrectly reject a valid image.
         """
 
-        if source == self._layout.venv / "pyvenv.cfg" or source.suffix == ".pth":
+        try:
+            resolved = source.resolve(strict=True)
+        except OSError as error:
+            raise ImageBuildError(
+                "cannot resolve venv file selected for relocation"
+            ) from error
+        if (
+            source == self._layout.venv / "pyvenv.cfg"
+            or source.suffix == ".pth"
+            or resolved in self._editable_hooks_by_helper
+            or resolved in self._editable_direct_urls
+        ):
             return True
         try:
             relative = source.relative_to(self._layout.venv)
@@ -1117,7 +1766,9 @@ class RootfsAssembler:
             finally:
                 os.close(descriptor)
         except OSError as error:
-            raise ImageBuildError("cannot inspect venv executable for a shebang") from error
+            raise ImageBuildError(
+                "cannot inspect venv executable for a shebang"
+            ) from error
 
     def _runtime_path_for_text_path(self, text_path: str) -> PurePosixPath | None:
         """@brief 将一个已有 host absolute 文本路径映射到 runtime / Map an existing host absolute text path into the runtime.
@@ -1134,6 +1785,24 @@ class RootfsAssembler:
             return self._map_source_to_runtime(candidate.resolve(strict=True))
         except OSError:
             return None
+
+    def _runtime_path_for_explicit_source_root(
+        self, source_root: Path
+    ) -> PurePosixPath:
+        """@brief 将一个已批准 source root 映射为其固定 runtime root / Map one approved source root to its fixed runtime root.
+
+        @param source_root 已验证 PEP 660 plan 引用的 canonical source root / Canonical source root referenced by the verified PEP 660 plan.
+        @return 对应的 runtime-internal root / Corresponding runtime-internal root.
+        @raise ImageBuildError plan 与 assembler 的 ``--python-source`` 输入不一致时抛出 /
+            Raised when the plan and assembler ``--python-source`` inputs disagree.
+        """
+
+        for candidate, runtime in self._source_maps[2:]:
+            if candidate == source_root:
+                return runtime
+        raise ImageBuildError(
+            "editable relocation plan references a source root absent from this assembler"
+        )
 
     def _runtime_path_for_shebang(self, text_path: str) -> PurePosixPath | None:
         """@brief 优先保留 venv entrypoint 的 shebang 语义 / Prefer preserving a venv entrypoint's shebang semantics.
@@ -1176,7 +1845,9 @@ class RootfsAssembler:
             elif normalized_key in {"home", "executable"}:
                 mapped = self._runtime_path_for_text_path(normalized_value)
                 if mapped is None:
-                    raise ImageBuildError(f"pyvenv.cfg {normalized_key} is outside admitted image inputs")
+                    raise ImageBuildError(
+                        f"pyvenv.cfg {normalized_key} is outside admitted image inputs"
+                    )
                 rewritten.append(f"{key.strip()} = {mapped.as_posix()}")
             elif normalized_key == "command":
                 rewritten.append("command = wspctl-image-relocated")
@@ -1184,28 +1855,138 @@ class RootfsAssembler:
                 rewritten.append(line)
         return ("\n".join(rewritten) + "\n").encode("utf-8")
 
-    def _rewrite_pth(self, data: bytes) -> bytes:
-        """@brief 重写 editable .pth 的绝对 source 路径 / Rewrite absolute source paths in an editable .pth file.
+    def _rewrite_scikit_build_editable_helper(
+        self, hook: ScikitBuildEditableHook, data: bytes
+    ) -> bytes:
+        """@brief 将已验证 scikit-build PEP 660 helper 的 source mapping 重写到 runtime / Rewrite source mappings of a verified scikit-build PEP 660 helper into the runtime.
+
+        @param hook validate 阶段产生的不可变 helper plan / Immutable helper plan produced during validation.
+        @param data 原 helper UTF-8 字节 / Original helper UTF-8 bytes.
+        @return 只含 runtime source roots 的 helper bytes / Helper bytes containing runtime source roots only.
+        @raise ImageBuildError helper 在 validation 后改变、含非 runtime absolute mapping 或 plan/source
+            mapping 不一致时抛出 / Raised when the helper changed after validation, carries a
+            non-runtime absolute mapping, or the plan/source mapping disagrees.
+        """
+
+        try:
+            rewritten = data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ImageBuildError(
+                "scikit-build editable helper must be UTF-8"
+            ) from error
+        runtime_roots: list[PurePosixPath] = []
+        for source_root in sorted(
+            hook.source_roots, key=lambda item: len(str(item)), reverse=True
+        ):
+            runtime_root = self._runtime_path_for_explicit_source_root(source_root)
+            host_root = str(source_root)
+            if host_root not in rewritten:
+                raise ImageBuildError(
+                    "scikit-build editable helper changed after its relocation plan was validated"
+                )
+            rewritten = rewritten.replace(host_root, runtime_root.as_posix())
+            runtime_roots.append(runtime_root)
+        try:
+            parsed = ast.parse(rewritten, filename=str(hook.helper), mode="exec")
+        except SyntaxError as error:
+            raise ImageBuildError(
+                "rewritten scikit-build editable helper is not valid Python"
+            ) from error
+        for node in ast.walk(parsed):
+            if (
+                not isinstance(node, ast.Constant)
+                or not isinstance(node.value, str)
+                or node.value in {"", "/"}
+            ):
+                continue
+            if not node.value.startswith("/"):
+                continue
+            runtime_path = PurePosixPath(node.value)
+            if not any(
+                runtime_path == root or root in runtime_path.parents
+                for root in runtime_roots
+            ):
+                raise ImageBuildError(
+                    "rewritten scikit-build editable helper retains a non-runtime absolute mapping"
+                )
+        return rewritten.encode("utf-8")
+
+    def _rewrite_editable_direct_url(
+        self, relocation: EditableDirectUrlRelocation, data: bytes
+    ) -> bytes:
+        """@brief 重写已验证 editable direct-url，绝不保留 host checkout URL / Rewrite a verified editable direct URL without retaining a host checkout URL.
+
+        @param relocation validate 阶段产生的 direct-url plan / Direct-url plan produced during validation.
+        @param data 原 PEP 610 metadata bytes / Original PEP 610 metadata bytes.
+        @return 只引用 runtime source root 的 canonical metadata / Canonical metadata referring only to the runtime source root.
+        @raise ImageBuildError metadata 在 validation 后改变或不是 object 时抛出 /
+            Raised when metadata changed after validation or is not an object.
+        """
+
+        try:
+            metadata = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ImageBuildError(
+                "editable direct_url metadata changed after validation"
+            ) from error
+        if (
+            not isinstance(metadata, dict)
+            or set(metadata) != {"url", "dir_info"}
+            or metadata.get("dir_info") != {"editable": True}
+        ):
+            raise ImageBuildError(
+                "editable direct_url metadata changed after validation"
+            )
+        runtime_root = self._runtime_path_for_explicit_source_root(
+            relocation.source_root
+        )
+        rewritten = {
+            "url": f"file://{runtime_root.as_posix()}",
+            "dir_info": {"editable": True},
+        }
+        return (
+            json.dumps(rewritten, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+
+    def _rewrite_pth(self, data: bytes, *, source: Path | None = None) -> bytes:
+        """@brief 重写 path-only ``.pth`` 或已验证 PEP 660 ``.pth`` 的绝对 source 路径 / Rewrite absolute source paths in a path-only or verified PEP 660 ``.pth`` file.
 
         @param data 原 .pth 字节 / Original .pth bytes.
+        @param source 可选的 canonical ``.pth`` source path / Optional canonical ``.pth`` source path.
         @return 只引用 runtime 内 source 的 .pth 字节 / .pth bytes referring only to runtime-internal sources.
-        @raise ImageBuildError 发现未显式批准的 absolute source line 时抛出 /
-            Raised when an absolute source line was not explicitly admitted.
+        @raise ImageBuildError 发现未显式批准的 absolute source line 或非计划 startup hook 时抛出 /
+            Raised when an absolute source line was not explicitly admitted or a startup hook is not planned.
         """
 
         try:
             lines = data.decode("utf-8").splitlines()
         except UnicodeDecodeError as error:
             raise ImageBuildError(".pth file must be UTF-8") from error
+        hook = self._editable_hooks_by_pth.get(source) if source is not None else None
         rewritten: list[str] = []
-        for line in lines:
+        for index, line in enumerate(lines):
+            if _is_executable_pth_line(line):
+                if hook is None or index != 0 or line != f"import {hook.module}":
+                    raise ImageBuildError(_EXECUTABLE_PTH_ERROR)
+                rewritten.append(line)
+                continue
             stripped = line.strip()
             if stripped.startswith("/"):
+                if hook is not None and (line != stripped or index == 0):
+                    raise ImageBuildError(
+                        "scikit-build editable .pth changed after validation"
+                    )
                 mapped = self._runtime_path_for_text_path(stripped)
                 if mapped is None:
-                    raise ImageBuildError(".pth references a host path not supplied with --python-source")
+                    raise ImageBuildError(
+                        ".pth references a host path not supplied with --python-source"
+                    )
                 rewritten.append(mapped.as_posix())
             else:
+                if hook is not None:
+                    raise ImageBuildError(
+                        "scikit-build editable .pth changed after validation"
+                    )
                 rewritten.append(line)
         return ("\n".join(rewritten) + "\n").encode("utf-8")
 
@@ -1227,7 +2008,9 @@ class RootfsAssembler:
             raise ImageBuildError("venv script shebang must be UTF-8") from error
         interpreter, spacing, suffix = declaration.partition(" ")
         if not interpreter.startswith("/"):
-            raise ImageBuildError("venv script shebang must name an absolute interpreter")
+            raise ImageBuildError(
+                "venv script shebang must name an absolute interpreter"
+            )
         mapped = self._runtime_path_for_shebang(interpreter)
         if mapped is None:
             runtime_interpreter = PurePosixPath(interpreter)
@@ -1237,7 +2020,9 @@ class RootfsAssembler:
                 PurePosixPath("/usr/bin/env"),
             } and self._runtime_exists(runtime_interpreter):
                 return data
-            raise ImageBuildError("venv script shebang references an unadmitted host interpreter")
+            raise ImageBuildError(
+                "venv script shebang references an unadmitted host interpreter"
+            )
         replacement = f"#!{mapped.as_posix()}{spacing}{suffix}".encode("utf-8")
         return replacement + (separator + remainder if separator else b"")
 
@@ -1251,9 +2036,15 @@ class RootfsAssembler:
         """
 
         abi = _read_elf_abi(source)
-        dynamic_output = self._run_host_tool(self._readelf, ("-dW", "--", str(source)), "read ELF dynamic metadata")
-        program_output = self._run_host_tool(self._readelf, ("-lW", "--", str(source)), "read ELF program metadata")
-        needed = tuple(match.group("name") for match in _NEEDED_PATTERN.finditer(dynamic_output))
+        dynamic_output = self._run_host_tool(
+            self._readelf, ("-dW", "--", str(source)), "read ELF dynamic metadata"
+        )
+        program_output = self._run_host_tool(
+            self._readelf, ("-lW", "--", str(source)), "read ELF program metadata"
+        )
+        needed = tuple(
+            match.group("name") for match in _NEEDED_PATTERN.finditer(dynamic_output)
+        )
         for name in needed:
             if "/" in name or name in {".", ".."} or "\x00" in name:
                 raise ImageBuildError("ELF DT_NEEDED contains an unsafe library name")
@@ -1270,28 +2061,51 @@ class RootfsAssembler:
             for raw_entry in selected_paths.split(":"):
                 if not raw_entry:
                     continue
-                expanded = raw_entry.replace("${ORIGIN}", str(source.parent)).replace("$ORIGIN", str(source.parent))
+                expanded = raw_entry.replace("${ORIGIN}", str(source.parent)).replace(
+                    "$ORIGIN", str(source.parent)
+                )
                 if "$" in expanded:
-                    raise ImageBuildError("ELF RPATH/RUNPATH contains an unsupported variable")
-                if raw_entry.startswith("/") and not self._is_runtime_stable_library_path(PurePosixPath(raw_entry)):
-                    raise ImageBuildError("ELF carries a host-specific absolute RPATH/RUNPATH")
+                    raise ImageBuildError(
+                        "ELF RPATH/RUNPATH contains an unsupported variable"
+                    )
+                if raw_entry.startswith(
+                    "/"
+                ) and not self._is_runtime_stable_library_path(
+                    PurePosixPath(raw_entry)
+                ):
+                    raise ImageBuildError(
+                        "ELF carries a host-specific absolute RPATH/RUNPATH"
+                    )
                 candidate = Path(expanded)
                 if not candidate.is_absolute():
-                    raise ImageBuildError("ELF RPATH/RUNPATH did not resolve to an absolute directory")
+                    raise ImageBuildError(
+                        "ELF RPATH/RUNPATH did not resolve to an absolute directory"
+                    )
                 try:
                     resolved = candidate.resolve(strict=True)
                 except OSError as error:
-                    raise ImageBuildError("ELF RPATH/RUNPATH references a missing directory") from error
+                    raise ImageBuildError(
+                        "ELF RPATH/RUNPATH references a missing directory"
+                    ) from error
                 if not resolved.is_dir():
                     raise ImageBuildError("ELF RPATH/RUNPATH entry is not a directory")
                 search_paths.append(resolved)
         interpreter_match = _INTERPRETER_PATTERN.search(program_output)
-        interpreter = interpreter_match.group("path") if interpreter_match is not None else None
+        interpreter = (
+            interpreter_match.group("path") if interpreter_match is not None else None
+        )
         if interpreter is not None and not Path(interpreter).is_absolute():
             raise ImageBuildError("ELF PT_INTERP must be absolute")
-        return ElfMetadata(needed=needed, interpreter=interpreter, search_paths=tuple(search_paths), abi=abi)
+        return ElfMetadata(
+            needed=needed,
+            interpreter=interpreter,
+            search_paths=tuple(search_paths),
+            abi=abi,
+        )
 
-    def _run_host_tool(self, executable: Path, arguments: Sequence[str], purpose: str) -> str:
+    def _run_host_tool(
+        self, executable: Path, arguments: Sequence[str], purpose: str
+    ) -> str:
         """@brief 在固定 locale、无 stdin 下运行可信 metadata 工具 / Run a trusted metadata tool with fixed locale and no stdin.
 
         @param executable 已验证 host tool / Validated host tool.
@@ -1321,7 +2135,9 @@ class RootfsAssembler:
         try:
             return completed.stdout.decode("utf-8")
         except UnicodeDecodeError as error:
-            raise ImageBuildError(f"trusted metadata tool returned non-UTF-8 while attempting to {purpose}") from error
+            raise ImageBuildError(
+                f"trusted metadata tool returned non-UTF-8 while attempting to {purpose}"
+            ) from error
 
     def _load_library_cache(self) -> dict[str, tuple[Path, ...]]:
         """@brief 从 ldconfig cache 建立 SONAME 到绝对候选路径映射 / Build a SONAME-to-absolute-candidate map from ldconfig cache.
@@ -1348,7 +2164,9 @@ class RootfsAssembler:
         self._library_cache = {name: tuple(paths) for name, paths in values.items()}
         return self._library_cache
 
-    def _resolve_needed_library(self, source: Path, metadata: ElfMetadata, soname: str) -> tuple[Path, Path]:
+    def _resolve_needed_library(
+        self, source: Path, metadata: ElfMetadata, soname: str
+    ) -> tuple[Path, Path]:
         """@brief 使用 source RPATH 与 ldconfig 解析一个 DT_NEEDED / Resolve one DT_NEEDED through source RPATH and ldconfig.
 
         @param source 正在分析的 ELF / ELF currently being analyzed.
@@ -1369,7 +2187,9 @@ class RootfsAssembler:
                 source_metadata = resolved.stat()
             except OSError:
                 continue
-            if stat.S_ISREG(source_metadata.st_mode) and _has_matching_elf_abi(resolved, metadata.abi):
+            if stat.S_ISREG(source_metadata.st_mode) and _has_matching_elf_abi(
+                resolved, metadata.abi
+            ):
                 return resolved, candidate
         for logical_path in self._load_library_cache().get(soname, ()):
             try:
@@ -1377,7 +2197,9 @@ class RootfsAssembler:
                 source_metadata = resolved.stat()
             except OSError:
                 continue
-            if stat.S_ISREG(source_metadata.st_mode) and _has_matching_elf_abi(resolved, metadata.abi):
+            if stat.S_ISREG(source_metadata.st_mode) and _has_matching_elf_abi(
+                resolved, metadata.abi
+            ):
                 return resolved, logical_path
         raise ImageBuildError(
             f"ELF dependency {soname!r} from {source} has no candidate with a matching ELF ABI"
@@ -1390,9 +2212,13 @@ class RootfsAssembler:
         @return 位于受准 system library root 时为真 / True when below an admitted system-library root.
         """
 
-        return any(path == root or root in path.parents for root in _SYSTEM_LIBRARY_ROOTS)
+        return any(
+            path == root or root in path.parents for root in _SYSTEM_LIBRARY_ROOTS
+        )
 
-    def _dependency_runtime_path(self, resolved_source: Path, logical_path: Path) -> PurePosixPath:
+    def _dependency_runtime_path(
+        self, resolved_source: Path, logical_path: Path
+    ) -> PurePosixPath:
         """@brief 为一个解析后的 library 选择 runtime destination / Choose a runtime destination for one resolved library.
 
         @param resolved_source library 的规范 source / Canonical source of the library.
@@ -1434,17 +2260,29 @@ class RootfsAssembler:
                 try:
                     loader_source = loader_logical_path.resolve(strict=True)
                 except OSError as error:
-                    raise ImageBuildError("ELF PT_INTERP loader does not exist on the trusted build host") from error
+                    raise ImageBuildError(
+                        "ELF PT_INTERP loader does not exist on the trusted build host"
+                    ) from error
                 if (
                     not loader_source.is_file()
-                    or not self._is_runtime_stable_library_path(PurePosixPath(metadata.interpreter))
+                    or not self._is_runtime_stable_library_path(
+                        PurePosixPath(metadata.interpreter)
+                    )
                     or not _has_matching_elf_abi(loader_source, metadata.abi)
                 ):
-                    raise ImageBuildError("ELF PT_INTERP loader is not an admitted system-library object")
-                self._copy_regular_file(loader_source, PurePosixPath(metadata.interpreter))
+                    raise ImageBuildError(
+                        "ELF PT_INTERP loader is not an admitted system-library object"
+                    )
+                self._copy_regular_file(
+                    loader_source, PurePosixPath(metadata.interpreter)
+                )
             for soname in metadata.needed:
-                dependency_source, logical_path = self._resolve_needed_library(source, metadata, soname)
-                destination = self._dependency_runtime_path(dependency_source, logical_path)
+                dependency_source, logical_path = self._resolve_needed_library(
+                    source, metadata, soname
+                )
+                destination = self._dependency_runtime_path(
+                    dependency_source, logical_path
+                )
                 self._copy_regular_file(dependency_source, destination)
 
     def _validate_rootfs(self) -> None:
@@ -1464,39 +2302,63 @@ class RootfsAssembler:
         )
         for runtime_path in required:
             if not self._runtime_exists(runtime_path):
-                raise ImageBuildError(f"required runtime entrypoint is absent: {runtime_path}")
+                raise ImageBuildError(
+                    f"required runtime entrypoint is absent: {runtime_path}"
+                )
         workspace = self._host_destination(PurePosixPath("/workspace"))
         temporary = self._host_destination(PurePosixPath("/tmp"))
         workspace_metadata = os.lstat(workspace)
-        if not stat.S_ISDIR(workspace_metadata.st_mode) or stat.S_IMODE(workspace_metadata.st_mode) != 0o1777:
-            raise ImageBuildError("/workspace must be a rootfs directory with mode 01777")
+        if (
+            not stat.S_ISDIR(workspace_metadata.st_mode)
+            or stat.S_IMODE(workspace_metadata.st_mode) != 0o1777
+        ):
+            raise ImageBuildError(
+                "/workspace must be a rootfs directory with mode 01777"
+            )
         temporary_metadata = os.lstat(temporary)
-        if not stat.S_ISDIR(temporary_metadata.st_mode) or stat.S_IMODE(temporary_metadata.st_mode) != 0o1777:
+        if (
+            not stat.S_ISDIR(temporary_metadata.st_mode)
+            or stat.S_IMODE(temporary_metadata.st_mode) != 0o1777
+        ):
             raise ImageBuildError("/tmp must be a rootfs directory with mode 01777")
         for entry in self._walk_rootfs_entries():
             metadata = os.lstat(entry)
             if stat.S_ISLNK(metadata.st_mode):
                 target = os.readlink(entry)
                 if not target or os.path.isabs(target):
-                    raise ImageBuildError("rootfs contains an empty or absolute symlink target")
+                    raise ImageBuildError(
+                        "rootfs contains an empty or absolute symlink target"
+                    )
                 try:
                     resolved = (entry.parent / target).resolve(strict=True)
                 except OSError as error:
-                    raise ImageBuildError("rootfs contains a dangling symlink") from error
+                    raise ImageBuildError(
+                        "rootfs contains a dangling symlink"
+                    ) from error
                 if not _is_relative_to(resolved, self._rootfs):
                     raise ImageBuildError("rootfs symlink escapes rootfs")
-            elif not stat.S_ISDIR(metadata.st_mode) and not stat.S_ISREG(metadata.st_mode):
+            elif not stat.S_ISDIR(metadata.st_mode) and not stat.S_ISREG(
+                metadata.st_mode
+            ):
                 raise ImageBuildError("rootfs contains an unsupported special inode")
             if metadata.st_uid != 0:
-                raise ImageBuildError("rootfs build did not produce root-owned metadata")
-            runtime_entry = PurePosixPath("/") / entry.relative_to(self._rootfs).as_posix()
+                raise ImageBuildError(
+                    "rootfs build did not produce root-owned metadata"
+                )
+            runtime_entry = (
+                PurePosixPath("/") / entry.relative_to(self._rootfs).as_posix()
+            )
             intentional_sticky_writable = runtime_entry in {
                 PurePosixPath("/tmp"),
                 PurePosixPath("/workspace"),
             }
-            unsafe_mode = metadata.st_mode & (stat.S_ISUID | stat.S_ISGID | stat.S_IWGRP | stat.S_IWOTH)
+            unsafe_mode = metadata.st_mode & (
+                stat.S_ISUID | stat.S_ISGID | stat.S_IWGRP | stat.S_IWOTH
+            )
             if unsafe_mode and not intentional_sticky_writable:
-                raise ImageBuildError("rootfs contains unsafe suid/sgid/group/world-writable metadata")
+                raise ImageBuildError(
+                    "rootfs contains unsafe suid/sgid/group/world-writable metadata"
+                )
 
     def _walk_rootfs_entries(self) -> Iterator[Path]:
         """@brief 以不跟随 symlink 的方式枚举 rootfs / Enumerate rootfs without following symlinks.
@@ -1508,16 +2370,22 @@ class RootfsAssembler:
         while pending:
             directory = pending.pop()
             try:
-                children = sorted(os.scandir(directory), key=lambda entry: entry.name, reverse=True)
+                children = sorted(
+                    os.scandir(directory), key=lambda entry: entry.name, reverse=True
+                )
             except OSError as error:
-                raise ImageBuildError("cannot enumerate rootfs during validation") from error
+                raise ImageBuildError(
+                    "cannot enumerate rootfs during validation"
+                ) from error
             for child in children:
                 path = Path(child.path)
                 yield path
                 try:
                     metadata = os.lstat(path)
                 except OSError as error:
-                    raise ImageBuildError("cannot lstat rootfs entry during validation") from error
+                    raise ImageBuildError(
+                        "cannot lstat rootfs entry during validation"
+                    ) from error
                 if stat.S_ISDIR(metadata.st_mode):
                     pending.append(path)
 
@@ -1532,13 +2400,17 @@ def _validate_command_input(path: Path) -> Path:
     """
 
     if path.name not in _ALLOWED_GNU_COMMANDS:
-        raise ImageBuildError(f"GNU command {path.name!r} is not in the explicit wspctl allowlist")
+        raise ImageBuildError(
+            f"GNU command {path.name!r} is not in the explicit wspctl allowlist"
+        )
     if not os.access(path, os.X_OK):
         raise ImageBuildError(f"GNU command {path} is not executable")
     return path
 
 
-def _validate_executable_input(path: Path, description: str, *, require_elf: bool = True) -> Path:
+def _validate_executable_input(
+    path: Path, description: str, *, require_elf: bool = True
+) -> Path:
     """@brief 校验一个 operator-selected executable input / Validate one operator-selected executable input.
 
     @param path 已解析 regular file / Resolved regular file.
@@ -1553,7 +2425,9 @@ def _validate_executable_input(path: Path, description: str, *, require_elf: boo
     if not os.access(path, os.X_OK):
         raise ImageBuildError(f"{description} must be executable")
     if require_elf and not _is_elf(path):
-        raise ImageBuildError(f"{description} must be an ELF executable; scripts are not admitted here")
+        raise ImageBuildError(
+            f"{description} must be an ELF executable; scripts are not admitted here"
+        )
     return path
 
 
@@ -1570,8 +2444,16 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
     if renameat2 is None:
-        raise ImageBuildError("host libc does not expose renameat2; refusing a non-atomic publish fallback")
-    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        raise ImageBuildError(
+            "host libc does not expose renameat2; refusing a non-atomic publish fallback"
+        )
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
     renameat2.restype = ctypes.c_int
     result = renameat2(
         _AT_FDCWD,
@@ -1584,8 +2466,12 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
         return
     error_number = ctypes.get_errno()
     if error_number == errno.EEXIST:
-        raise ImageBuildError("generation destination already exists; generations are never overwritten")
-    raise ImageBuildError(f"atomic generation publish failed: {os.strerror(error_number)}")
+        raise ImageBuildError(
+            "generation destination already exists; generations are never overwritten"
+        )
+    raise ImageBuildError(
+        f"atomic generation publish failed: {os.strerror(error_number)}"
+    )
 
 
 def _fsync_tree(root: Path) -> None:
@@ -1625,7 +2511,9 @@ def _fsync_tree(root: Path) -> None:
             raise ImageBuildError("cannot fsync staging regular file") from error
     for directory in reversed(directories):
         try:
-            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            descriptor = os.open(
+                directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+            )
             try:
                 os.fsync(descriptor)
             finally:
@@ -1649,7 +2537,9 @@ def _read_manifest_digest(rootfs: Path, generation: str) -> str:
         metadata = os.lstat(manifest)
         content = manifest.read_text(encoding="utf-8")
     except OSError as error:
-        raise ImageBuildError("native sealer did not create a readable manifest") from error
+        raise ImageBuildError(
+            "native sealer did not create a readable manifest"
+        ) from error
     if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o444:
         raise ImageBuildError("native sealer did not create an immutable manifest file")
     lines = content.splitlines()
@@ -1669,7 +2559,10 @@ def _read_manifest_digest(rootfs: Path, generation: str) -> str:
         "digest": fields.get("digest", ""),
     }:
         raise ImageBuildError("native sealer produced an unexpected manifest schema")
-    if re.fullmatch(r"[0-9a-f]{64}", rootfs_digest) is None or re.fullmatch(r"[0-9a-f]{64}", fields["digest"]) is None:
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", rootfs_digest) is None
+        or re.fullmatch(r"[0-9a-f]{64}", fields["digest"]) is None
+    ):
         raise ImageBuildError("native sealer produced a non-SHA-256 manifest digest")
     return rootfs_digest
 
@@ -1686,7 +2579,14 @@ def _seal_rootfs(spec: BuildSpec, rootfs: Path) -> str:
 
     try:
         completed = subprocess.run(
-            [str(spec.sealer), "--seal", "--base-root", str(rootfs), "--generation", spec.generation],
+            [
+                str(spec.sealer),
+                "--seal",
+                "--base-root",
+                str(rootfs),
+                "--generation",
+                spec.generation,
+            ],
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -1714,13 +2614,21 @@ def build_image(spec: BuildSpec) -> tuple[Path, str]:
 
     destination = spec.output_root / spec.generation
     if os.path.lexists(destination):
-        raise ImageBuildError("generation destination already exists; immutable generations cannot be overwritten")
+        raise ImageBuildError(
+            "generation destination already exists; immutable generations cannot be overwritten"
+        )
     try:
-        staging = Path(tempfile.mkdtemp(prefix=f".{spec.generation}.staging-", dir=spec.output_root))
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".{spec.generation}.staging-", dir=spec.output_root
+            )
+        )
         os.chown(staging, 0, 0)
         os.chmod(staging, 0o700)
     except OSError as error:
-        raise ImageBuildError("cannot create private artifact-store staging directory") from error
+        raise ImageBuildError(
+            "cannot create private artifact-store staging directory"
+        ) from error
     published = False
     try:
         rootfs = staging / "rootfs"
@@ -1737,20 +2645,28 @@ def build_image(spec: BuildSpec) -> tuple[Path, str]:
             python_sources=spec.python_sources,
             readelf=spec.readelf,
             ldconfig=spec.ldconfig,
+            venv_relocation=spec.venv_relocation,
         )
-        assembler.build(bash=spec.bash, gnu_commands=spec.gnu_commands, supervisor=spec.supervisor)
+        assembler.build(
+            bash=spec.bash, gnu_commands=spec.gnu_commands, supervisor=spec.supervisor
+        )
         digest = _seal_rootfs(spec, rootfs)
         _fsync_tree(staging)
         _rename_noreplace(staging, destination)
         published = True
         try:
-            descriptor = os.open(spec.output_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            descriptor = os.open(
+                spec.output_root,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            )
             try:
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
         except OSError as error:
-            raise ImageBuildError("generation was published but artifact-store fsync failed; operator intervention is required") from error
+            raise ImageBuildError(
+                "generation was published but artifact-store fsync failed; operator intervention is required"
+            ) from error
         return destination, digest
     finally:
         if not published and os.path.lexists(staging):
@@ -1767,7 +2683,9 @@ def _build_spec(arguments: argparse.Namespace) -> BuildSpec:
     """
 
     if os.geteuid() != 0:
-        raise ImageBuildError("wspctl image builds must run as root so every rootfs inode is root-owned")
+        raise ImageBuildError(
+            "wspctl image builds must run as root so every rootfs inode is root-owned"
+        )
     generation = _validate_generation(arguments.generation)
     output_root = _validate_controlled_directory(
         Path(arguments.output_root),
@@ -1776,10 +2694,12 @@ def _build_spec(arguments: argparse.Namespace) -> BuildSpec:
     )
     venv = _require_absolute_existing(arguments.venv, "venv", directory=True)
     python_sources = tuple(
-        _require_absolute_existing(source, "python source", directory=True) for source in arguments.python_source
+        _require_absolute_existing(source, "python source", directory=True)
+        for source in arguments.python_source
     )
     if len(set(python_sources)) != len(python_sources):
         raise ImageBuildError("--python-source entries must be unique")
+    venv_relocation = _validate_relocatable_venv(venv, python_sources=python_sources)
     bash = _validate_executable_input(
         _require_absolute_existing(arguments.bash, "bash", directory=False),
         "bash",
@@ -1798,11 +2718,15 @@ def _build_spec(arguments: argparse.Namespace) -> BuildSpec:
     if len({command.name for command in gnu_commands}) != len(gnu_commands):
         raise ImageBuildError("--gnu-command basenames must be unique")
     supervisor = _validate_executable_input(
-        _require_absolute_existing(arguments.wsp_systemd, "wsp-systemd", directory=False),
+        _require_absolute_existing(
+            arguments.wsp_systemd, "wsp-systemd", directory=False
+        ),
         "wsp-systemd",
     )
     sealer = _validate_executable_input(
-        _require_absolute_existing(arguments.sealer, "wspctl-image sealer", directory=False),
+        _require_absolute_existing(
+            arguments.sealer, "wspctl-image sealer", directory=False
+        ),
         "wspctl-image sealer",
     )
     readelf = _validate_executable_input(
@@ -1825,6 +2749,7 @@ def _build_spec(arguments: argparse.Namespace) -> BuildSpec:
         sealer=sealer,
         readelf=readelf,
         ldconfig=ldconfig,
+        venv_relocation=venv_relocation,
     )
 
 
@@ -1837,26 +2762,44 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build one root-owned immutable wspctl base generation from explicit trusted host inputs."
     )
-    parser.add_argument("--generation", required=True, help="safe immutable generation name")
-    parser.add_argument("--output-root", required=True, help="existing root-owned artifact-store directory")
-    parser.add_argument("--venv", required=True, help="absolute trusted project .venv path")
+    parser.add_argument(
+        "--generation", required=True, help="safe immutable generation name"
+    )
+    parser.add_argument(
+        "--output-root",
+        required=True,
+        help="existing root-owned artifact-store directory",
+    )
+    parser.add_argument(
+        "--venv", required=True, help="absolute trusted project .venv path"
+    )
     parser.add_argument(
         "--python-source",
         action="append",
         default=[],
-        help="absolute trusted source root required by an editable .pth; repeatable",
+        help="absolute trusted source root required by a path-only .pth; repeatable",
     )
-    parser.add_argument("--bash", required=True, help="absolute trusted Bash executable")
+    parser.add_argument(
+        "--bash", required=True, help="absolute trusted Bash executable"
+    )
     parser.add_argument(
         "--gnu-command",
         action="append",
         required=True,
         help="absolute trusted GNU command in the fixed allowlist; repeatable",
     )
-    parser.add_argument("--wsp-systemd", required=True, help="absolute built wsp-systemd executable")
-    parser.add_argument("--sealer", required=True, help="absolute built wspctl-image executable")
-    parser.add_argument("--readelf", required=True, help="absolute trusted readelf executable")
-    parser.add_argument("--ldconfig", required=True, help="absolute trusted ldconfig executable")
+    parser.add_argument(
+        "--wsp-systemd", required=True, help="absolute built wsp-systemd executable"
+    )
+    parser.add_argument(
+        "--sealer", required=True, help="absolute built wspctl-image executable"
+    )
+    parser.add_argument(
+        "--readelf", required=True, help="absolute trusted readelf executable"
+    )
+    parser.add_argument(
+        "--ldconfig", required=True, help="absolute trusted ldconfig executable"
+    )
     parser.add_argument(
         "--allow-insecure-development-output",
         action="store_true",

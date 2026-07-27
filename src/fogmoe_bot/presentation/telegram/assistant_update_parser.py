@@ -112,7 +112,20 @@ def looks_like_assistant_candidate(payload: JsonObject) -> bool:
     values = [payload.get("message"), payload.get("edited_message")]
     messages = [value for value in values if isinstance(value, dict)]
     return any(
-        any(key in message for key in ("text", "photo", "sticker", "document"))
+        any(
+            key in message
+            for key in (
+                "text",
+                "photo",
+                "sticker",
+                "document",
+                "voice",
+                "audio",
+                "video",
+                "animation",
+                "video_note",
+            )
+        )
         and not _has_service_event(message)
         for message in messages
     )
@@ -140,18 +153,30 @@ def _message_object(payload: JsonObject) -> tuple[JsonObject, bool]:
 def _parse_content(
     message: JsonObject,
 ) -> tuple[TelegramAssistantContentKind, str, TelegramMediaReference | None]:
-    """@brief 解析唯一 text/photo/sticker/document 内容 / Parse exactly one text, photo, sticker, or document content.
+    """@brief 解析唯一文本或可下载附件内容 / Parse exactly one text or downloadable attachment content.
 
     @param message 消息对象 / Message object.
     @return 内容种类、文本与媒体 / Content kind, text, and media.
     """
 
     present = tuple(
-        key for key in ("text", "photo", "sticker", "document") if key in message
+        key
+        for key in (
+            "text",
+            "photo",
+            "sticker",
+            "document",
+            "voice",
+            "audio",
+            "video",
+            "animation",
+            "video_note",
+        )
+        if key in message
     )
     if len(present) != 1:
         raise _malformed(
-            "Assistant message requires exactly one text, photo, sticker, or document"
+            "Assistant message requires exactly one text or downloadable attachment"
         )
     key = present[0]
     if key == "text":
@@ -167,8 +192,23 @@ def _parse_content(
     if key == "document":
         media = _parse_document(message["document"])
         return TelegramAssistantContentKind.DOCUMENT, caption or "[document]", media
-    media = _parse_sticker(message["sticker"])
-    return TelegramAssistantContentKind.STICKER, caption or "[sticker]", media
+    if key == "sticker":
+        media = _parse_sticker(message["sticker"])
+        return TelegramAssistantContentKind.STICKER, caption or "[sticker]", media
+    if key == "voice":
+        media = _parse_voice(message["voice"])
+        return TelegramAssistantContentKind.VOICE, caption or "[voice]", media
+    if key == "audio":
+        media = _parse_audio(message["audio"])
+        return TelegramAssistantContentKind.AUDIO, caption or "[audio]", media
+    if key == "video":
+        media = _parse_video(message["video"])
+        return TelegramAssistantContentKind.VIDEO, caption or "[video]", media
+    if key == "animation":
+        media = _parse_animation(message["animation"])
+        return TelegramAssistantContentKind.ANIMATION, caption or "[animation]", media
+    media = _parse_video_note(message["video_note"])
+    return TelegramAssistantContentKind.VIDEO_NOTE, caption or "[video_note]", media
 
 
 def _parse_photo(value: JsonValue) -> TelegramMediaReference:
@@ -243,6 +283,130 @@ def _parse_document(value: JsonValue) -> TelegramMediaReference:
         height=None,
         mime_type=_optional_string(value, "mime_type"),
         file_name=_optional_string(value, "file_name"),
+    )
+
+
+def _parse_voice(value: JsonValue) -> TelegramMediaReference:
+    """@brief 解析 Telegram Voice 引用 / Parse a Telegram Voice reference.
+
+    @param value PTB durable JSON 中的 ``voice`` object / ``voice`` object from PTB durable JSON.
+    @return 未下载的受限语音引用 / Undownloaded constrained voice reference.
+    """
+
+    return _parse_file_media(
+        value,
+        kind=TelegramAssistantContentKind.VOICE,
+        requires_dimensions=False,
+        file_name_allowed=False,
+    )
+
+
+def _parse_audio(value: JsonValue) -> TelegramMediaReference:
+    """@brief 解析 Telegram Audio 引用 / Parse a Telegram Audio reference.
+
+    @param value PTB durable JSON 中的 ``audio`` object / ``audio`` object from PTB durable JSON.
+    @return 未下载的受限音频引用 / Undownloaded constrained audio reference.
+    """
+
+    return _parse_file_media(
+        value,
+        kind=TelegramAssistantContentKind.AUDIO,
+        requires_dimensions=False,
+        file_name_allowed=True,
+    )
+
+
+def _parse_video(value: JsonValue) -> TelegramMediaReference:
+    """@brief 解析 Telegram Video 引用 / Parse a Telegram Video reference.
+
+    @param value PTB durable JSON 中的 ``video`` object / ``video`` object from PTB durable JSON.
+    @return 未下载的受限视频引用 / Undownloaded constrained video reference.
+    """
+
+    return _parse_file_media(
+        value,
+        kind=TelegramAssistantContentKind.VIDEO,
+        requires_dimensions=True,
+        file_name_allowed=True,
+    )
+
+
+def _parse_animation(value: JsonValue) -> TelegramMediaReference:
+    """@brief 解析 Telegram Animation 引用 / Parse a Telegram Animation reference.
+
+    @param value PTB durable JSON 中的 ``animation`` object / ``animation`` object from PTB durable JSON.
+    @return 未下载的受限动画引用 / Undownloaded constrained animation reference.
+    """
+
+    return _parse_file_media(
+        value,
+        kind=TelegramAssistantContentKind.ANIMATION,
+        requires_dimensions=True,
+        file_name_allowed=True,
+    )
+
+
+def _parse_video_note(value: JsonValue) -> TelegramMediaReference:
+    """@brief 解析 Telegram VideoNote 引用 / Parse a Telegram VideoNote reference.
+
+    @param value PTB durable JSON 中的 ``video_note`` object / ``video_note`` object from PTB durable JSON.
+    @return 未下载的受限圆形视频引用 / Undownloaded constrained round-video reference.
+    @note Telegram 用 ``length`` 表示圆形视频直径；为保留已有 width/height 形状，本边界把它
+        复制为两个相同的可选维度。/ Telegram uses ``length`` for a round video's diameter;
+        this boundary copies it into the existing width/height shape.
+    """
+
+    if not isinstance(value, dict):
+        raise _malformed("Telegram video_note must be an object")
+    length = _required_int(value, "length", minimum=1)
+    return TelegramMediaReference(
+        kind=TelegramAssistantContentKind.VIDEO_NOTE,
+        file_id=_required_string(value, "file_id"),
+        file_unique_id=_required_string(value, "file_unique_id"),
+        file_size=_optional_int(value, "file_size", minimum=1),
+        width=length,
+        height=length,
+        mime_type=None,
+    )
+
+
+def _parse_file_media(
+    value: JsonValue,
+    *,
+    kind: TelegramAssistantContentKind,
+    requires_dimensions: bool,
+    file_name_allowed: bool,
+) -> TelegramMediaReference:
+    """@brief 解析共享 file-id 形状的 Telegram 媒体 / Parse Telegram media sharing the file-ID shape.
+
+    @param value 候选 Telegram object / Candidate Telegram object.
+    @param kind 强类型媒体类别 / Strongly typed media kind.
+    @param requires_dimensions 是否要求 width/height / Whether width/height are required.
+    @param file_name_allowed 是否读取可选文件名 / Whether to read an optional filename.
+    @return 未下载媒体引用 / Undownloaded media reference.
+    @raise MalformedTelegramAssistantUpdate object 或必需字段非法时抛出 /
+        Raised when the object or a required field is invalid.
+    @note 该 helper 仍只保留 durable 下载引用；它不下载、不解释文件、也不让 metadata 进入
+        canonical model message。/ This helper still retains only a durable download reference:
+        it does not download or interpret a file, and it never lets metadata enter the canonical
+        model message.
+    """
+
+    if not isinstance(value, dict):
+        raise _malformed(f"Telegram {kind.value} must be an object")
+    return TelegramMediaReference(
+        kind=kind,
+        file_id=_required_string(value, "file_id"),
+        file_unique_id=_required_string(value, "file_unique_id"),
+        file_size=_optional_int(value, "file_size", minimum=1),
+        width=(
+            _required_int(value, "width", minimum=1) if requires_dimensions else None
+        ),
+        height=(
+            _required_int(value, "height", minimum=1) if requires_dimensions else None
+        ),
+        mime_type=_optional_string(value, "mime_type"),
+        file_name=(_optional_string(value, "file_name") if file_name_allowed else None),
     )
 
 

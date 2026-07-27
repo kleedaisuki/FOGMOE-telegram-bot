@@ -19,13 +19,11 @@ from typing import Protocol, cast
 
 from fogmoe_bot.application.context_window.projection import (
     CompactionPending,
-    ContextWindowInvariantError,
     ContextWindowReady,
     ContextWindowRequest,
     ContextWindowResult,
     ContextWindowTooLarge,
     checkpoint_summary_message,
-    project_conversation_message,
 )
 from fogmoe_bot.application.conversation.inference_worker import (
     InferenceDependencyPending,
@@ -56,10 +54,8 @@ from fogmoe_bot.domain.assistant.request_metadata import RequestMeta
 from fogmoe_bot.domain.context import (
     ContextState,
     ConversationScope,
-    RuntimeMessageReplacement,
     UserState,
     build_context_state,
-    create_runtime_replacement,
 )
 from fogmoe_bot.domain.context_window.budget import TokenCount
 from fogmoe_bot.domain.conversation.identity import DeliveryStreamId
@@ -74,6 +70,11 @@ from fogmoe_bot.domain.user_profile.models import (
     ProfileDocument,
     UserProfileSnapshot,
 )
+from fogmoe_bot.domain.workspace.attachment import (
+    WORKSPACE_ATTACHMENT_FIELD,
+    WorkspaceAttachmentImportState,
+    workspace_attachment_import_state,
+)
 
 from .agent_loop import AgentResponse
 from .current_turn_upload import (
@@ -83,6 +84,7 @@ from .current_turn_upload import (
     CurrentTurnUploadTooLargeError,
     CurrentTurnUploadTransportError,
     CurrentTurnUploadUnavailableError,
+    workspace_attachment_file_path,
 )
 from .errors import (
     AssistantInferenceUnavailableError,
@@ -101,6 +103,14 @@ from .tool_runtime import ToolExecutionContext
 from .workspace_attachment_preprocessor import (
     CurrentTurnWorkspaceAttachmentPreprocessor,
     ImportedCurrentTurnAttachment,
+)
+from .workspace_attachment_receipt import (
+    WorkspaceAttachmentReceiptConflictError,
+    WorkspaceAttachmentReceiptUnavailableError,
+)
+from .workspace_attachment_intent import (
+    WorkspaceAttachmentIntentConflictError,
+    WorkspaceAttachmentIntentUnavailableError,
 )
 
 _MAX_TELEGRAM_TEXT_LENGTH = 4096
@@ -170,7 +180,8 @@ class DurableAssistantInferenceAdapter:
         inference: AssistantInference,
         translation_inference: AssistantInference | None = None,
         translation_system_prompt: str = TRANSLATION_SYSTEM_PROMPT,
-        attachment_preprocessor: CurrentTurnWorkspaceAttachmentPreprocessor | None = None,
+        attachment_preprocessor: CurrentTurnWorkspaceAttachmentPreprocessor
+        | None = None,
         clock: UtcClock | None = None,
     ) -> None:
         """@brief 创建 durable Assistant adapter / Create the durable Assistant adapter.
@@ -260,7 +271,7 @@ class DurableAssistantInferenceAdapter:
         # merely because it happened to carry a Telegram document reference.
         self._validate_anchor(command, projection)
         attachment = await self._preprocess_current_turn_attachment(command)
-        replacement = self._attachment_runtime_replacement(
+        attachment_message = self._attachment_runtime_message(
             projection,
             attachment=attachment,
         )
@@ -268,7 +279,7 @@ class DurableAssistantInferenceAdapter:
             command,
             projection,
             base_context=base_context,
-            runtime_replacement=replacement,
+            current_attachment_message=attachment_message,
         )
         committed_count = len(context_state.messages)
         is_translation = command.task_kind == "translation"
@@ -411,14 +422,15 @@ class DurableAssistantInferenceAdapter:
         projection: ContextWindowReady,
         *,
         base_context: ContextState,
-        runtime_replacement: RuntimeMessageReplacement | None = None,
+        current_attachment_message: CanonicalMessage | None = None,
     ) -> ContextState:
         """@brief 校验 anchor 并将 summary+tail 加入基础上下文 / Validate the anchor and add summary plus tail to the base context.
 
         @param command 已校验命令 / Validated command.
         @param projection token-aware durable projection / Token-aware durable projection.
         @param base_context 不含普通历史的上下文 / Context without ordinary history.
-        @param runtime_replacement 可选当前 Turn 模型消息替换 / Optional current-Turn model-message replacement.
+        @param current_attachment_message 已 receipt 见证、待显式注入的当前附件模型消息 /
+            Receipt-witnessed current-attachment model message to inject explicitly.
         @return 本次尝试独占上下文 / Attempt-local context.
         @raise PermanentInferenceError anchor Turn 损坏 / The anchor Turn is corrupt.
         """
@@ -432,15 +444,21 @@ class DurableAssistantInferenceAdapter:
         if projection.checkpoint_summary is not None:
             history.append(checkpoint_summary_message(projection.checkpoint_summary))
         history.extend(projection.messages)
+        if current_attachment_message is not None:
+            # The first projection was deliberately read while this row was pending; a retry may
+            # instead see the already-imported row.  Normalize both cases to one explicit,
+            # post-receipt injection.  首次投影刻意发生在该行 pending 时；重试可能已经读到
+            # imported 行。两种情况都规约为一次显式、receipt 后的注入。
+            history = [
+                message for message in history if message != current_attachment_message
+            ]
+            history.append(current_attachment_message)
         context_state = build_context_state(
             context_id=command.typed_turn_id.value,
             system_prompt=self._system_prompt,
             history_messages=history,
             scope=base_context.scope,
             user_state=base_context.user_state,
-            runtime_replacements=(
-                () if runtime_replacement is None else (runtime_replacement,)
-            ),
         )
         # 附件 Turn 不得将持久化 caption/原始文本作为 Working Memory 查询：检索结果会随后
         # 渲染进模型提示。durable ingress 已持久化同一占位符；这个赋值也保证早期尚未写入
@@ -448,15 +466,15 @@ class DurableAssistantInferenceAdapter:
         # persisted caption/raw text as a Working-Memory query: retrieval is subsequently rendered
         # into the model prompt. Durable ingress already persists the same placeholder; this also
         # keeps an early pre-placeholder activity non-leaky on its first execution.
-        if runtime_replacement is not None:
-            current_user_text = runtime_replacement.runtime_message.text
+        if current_attachment_message is not None:
+            current_user_text = current_attachment_message.text
         context_state.current_user_text = current_user_text
         if (
-            runtime_replacement is not None
-            and runtime_replacement.runtime_message not in context_state.messages
+            current_attachment_message is not None
+            and current_attachment_message not in context_state.messages
         ):
             raise PermanentInferenceError(
-                "Current-turn attachment placeholder was not applied to model context",
+                "Receipt-witnessed current-turn attachment was not injected into model context",
                 category=InferenceErrorCategory.INTERNAL,
             )
         return context_state
@@ -486,6 +504,30 @@ class DurableAssistantInferenceAdapter:
             )
         try:
             return await preprocessor.preprocess(command)
+        except WorkspaceAttachmentIntentUnavailableError as error:
+            raise RetryableInferenceError(
+                "Current-turn attachment import intent storage is temporarily unavailable",
+                category=InferenceErrorCategory.NETWORK,
+            ) from error
+        except WorkspaceAttachmentIntentConflictError as error:
+            raise PermanentInferenceError(
+                "Current-turn attachment import intent conflicts with durable history",
+                category=InferenceErrorCategory.INTERNAL,
+            ) from error
+        except WorkspaceAttachmentReceiptUnavailableError as error:
+            # Native may already have journaled the file; retrying replays that receipt and
+            # retries only the transactional publish, so no model observes an un-witnessed path.
+            # native 可能已经 journal 了文件；重试会回放该 receipt 并只重试事务性发布，
+            # 因而模型不会看到未见证路径。
+            raise RetryableInferenceError(
+                "Current-turn attachment receipt storage is temporarily unavailable",
+                category=InferenceErrorCategory.NETWORK,
+            ) from error
+        except WorkspaceAttachmentReceiptConflictError as error:
+            raise PermanentInferenceError(
+                "Current-turn attachment receipt conflicts with durable history",
+                category=InferenceErrorCategory.INTERNAL,
+            ) from error
         except WorkspaceInvocationOutcomeUnknownError as error:
             raise PermanentInferenceError(
                 "Current-turn attachment import outcome is unknown",
@@ -506,7 +548,10 @@ class DurableAssistantInferenceAdapter:
                 "Current-turn attachment exceeds the supported size",
                 category=InferenceErrorCategory.INVALID_REQUEST,
             ) from error
-        except (CurrentTurnUploadIntegrityError, CurrentTurnUploadDownloadError) as error:
+        except (
+            CurrentTurnUploadIntegrityError,
+            CurrentTurnUploadDownloadError,
+        ) as error:
             raise PermanentInferenceError(
                 "Telegram attachment provider violated its download contract",
                 category=InferenceErrorCategory.PROVIDER,
@@ -538,19 +583,27 @@ class DurableAssistantInferenceAdapter:
             ) from error
 
     @staticmethod
-    def _attachment_runtime_replacement(
+    def _attachment_runtime_message(
         projection: ContextWindowReady,
         *,
         attachment: ImportedCurrentTurnAttachment | None,
-    ) -> RuntimeMessageReplacement | None:
-        """@brief 将当前附件投影为唯一的模型消息替换 / Project a current attachment into the sole model-message replacement.
+    ) -> CanonicalMessage | None:
+        """@brief 将已见证当前附件投影为唯一的显式模型消息 / Project a witnessed current attachment into the sole explicit model message.
 
         @param projection 已完成且仍指向当前 Turn 的历史投影 / Completed history projection still anchored to the current Turn.
         @param attachment 已导入的模型安全附件投影；没有附件时为 None /
             Imported model-safe attachment projection, or None without an attachment.
-        @return 用于 ContextState 的运行时替换；无附件时为 None / Runtime replacement for ContextState, or None without an attachment.
-        @raise PermanentInferenceError anchor 不能精确投影为一条 user canonical message 时抛出 /
-            Raised when the anchor cannot be projected to exactly one user canonical message.
+        @return receipt 后待注入 ContextState 的规范 user 消息；无附件时为 None /
+            Canonical user message to inject into ContextState after receipt, or ``None`` without
+            an attachment.
+        @raise PermanentInferenceError anchor 不能精确匹配 receipt 路径时抛出 /
+            Raised when the anchor cannot exactly match the receipt path.
+        @note pending 行被通用 Context Window 投影隐藏，所以这里不依赖
+            ``project_conversation_message``；它只在 native+durable receipt 均成功后从已锁定
+            的 anchor 语义构造一次显式注入。/ A pending row is hidden by generic Context
+            Window projection, so this method does not depend on
+            ``project_conversation_message``; it constructs one explicit injection from the
+            anchored semantics only after both native and durable receipt success.
         """
 
         if attachment is None:
@@ -560,8 +613,13 @@ class DurableAssistantInferenceAdapter:
             for row in projection.anchor_messages:
                 if row.draft.role is not MessageRole.USER:
                     continue
-                persisted_messages.extend(project_conversation_message(row))
-        except ContextWindowInvariantError as error:
+                raw_model_message = row.draft.content.get("model_message")
+                if not isinstance(raw_model_message, Mapping):
+                    raise CanonicalMessageError(
+                        "Current-turn attachment anchor has no canonical model message"
+                    )
+                persisted_messages.append(CanonicalMessage.from_json(raw_model_message))
+        except (CanonicalMessageError, TypeError, ValueError) as error:
             raise PermanentInferenceError(
                 "Current-turn attachment anchor cannot be projected",
                 category=InferenceErrorCategory.INTERNAL,
@@ -571,13 +629,13 @@ class DurableAssistantInferenceAdapter:
                 "Current-turn attachment requires exactly one persisted user message",
                 category=InferenceErrorCategory.INVALID_REQUEST,
             )
-        replacement = create_runtime_replacement(
-            persisted_message=persisted_messages[0],
-            runtime_message=attachment.model_placeholder(),
-        )
-        if replacement is None:
-            raise AssertionError("Non-null attachment replacement cannot be None")
-        return replacement
+        attachment_message = attachment.model_placeholder()
+        if persisted_messages[0] != attachment_message:
+            raise PermanentInferenceError(
+                "Current-turn attachment anchor does not match its witnessed receipt path",
+                category=InferenceErrorCategory.INVALID_REQUEST,
+            )
+        return attachment_message
 
     @staticmethod
     def _validate_anchor(
@@ -625,6 +683,13 @@ class DurableAssistantInferenceAdapter:
             ):
                 raise PermanentInferenceError(
                     "Translation activity input does not match its durable user message",
+                    category=InferenceErrorCategory.INVALID_REQUEST,
+                )
+            if command.current_turn_upload is not None:
+                _validate_current_attachment_anchor(command, message.draft.content)
+            elif WORKSPACE_ATTACHMENT_FIELD in message.draft.content:
+                raise PermanentInferenceError(
+                    "Assistant command without an upload cannot project an attachment marker",
                     category=InferenceErrorCategory.INVALID_REQUEST,
                 )
         if current_user_count != 1:
@@ -754,7 +819,9 @@ def _sanitize_runtime_event(event: Mapping[str, object]) -> JsonObject:
     return {key: _json_value(event[key]) for key in allowed_keys if key in event}
 
 
-def _events_to_history(events: Sequence[Mapping[str, object]]) -> list[CanonicalMessage]:
+def _events_to_history(
+    events: Sequence[Mapping[str, object]],
+) -> list[CanonicalMessage]:
     """@brief 将事件回退投影为 canonical history / Project events into canonical history as a fallback.
 
     @param events 有序 Runtime events / Ordered Runtime events.
@@ -876,6 +943,73 @@ def _last_assistant_texts(messages: Sequence[CanonicalMessage]) -> list[str]:
     return []
 
 
+def _validate_current_attachment_anchor(
+    command: DurableAssistantInferenceCommand,
+    content: JsonObject,
+) -> None:
+    """@brief 验证当前附件 anchor 仍是受控 pending/imported 占位符 / Validate that a current-attachment anchor remains a controlled pending/imported placeholder.
+
+    @param command 已验证且携带当前上传引用的 durable command / Validated durable command carrying a current upload reference.
+    @param content 当前 user row 的 durable envelope / Durable envelope of the current user row.
+    @return None / None.
+    @raise PermanentInferenceError marker、路径或 canonical message 漂移时抛出 /
+        Raised when marker, path, or canonical message drifted.
+    @note 这一步发生在任何 native 写入前。pending 时该行还不能进入普通投影；imported 时
+        后续 receipt store 仍会验证 immutable receipt。/ This check occurs before any native
+        write. A pending row cannot yet enter ordinary projection; an imported row is still
+        verified against its immutable receipt by the subsequent receipt store.
+    """
+
+    reference = command.current_turn_upload
+    if reference is None:  # pragma: no cover - caller narrows this branch.
+        raise PermanentInferenceError(
+            "Attachment anchor validation lost its upload reference",
+            category=InferenceErrorCategory.INTERNAL,
+        )
+    if WORKSPACE_ATTACHMENT_FIELD not in content:
+        raise PermanentInferenceError(
+            "Current-turn attachment anchor is missing its visibility marker",
+            category=InferenceErrorCategory.INVALID_REQUEST,
+        )
+    state = workspace_attachment_import_state(content)
+    if state not in {
+        WorkspaceAttachmentImportState.PENDING,
+        WorkspaceAttachmentImportState.IMPORTED,
+    }:
+        raise PermanentInferenceError(
+            "Current-turn attachment anchor is not pending or receipt-imported",
+            category=InferenceErrorCategory.INVALID_REQUEST,
+        )
+    expected_path = workspace_attachment_file_path(
+        turn_id=command.typed_turn_id,
+        reference=reference,
+    )
+    expected = f'<workspace_file path="{expected_path}" />'
+    if content.get("text") != expected:
+        raise PermanentInferenceError(
+            "Current-turn attachment text does not match its fixed Workspace path",
+            category=InferenceErrorCategory.INVALID_REQUEST,
+        )
+    model_message = content.get("model_message")
+    if not isinstance(model_message, Mapping):
+        raise PermanentInferenceError(
+            "Current-turn attachment model message is invalid",
+            category=InferenceErrorCategory.INVALID_REQUEST,
+        )
+    try:
+        canonical = CanonicalMessage.from_json(model_message)
+    except (CanonicalMessageError, TypeError, ValueError) as error:
+        raise PermanentInferenceError(
+            "Current-turn attachment model message is invalid",
+            category=InferenceErrorCategory.INVALID_REQUEST,
+        ) from error
+    if canonical != text_message(MessageRole.USER, expected):
+        raise PermanentInferenceError(
+            "Current-turn attachment model message does not match its fixed Workspace path",
+            category=InferenceErrorCategory.INVALID_REQUEST,
+        )
+
+
 def _anchor_user_text(projection: ContextWindowReady) -> str:
     """@brief 从 anchor row 读取未改写 Query / Read the unrewritten query from the anchor row.
 
@@ -935,9 +1069,7 @@ def _profile_from_command(
     )
 
 
-def _history_ends_with_text(
-    messages: Sequence[CanonicalMessage], text: str
-) -> bool:
+def _history_ends_with_text(messages: Sequence[CanonicalMessage], text: str) -> bool:
     """@brief 判断历史末尾是否已有最终文本 / Check whether history already ends with final text.
 
     @param messages 模型消息 / Model messages.

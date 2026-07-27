@@ -24,6 +24,34 @@ class WorkspaceRuntimeProtocolError(WorkspaceRuntimeUnavailableError):
     """
 
 
+class WorkspaceFileReplayNotFoundError(RuntimeError):
+    """@brief native 已明确证明 payload journal 不存在 / Native explicitly proved that a payload journal does not exist.
+
+    @param request_id 已查询但不存在的稳定文件调用 ID / Stable file invocation ID that was queried and is absent.
+    @note 这不是 runtime unavailable 或副作用不确定：只有 native 完成只读查询且确认既无
+        completed 也无 pending journal 时才能抛出。调用方此时才可重新下载 provider bytes。
+        / This is neither runtime unavailability nor an indeterminate side effect: it may be
+        raised only after native finishes a read-only lookup and confirms there is neither a
+        completed nor pending journal. Only then may a caller download provider bytes again.
+    """
+
+    def __init__(self, request_id: WorkspaceRequestId) -> None:
+        """@brief 构造明确不存在的 journal 异常 / Construct an explicitly absent-journal error.
+
+        @param request_id 已查询的强类型请求标识 / Strongly typed request identifier queried.
+        @return None / None.
+        @raise TypeError 请求标识不是强类型值对象时抛出 / Raised when the request ID is not a strong value object.
+        """
+
+        if not isinstance(request_id, WorkspaceRequestId):
+            raise TypeError(
+                "Workspace replay-not-found error requires a WorkspaceRequestId"
+            )
+        self.request_id = request_id
+        """@brief 已明确不存在的 journal 请求标识 / Request ID of the journal explicitly found absent."""
+        super().__init__(f"Workspace file replay was not found: {request_id}")
+
+
 class WorkspaceInvocationOutcomeUnknownError(RuntimeError):
     """@brief command 可能已产生副作用但结果不可恢复 / A command may have had side effects but its result is unrecoverable.
 
@@ -56,6 +84,7 @@ class WorkspaceInvocationOutcomeUnknownError(RuntimeError):
 
 
 __all__ = [
+    "WorkspaceFileReplayNotFoundError",
     "WorkspaceInvocationOutcomeUnknownError",
     "WorkspaceRuntimeProtocolError",
     "WorkspaceRuntimeUnavailableError",

@@ -116,7 +116,7 @@ struct TaskCgroupControl final {
  * @brief 为 activation 创建 quota-verified workspace OverlayFS 挂载目录 / Create quota-verified workspace OverlayFS mount directories for an activation.
  * @param config sandbox 配置 / Sandbox configuration.
  * @param quota 已 preflight 的 XFS quota 服务 / Preflighted XFS quota service.
- * @param runtime_key runtime 标识 / Runtime key.
+ * @param activation_lease 为该 runtime 持有的 activation 排他租约 / Exclusive activation lease held for this runtime.
  * @param activation_id 激活标识 / Activation ID.
  * @return 不含未经哈希用户路径的层路径 / Layer paths without unhashed user paths.
  * @note upperdir 按 runtime 持久化，因此新 activation 可恢复 workspace；workdir 每次创建且必须为空。
@@ -125,13 +125,14 @@ struct TaskCgroupControl final {
 [[nodiscard]] Result<TaskLayer> prepare_task_layer(
     const SandboxConfig& config,
     const XfsProjectQuota& quota,
-    const std::string& runtime_key,
+    const RuntimeActivationLease& activation_lease,
     const std::string& activation_id);
 
 /**
  * @brief 仅删除一个已退出 activation 的 transient mount staging / Remove transient mount staging for one exited activation only.
  * @param config sandbox 配置 / Sandbox configuration.
  * @param quota 已 preflight 的 XFS quota 服务 / Preflighted XFS quota service.
+ * @param activation_lease 为该 runtime 持有的 activation 排他租约 / Exclusive activation lease held for this runtime.
  * @param layer 要清理的 activation 层 / Activation layer to clean.
  * @return 成功或 fail-closed 错误 / Success or fail-closed error.
  * @note 调用者必须先证明 runtime cgroup 为 populated 0 且 launcher PID 已退出；此函数
@@ -142,7 +143,25 @@ struct TaskCgroupControl final {
 [[nodiscard]] Result<void> cleanup_task_layer(
     const SandboxConfig& config,
     const XfsProjectQuota& quota,
+    const RuntimeActivationLease& activation_lease,
     const TaskLayer& layer);
+
+/**
+ * @brief 在 cgroup task-free 证明之后回收 crash 遗留的 transient staging / Reclaim crash-left transient staging after a cgroup task-free proof.
+ * @param config sandbox 配置 / Sandbox configuration.
+ * @param quota 已 preflight 的 XFS quota 服务 / Preflighted XFS quota service.
+ * @param activation_lease 为该 runtime 持有的 activation 排他租约 / Exclusive activation lease held for this runtime.
+ * @param runtime_key runtime 标识 / Runtime key.
+ * @return 成功或 fail-closed recovery 错误 / Success or a fail-closed recovery error.
+ * @note 此 wrapper 将同一 runtime 的 ``cgroup.events: populated 0`` 与 quota GC 绑定，
+ *       防止调用方只凭路径调用清理。/ This wrapper binds ``cgroup.events: populated 0`` for
+ *       the same runtime to quota GC, preventing path-only cleanup by callers.
+ */
+[[nodiscard]] Result<void> reclaim_dead_task_layers(
+    const SandboxConfig& config,
+    const XfsProjectQuota& quota,
+    const RuntimeActivationLease& activation_lease,
+    const std::string& runtime_key);
 
 /**
  * @brief 新 PID/mount namespace 中建立只读 lower 与 OverlayFS / Establish readonly lower and OverlayFS in new PID/mount namespace.

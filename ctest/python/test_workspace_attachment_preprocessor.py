@@ -14,7 +14,9 @@ from fogmoe_bot.application.assistant.current_turn_upload import (
     CurrentTurnUploadReference,
     CurrentTurnUploadTooLargeError,
     CurrentTurnUploadTransportError,
+    CurrentTurnUploadUnavailableError,
     DownloadedCurrentTurnUpload,
+    workspace_attachment_file_path,
 )
 from fogmoe_bot.application.assistant.durable_inference import (
     DurableAssistantInferenceAdapter,
@@ -26,6 +28,13 @@ from fogmoe_bot.application.assistant.inference_command import (
 )
 from fogmoe_bot.application.assistant.workspace_attachment_preprocessor import (
     CurrentTurnWorkspaceAttachmentPreprocessor,
+)
+from fogmoe_bot.application.assistant.workspace_attachment_intent import (
+    WorkspaceAttachmentIntentConflictError,
+)
+from fogmoe_bot.application.assistant.workspace_attachment_receipt import (
+    WorkspaceAttachmentImportReceipt,
+    WorkspaceAttachmentReceiptUnavailableError,
 )
 from fogmoe_bot.application.context_window.projection import (
     ContextWindowBounds,
@@ -39,11 +48,15 @@ from fogmoe_bot.application.conversation.inference_worker import (
     PermanentInferenceError,
     RetryableInferenceError,
 )
-from fogmoe_bot.application.workspace.errors import WorkspaceRuntimeProtocolError
+from fogmoe_bot.application.workspace.errors import (
+    WorkspaceFileReplayNotFoundError,
+    WorkspaceRuntimeProtocolError,
+)
 from fogmoe_bot.application.workspace.models import (
     MAX_ADD_FILE_CHUNK_BYTES,
     AddFileCommand,
     AddFileResult,
+    ReplayFileCommand,
 )
 from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.assistant.messages import CanonicalMessage, text_message
@@ -63,6 +76,10 @@ from fogmoe_bot.domain.conversation.message import (
 )
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.workspace.scope import GroupRuntimeScope, PersonalRuntimeScope
+from fogmoe_bot.domain.workspace.attachment import (
+    AttachmentImportIntent,
+    pending_workspace_attachment_marker,
+)
 
 _NOW = datetime(2030, 1, 1, tzinfo=UTC)
 """@brief 测试使用的稳定 UTC 时间 / Stable UTC time used by tests."""
@@ -133,8 +150,29 @@ class _FailingUploadSource:
         raise self._error
 
 
+class _ExpiringUploadSource(_UploadSource):
+    """@brief 首次返回附件、之后模拟 provider capability 过期的 source / Source returning an attachment once and then simulating an expired provider capability."""
+
+    async def download(
+        self,
+        reference: CurrentTurnUploadReference,
+    ) -> DownloadedCurrentTurnUpload:
+        """@brief 只允许首次下载；后续调用明确失败 / Allow only the first download and explicitly fail later calls.
+
+        @param reference 当前 durable 附件引用 / Current durable attachment reference.
+        @return 首次的已验证内容 / Verified content on the first call.
+        @raise CurrentTurnUploadUnavailableError 第二次调用表示 capability 已过期 / Raised on a second call to represent an expired capability.
+        """
+
+        if self.references:
+            raise CurrentTurnUploadUnavailableError(
+                "test Telegram capability expired after the first download"
+            )
+        return await super().download(reference)
+
+
 class _RuntimeProcess:
-    """@brief 记录 add_file command 的 RuntimeProcess 替身 / RuntimeProcess double recording add_file commands."""
+    """@brief 以 completed journal 模拟 add_file/replay_file 的 RuntimeProcess 替身 / RuntimeProcess double simulating add_file/replay_file through a completed journal."""
 
     def __init__(self, *, mismatched_receipt: bool = False) -> None:
         """@brief 配置收据是否故意漂移 / Configure whether the receipt deliberately drifts.
@@ -145,8 +183,36 @@ class _RuntimeProcess:
 
         self.mismatched_receipt = mismatched_receipt
         self.commands: list[AddFileCommand] = []
+        self.replay_commands: list[ReplayFileCommand] = []
         self.chunk_payloads: list[bytes] = []
         self.chunk_lengths: list[tuple[int, ...]] = []
+        self._completed: dict[str, AddFileResult] = {}
+
+    async def replay_file(self, command: ReplayFileCommand) -> AddFileResult:
+        """@brief 回放 completed journal，未命中时明确 not_found / Replay a completed journal or explicitly report not-found.
+
+        @param command 只读 journal 查询 / Read-only journal lookup.
+        @return 已完成文件的 replay receipt / Replay receipt of the completed file.
+        @raise WorkspaceFileReplayNotFoundError 尚未执行 add_file 时抛出 / Raised before add_file has executed.
+        """
+
+        self.replay_commands.append(command)
+        completed = self._completed.get(command.request_id.value)
+        if completed is None:
+            raise WorkspaceFileReplayNotFoundError(command.request_id)
+        if (
+            completed.path != command.runtime_path
+            or completed.byte_size != command.byte_size
+            or completed.sha256 != command.sha256
+        ):
+            raise AssertionError("test completed journal drifted from replay command")
+        return AddFileResult(
+            request_id=command.request_id,
+            replayed=True,
+            path=completed.path,
+            byte_size=completed.byte_size,
+            sha256=completed.sha256,
+        )
 
     async def add_file(self, command: AddFileCommand) -> AddFileResult:
         """@brief 消费一次 command stream 并返回 native 风格收据 / Consume one command stream and return a native-style receipt.
@@ -162,13 +228,135 @@ class _RuntimeProcess:
         path = command.runtime_path
         if self.mismatched_receipt:
             path = "/workspace/uploads/other/payload"
-        return AddFileResult(
+        result = AddFileResult(
             request_id=command.request_id,
-            replayed=len(self.commands) > 1,
+            replayed=False,
             path=path,
             byte_size=command.byte_size,
             sha256=command.sha256,
         )
+        self._completed[command.request_id.value] = result
+        return result
+
+
+class _IntentStore:
+    """@brief 内存中的 immutable AttachmentImportIntent aggregate store / In-memory immutable AttachmentImportIntent aggregate store."""
+
+    def __init__(self) -> None:
+        """@brief 初始化空 intent journal / Initialize an empty intent journal.
+
+        @return None / None.
+        """
+
+        self.intents: dict[TurnId, AttachmentImportIntent] = {}
+        self.prepared: list[AttachmentImportIntent] = []
+
+    async def find(
+        self,
+        command: DurableAssistantInferenceCommand,
+    ) -> AttachmentImportIntent | None:
+        """@brief 返回同 Turn 已准备 intent / Return a prepared intent for the same Turn.
+
+        @param command 当前 durable command / Current durable command.
+        @return 已存 aggregate 或 None / Stored aggregate or None.
+        """
+
+        return self.intents.get(command.typed_turn_id)
+
+    async def prepare(
+        self,
+        command: DurableAssistantInferenceCommand,
+        intent: AttachmentImportIntent,
+    ) -> AttachmentImportIntent:
+        """@brief 首次保存或验证并发等价 intent / Store the first intent or validate an equivalent concurrent intent.
+
+        @param command 当前 durable command / Current durable command.
+        @param intent 候选 immutable aggregate / Candidate immutable aggregate.
+        @return 同 Turn 的唯一 aggregate / Sole aggregate for the Turn.
+        """
+
+        existing = self.intents.get(command.typed_turn_id)
+        if existing is not None:
+            if existing != intent:
+                raise WorkspaceAttachmentIntentConflictError(
+                    "test intent store rejected mutable replay semantics"
+                )
+            return existing
+        self.intents[command.typed_turn_id] = intent
+        self.prepared.append(intent)
+        return intent
+
+
+class _ReceiptStore:
+    """@brief 记录 native 成功后的 receipt publish 的 durable 替身 / Durable double recording receipt publication after native success."""
+
+    def __init__(
+        self,
+        error: Exception | None = None,
+        *,
+        failures_remaining: int | None = None,
+    ) -> None:
+        """@brief 配置可选 publish 失败 / Configure an optional publication failure.
+
+        @param error publish 应抛出的可选错误 / Optional error raised by publication.
+        @param failures_remaining 在成功前应注入错误的次数；None 表示每次都使用 ``error`` /
+            Number of injected failures before success; None means use ``error`` every time.
+        @return None / None.
+        """
+
+        self._error = error
+        self._failures_remaining = failures_remaining
+        self.records: list[
+            tuple[DurableAssistantInferenceCommand, WorkspaceAttachmentImportReceipt]
+        ] = []
+        self.published: list[
+            tuple[DurableAssistantInferenceCommand, WorkspaceAttachmentImportReceipt]
+        ] = []
+
+    async def record_import(
+        self,
+        command: DurableAssistantInferenceCommand,
+        receipt: WorkspaceAttachmentImportReceipt,
+    ) -> None:
+        """@brief 记录或拒绝一个 receipt publish / Record or reject one receipt publication.
+
+        @param command 已恢复的 durable command / Restored durable command.
+        @param receipt native 成功导出的 receipt / Receipt derived from native success.
+        @return None / None.
+        """
+
+        self.records.append((command, receipt))
+        if self._error is not None and self._failures_remaining is None:
+            raise self._error
+        if self._failures_remaining is not None and self._failures_remaining > 0:
+            self._failures_remaining -= 1
+            raise self._error or RuntimeError("test receipt failure")
+        self.published.append((command, receipt))
+
+
+class _HistoryInvalidator:
+    """@brief 记录 receipt 后历史失效的 Context Window 替身 / Context-Window double recording post-receipt history invalidation."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        """@brief 配置可选失效错误 / Configure an optional invalidation error.
+
+        @param error 每次 invalidate 应抛出的可选错误 / Optional error raised by every invalidation.
+        @return None / None.
+        """
+
+        self._error = error
+        self.conversations: list[object] = []
+
+    def invalidate(self, conversation_id: object) -> None:
+        """@brief 记录一个会话失效 / Record one conversation invalidation.
+
+        @param conversation_id receipt 已发布的会话 / Conversation whose receipt was published.
+        @return None / None.
+        """
+
+        self.conversations.append(conversation_id)
+        if self._error is not None:
+            raise self._error
 
 
 class _History:
@@ -330,10 +518,21 @@ def _anchor(command: DurableAssistantInferenceCommand) -> ConversationMessage:
     """
 
     original_text = "caption that must not reach the model"
+    if command.current_turn_upload is not None:
+        original_text = (
+            '<workspace_file path="'
+            + workspace_attachment_file_path(
+                turn_id=command.typed_turn_id,
+                reference=command.current_turn_upload,
+            )
+            + '" />'
+        )
     content: JsonObject = {
         "text": original_text,
         "model_message": text_message(MessageRole.USER, original_text).to_json(),
     }
+    if command.current_turn_upload is not None:
+        content["workspace_attachment"] = pending_workspace_attachment_marker()
     return ConversationMessage(
         draft=MessageDraft(
             message_id=ConversationMessageId.for_turn(
@@ -373,6 +572,9 @@ class WorkspaceAttachmentPreprocessorTests(unittest.TestCase):
             result = await CurrentTurnWorkspaceAttachmentPreprocessor(
                 source=source,
                 runtime_process=runtime,  # type: ignore[arg-type]
+                intents=_IntentStore(),
+                receipts=_ReceiptStore(),
+                history_invalidator=_HistoryInvalidator(),
             ).preprocess(command)
 
             self.assertIsNotNone(result)
@@ -414,13 +616,18 @@ class WorkspaceAttachmentPreprocessorTests(unittest.TestCase):
             await CurrentTurnWorkspaceAttachmentPreprocessor(
                 source=_UploadSource(),
                 runtime_process=runtime,  # type: ignore[arg-type]
+                intents=_IntentStore(),
+                receipts=_ReceiptStore(),
+                history_invalidator=_HistoryInvalidator(),
             ).preprocess(command)
             self.assertEqual(runtime.commands[0].scope, GroupRuntimeScope(-10042))
 
         asyncio.run(scenario())
 
-    def test_import_request_is_stable_and_chunks_are_protocol_bounded(self) -> None:
-        """@brief 同一 Turn 重试使用同一请求身份且按协议切块 / Retrying one Turn uses one request identity and protocol-bounded chunks.
+    def test_import_request_is_stable_and_completed_retry_replays_before_download(
+        self,
+    ) -> None:
+        """@brief 同一 Turn 重试先只读 replay，且首次 chunks 保持协议有界 / Retrying one Turn first performs read-only replay while first-attempt chunks remain protocol-bounded.
 
         @return None / None.
         """
@@ -438,6 +645,9 @@ class WorkspaceAttachmentPreprocessorTests(unittest.TestCase):
             preprocessor = CurrentTurnWorkspaceAttachmentPreprocessor(
                 source=source,
                 runtime_process=runtime,  # type: ignore[arg-type]
+                intents=_IntentStore(),
+                receipts=_ReceiptStore(),
+                history_invalidator=_HistoryInvalidator(),
             )
 
             first = await preprocessor.preprocess(command)
@@ -445,19 +655,22 @@ class WorkspaceAttachmentPreprocessorTests(unittest.TestCase):
 
             self.assertIsNotNone(first)
             self.assertIsNotNone(second)
-            self.assertEqual(len(runtime.commands), 2)
-            first_command, second_command = runtime.commands
-            self.assertEqual(first_command.opaque_id, second_command.opaque_id)
-            self.assertEqual(first_command.request_id, second_command.request_id)
-            self.assertEqual(first_command.request_hash, second_command.request_hash)
+            self.assertEqual(len(runtime.commands), 1)
+            first_command = runtime.commands[0]
+            self.assertEqual(len(runtime.replay_commands), 2)
+            first_replay, second_replay = runtime.replay_commands
+            self.assertEqual(first_command.opaque_id, first_replay.opaque_id)
+            self.assertEqual(first_command.request_id, first_replay.request_id)
+            self.assertEqual(first_replay.request_id, second_replay.request_id)
+            self.assertEqual(first_replay.request_hash, second_replay.request_hash)
             self.assertEqual(
                 runtime.chunk_lengths,
                 [
                     (MAX_ADD_FILE_CHUNK_BYTES, MAX_ADD_FILE_CHUNK_BYTES, 7),
-                    (MAX_ADD_FILE_CHUNK_BYTES, MAX_ADD_FILE_CHUNK_BYTES, 7),
                 ],
             )
-            self.assertEqual(runtime.chunk_payloads, [content, content])
+            self.assertEqual(runtime.chunk_payloads, [content])
+            self.assertEqual(source.references, [command.current_turn_upload])
             assert second is not None
             self.assertTrue(second.replayed)
 
@@ -480,10 +693,79 @@ class WorkspaceAttachmentPreprocessorTests(unittest.TestCase):
             result = await CurrentTurnWorkspaceAttachmentPreprocessor(
                 source=source,
                 runtime_process=runtime,  # type: ignore[arg-type]
+                intents=_IntentStore(),
+                receipts=_ReceiptStore(),
+                history_invalidator=_HistoryInvalidator(),
             ).preprocess(_command())
             self.assertIsNone(result)
             self.assertEqual(source.references, [])
             self.assertEqual(runtime.commands, [])
+
+        asyncio.run(scenario())
+
+    def test_native_success_receipt_failure_then_expired_source_retries_by_journal_replay(
+        self,
+    ) -> None:
+        """@brief native 成功后 DB receipt 中断时，过期 Telegram source 不妨碍 retry publish / After native success and DB receipt interruption, an expired Telegram source does not prevent retry publication.
+
+        @return None / None.
+        @note 这是 recovery gap 的定向回归：第一次已写 native completed journal，却在 receipt
+            前失败；第二次必须先 replay，不能重新下载，并最终让 receipt 成为唯一模型可见
+            publish witness。/ This is the directed recovery-gap regression: the first attempt
+            writes a native completed journal but fails before its receipt; the second must replay
+            first, must not re-download, and finally makes the receipt the sole model-visible
+            publish witness.
+        """
+
+        async def scenario() -> None:
+            """@brief 执行 native-success → receipt-failure → expired-source → replay-publish 序列 / Execute native-success → receipt-failure → expired-source → replay-publish.
+
+            @return None / None.
+            """
+
+            command = _command(upload=_reference())
+            source = _ExpiringUploadSource()
+            runtime = _RuntimeProcess()
+            intents = _IntentStore()
+            receipts = _ReceiptStore(
+                WorkspaceAttachmentReceiptUnavailableError(
+                    "test receipt transaction lost"
+                ),
+                failures_remaining=1,
+            )
+            preprocessor = CurrentTurnWorkspaceAttachmentPreprocessor(
+                source=source,
+                runtime_process=runtime,  # type: ignore[arg-type]
+                intents=intents,
+                receipts=receipts,
+                history_invalidator=_HistoryInvalidator(),
+            )
+
+            with self.assertRaises(WorkspaceAttachmentReceiptUnavailableError):
+                await preprocessor.preprocess(command)
+            self.assertEqual(len(intents.prepared), 1)
+            self.assertEqual(len(runtime.commands), 1)
+            self.assertEqual(len(runtime.replay_commands), 1)
+            self.assertEqual(source.references, [command.current_turn_upload])
+            self.assertEqual(receipts.published, [])
+
+            recovered = await preprocessor.preprocess(command)
+
+            self.assertIsNotNone(recovered)
+            assert recovered is not None
+            self.assertTrue(recovered.replayed)
+            self.assertEqual(len(runtime.commands), 1)
+            self.assertEqual(len(runtime.replay_commands), 2)
+            self.assertEqual(source.references, [command.current_turn_upload])
+            self.assertEqual(len(receipts.records), 2)
+            self.assertEqual(len(receipts.published), 1)
+            published_command, published_receipt = receipts.published[0]
+            self.assertEqual(published_command, command)
+            self.assertEqual(published_receipt.path, recovered.path)
+            self.assertEqual(
+                recovered.model_placeholder().text,
+                f'<workspace_file path="{published_receipt.path}" />',
+            )
 
         asyncio.run(scenario())
 
@@ -503,6 +785,9 @@ class WorkspaceAttachmentPreprocessorTests(unittest.TestCase):
                 await CurrentTurnWorkspaceAttachmentPreprocessor(
                     source=_UploadSource(),
                     runtime_process=_RuntimeProcess(mismatched_receipt=True),  # type: ignore[arg-type]
+                    intents=_IntentStore(),
+                    receipts=_ReceiptStore(),
+                    history_invalidator=_HistoryInvalidator(),
                 ).preprocess(_command(upload=_reference()))
 
         asyncio.run(scenario())
@@ -562,6 +847,9 @@ class WorkspaceAttachmentPreprocessorTests(unittest.TestCase):
                         attachment_preprocessor=CurrentTurnWorkspaceAttachmentPreprocessor(
                             source=_FailingUploadSource(error),  # type: ignore[arg-type]
                             runtime_process=runtime,  # type: ignore[arg-type]
+                            intents=_IntentStore(),
+                            receipts=_ReceiptStore(),
+                            history_invalidator=_HistoryInvalidator(),
                         ),
                     )
                     with self.assertRaises(expected_type) as captured:
@@ -598,6 +886,9 @@ class WorkspaceAttachmentPreprocessorTests(unittest.TestCase):
                 attachment_preprocessor=CurrentTurnWorkspaceAttachmentPreprocessor(
                     source=_UploadSource(),
                     runtime_process=runtime,  # type: ignore[arg-type]
+                    intents=_IntentStore(),
+                    receipts=_ReceiptStore(),
+                    history_invalidator=_HistoryInvalidator(),
                 ),
             )
 

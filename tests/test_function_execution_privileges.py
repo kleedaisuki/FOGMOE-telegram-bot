@@ -63,7 +63,7 @@ def test_schema_snapshot_never_exposes_security_definer_routines_to_public() -> 
 
     snapshot = _SNAPSHOT_PATH.read_text(encoding="utf-8")
 
-    assert "-- Alembic head: 0070_workspace_attachment_model_boundary" in snapshot
+    assert "-- Alembic head: 0072_workspace_attachment_import_intents" in snapshot
     assert (
         "ALTER DEFAULT PRIVILEGES\n  REVOKE EXECUTE ON ROUTINES FROM PUBLIC" in snapshot
     )

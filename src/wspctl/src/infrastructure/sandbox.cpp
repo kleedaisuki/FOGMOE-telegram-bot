@@ -130,6 +130,20 @@ namespace {
     return output;
 }
 
+/**
+ * @brief 判断两个 quota binding 是否描述同一个 runtime project pair / Check whether two quota bindings describe the same runtime project pair.
+ * @param left 左侧 binding / Left binding.
+ * @param right 右侧 binding / Right binding.
+ * @return 所有路径及 project ID 都相同则为真 / True when every path and project ID matches.
+ */
+[[nodiscard]] bool same_runtime_quota_binding(
+    const RuntimeQuotaBinding& left,
+    const RuntimeQuotaBinding& right) noexcept {
+    return left.runtime_dir == right.runtime_dir && left.control_dir == right.control_dir &&
+           left.workspace_dir == right.workspace_dir && left.control_project_id == right.control_project_id &&
+           left.workspace_project_id == right.workspace_project_id;
+}
+
 /** @brief 创建 cgroup 目录（不能 chmod cgroupfs） / Create a cgroup directory without chmod on cgroupfs. */
 [[nodiscard]] Result<void> create_cgroup_directory(const std::filesystem::path& path) {
     std::error_code error;
@@ -381,33 +395,30 @@ Result<void> prepare_broker_cgroup(const SandboxConfig& config) {
 Result<TaskLayer> prepare_task_layer(
     const SandboxConfig& config,
     const XfsProjectQuota& quota,
-    const std::string& runtime_key,
+    const RuntimeActivationLease& activation_lease,
     const std::string& activation_id) {
-    if (runtime_key.empty() || activation_id.empty()) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "runtime_key and activation_id are required"));
+    if (activation_id.empty()) {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, "activation_id is required"));
     }
-    const auto binding = quota.ensure_runtime(runtime_key);
-    if (!binding) {
-        return std::unexpected(binding.error());
-    }
-    const auto storage = quota.prepare_activation_storage(*binding, activation_id);
+    const RuntimeQuotaBinding& binding = activation_lease.binding();
+    const auto storage = quota.prepare_activation_storage(activation_lease, activation_id);
     if (!storage) {
         return std::unexpected(storage.error());
     }
     const TaskLayer layer{
-        .quota_binding = *binding,
+        .quota_binding = binding,
         .activation_id = activation_id,
-        .runtime_dir = binding->runtime_dir,
-        .upper_dir = binding->workspace_dir / "upper",
+        .runtime_dir = binding.runtime_dir,
+        .upper_dir = binding.workspace_dir / "upper",
         .work_dir = storage->workspace_work_dir,
         .root_dir = storage->control_activation_dir / "root",
         .workspace_lower_dir = storage->control_activation_dir / "workspace-lower",
         .merged_dir = storage->control_activation_dir / "root" / "workspace",
     };
     if (layer.runtime_dir.parent_path() != config.state_root / "runtimes" ||
-        layer.upper_dir != binding->workspace_dir / "upper" ||
-        layer.work_dir.parent_path() != binding->workspace_dir / "work" ||
-        layer.root_dir.parent_path() != binding->control_dir / "mounts" / layer.root_dir.parent_path().filename() ||
+        layer.upper_dir != binding.workspace_dir / "upper" ||
+        layer.work_dir.parent_path() != binding.workspace_dir / "work" ||
+        layer.root_dir.parent_path() != binding.control_dir / "mounts" / layer.root_dir.parent_path().filename() ||
         layer.workspace_lower_dir.parent_path() != layer.root_dir.parent_path() || layer.merged_dir != layer.root_dir / "workspace") {
         return std::unexpected(make_error(ErrorCode::internal, "XFS quota service returned an invalid task-layer layout"));
     }
@@ -417,9 +428,11 @@ Result<TaskLayer> prepare_task_layer(
 Result<void> cleanup_task_layer(
     const SandboxConfig& config,
     const XfsProjectQuota& quota,
+    const RuntimeActivationLease& activation_lease,
     const TaskLayer& layer) {
     const std::filesystem::path control_activation_dir = layer.root_dir.parent_path();
-    if (layer.quota_binding.runtime_dir != layer.runtime_dir ||
+    if (!same_runtime_quota_binding(layer.quota_binding, activation_lease.binding()) ||
+        layer.quota_binding.runtime_dir != layer.runtime_dir ||
         layer.runtime_dir.parent_path() != config.state_root / "runtimes" ||
         layer.upper_dir != layer.quota_binding.workspace_dir / "upper" ||
         layer.work_dir.parent_path() != layer.quota_binding.workspace_dir / "work" ||
@@ -429,7 +442,22 @@ Result<void> cleanup_task_layer(
         layer.merged_dir != layer.root_dir / "workspace") {
         return std::unexpected(make_error(ErrorCode::invalid_argument, "task layer does not describe an owned staging tree"));
     }
-    return quota.cleanup_activation_storage(layer.quota_binding, layer.activation_id);
+    return quota.cleanup_activation_storage(activation_lease, layer.activation_id);
+}
+
+Result<void> reclaim_dead_task_layers(
+    const SandboxConfig& config,
+    const XfsProjectQuota& quota,
+    const RuntimeActivationLease& activation_lease,
+    const std::string& runtime_key) {
+    if (runtime_key.empty() ||
+        activation_lease.binding().runtime_dir != config.state_root / "runtimes" / hash_component(runtime_key)) {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, "runtime key does not match the activation lease binding"));
+    }
+    if (const auto task_free = wait_runtime_cgroup_empty(config, runtime_key); !task_free) {
+        return std::unexpected(task_free.error());
+    }
+    return quota.reclaim_dead_activation_storage(activation_lease);
 }
 
 Result<void> setup_runtime_mounts(const SandboxConfig& config, const TaskLayer& layer) {

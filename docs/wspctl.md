@@ -39,6 +39,10 @@ PID 1 supervisor 分别缩小命名空间、文件、资源、系统调用与生
   [cgroup v2 文档](https://docs.kernel.org/admin-guide/cgroup-v2.html) 与
   [seccomp 文档](https://man7.org/linux/man-pages/man2/seccomp.2.html) 支持本设计的最小
   mount view、single-writer cgroup tree 和 `no_new_privs` + syscall deny-list 选择。
+- [AWS 的 DDD/hexagonal architecture 指南](https://docs.aws.amazon.com/prescriptive-guidance/latest/hexagonal-architectures/overview.html)
+  强调领域模型先于 database、外部 API 与 presentation 建立且不依赖它们；所以这里把
+  `Runtime`、`ActivationId`、`AttachmentImportIntent` 等业务语义留在 domain/application，
+  而把 Linux primitive、PostgreSQL 与 pybind transport 放在 infrastructure/presentation。
 - Firecracker 的生产经验表明，为低启动开销工作负载使用 microVM 是可行的下一层隔离，
   但不是本版本的隐藏依赖；参见 [Firecracker: Lightweight Virtualization for Serverless
   Applications](https://www.usenix.org/conference/nsdi20/presentation/agache)。
@@ -268,13 +272,16 @@ application 层 `RuntimeProcess` 的第二个能力，与 `run_bash` 共享同�
 Runtime 的串行锁和全局 admission。模型始终只得到 `run_bash`；因此它不能选择 host 路径、上传
 目标、文件 ID，或绕过 runtime 边界。
 
-当前 Telegram `photo`、`sticker` 与 `document` 的正确时序相同：
+当前 Telegram `photo`、`sticker`、`document`、`voice`、`audio`、`video`、`animation` 与
+`video_note` 的正确时序相同：
 
 ```text
-Telegram Update → durable Turn / CurrentTurnUploadReference
+Telegram Update → durable Turn / CurrentTurnUploadReference + marker=pending
   →（该 Turn 的 inference 开始、Agent 之前）受限内存下载
   → RuntimeProcess.add_file(AddFileCommand)
-  → /workspace/uploads/<opaque-id>/payload
+  → native journal 的已验证 publish
+  → PostgreSQL immutable attachment_import_receipt
+  → 同一 DB transaction: marker pending → imported
   → 当前 user model message: <workspace_file path="…" />
   → Agent 只能通过 run_bash 使用该路径
 ```
@@ -286,12 +293,29 @@ preprocessor 使用。下载 adapter 复用已初始化的 Telegram Bot，先核
 完整语义 hash、长度、内容 SHA-256 和至多 64 KiB 的 bytes chunks。文件名、MIME、shebang、Telegram
 `file_id` 都不参与目标路径或幂等语义。
 
-durable ingress 在有附件时立即把**模型面对的** `content.text` 和 canonical `model_message`
-都写成同一个固定 `<workspace_file …/>` 占位符；caption 只在接受路由的短暂解析阶段存在，绝不作为
-第二条模型消息、WorkingMemory（工作记忆）或 Profile Dreaming（画像归纳）的文本来源。受限下载仍在
-Agent 前发生，故模型只有在 native `add_file` 成功 receipt 后才会真正被调用。已知 Telegram
-网络/超时失败映射为可重试的 `NETWORK`；超限是 `INVALID_REQUEST`；身份漂移、非 bytes 响应和非 HTTPS
-provider 路径是终态 `PROVIDER` 契约失败；未知程序错误是 `INTERNAL`，不能伪装成网络重试。
+durable ingress 在有附件时立即把审计 envelope 的 `content.text` 和 canonical `model_message`
+都写成同一个固定 `<workspace_file …/>` 占位符，并在**同一 acceptance transaction** 写入
+`workspace_attachment={"version": 1, "state": "pending"}`。这里的文本尚不是模型面对的事实：
+普通 ContextWindow（上下文窗口）、compaction（压缩）、retrieval（检索）和 Profile source 对
+`pending`、`unavailable`、未知版本或畸形 marker 一律 fail-closed（失败关闭）地隐藏整条行；caption
+只在接受路由的短暂解析阶段存在，绝不作为第二条模型消息、WorkingMemory（工作记忆）或 Profile
+Dreaming（画像归纳）的文本来源。
+
+native `add_file` journal 的成功**不是**模型可见性的充分条件。Python 必须先核验 native 回执的
+request ID、固定 path、字节数和 SHA-256，再用 PostgreSQL 的
+`workspace.attachment_import_receipts` 插入不可变 receipt，并在**同一事务**把受控 source user
+行从 `pending` 改为 `imported`。数据库 insert trigger（触发器）重新绑定 source message、Turn、
+conversation、scope 与固定 path；deferred constraint trigger（延迟约束触发器）在 commit 时再次要求
+source marker 已是 `imported`。因此“只写了 native journal”或“只写了看起来像路径的文本”都不能使
+路径进入模型。首次 attempt 在 receipt 后显式注入一次当前 user placeholder；重试则去重已投影行后
+再注入一次，避免重复。
+
+已知 Telegram 网络/超时失败映射为可重试的 `NETWORK`；超限是 `INVALID_REQUEST`；身份漂移、非 bytes
+响应和非 HTTPS provider 路径是终态 `PROVIDER` 契约失败；未知程序错误是 `INTERNAL`，不能伪装成网络
+重试。可重试失败保持 `pending`，以 native journal 的同一 request ID 安全回放并重试数据库 publish；
+**最终**失败时，fenced inference activity 先在其 transaction 中变为 `failed`，随后同一 transaction
+只允许该附件严格 `pending → unavailable`。 `unavailable` 没有 receipt，永不显示路径，也不能在之后
+提升为 `imported`；若 receipt 并发已先完成，条件更新零行并保留已见证的 `imported`。
 
 native supervisor 只在该 Runtime 的 OverlayFS `/workspace/uploads/<opaque-id>/payload` 下以
 受限 `openat2` 视图写入，`fdatasync` 后原子 publish，并把收据纳入同一类 durable journal。初始
@@ -299,14 +323,17 @@ mode 可以是 `0600`，这只是防止 host 控制面将上传内容作为 host
 workspace 内执行的禁止。用户上传或 Bot 生成的文件可以在隔离 Workspace 中被 `chmod` 后由
 `run_bash` 执行，仍受 namespace、cgroup、seccomp、PID 1 和 OverlayFS 约束。
 
-Python 仅在 native 回执的 request ID、固定 path、字节数和 SHA-256 与 `AddFileCommand` 完全一致时
-才发布占位符。模型可见的当前 user message 和 `current_user_text` 都是单个
-`<workspace_file path="…" />`；它不会看到原 caption、filename、MIME、Telegram capability 或 bytes。
-若导入已提交但结果不可判定，activity 以 `partial_effect` 终结而不是重试同一 request ID；暂时的
-Telegram/network 或 Runtime 不可用才允许 durable worker 重试。
+模型可见的当前 user message 和 `current_user_text` 都是单个
+`<workspace_file path="…" />`，但仅在上述 native+数据库双重见证完成后出现；它不会看到原
+caption、filename、MIME、Telegram capability 或 bytes。若导入已提交但结果不可判定，activity 以
+`partial_effect` 终结而不是重试同一 request ID；暂时的 Telegram/network 或 Runtime 不可用才允许
+durable worker 重试。
 
-`0070_workspace_attachment_model_boundary` 处理升级前的历史媒体：每一条 direct-media 旧行都没有
-`add_file` 成功 receipt，因此**绝不**把看起来像 `<workspace_file>` 的字符串当成可用路径。canonical
+`0070_workspace_attachment_model_boundary` 处理升级前的历史媒体；
+`0071_workspace_attachment_import_receipts` 随后建立 immutable receipt/marker 状态机。两者之前的
+每一条 direct-media、rollout marker 或 `current_turn_upload` 旧行都没有**数据库见证**的 `add_file`
+receipt，因此 0071 把它们明确终结为 `unavailable`，而不是把看起来像 `<workspace_file>` 的字符串
+当成可用路径。canonical
 消息可以有多个 text/image part，首段占位符不能证明 bytes 已原子发布到 Runtime。迁移保留 append-only
 audit（追加式审计）原文，却把该
 附件 Turn 的 user、assistant 与 tool 全链打上 `exclude_from_assistant=true`。私聊中该 raw 内容可能已
@@ -317,8 +344,8 @@ audit（追加式审计）原文，却把该
 表面上只有文本的 Agent Turn，且无法可靠反向定位。因此迁移还会保守排除**所有历史群 Assistant Turn**
 及其 compaction/retrieval；这故意牺牲旧群聊天模型历史，以保证该旁路不会从 assistant 回复或摘要回流。
 私聊历史不因这条群旁路规则而被扩大清理。未来检索和画像 source 也把该 marker 当作整 Turn 排除条件。
-迁移时必须停掉旧 Bot/worker、排空 inference、compaction、vector 和 Dream 队列；提交后重启新进程以
-清空内存 ContextWindow cache。
+迁移时必须停掉旧 Bot/worker、排空 inference、compaction、vector 和 Dream 队列；0071 的部署顺序是先
+迁移、再启动带 receipt publisher 的新 Bot/worker，提交后重启新进程以清空内存 ContextWindow cache。
 
 群消息观察器是另一条只读旁路，不能取得当前 Turn 的 import receipt。它会把任何历史或新入站群媒体
 统一投影为 `<group_attachment />`（非可执行、非路径标记），而不是 `<workspace_file>`；`fetch_group_context`

@@ -34,6 +34,7 @@ adapter”，而不是一个与任意服务混在一起的顶层目录。
 
 ```bash
 cmake -S . -B build/wspctl-dev \
+  -DPython_EXECUTABLE="$PWD/.venv/bin/python" \
   -DWSPCTL_INSTALL_HOST_TOOLS=ON \
   -DWSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT=ON
 ```
@@ -46,9 +47,29 @@ cmake -S . -B build/wspctl-dev \
 
 ```bash
 cmake -S . -B build/wspctl-prod \
+  -DPython_EXECUTABLE="$PWD/.venv/bin/python" \
   -DWSPCTL_INSTALL_HOST_TOOLS=ON \
   -DWSPCTL_HOST_WORKDIR=/srv/fogmoe-wspctl
 ```
+
+`src/wspctl/CMakeLists.txt` 在源码树中也会自动优先选择项目的
+`$PWD/.venv/bin/python`，因此上述 `-DPython_EXECUTABLE=...` 不是第二套语义，而是把
+同一个选择写明给 CI/operator。若特意使用别的解释器，必须显式传入其绝对路径，并保证该环境中
+存在匹配的 `pybind11` CMake package；否则 CMake 会在 configure 阶段失败，而不会构建一个缺少 native
+binding 的半成品。
+
+配置只会生成 build graph 和 host asset 模板；在引用 `build/wspctl-prod/src/wspctl/wsp-systemd` 或安装
+unit 前必须实际编译并安装 host programs：
+
+```bash
+cmake --build build/wspctl-prod --parallel
+sudo cmake --install build/wspctl-prod
+```
+
+生成的 `wspctld.service` 的 `ExecStart` 来自同一次 configure 的
+`CMAKE_INSTALL_FULL_BINDIR`，默认是 `/usr/local/bin/wspctld`。若 operator 使用非默认 prefix，必须在**首次
+configure** 时一起给出，例如 `-DCMAKE_INSTALL_PREFIX=/opt/fogmoe-wspctl`，再执行上述 build/install；不要在
+事后只用 `cmake --install --prefix ...` 或手工复制 binary，因为那不会重新生成已经固定路径的 unit。
 
 `WSPCTL_HOST_WORKDIR` 必须是绝对路径，且从 `/` 到该目录的每个祖先都应为 `root:root`、不可由
 group/other 写。可按运营策略使用 `/srv`、`/var/lib` 或专用 volume；重要的是这个 ownership
@@ -69,8 +90,9 @@ checkout 与其他服务 state 不得位于该 filesystem。生成的 unit 使�
 [`deploy/wspctl/systemd/wspctld.service.in`](../deploy/wspctl/systemd/wspctld.service.in) 和
 [`deploy/wspctl/systemd/wspctld.env.example.in`](../deploy/wspctl/systemd/wspctld.env.example.in)
 生成实际文件至，例如 `build/wspctl-prod/deploy/wspctl/systemd/`；不要直接安装 `.in` 模板。
-`cmake --install` 只把生成资产放进安装前缀的 `share/fogmoe-wspctl/systemd/`，不会静默创建
-host work root 或激活 service。生产 operator 应像下面一样显式复制/链接 unit。将生成的
+`cmake --install` 会将 host binaries 安装到 prefix 的 `bin/` 与 `libexec/wspctl/`，并把生成资产放进
+`share/fogmoe-wspctl/systemd/`；它不会静默创建 host work root 或激活 service。生产 operator 应像下面一样
+显式复制/链接 unit。将生成的
 `wspctld.env.example` 复制为
 `WSPCTL_HOST_WORKDIR/wspctld.env`，以 `root:root`、`0600` 保存，并把 generation 路径、资源
 上限替换为实际值。`WSPCTL_SUPERVISOR` 是 `pivot_root` 后的 **image-internal** 路径，
@@ -126,7 +148,7 @@ artifact store，再将选中的 generation 用只读 bind mount 发布到 `imag
 
 不要把 `.venv`、`/usr/bin/bash` 或 `wsp-systemd` 在 broker 启动时 bind mount 进 runtime。受控
 构建器 [`tools/build_wspctl_image.py`](../tools/build_wspctl_image.py) 只接受 operator 明确给出的
-**绝对 host 路径**：项目 venv、需要兼容 editable 安装时的 source root、Bash、逐项选择的 GNU 基础
+**绝对 host 路径**：项目 `.venv`、其 PEP 660/path-only `.pth` 明确引用的 source root、Bash、逐项选择的 GNU 基础
 命令、已构建的 `wsp-systemd` 与 `wspctl-image`。这是 host 构建控制面的工作，输入由 operator 与项目
 checkout 决定；它不属于 `run_bash` 的能力，也不向 workspace payload 暴露 builder API。构建器不会运行
 `ldd`，而是通过 `readelf` 读取 ELF metadata，并以 `RPATH/RUNPATH` 和 `ldconfig` 递归复制 dynamic
@@ -155,6 +177,7 @@ sudo "$PWD/.venv/bin/python" tools/build_wspctl_image.py \
   --bash /usr/bin/bash \
   --gnu-command /usr/bin/env \
   --gnu-command /usr/bin/cat \
+  --gnu-command /usr/bin/chmod \
   --gnu-command /usr/bin/cp \
   --gnu-command /usr/bin/find \
   --gnu-command /usr/bin/grep \
@@ -172,11 +195,25 @@ sudo "$PWD/.venv/bin/python" tools/build_wspctl_image.py \
   --ldconfig /usr/sbin/ldconfig
 ```
 
-`--python-source` 不是隐式读取 checkout 的捷径：它只在 venv 的 editable `.pth` 明确引用该 source
-时需要，且该 source 会被复制到 image 内的 `/opt/wspctl/python-source/`，`.pth` 也被重写为该
-runtime-internal path。若 production venv 不含 editable package，应省略该选项。venv 的 absolute
-interpreter symlink 会变为 rootfs-contained relative symlink；console script 的 shebang（解释器行）
-改为 relocated venv path，而非 host 路径，因此仍看到 image 内的 site-packages。
+当前项目的 `.venv` 可以直接作为 production image 输入，不需要另做 wheel venv。其唯一可执行
+`.pth` 例外是 scikit-build-core PEP 660 的 `_editable_skbc_*` helper；构建器**不会执行**它，而是只在
+下列结构全部成立时重定位：`.pth` 的首行是唯一的 `import _editable_skbc_<name>`、同一
+`site-packages` 内存在 regular helper、helper 同时定义 `ScikitBuildRedirectingFinder` 与 `install`、并以
+单个顶层 `install(...)` 终结；所有 source absolute mapping 和 `.pth` 后续 path-only 行都必须唯一落在
+显式 `--python-source` 下，wheel mapping 必须是 runtime-relative。与该 helper 同名 distribution 的
+`direct_url.json` 也只能是精确的 editable local metadata；它会被改写为 runtime 内
+`file:///opt/wspctl/python-source/...`，不会保留 checkout URL。
+
+所以本项目应显式使用 `--venv "$PWD/.venv" --python-source "$PWD/src"`，正如上面的命令。构建后的
+rootfs 中 helper、`.pth` 与 PEP 610 metadata 均不得出现 host checkout 路径；
+`ctest/python/test_wspctl_image_builder.py` 会实际加载重写后的 helper、导入一个 workspace package，并断言
+输出没有 host path。venv 的 absolute interpreter symlink 会变为 rootfs-contained relative symlink；console
+script 的 shebang（解释器行）改为 relocated venv path，因此仍看到 image 内的 site-packages。
+
+这不是对任意 startup code 的放行。setuptools 的 `distutils-precedence.pth`、多个 executable line、
+非 `_editable_skbc_*` helper、动态/非字面 terminal mapping、未受准 source、host-absolute wheel entry，或不匹配的
+editable/direct-local `direct_url.json` 一律 fail closed。若依赖需要另一种 executable `.pth`，必须先新增一个
+同样可结构验证、带迁移与运行时测试的专门 relocation strategy（重定位策略）；不能把 host `.venv` hook 原样复制。
 
 builder 会创建最小 `/proc`、`/dev`、`/tmp`、`/run` 和 `/workspace` mountpoint。`/workspace` 与
 `/tmp` 是 root-owned `01777`：前者给降权 task 在自己的 OverlayFS merged view 中创建文件，后者
@@ -256,6 +293,68 @@ sudo rmdir "$test_parent"
 `CAP_SYS_RESOURCE` 的 child 中分别把 inode 和 byte 写入推到 hard limit 之外；两项都必须得到 kernel
 `EDQUOT`。默认没有上述环境变量时它显示为 skip，不能据此把生产验收标为通过。
 
+## 真实 namespace / OverlayFS / restart E2E 验收
+
+`wspctl.privileged_e2e` 是与 `wspctl.xfs_project_quota` 不同的一条验收测试：后者只验证 XFS
+hard limit；前者会实际 `fork/exec` CMake 构建的 `wspctld`，并以数字 UID/GID `65532` 的 native
+Unix gateway client 发请求。它绝不把 mock、静态代码检查或非 root 的 skip 计为运行时验收。
+
+测试需要 operator/CI 显式准备下列对象，且都必须与 production state 隔离：
+
+| 环境变量 | 必要对象 |
+| --- | --- |
+| `WSPCTL_PRIVILEGED_E2E_XFS_MOUNT` | 空的、一次性、独立挂载的可写 XFS `prjquota`/`pquota` filesystem（不能是 `/`）。 |
+| `WSPCTL_PRIVILEGED_E2E_STATE_PARENT` | 上述 mount 内、与之同一 XFS superblock/fsid 的 `root:root`、不可 group/world 写 parent；测试会在创建任何 state 前显式核验 containment、XFS type、mountpoint、`st_dev` 与 fsid，随后只在其下创建一个 `mkdtemp` state root。 |
+| `WSPCTL_PRIVILEGED_E2E_SOCKET_PARENT` | 具有安全 root-owned ancestry 的 `root:root 0711` parent；测试只会在其下创建一个 socket directory，供 UID `65532` traverse。 |
+| `WSPCTL_PRIVILEGED_E2E_CGROUP_PARENT` | 一个空的、可写的 systemd `Delegate=yes` cgroup v2 subtree，暴露 `cpu,memory,pids,io`；测试只会在其下创建一个 child。 |
+| `WSPCTL_PRIVILEGED_E2E_IMAGES_ROOT` / `WSPCTL_PRIVILEGED_E2E_BASE_ROOT` | 已发布的 `<images>/<generation>/rootfs`；它必须已有 sealed manifest，且 `BASE_ROOT` 必须在真实只读 mount 上。 |
+| `WSPCTL_PRIVILEGED_E2E_XFS_PROJECT_ID_MIN` / `WSPCTL_PRIVILEGED_E2E_XFS_PROJECT_ID_MAX` | 为本测试专属保留的一对或多对非零 even-to-odd project IDs；不得与任何服务复用。 |
+
+默认 image-internal supervisor 路径是 `/libexec/wspctl/wsp-systemd`；若 generation 使用不同路径，显式设
+`WSPCTL_PRIVILEGED_E2E_SUPERVISOR`。该 generation 还必须按 image allowlist 包含 `/bin/bash` 和
+`chmod`：E2E 会验证 `add_file` 先以不可执行 mode 发布，再仅在 workspace task 内 `chmod +x` 并直接
+执行，而不会在 host 执行上传内容。
+
+例如（`cgroup_parent` 应由 CI/systemd provisioner 创建为独立的 `Delegate=yes` subtree，不能拿生产
+cgroup 或普通 `/sys/fs/cgroup` 根代替）：
+
+```bash
+test_mount=/mnt/wspctl-e2e-xfs
+state_parent="$test_mount/e2e-state-parent"
+socket_parent=/run/wspctl-e2e
+cgroup_parent=/sys/fs/cgroup/example-e2e-delegated # CI-provisioned, empty, Delegate=yes
+images_root=/srv/fogmoe-wspctl/images
+base_root="$images_root/2026-07-27-python314/rootfs"
+
+sudo install -d -o root -g root -m 0700 "$state_parent"
+sudo install -d -o root -g root -m 0711 "$socket_parent"
+sudo env \
+  WSPCTL_REQUIRE_PRIVILEGED_E2E=1 \
+  WSPCTL_PRIVILEGED_E2E_XFS_MOUNT="$test_mount" \
+  WSPCTL_PRIVILEGED_E2E_STATE_PARENT="$state_parent" \
+  WSPCTL_PRIVILEGED_E2E_SOCKET_PARENT="$socket_parent" \
+  WSPCTL_PRIVILEGED_E2E_CGROUP_PARENT="$cgroup_parent" \
+  WSPCTL_PRIVILEGED_E2E_IMAGES_ROOT="$images_root" \
+  WSPCTL_PRIVILEGED_E2E_BASE_ROOT="$base_root" \
+  WSPCTL_PRIVILEGED_E2E_XFS_PROJECT_ID_MIN=300000 \
+  WSPCTL_PRIVILEGED_E2E_XFS_PROJECT_ID_MAX=300003 \
+  ctest --test-dir build/wspctl-prod -R '^wspctl\.privileged_e2e$' --output-on-failure
+```
+
+它依次证明：task 的 parent 是 namespace PID 1、task 具有空 capability / `NoNewPrivs=1` /
+seccomp filter；UID `65532` 的 client 无法 traverse host state root；`add_file` 返回唯一
+`/workspace/uploads/<opaque>/payload` 路径并可只在 task 内 chmod/execute；Overlay upper 写入持久；
+前台 timeout 后 task cgroup 会清理 background orphan；最后用 `SIGTERM` 非优雅重启 broker，并以**同一
+runtime key、新 activation**恢复该 upper 与可执行 payload。测试只删除自己通过 `mkdtemp` 创建且在
+cleanup 前仍匹配原始 device/inode 的 state/socket children，以及自己创建的固定 cgroup child hierarchy；
+绝不递归删除、signal 或 `cgroup.kill` operator 给的 parent。
+
+XFS project quota assignment/limit 是 filesystem 级元数据，即使测试 state root 被删除也可能保留在
+mount 上。因此 `test_mount` 和 project-ID range 必须真的是 disposable；验收结束后应由 operator 销毁该
+测试 filesystem（或按 XFS 运维流程显式清理 quota metadata），而不是指向 production mount。未设置这些
+变量时测试返回 CTest skip `77`；只有设置 `WSPCTL_REQUIRE_PRIVILEGED_E2E=1` 的 CI 才会把缺前置条件
+升级为失败。
+
 ## 从旧 Judge0 配置迁移
 
 新版本不再接受 `integrations.code_execution`。在停止旧 Bot、排空 durable work 并备份数据库后，
@@ -274,14 +373,14 @@ uv run python tools/migrate_config_v2_to_wspctl.py ./config.json
 应按敏感文件保管。
 
 随后执行数据库迁移并启动 broker；`0069_workspace_runtimes` 会拒绝未排空的旧不确定执行，
-而 `0070_workspace_attachment_model_boundary` 还会拒绝未排空的 inference、context compaction、
-retrieval vector 与 Profile Dream 队列。它会保留历史附件 audit 行、但排除每一条历史 direct-media Turn
-及同一私聊会话中其后的 Assistant Turn 的未来模型使用；后者是防止 raw caption 已被纯文本回复转述后经
-retrieval/Profile 回流。历史 `<workspace_file>` 文本不是 native `add_file` receipt，不能作为例外。它清除
-可含 caption 的派生状态，并把历史群媒体收束为非可执行标记。由于旧 `fetch_group_context` 没有
-逐读取 provenance，0070 还会保守排除所有历史群 Assistant Turn 及其 compaction/retrieval；这是防止
-caption 已被模型转述后回流的必要代价，不影响私聊历史。不要跳过这些检查。迁移提交后必须重启新的
-Bot worker，以清空任何内存中的旧 ContextWindow/summary：
+`0070_workspace_attachment_model_boundary` 会清理历史 raw media 派生物，而
+`0071_workspace_attachment_import_receipts` 同样要求 inference、context compaction、retrieval vector
+与 Profile Dream 队列已排空。0071 建立 immutable receipt 与 `pending → imported/unavailable` 状态机：
+历史 direct-media、rollout marker 和旧 `current_turn_upload` 行没有数据库见证的 native publish，故一律
+终结为 `unavailable`，绝不从 `<workspace_file>` 文本推断可执行路径。新版本必须在 native `add_file`
+成功后写入 receipt 并同事务发布 `imported`；最终 inference 失败则同事务终结尚未发布的 `pending`。
+不要跳过 drain、迁移顺序或重启：迁移提交后必须启动 receipt-aware 新 Bot worker，以清空任何内存中的旧
+ContextWindow/summary：
 
 ```bash
 fogmoe-dbctl --config ./config.json migrate

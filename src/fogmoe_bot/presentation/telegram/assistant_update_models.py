@@ -26,6 +26,7 @@ from fogmoe_bot.domain.conversation.identity import TurnId, TurnSource
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.domain.workspace.attachment import pending_workspace_attachment_marker
 
 from .delivery import delivery_stream_for_chat
 
@@ -40,6 +41,11 @@ class TelegramAssistantContentKind(StrEnum):
     PHOTO = "photo"
     STICKER = "sticker"
     DOCUMENT = "document"
+    VOICE = "voice"
+    AUDIO = "audio"
+    VIDEO = "video"
+    ANIMATION = "animation"
+    VIDEO_NOTE = "video_note"
 
 
 class MalformedTelegramAssistantUpdate(PermanentIngressError):
@@ -61,11 +67,11 @@ class TelegramMediaReference:
     @param emoji Sticker emoji / Sticker emoji.
 
     @note 这是 durable 引用而非已下载文件：不含内容 bytes、下载 URL、host path 或
-        workspace path。Telegram 的 Document 可省略 ``file_name`` 与 ``mime_type``，因此
-        两者以 ``None`` 原样表达。/ This is a durable reference rather than downloaded
+        workspace path。Telegram 的 Document、Audio、Video 与 Animation 可省略
+        ``file_name`` 与 ``mime_type``，因此两者以 ``None`` 原样表达。/ This is a durable reference rather than downloaded
         data: it contains no content bytes, download URL, host path, or workspace path.
-        Telegram Documents may omit ``file_name`` and ``mime_type``, so both are represented
-        as ``None`` when absent.
+        Telegram Documents, Audio, Video, and Animation may omit ``file_name`` and
+        ``mime_type``, so both are represented as ``None`` when absent.
     """
 
     kind: TelegramAssistantContentKind
@@ -106,11 +112,16 @@ class TelegramMediaReference:
             "emoji": self.emoji,
             "max_download_bytes": ASSISTANT_MEDIA_LIMIT_BYTES,
         }
-        # 保持既有 photo/sticker 的持久 JSON 形状；Document 则始终带显式 filename 字段，
-        # 即使 Telegram 省略它也以 None 表达。 Preserve the existing persisted JSON shape for
-        # photos/stickers; Documents always carry an explicit filename field, using None when
-        # Telegram omitted it.
-        if self.kind is TelegramAssistantContentKind.DOCUMENT:
+        # 保持既有 photo/sticker/voice/video-note 的持久 JSON 形状；可能带文件名的媒体始终
+        # 带显式 filename 字段，即使 Telegram 省略它也以 None 表达。 Preserve the existing
+        # persisted JSON shape for photos/stickers/voice/video-notes; media that may carry a
+        # filename always carry an explicit field, using None when Telegram omitted it.
+        if self.kind in {
+            TelegramAssistantContentKind.DOCUMENT,
+            TelegramAssistantContentKind.AUDIO,
+            TelegramAssistantContentKind.VIDEO,
+            TelegramAssistantContentKind.ANIMATION,
+        }:
             payload["file_name"] = self.file_name
         return payload
 
@@ -300,6 +311,12 @@ class ParsedTelegramAssistantMessage:
             # Workspace-path placeholder. Thus later derivations reading ``content.text``, such as
             # Working Memory and Profile Dreaming, cannot feed the caption back into a model.
             user_content["text"] = model_text
+            # 路径文本本身不证明文件已存在：只有 receipt store 在 native ``add_file`` 成功后
+            # 原子地把该 marker 切换为 imported，它才可进入任一模型派生面。/ Path-looking
+            # text itself does not prove a file exists: it may enter any model-derived surface
+            # only after the receipt store atomically changes this marker to imported following
+            # native ``add_file`` success.
+            user_content["workspace_attachment"] = pending_workspace_attachment_marker()
         else:
             model_text = self.text
             if self.chat_type in GROUP_CHAT_TYPES:

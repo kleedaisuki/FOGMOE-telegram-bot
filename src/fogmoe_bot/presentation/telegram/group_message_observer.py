@@ -213,11 +213,15 @@ def _content(message: JsonObject) -> tuple[GroupMessageKind, str]:
         return GroupMessageKind.PHOTO, _GROUP_ATTACHMENT_MARKER
     if _object(message.get("sticker")) is not None:
         return GroupMessageKind.STICKER, _GROUP_ATTACHMENT_MARKER
-    if _object(message.get("voice")) is not None:
+    if (
+        _object(message.get("voice")) is not None
+        or _object(message.get("audio")) is not None
+    ):
         return GroupMessageKind.VOICE, _GROUP_ATTACHMENT_MARKER
     if (
         _object(message.get("video")) is not None
         or _object(message.get("animation")) is not None
+        or _object(message.get("video_note")) is not None
     ):
         return GroupMessageKind.VIDEO, _GROUP_ATTACHMENT_MARKER
     if _object(message.get("document")) is not None:

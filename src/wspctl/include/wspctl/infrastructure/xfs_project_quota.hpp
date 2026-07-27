@@ -68,6 +68,63 @@ struct RuntimeQuotaActivationStorage final {
     std::filesystem::path workspace_work_dir;
 };
 
+class XfsProjectQuota;
+
+/**
+ * @brief 一个 runtime 的跨 broker activation 排他租约 / Cross-broker exclusive activation lease for one runtime.
+ *
+ * 租约持有 ``control/activation.lock`` 的 ``flock``，生命周期覆盖存活 PID 1 与其 task
+ * cgroup。崩溃会由内核关闭 FD 并释放锁；下一 broker 只能在取得租约、杀死旧 cgroup 并
+ * 观察 ``populated 0`` 后回收 transient staging。/ The lease holds an ``flock`` on
+ * ``control/activation.lock`` for the lifetime of the live PID 1 and task cgroup. A crash
+ * closes the FD and releases the lock in the kernel; the next broker may reclaim transient
+ * staging only after acquiring the lease, killing the old cgroup, and observing ``populated 0``.
+ */
+class RuntimeActivationLease final {
+public:
+    /** @brief 析构时释放 activation ``flock`` / Release the activation ``flock`` on destruction. */
+    ~RuntimeActivationLease();
+
+    /** @brief 禁止复制 OS lock ownership / Copying OS lock ownership is forbidden. */
+    RuntimeActivationLease(const RuntimeActivationLease&) = delete;
+    /** @brief 禁止复制赋值 OS lock ownership / Copy-assigning OS lock ownership is forbidden. */
+    RuntimeActivationLease& operator=(const RuntimeActivationLease&) = delete;
+
+    /**
+     * @brief 移交 activation lock ownership / Transfer activation-lock ownership.
+     * @param other 被移交的租约 / Lease being transferred.
+     */
+    RuntimeActivationLease(RuntimeActivationLease&& other) noexcept;
+
+    /**
+     * @brief 移动赋值 activation lock ownership / Move-assign activation-lock ownership.
+     * @param other 被移交的租约 / Lease being transferred.
+     * @return 当前租约 / This lease.
+     */
+    RuntimeActivationLease& operator=(RuntimeActivationLease&& other) noexcept;
+
+    /**
+     * @brief 取得租约绑定的 verified quota roots / Get the verified quota roots bound to this lease.
+     * @return 不可变 runtime quota binding / Immutable runtime quota binding.
+     */
+    [[nodiscard]] const RuntimeQuotaBinding& binding() const noexcept;
+
+private:
+    friend class XfsProjectQuota;
+
+    /**
+     * @brief 仅由 quota service 构造已锁定租约 / Construct a locked lease only from the quota service.
+     * @param binding 已验证 runtime quota binding / Verified runtime quota binding.
+     * @param lock_fd 已持有 ``LOCK_EX`` 的私有 regular-file FD / Private regular-file FD holding ``LOCK_EX``.
+     */
+    RuntimeActivationLease(RuntimeQuotaBinding binding, int lock_fd) noexcept;
+
+    /** @brief 租约绑定的 runtime quota roots / Runtime quota roots bound to the lease. */
+    RuntimeQuotaBinding binding_;
+    /** @brief 持有 flock 的 private activation-lock FD / Private activation-lock FD holding flock. */
+    int lock_fd_{-1};
+};
+
 /**
  * @brief 对 XFS-only quota 配置与挂载状态执行 fail-closed 预检 / Fail-closed preflight for XFS-only quota configuration and mount state.
  * @param config XFS project-quota 配置 / XFS project-quota configuration.
@@ -108,8 +165,30 @@ public:
     [[nodiscard]] Result<RuntimeQuotaBinding> ensure_runtime(std::string_view runtime_key) const;
 
     /**
+     * @brief 只读查找并读回一个已 ready 的 runtime quota binding / Look up and read back one ready runtime quota binding read-only.
+     * @param runtime_key canonical runtime UUID / Canonical runtime UUID.
+     * @return 已验证 binding，或不存在/未 ready/不一致错误 / Verified binding, or absent/not-ready/inconsistent error.
+     * @note 此 API 绝不创建 registry 目录、lock file、project pair 或 runtime layout；它只打开现有
+     *       registry 并以 shared ``flock`` 读取。/ This API never creates registry directories,
+     *       a lock file, a project pair, or a runtime layout; it only opens the existing registry
+     *       and reads it under a shared ``flock``.
+     */
+    [[nodiscard]] Result<RuntimeQuotaBinding> find_ready_runtime(std::string_view runtime_key) const;
+
+    /**
+     * @brief 取得一个 runtime 的非阻塞 activation 排他租约 / Acquire a nonblocking exclusive activation lease for one runtime.
+     * @param runtime_key canonical runtime UUID / Canonical runtime UUID.
+     * @return 持锁租约，或另一 broker 已持有该 runtime 时的 ``busy`` / Locked lease, or ``busy`` when another broker owns this runtime.
+     * @note 租约必须从 cgroup recovery 到正常 cleanup 全程持有。它只互斥 activation
+     *       staging 变更，不替代 journal 的 invocation 幂等性。/ The lease must be held from
+     *       cgroup recovery through normal cleanup. It serializes activation-staging mutations
+     *       only; it does not replace journal invocation idempotency.
+     */
+    [[nodiscard]] Result<RuntimeActivationLease> acquire_activation_lease(std::string_view runtime_key) const;
+
+    /**
      * @brief 创建并验证一次 activation 的 quota-owned transient 目录 / Create and verify quota-owned transient directories for one activation.
-     * @param binding 已 ready 的 runtime binding / Ready runtime binding.
+     * @param lease 为该 runtime 持有的 activation 租约 / Activation lease held for this runtime.
      * @param activation_id validated activation identifier / Validated activation identifier.
      * @return activation 的 control/work 路径 / Activation control/work paths.
      * @note ``workdir`` 总是 workspace project 下的新空目录，满足 OverlayFS same-filesystem
@@ -117,22 +196,46 @@ public:
      *       project, satisfying OverlayFS's same-filesystem constraint.
      */
     [[nodiscard]] Result<RuntimeQuotaActivationStorage> prepare_activation_storage(
-        const RuntimeQuotaBinding& binding,
+        const RuntimeActivationLease& lease,
         std::string_view activation_id) const;
 
     /**
      * @brief 删除已退出 activation 的 transient quota storage / Remove transient quota storage of an exited activation.
-     * @param binding 已 ready 的 runtime binding / Ready runtime binding.
+     * @param lease 为该 runtime 持有的 activation 租约 / Activation lease held for this runtime.
      * @param activation_id validated activation identifier / Validated activation identifier.
      * @return 成功或 fail-closed cleanup 错误 / Success or a fail-closed cleanup error.
      * @note 永不删除 workspace ``upper``、journal 或 project pair。 This never deletes the
      *       workspace ``upper``, journal, or project pair.
      */
     [[nodiscard]] Result<void> cleanup_activation_storage(
-        const RuntimeQuotaBinding& binding,
+        const RuntimeActivationLease& lease,
         std::string_view activation_id) const;
 
+    /**
+     * @brief 回收一个已证明无 task 的 runtime 的所有残留 transient activation storage / Reclaim all residual transient activation storage for a runtime proven task-free.
+     * @param lease 为该 runtime 持有的 activation 租约 / Activation lease held for this runtime.
+     * @return 成功或 fail-closed cleanup 错误 / Success or a fail-closed cleanup error.
+     * @note 调用者必须紧邻本调用前以同一 runtime cgroup 观察 ``populated 0``。此函数只会
+     *       枚举 ``control/mounts/<sha256>`` 和 ``workspace/work/<sha256>`` 的直接子目录；
+     *       从不扫描或删除 ``upper``、journal、registry 或 runtime root。/ The caller must
+     *       observe ``populated 0`` for the same runtime cgroup immediately before this call.
+     *       This enumerates only direct children of ``control/mounts/<sha256>`` and
+     *       ``workspace/work/<sha256>``; it never scans or deletes ``upper``, journals, the
+     *       registry, or the runtime root.
+     */
+    [[nodiscard]] Result<void> reclaim_dead_activation_storage(const RuntimeActivationLease& lease) const;
+
 private:
+    /**
+     * @brief 验证仍由本 service 持有的 activation 租约 / Validate an activation lease still held by this service.
+     * @param lease 待验证的 runtime activation 租约 / Runtime activation lease to validate.
+     * @return 成功或 fail-closed 验证错误 / Success or a fail-closed validation error.
+     * @note 该检查将 lock FD、XFS preflight 及持久 binding 的 readback 绑定在每次 staging
+     *       变更前。/ This binds the lock FD, XFS preflight, and persistent-binding readback
+     *       before every staging mutation.
+     */
+    [[nodiscard]] Result<void> validate_activation_lease(const RuntimeActivationLease& lease) const;
+
     /** @brief broker 的持久状态根 / Broker persistent state root. */
     std::filesystem::path state_root_;
     /** @brief 唯一允许的 XFS quota 配置 / The sole permitted XFS quota configuration. */

@@ -1,3 +1,20 @@
+# 优先使用项目已固定依赖的 virtual environment（虚拟环境），避免 CMake 在开发机上
+# 随机选中另一个满足版本号却没有 pybind11 的 Python。wheel build 会显式传入其
+# isolation interpreter；因此这个 fallback 只服务于源码树的本地/host 构建。
+# Prefer the project virtual environment so a host CMake invocation does not arbitrarily
+# discover a version-compatible Python without pybind11. Wheel builds explicitly provide
+# their isolated interpreter, so this fallback only applies to source-tree local/host builds.
+set(WSPCTL_PROJECT_VENV_PYTHON "${CMAKE_SOURCE_DIR}/.venv/bin/python")
+if((NOT DEFINED Python_EXECUTABLE OR Python_EXECUTABLE STREQUAL "") AND EXISTS "${WSPCTL_PROJECT_VENV_PYTHON}")
+    set(
+        Python_EXECUTABLE
+        "${WSPCTL_PROJECT_VENV_PYTHON}"
+        CACHE FILEPATH
+        "Python interpreter selected from the project .venv for wspctl"
+    )
+    message(STATUS "wspctl: using project virtual-environment Python: ${Python_EXECUTABLE}")
+endif()
+
 find_package(Python 3.14 REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 CONFIG QUIET)
 if(NOT pybind11_FOUND)
@@ -65,6 +82,8 @@ add_library(wspctl_infrastructure STATIC
     src/infrastructure/broker.cpp
     src/infrastructure/image.cpp
     src/infrastructure/journal.cpp
+    src/infrastructure/payload_replay.cpp
+    src/infrastructure/pidfd_control.cpp
     src/infrastructure/protocol.cpp
     src/infrastructure/runtime_gate.cpp
     src/infrastructure/sandbox.cpp

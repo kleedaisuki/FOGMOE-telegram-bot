@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -18,6 +19,7 @@ from fogmoe_bot.application.assistant.inference_command import (
 from fogmoe_bot.application.assistant.current_turn_upload import (
     CURRENT_TURN_UPLOAD_MAX_BYTES,
     CurrentTurnUploadReference,
+    workspace_attachment_file_path,
 )
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCapability,
@@ -29,6 +31,7 @@ from fogmoe_bot.application.conversation.workflow import (
 )
 from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
 from fogmoe_bot.domain.accounts.plan import AccountPlan
+from fogmoe_bot.domain.assistant.messages import CanonicalMessage, text_message
 from fogmoe_bot.domain.assistant.request_metadata import (
     RequestMeta,
     normalize_request_meta,
@@ -43,10 +46,15 @@ from fogmoe_bot.domain.conversation.identity import (
 )
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
 from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.conversation.workflow_results import TurnAcceptanceResult
 from fogmoe_bot.domain.observability.trace import TraceContext
 from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.domain.user_profile.models import UserProfileSnapshot
+from fogmoe_bot.domain.workspace.attachment import (
+    WORKSPACE_ATTACHMENT_FIELD,
+    pending_workspace_attachment_marker,
+)
 
 ASSISTANT_TEXT_LIMIT = 4096
 """@brief Assistant 文本输入上限 / Assistant text-input limit."""
@@ -194,6 +202,37 @@ class AssistantTurnRequest:
                 raise ValueError(
                     "current_turn_upload source_message_id must match message_id"
                 )
+        normalized_content = normalize_user_content_model_message(self.user_content)
+        if upload is not None:
+            expected_placeholder = _current_turn_upload_placeholder(
+                update_id=self.update_id,
+                reference=upload,
+            )
+            if normalized_content.get("text") != expected_placeholder:
+                raise ValueError(
+                    "current_turn_upload requires the fixed Workspace placeholder text"
+                )
+            expected_message = text_message(MessageRole.USER, expected_placeholder)
+            model_message_json = normalized_content["model_message"]
+            if not isinstance(model_message_json, Mapping):
+                raise ValueError(
+                    "current_turn_upload requires a canonical Workspace model message"
+                )
+            model_message = CanonicalMessage.from_json(model_message_json)
+            if model_message != expected_message:
+                raise ValueError(
+                    "current_turn_upload requires the fixed Workspace model message"
+                )
+            if normalized_content.get(WORKSPACE_ATTACHMENT_FIELD) != (
+                pending_workspace_attachment_marker()
+            ):
+                raise ValueError(
+                    "current_turn_upload requires the pending Workspace attachment marker"
+                )
+        elif WORKSPACE_ATTACHMENT_FIELD in normalized_content:
+            raise ValueError(
+                "Workspace attachment marker requires a current_turn_upload reference"
+            )
         object.__setattr__(self, "received_at", ensure_utc(self.received_at))
         object.__setattr__(self, "display_name", self.display_name.strip())
         if self.username is not None:
@@ -201,7 +240,7 @@ class AssistantTurnRequest:
         object.__setattr__(
             self,
             "user_content",
-            normalize_user_content_model_message(self.user_content),
+            normalized_content,
         )
         object.__setattr__(self, "meta", normalize_request_meta(self.meta))
         if not isinstance(self.trace_context, TraceContext):
@@ -423,6 +462,30 @@ def normalize_assistant_personal_info(value: str | None) -> str:
     """
 
     return (value or "").strip()[:500]
+
+
+def _current_turn_upload_placeholder(
+    *,
+    update_id: UpdateId,
+    reference: CurrentTurnUploadReference,
+) -> str:
+    """@brief 派生 ingress 必须持久化的唯一附件占位符 / Derive the sole attachment placeholder that ingress must persist.
+
+    @param update_id 已接受 Telegram Update ID / Accepted Telegram Update identifier.
+    @param reference 当前 Turn 已授权上传引用 / Authorized current-Turn upload reference.
+    @return 固定 ``<workspace_file>`` 文本 / Fixed ``<workspace_file>`` text.
+    @note 此文本本身不是文件存在证明；只有同一行从 pending 原子转换到 imported 并有
+        receipt 后才可被通用模型投影读取。/ This text alone is not proof that a file exists;
+        generic model projection may read it only after the same row atomically moves from
+        pending to imported with a receipt.
+    """
+
+    turn_id = TurnId.for_source(TurnSource.telegram(update_id))
+    path = workspace_attachment_file_path(
+        turn_id=turn_id,
+        reference=reference,
+    )
+    return f'<workspace_file path="{path}" />'
 
 
 def _feedback_text(reason: AssistantFeedbackReason) -> str:

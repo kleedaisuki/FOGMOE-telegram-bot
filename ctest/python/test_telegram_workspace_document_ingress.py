@@ -25,6 +25,7 @@ from fogmoe_bot.application.assistant.current_turn_upload import (
 from fogmoe_bot.domain.assistant.messages import CanonicalMessage
 from fogmoe_bot.domain.conversation.identity import TurnId, TurnSource, UpdateId
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
+from fogmoe_bot.domain.workspace.attachment import pending_workspace_attachment_marker
 from fogmoe_bot.presentation.telegram.assistant_primary_route import (
     TelegramAssistantPrimaryRoute,
 )
@@ -62,7 +63,9 @@ class _RecordingAcceptance:
 
         self.calls: list[object] = []
 
-    async def accept(self, request: object, *, accepted_at: datetime) -> AssistantTurnAccepted:
+    async def accept(
+        self, request: object, *, accepted_at: datetime
+    ) -> AssistantTurnAccepted:
         """@brief 记录一次 acceptance / Record one acceptance.
 
         @param request 已验证的 Assistant 请求 / Validated Assistant request.
@@ -127,6 +130,11 @@ def _message_payload(
     document: dict[str, object] | None = None,
     photo: dict[str, object] | None = None,
     sticker: dict[str, object] | None = None,
+    voice: dict[str, object] | None = None,
+    audio: dict[str, object] | None = None,
+    video: dict[str, object] | None = None,
+    animation: dict[str, object] | None = None,
+    video_note: dict[str, object] | None = None,
     caption: str | None = "please inspect this",
 ) -> dict[str, object]:
     """@brief 构造最小 durable Assistant message / Build a minimal durable Assistant message.
@@ -137,6 +145,11 @@ def _message_payload(
     @param document 可选 Document / Optional Document.
     @param photo 可选 PhotoSize / Optional PhotoSize.
     @param sticker 可选 Sticker / Optional Sticker.
+    @param voice 可选 Voice / Optional Voice.
+    @param audio 可选 Audio / Optional Audio.
+    @param video 可选 Video / Optional Video.
+    @param animation 可选 Animation / Optional Animation.
+    @param video_note 可选 VideoNote / Optional VideoNote.
     @param caption 媒体 caption / Media caption.
     @return PTB ``to_json`` 形状的 Update / Update in PTB ``to_json`` shape.
     """
@@ -153,15 +166,29 @@ def _message_payload(
             "username": "klee",
         },
     }
-    candidates = (document, photo, sticker)
-    if sum(candidate is not None for candidate in candidates) != 1:
+    candidates = {
+        "document": document,
+        "photo": photo,
+        "sticker": sticker,
+        "voice": voice,
+        "audio": audio,
+        "video": video,
+        "animation": animation,
+        "video_note": video_note,
+    }
+    if sum(candidate is not None for candidate in candidates.values()) != 1:
         raise ValueError("test payload requires exactly one media candidate")
     if document is not None:
         message["document"] = document
     elif photo is not None:
         message["photo"] = [photo]
-    else:
+    elif sticker is not None:
         message["sticker"] = sticker
+    else:
+        for kind, candidate in candidates.items():
+            if candidate is not None:
+                message[kind] = candidate
+                break
     if caption is not None:
         message["caption"] = caption
     return {"update_id": update_id, "message": message}
@@ -202,7 +229,9 @@ def _inbound(payload: dict[str, object]) -> InboundUpdate:
     )
 
 
-def _route() -> tuple[TelegramAssistantPrimaryRoute, _RecordingAcceptance, _RecordingFeedback]:
+def _route() -> tuple[
+    TelegramAssistantPrimaryRoute, _RecordingAcceptance, _RecordingFeedback
+]:
     """@brief 构造 document ingress route 及记录端口 / Build the document-ingress route and recording ports.
 
     @return route、acceptance 和 feedback doubles / Route, acceptance, and feedback doubles.
@@ -228,7 +257,9 @@ def _route() -> tuple[TelegramAssistantPrimaryRoute, _RecordingAcceptance, _Reco
 class TelegramWorkspaceDocumentIngressTests(unittest.TestCase):
     """@brief Document 引用的 parser/model/route 合约 / Parser/model/route contracts for Document references."""
 
-    def test_document_reference_is_durable_metadata_without_bytes_or_host_path(self) -> None:
+    def test_document_reference_is_durable_metadata_without_bytes_or_host_path(
+        self,
+    ) -> None:
         """@brief Document 仅持久化可重放元数据 / A Document persists replayable metadata only.
 
         @return None / None.
@@ -266,7 +297,15 @@ class TelegramWorkspaceDocumentIngressTests(unittest.TestCase):
             },
         )
         assert isinstance(reference, dict)
-        self.assertTrue({"bytes", "content", "host_path", "workspace_path", "download_url"}.isdisjoint(reference))
+        self.assertTrue(
+            {
+                "bytes",
+                "content",
+                "host_path",
+                "workspace_path",
+                "download_url",
+            }.isdisjoint(reference)
+        )
 
     def test_document_optional_filename_and_mime_stay_metadata_only(self) -> None:
         """@brief Telegram 可省略的 filename/MIME 原样保留为 None / Optional Telegram filename/MIME remain None.
@@ -294,7 +333,9 @@ class TelegramWorkspaceDocumentIngressTests(unittest.TestCase):
         self.assertEqual(reference["mime_type"], None)
         self.assertEqual(reference["file_size"], None)
 
-    def test_document_route_accepts_at_limit_and_rejects_declared_oversize(self) -> None:
+    def test_document_route_accepts_at_limit_and_rejects_declared_oversize(
+        self,
+    ) -> None:
         """@brief route 将 8 MiB Document 接受，声明超限则仅反馈 / Route accepts a 8 MiB Document and only feeds back declared oversize.
 
         @return None / None.
@@ -333,7 +374,9 @@ class TelegramWorkspaceDocumentIngressTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_document_malformed_candidate_is_quarantined_and_not_silently_ignored(self) -> None:
+    def test_document_malformed_candidate_is_quarantined_and_not_silently_ignored(
+        self,
+    ) -> None:
         """@brief 畸形 Document 仍是 Assistant candidate 并触发永久 parser 错误 / A malformed Document remains an Assistant candidate and causes a permanent parser error.
 
         @return None / None.
@@ -353,8 +396,10 @@ class TelegramWorkspaceDocumentIngressTests(unittest.TestCase):
         with self.assertRaises(MalformedTelegramAssistantUpdate):
             parse_telegram_assistant_update(inbound)
 
-    def test_every_attachment_kind_gets_a_durable_upload_and_model_placeholder(self) -> None:
-        """@brief 图片、贴纸和文档都走同一预导入边界 / Photo, sticker, and Document all use the same pre-import boundary.
+    def test_every_attachment_kind_gets_a_durable_upload_and_model_placeholder(
+        self,
+    ) -> None:
+        """@brief 八类 Telegram 附件都走同一预导入边界 / All eight Telegram attachment kinds use the same pre-import boundary.
 
         @return None / None.
         """
@@ -375,6 +420,43 @@ class TelegramWorkspaceDocumentIngressTests(unittest.TestCase):
             "is_animated": False,
             "is_video": False,
             "emoji": "✨",
+        }
+        voice = {
+            "file_id": "voice-file-id",
+            "file_unique_id": "voice-unique-id",
+            "file_size": 321,
+            "mime_type": "audio/ogg",
+        }
+        audio = {
+            "file_id": "audio-file-id",
+            "file_unique_id": "audio-unique-id",
+            "file_size": 654,
+            "mime_type": "audio/mpeg",
+            "file_name": "song.mp3",
+        }
+        video = {
+            "file_id": "video-file-id",
+            "file_unique_id": "video-unique-id",
+            "file_size": 987,
+            "mime_type": "video/mp4",
+            "file_name": "clip.mp4",
+            "width": 1280,
+            "height": 720,
+        }
+        animation = {
+            "file_id": "animation-file-id",
+            "file_unique_id": "animation-unique-id",
+            "file_size": 246,
+            "mime_type": "video/mp4",
+            "file_name": "loop.mp4",
+            "width": 320,
+            "height": 240,
+        }
+        video_note = {
+            "file_id": "video-note-file-id",
+            "file_unique_id": "video-note-unique-id",
+            "file_size": 135,
+            "length": 240,
         }
         cases = (
             (
@@ -398,6 +480,41 @@ class TelegramWorkspaceDocumentIngressTests(unittest.TestCase):
                 "document-file-id",
                 "document-unique-id",
             ),
+            (
+                "voice",
+                _inbound(_message_payload(update_id=204, voice=voice)),
+                CurrentTurnUploadKind.VOICE,
+                "voice-file-id",
+                "voice-unique-id",
+            ),
+            (
+                "audio",
+                _inbound(_message_payload(update_id=205, audio=audio)),
+                CurrentTurnUploadKind.AUDIO,
+                "audio-file-id",
+                "audio-unique-id",
+            ),
+            (
+                "video",
+                _inbound(_message_payload(update_id=206, video=video)),
+                CurrentTurnUploadKind.VIDEO,
+                "video-file-id",
+                "video-unique-id",
+            ),
+            (
+                "animation",
+                _inbound(_message_payload(update_id=207, animation=animation)),
+                CurrentTurnUploadKind.ANIMATION,
+                "animation-file-id",
+                "animation-unique-id",
+            ),
+            (
+                "video_note",
+                _inbound(_message_payload(update_id=208, video_note=video_note)),
+                CurrentTurnUploadKind.VIDEO_NOTE,
+                "video-note-file-id",
+                "video-note-unique-id",
+            ),
         )
         for name, inbound, expected_kind, file_id, unique_id in cases:
             with self.subTest(kind=name):
@@ -420,6 +537,10 @@ class TelegramWorkspaceDocumentIngressTests(unittest.TestCase):
                     f'<workspace_file path="{expected_path}" />',
                 )
                 self.assertEqual(request.user_content["text"], model_message.text)
+                self.assertEqual(
+                    request.user_content["workspace_attachment"],
+                    pending_workspace_attachment_marker(),
+                )
                 for forbidden in (
                     "please inspect this",
                     file_id,
@@ -429,12 +550,16 @@ class TelegramWorkspaceDocumentIngressTests(unittest.TestCase):
                 ):
                     self.assertNotIn(forbidden, model_message.text)
 
-        photo_reference = parse_telegram_assistant_update(
-            _inbound(_message_payload(photo=photo))
-        ).to_request(_inbound(_message_payload(photo=photo))).user_content["media"]
-        sticker_reference = parse_telegram_assistant_update(
-            _inbound(_message_payload(sticker=sticker))
-        ).to_request(_inbound(_message_payload(sticker=sticker))).user_content["media"]
+        photo_reference = (
+            parse_telegram_assistant_update(_inbound(_message_payload(photo=photo)))
+            .to_request(_inbound(_message_payload(photo=photo)))
+            .user_content["media"]
+        )
+        sticker_reference = (
+            parse_telegram_assistant_update(_inbound(_message_payload(sticker=sticker)))
+            .to_request(_inbound(_message_payload(sticker=sticker)))
+            .user_content["media"]
+        )
 
         assert isinstance(photo_reference, dict)
         assert isinstance(sticker_reference, dict)
@@ -445,7 +570,9 @@ class TelegramWorkspaceDocumentIngressTests(unittest.TestCase):
         self.assertEqual(sticker_reference["width"], 512)
         self.assertEqual(sticker_reference["height"], 512)
 
-    def test_group_attachment_caption_can_route_but_never_becomes_model_text(self) -> None:
+    def test_group_attachment_caption_can_route_but_never_becomes_model_text(
+        self,
+    ) -> None:
         """@brief 群附件 caption 只用于路由，接受后仍只暴露 Workspace 占位符 / A group attachment caption routes only; after acceptance it still exposes only a Workspace placeholder.
 
         @return None / None.

@@ -783,7 +783,7 @@ def test_0062_business_data_matrix_and_fresh_head_are_transactional() -> None:
         )
         assert (
             _scalar(cluster, success, "SELECT version_num FROM infra.alembic_version;")
-            == "0068_canonical_assistant_messages"
+            == "0072_workspace_attachment_import_intents"
         )
         assert (
             _scalar(
@@ -863,7 +863,7 @@ def test_0062_business_data_matrix_and_fresh_head_are_transactional() -> None:
         )
         assert (
             _scalar(cluster, fresh, "SELECT version_num FROM infra.alembic_version;")
-            == "0068_canonical_assistant_messages"
+            == "0072_workspace_attachment_import_intents"
         )
         assert (
             _scalar(

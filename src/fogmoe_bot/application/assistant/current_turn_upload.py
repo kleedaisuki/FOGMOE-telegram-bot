@@ -52,6 +52,21 @@ class CurrentTurnUploadKind(StrEnum):
     DOCUMENT = "document"
     """@brief Telegram 文档附件 / Telegram document attachment."""
 
+    VOICE = "voice"
+    """@brief Telegram 语音附件 / Telegram voice attachment."""
+
+    AUDIO = "audio"
+    """@brief Telegram 音频附件 / Telegram audio attachment."""
+
+    VIDEO = "video"
+    """@brief Telegram 视频附件 / Telegram video attachment."""
+
+    ANIMATION = "animation"
+    """@brief Telegram 动画附件 / Telegram animation attachment."""
+
+    VIDEO_NOTE = "video_note"
+    """@brief Telegram 圆形视频消息附件 / Telegram video-note attachment."""
+
 
 class CurrentTurnUploadReference(BaseModel):
     """@brief 当前 Turn 唯一授权的 Telegram 附件引用 / Sole Telegram attachment reference authorized for the current Turn.
@@ -177,7 +192,10 @@ class DownloadedCurrentTurnUpload:
             raise CurrentTurnUploadTooLargeError(
                 "Current-turn upload exceeds the 8 MiB limit"
             )
-        if not isinstance(self.sha256, str) or _SHA256_HEX.fullmatch(self.sha256) is None:
+        if (
+            not isinstance(self.sha256, str)
+            or _SHA256_HEX.fullmatch(self.sha256) is None
+        ):
             raise ValueError("Current-turn upload sha256 must be lowercase SHA-256 hex")
         actual_digest = hashlib.sha256(self.content).hexdigest()
         if self.sha256 != actual_digest:
@@ -187,7 +205,9 @@ class DownloadedCurrentTurnUpload:
         if self.original_file_name is not None and not isinstance(
             self.original_file_name, str
         ):
-            raise TypeError("Current-turn upload original_file_name must be a string or None")
+            raise TypeError(
+                "Current-turn upload original_file_name must be a string or None"
+            )
         if self.mime_type is not None and not isinstance(self.mime_type, str):
             raise TypeError("Current-turn upload mime_type must be a string or None")
 

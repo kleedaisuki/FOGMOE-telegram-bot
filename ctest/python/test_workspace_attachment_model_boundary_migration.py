@@ -51,7 +51,9 @@ _GROUP_TOOL_CATALOG_PATH = (
 class WorkspaceAttachmentModelBoundaryMigrationTests(unittest.TestCase):
     """@brief 历史 raw 附件不得经任一模型派生面回流 / Historical raw attachments must not return through any model-derivation surface."""
 
-    def test_revision_is_a_single_irreversible_child_of_workspace_runtime_identity(self) -> None:
+    def test_revision_is_a_single_irreversible_child_of_workspace_runtime_identity(
+        self,
+    ) -> None:
         """@brief 0070 只接在 0069 后，并拒绝不安全回退 / 0070 follows only 0069 and rejects an unsafe downgrade.
 
         @return None / None.
@@ -97,7 +99,9 @@ class WorkspaceAttachmentModelBoundaryMigrationTests(unittest.TestCase):
         self.assertIn("requires drained Profile Dreaming jobs", upgrade)
         self.assertIn("Operators must stop every", upgrade)
 
-    def test_every_legacy_attachment_turn_is_excluded_instead_of_receiving_a_fake_file_path(self) -> None:
+    def test_every_legacy_attachment_turn_is_excluded_instead_of_receiving_a_fake_file_path(
+        self,
+    ) -> None:
         """@brief 无 add_file receipt 的全部旧媒体 Turn 均排除，而非伪造 Workspace 文件 / Every old media Turn without an add_file receipt is excluded rather than fabricating a Workspace file.
 
         @return None / None.
@@ -152,7 +156,9 @@ class WorkspaceAttachmentModelBoundaryMigrationTests(unittest.TestCase):
         self.assertNotIn("model_message,parts,0,text", legacy_insert)
         self.assertNotIn("workspace_file path=", legacy_insert)
 
-    def test_all_existing_model_derivatives_are_deleted_or_rebuilt_from_safe_history(self) -> None:
+    def test_all_existing_model_derivatives_are_deleted_or_rebuilt_from_safe_history(
+        self,
+    ) -> None:
         """@brief 清空 compaction、retrieval、Profile/Dream 与群旁路派生物 / Clear compaction, retrieval, Profile/Dream, and group-side-channel derivatives.
 
         @return None / None.
@@ -223,7 +229,9 @@ class WorkspaceAttachmentModelBoundaryMigrationTests(unittest.TestCase):
             upgrade.index("UPDATE conversation.conversation_messages AS message"),
         )
 
-    def test_private_attachment_taint_propagates_to_later_text_only_assistant_turns(self) -> None:
+    def test_private_attachment_taint_propagates_to_later_text_only_assistant_turns(
+        self,
+    ) -> None:
         """@brief 私聊附件可经后续纯文本回复传播，闭包必须覆盖 retrieval/Profile / A private attachment can propagate through later text-only replies, so its closure must cover retrieval/Profile.
 
         @return None / None.
@@ -273,9 +281,7 @@ class WorkspaceAttachmentModelBoundaryMigrationTests(unittest.TestCase):
         closure_end = upgrade.index("-- @brief 合并 direct-media", closure_start)
         self.assertNotIn("created_at", upgrade[closure_start:closure_end])
 
-        profile_start = upgrade.index(
-            "INSERT INTO wspctl_0070_affected_profile_users"
-        )
+        profile_start = upgrade.index("INSERT INTO wspctl_0070_affected_profile_users")
         profile_end = upgrade.index(
             "-- dream_sources is deleted explicitly",
             profile_start,
@@ -284,7 +290,9 @@ class WorkspaceAttachmentModelBoundaryMigrationTests(unittest.TestCase):
         self.assertIn("JOIN wspctl_0070_tainted_turns AS affected", profile_users)
         self.assertIn("USING wspctl_0070_tainted_turns AS affected", upgrade)
 
-    def test_future_episodic_and_profile_discovery_reject_the_same_turn_marker(self) -> None:
+    def test_future_episodic_and_profile_discovery_reject_the_same_turn_marker(
+        self,
+    ) -> None:
         """@brief 迁移 marker 被两类 future source 查询和其 LATERAL 聚合共同识别 / The migration marker is recognized by both future source queries and their LATERAL aggregation.
 
         @return None / None.
@@ -301,15 +309,19 @@ class WorkspaceAttachmentModelBoundaryMigrationTests(unittest.TestCase):
         self.assertIn("CROSS JOIN LATERAL", retrieval_source)
         self.assertIn("CROSS JOIN LATERAL", profile_source)
 
-    def test_schema_snapshot_moves_to_the_new_data_migration_head_without_ddl_drift(self) -> None:
+    def test_schema_snapshot_moves_to_the_new_data_migration_head_without_ddl_drift(
+        self,
+    ) -> None:
         """@brief 0070 是数据边界迁移，snapshot 只前移 head 注释 / 0070 is a data-boundary migration, so the snapshot only advances its head comment.
 
         @return None / None.
         """
 
         snapshot = _SCHEMA_PATH.read_text(encoding="utf-8")
-        self.assertIn("through 0070_workspace_attachment_model_boundary", snapshot)
-        self.assertIn("Alembic head: 0070_workspace_attachment_model_boundary", snapshot)
+        self.assertIn("through 0072_workspace_attachment_import_intents", snapshot)
+        self.assertIn(
+            "Alembic head: 0072_workspace_attachment_import_intents", snapshot
+        )
         self.assertIn("CREATE TABLE workspace.runtimes", snapshot)
 
 

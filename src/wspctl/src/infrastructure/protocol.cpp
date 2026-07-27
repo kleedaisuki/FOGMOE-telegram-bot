@@ -279,14 +279,27 @@ private:
     return writer.take();
 }
 
-/** @brief 编码不含外部语义 hash/activation 的规范文件元数据 / Encode canonical file metadata excluding caller semantic hash and activation. */
-[[nodiscard]] std::vector<std::byte> encode_canonical_payload(const PayloadBeginRequest& request) {
+/**
+ * @brief 编码不含外部语义 hash/activation 的规范文件元数据 / Encode canonical file metadata excluding caller semantic hash and activation.
+ * @param runtime_key 持久 runtime 标识 / Persistent runtime key.
+ * @param request_id 稳定文件调用标识 / Stable file invocation ID.
+ * @param opaque_id 受限 uploads capability / Constrained uploads capability.
+ * @param byte_size 完整文件字节数 / Complete file byte count.
+ * @param sha256 完整内容摘要 / Complete-content digest.
+ * @return 用于 SHA-256 的 canonical bytes / Canonical bytes used for SHA-256.
+ */
+[[nodiscard]] std::vector<std::byte> encode_canonical_payload_metadata(
+    const std::string_view runtime_key,
+    const std::string_view request_id,
+    const std::string_view opaque_id,
+    const std::size_t byte_size,
+    const std::string_view sha256) {
     Writer writer;
-    writer.string(request.runtime_key);
-    writer.string(request.request_id);
-    writer.string(request.opaque_id);
-    writer.u64(static_cast<std::uint64_t>(request.byte_size));
-    writer.string(request.sha256);
+    writer.string(runtime_key);
+    writer.string(request_id);
+    writer.string(opaque_id);
+    writer.u64(static_cast<std::uint64_t>(byte_size));
+    writer.string(sha256);
     return writer.take();
 }
 
@@ -354,7 +367,7 @@ private:
 /** @brief 校验 MessageKind 枚举值 / Validate a MessageKind enum value. */
 [[nodiscard]] bool is_known_kind(const std::uint16_t raw_kind) {
     return raw_kind >= static_cast<std::uint16_t>(MessageKind::execute) &&
-           raw_kind <= static_cast<std::uint16_t>(MessageKind::payload_result);
+           raw_kind <= static_cast<std::uint16_t>(MessageKind::payload_replay);
 }
 
 /** @brief 校验 execution result 可安全编码 / Validate an execution result before encoding. */
@@ -442,6 +455,24 @@ Result<void> validate_payload_begin_request(const PayloadBeginRequest& request) 
     return {};
 }
 
+Result<void> validate_payload_replay_request(const PayloadReplayRequest& request) {
+    if (!is_safe_identifier(request.runtime_key) || !is_safe_identifier(request.request_id) ||
+        !is_safe_payload_opaque_id(request.opaque_id)) {
+        return std::unexpected(make_error(
+            ErrorCode::invalid_argument,
+            "invalid runtime, request, or opaque file identifier for read-only replay"));
+    }
+    if (!is_sha256(request.request_hash) || !is_sha256(request.sha256)) {
+        return std::unexpected(make_error(
+            ErrorCode::invalid_argument,
+            "file replay request_hash and sha256 must be lowercase SHA-256 hex"));
+    }
+    if (request.byte_size > kMaxAddFileBytes) {
+        return std::unexpected(make_error(ErrorCode::frame_too_large, "file replay byte size exceeds ingress quota"));
+    }
+    return {};
+}
+
 Result<void> validate_payload_chunk(const PayloadChunk& chunk) {
     if (!is_safe_identifier(chunk.request_id) || chunk.bytes.empty() || chunk.bytes.size() > kMaxAddFileChunkBytes) {
         return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid file chunk"));
@@ -470,7 +501,22 @@ std::string canonical_request_hash(const ExecuteRequest& request) {
 }
 
 std::string canonical_payload_hash(const PayloadBeginRequest& request) {
-    const std::vector<std::byte> canonical = encode_canonical_payload(request);
+    const std::vector<std::byte> canonical = encode_canonical_payload_metadata(
+        request.runtime_key,
+        request.request_id,
+        request.opaque_id,
+        request.byte_size,
+        request.sha256);
+    return sha256_hex(canonical);
+}
+
+std::string canonical_payload_hash(const PayloadReplayRequest& request) {
+    const std::vector<std::byte> canonical = encode_canonical_payload_metadata(
+        request.runtime_key,
+        request.request_id,
+        request.opaque_id,
+        request.byte_size,
+        request.sha256);
     return sha256_hex(canonical);
 }
 
@@ -591,6 +637,53 @@ Result<PayloadBeginRequest> decode_payload_begin_request(const std::span<const s
         .sha256 = *sha256,
     };
     if (const auto valid = validate_payload_begin_request(request); !valid) {
+        return std::unexpected(valid.error());
+    }
+    return request;
+}
+
+Result<std::vector<std::byte>> encode_payload_replay_request(const PayloadReplayRequest& request) {
+    if (const auto valid = validate_payload_replay_request(request); !valid) {
+        return std::unexpected(valid.error());
+    }
+    Writer writer;
+    writer.string(request.runtime_key);
+    writer.string(request.request_id);
+    writer.string(request.request_hash);
+    writer.string(request.opaque_id);
+    writer.u64(static_cast<std::uint64_t>(request.byte_size));
+    writer.string(request.sha256);
+    std::vector<std::byte> encoded = writer.take();
+    if (encoded.size() > kMaxFrameBytes - kFrameHeaderBytes) {
+        return std::unexpected(make_error(ErrorCode::frame_too_large, "file replay payload exceeds frame quota"));
+    }
+    return encoded;
+}
+
+Result<PayloadReplayRequest> decode_payload_replay_request(const std::span<const std::byte> payload) {
+    if (payload.size() > kMaxFrameBytes - kFrameHeaderBytes) {
+        return std::unexpected(make_error(ErrorCode::frame_too_large, "file replay payload exceeds quota"));
+    }
+    Reader reader(payload);
+    const auto runtime_key = reader.string(128U);
+    const auto request_id = reader.string(128U);
+    const auto request_hash = reader.string(64U);
+    const auto opaque_id = reader.string(kMaxFileOpaqueIdBytes);
+    const auto byte_size = reader.u64();
+    const auto sha256 = reader.string(64U);
+    if (!runtime_key || !request_id || !request_hash || !opaque_id || !byte_size || !sha256 || !reader.finished() ||
+        *byte_size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid file replay request"));
+    }
+    PayloadReplayRequest request{
+        .runtime_key = *runtime_key,
+        .request_id = *request_id,
+        .request_hash = *request_hash,
+        .opaque_id = *opaque_id,
+        .byte_size = static_cast<std::size_t>(*byte_size),
+        .sha256 = *sha256,
+    };
+    if (const auto valid = validate_payload_replay_request(request); !valid) {
         return std::unexpected(valid.error());
     }
     return request;

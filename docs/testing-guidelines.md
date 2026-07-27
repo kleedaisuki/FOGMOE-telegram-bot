@@ -46,5 +46,7 @@ FOGMOE_TEST_POSTGRES=1 .venv/bin/pytest -q \
 ```
 
 迁移变更还必须在空库验证 `fresh → head`，并从父版本执行一次
-`upgrade → downgrade → upgrade`；测试结束后删除隔离实例。真实 provider 连通性测试仅在人工
-诊断时使用 `RUN_ENV_API_CONNECTIVITY_TESTS=1`，不得成为普通测试或 CI 的隐式网络依赖。
+`upgrade → downgrade → upgrade`；若 revision 明确声明为不可逆（例如删除无法重建的审计事实），
+则改为验证 `parent → upgrade` 与 downgrade 的明确原子拒绝。测试结束后删除隔离实例。真实
+provider 连通性测试仅在人工诊断时使用 `RUN_ENV_API_CONNECTIVITY_TESTS=1`，不得成为普通测试或
+CI 的隐式网络依赖。

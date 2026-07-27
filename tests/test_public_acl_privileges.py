@@ -124,7 +124,7 @@ def test_schema_snapshot_records_the_public_boundary_head() -> None:
 
     snapshot = _SNAPSHOT_PATH.read_text(encoding="utf-8")
 
-    assert "-- Alembic head: 0070_workspace_attachment_model_boundary" in snapshot
+    assert "-- Alembic head: 0072_workspace_attachment_import_intents" in snapshot
     assert "REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC" in snapshot
     assert "REVOKE ALL PRIVILEGES ON TYPES FROM PUBLIC" in snapshot
     assert "fogmoe_snapshot_public_acl" in snapshot

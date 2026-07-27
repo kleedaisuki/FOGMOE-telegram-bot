@@ -94,6 +94,31 @@ class RuntimeProcess:
         """
         ...
 
+    def replay_file(
+        self,
+        opaque_id: str,
+        byte_size: int,
+        sha256: str,
+        request_id: str = "",
+        request_hash: str = "",
+    ) -> Mapping[str, object]:
+        """@brief 只读恢复一个已完成文件 ingress 的收据 / Read-only replay of one completed file-ingress receipt.
+
+        @param opaque_id trusted persisted uploads-directory capability / Trusted persisted uploads-directory capability.
+        @param byte_size persisted complete byte count / Persisted complete byte count.
+        @param sha256 persisted complete-content SHA-256 / Persisted complete-content SHA-256.
+        @param request_id original stable journal idempotency ID / Original stable journal idempotency ID.
+        @param request_hash original SHA-256 file-ingress semantic hash / Original SHA-256 file-ingress semantic hash.
+        @return ``replayed=True`` 的 request ID、runtime path、byte size 与 SHA-256 / Request ID, runtime path, byte size, and SHA-256 with ``replayed=True``.
+        @raise NativeError ``not_found`` 表示没有 durable receipt；``invocation_in_doubt`` 表示
+            pending/对象缺失等不能安全下载的情况。/ ``not_found`` means no durable receipt;
+            ``invocation_in_doubt`` means pending/missing-object or another unsafe-to-download state.
+        @note 本方法没有 activation 参数，且不会启动、替换或终止 RuntimeProcess，也不接受 bytes 或
+            host path。/ This method has no activation argument and never starts, replaces, or
+            retires a RuntimeProcess; it accepts neither bytes nor a host path.
+        """
+        ...
+
     def close(self) -> None:
         """@brief 释放本地 client 资源 / Release local client resources.
 

@@ -19,6 +19,7 @@ from fogmoe_bot.domain.assistant.messages import (
     CanonicalMessageError,
 )
 from fogmoe_bot.domain.conversation.identity import (
+    CURRENT_USER_MESSAGE_SEMANTIC_KEY,
     ConversationId,
     ConversationMessageId,
     InferenceActivityId,
@@ -124,7 +125,9 @@ def normalize_user_content_model_message(content: JsonObject) -> JsonObject:
     try:
         message = CanonicalMessage.from_json(raw_message)
     except CanonicalMessageError as error:
-        raise ValueError("Conversation ingress model_message must be canonical V2") from error
+        raise ValueError(
+            "Conversation ingress model_message must be canonical V2"
+        ) from error
     if message.role is not MessageRole.USER:
         raise ValueError("Conversation ingress model_message must have the user role")
     normalized = dict(content)
@@ -215,7 +218,10 @@ class ConversationWorkflow:
             received_at=command.received_at,
         )
         message = MessageDraft(
-            message_id=ConversationMessageId.for_turn(turn_id, "user.input"),
+            message_id=ConversationMessageId.for_turn(
+                turn_id,
+                CURRENT_USER_MESSAGE_SEMANTIC_KEY,
+            ),
             conversation_id=command.conversation_id,
             turn_id=turn_id,
             source_update_id=command.source.update_id,

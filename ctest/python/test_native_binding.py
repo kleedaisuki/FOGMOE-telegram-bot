@@ -46,7 +46,9 @@ def test_connection_error_exposes_structured_native_error() -> None:
         assert error.code == "io_failure"
         assert error.request_id == "native-binding-test"
     else:
-        raise AssertionError("RuntimeProcess unexpectedly connected to a nonexistent broker")
+        raise AssertionError(
+            "RuntimeProcess unexpectedly connected to a nonexistent broker"
+        )
 
 
 def test_constructor_binds_one_valid_activation() -> None:
@@ -90,8 +92,8 @@ def test_execute_cannot_override_handle_activation() -> None:
     raise AssertionError("RuntimeProcess.execute accepted an activation override")
 
 
-def test_add_file_is_the_only_public_file_ingress_method() -> None:
-    """@brief add_file 必须是唯一公开写入 ABI / add_file must be the sole public ingress ABI.
+def test_add_file_is_the_only_public_mutating_file_ingress_method() -> None:
+    """@brief add_file 必须是唯一公开写入 ABI；replay_file 只能读取回执 / add_file must be the sole public mutating ingress ABI; replay_file only reads receipts.
 
     @return None / None.
     """
@@ -102,6 +104,7 @@ def test_add_file_is_the_only_public_file_ingress_method() -> None:
         "activation-native-binding",
     )
     assert hasattr(process, "add_file")
+    assert hasattr(process, "replay_file")
     assert not hasattr(process, "add_payload")
     try:
         process.add_file(
@@ -116,7 +119,49 @@ def test_add_file_is_the_only_public_file_ingress_method() -> None:
         assert error.code == "io_failure"
         assert error.request_id == "native-file-ingress-test"
     else:
-        raise AssertionError("RuntimeProcess.add_file unexpectedly connected to a nonexistent broker")
+        raise AssertionError(
+            "RuntimeProcess.add_file unexpectedly connected to a nonexistent broker"
+        )
+
+
+def test_replay_file_has_no_activation_or_chunk_source_abi() -> None:
+    """@brief replay_file 必须是无 activation、无 bytes 流的只读 RPC / replay_file must be an activation-free, byte-stream-free read-only RPC.
+
+    @return None / None.
+    """
+
+    process = RuntimeProcess(
+        "/tmp/wspctl-no-such-broker.sock",
+        "123e4567-e89b-12d3-a456-426614174000",
+        "activation-native-binding",
+    )
+    try:
+        process.replay_file(
+            "native-file-ingress",
+            1,
+            "a" * 64,
+            request_id="native-file-replay-test",
+            request_hash="b" * 64,
+        )
+    except NativeError as error:
+        assert error.code == "io_failure"
+        assert error.request_id == "native-file-replay-test"
+    else:
+        raise AssertionError(
+            "RuntimeProcess.replay_file unexpectedly connected to a nonexistent broker"
+        )
+    try:
+        process.replay_file(
+            "native-file-ingress",
+            1,
+            "a" * 64,
+            request_id="native-file-replay-no-activation",
+            request_hash="b" * 64,
+            activation_id="activation-other",
+        )
+    except TypeError:
+        return
+    raise AssertionError("RuntimeProcess.replay_file accepted an activation override")
 
 
 def test_add_file_rejects_one_raw_binary_buffer_as_chunks() -> None:
@@ -141,4 +186,6 @@ def test_add_file_rejects_one_raw_binary_buffer_as_chunks() -> None:
         )
     except TypeError:
         return
-    raise AssertionError("RuntimeProcess.add_file accepted one raw bytes buffer as the chunk iterable")
+    raise AssertionError(
+        "RuntimeProcess.add_file accepted one raw bytes buffer as the chunk iterable"
+    )

@@ -12,6 +12,7 @@ from fogmoe_bot.application.workspace.models import (
     AddFileCommand,
     AddFileResult,
     DEFAULT_BASH_OUTPUT_LIMIT_BYTES,
+    ReplayFileCommand,
     RunBashCommand,
     RunBashResult,
 )
@@ -64,6 +65,20 @@ class _UnavailableRuntimeProcess:
         """@brief 拒绝未装配的文件导入 / Reject an unwired file import.
 
         @param command 被拒绝的 add_file 应用命令 / Rejected add_file application command.
+        @return 此函数永不返回 / This function never returns.
+        @raise WorkspaceRuntimeUnavailableError 始终抛出，防止绕过 RuntimeProcess /
+            Always raised to prevent bypassing RuntimeProcess.
+        """
+
+        del command
+        raise WorkspaceRuntimeUnavailableError(
+            "Workspace runtime is not configured in this process"
+        )
+
+    async def replay_file(self, command: ReplayFileCommand) -> AddFileResult:
+        """@brief 拒绝未装配的附件 journal 重放 / Reject an unwired attachment-journal replay.
+
+        @param command 被拒绝的 replay_file 应用命令 / Rejected replay_file application command.
         @return 此函数永不返回 / This function never returns.
         @raise WorkspaceRuntimeUnavailableError 始终抛出，防止绕过 RuntimeProcess /
             Always raised to prevent bypassing RuntimeProcess.

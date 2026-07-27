@@ -12,6 +12,7 @@ from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from fogmoe_bot.application.workspace.errors import (
+    WorkspaceFileReplayNotFoundError,
     WorkspaceInvocationOutcomeUnknownError,
     WorkspaceRuntimeProtocolError,
     WorkspaceRuntimeUnavailableError,
@@ -19,6 +20,7 @@ from fogmoe_bot.application.workspace.errors import (
 from fogmoe_bot.application.workspace.models import (
     AddFileCommand,
     AddFileResult,
+    ReplayFileCommand,
     RunBashCommand,
     RunBashResult,
 )
@@ -124,6 +126,29 @@ class NativeRuntimeProcess(Protocol):
 
         ...
 
+    def replay_file(
+        self,
+        opaque_id: str,
+        byte_size: int,
+        sha256: str,
+        request_id: str = "",
+        request_hash: str = "",
+    ) -> Mapping[str, object]:
+        """@brief 只读查询已完成 payload journal / Read-only lookup of a completed payload journal.
+
+        @param opaque_id 受限 uploads 目录的 opaque component / Opaque component of the constrained uploads directory.
+        @param byte_size 已持久 import intent 的完整字节数 / Complete byte size from the persisted import intent.
+        @param sha256 已持久 import intent 的完整 SHA-256 / Complete SHA-256 from the persisted import intent.
+        @param request_id 原始稳定 journal 调用 ID / Original stable journal invocation ID.
+        @param request_hash 原始上传意图语义 SHA-256 / SHA-256 of original upload-intent semantics.
+        @return ``replayed=true`` 的 native 文件收据 mapping / Native file-receipt mapping with ``replayed=true``.
+        @note 该调用没有 chunks，binding 不得创建 pending journal、读取 payload bytes 或激活
+            runtime。/ This call has no chunks; the binding must not create a pending journal,
+            read payload bytes, or activate a runtime.
+        """
+
+        ...
+
     def close(self) -> object:
         """@brief 关闭 native client 资源 / Close native client resources.
 
@@ -201,6 +226,7 @@ class WspctlRuntimeProcessFactory:
         if (
             not callable(getattr(process, "execute", None))
             or not callable(getattr(process, "add_file", None))
+            or not callable(getattr(process, "replay_file", None))
             or not callable(getattr(process, "close", None))
         ):
             raise WorkspaceRuntimeUnavailableError(
@@ -464,11 +490,7 @@ class _FairRuntimeAdmissionScheduler:
         """
 
         self._discard_cancelled_waiters_locked(queue)
-        if (
-            queue.active_waiter is None
-            and queue.waiters
-            and not queue.queued
-        ):
+        if queue.active_waiter is None and queue.waiters and not queue.queued:
             self._ready_keys.append(key)
             queue.queued = True
 
@@ -561,7 +583,9 @@ class _NativeClientLifecycleOffloadGate:
         """
 
         if capacity < 1:
-            raise ValueError("Native client lifecycle-offload capacity must be positive")
+            raise ValueError(
+                "Native client lifecycle-offload capacity must be positive"
+            )
         self._slots = asyncio.BoundedSemaphore(capacity)
         """@brief 默认 executor 的已提交 lifecycle 调用槽位 / Slots for submitted default-executor lifecycle calls."""
         self._pending_tasks: set[asyncio.Task[object]] = set()
@@ -729,6 +753,44 @@ class WspctlRuntimeProcess(RuntimeProcess):
         )
         return await asyncio.shield(task)
 
+    async def replay_file(self, command: ReplayFileCommand) -> AddFileResult:
+        """@brief 查询一个已完成 payload journal 而不创建 native 副作用 / Query a completed payload journal without creating a native side effect.
+
+        @param command 只含 immutable intent metadata 的只读 replay command /
+            Read-only replay command containing only immutable intent metadata.
+        @return 已验证的 ``replayed=true`` 文件收据 / Verified file receipt with ``replayed=true``.
+        @raise WorkspaceFileReplayNotFoundError native 明确证实 journal 不存在时抛出 /
+            Raised when native explicitly proves the journal does not exist.
+        @raise WorkspaceInvocationOutcomeUnknownError native 发现 pending 或不可证明 payload 时抛出 /
+            Raised when native finds pending or an unprovable payload.
+        @raise WorkspaceRuntimeUnavailableError native runtime 或 runner 不可安全使用时抛出 /
+            Raised when native runtime or runner cannot be used safely.
+        @note client 对象会像其他 command 一样复用 cache/lock/admission，但 native RPC 本身不
+            含 activation/chunks，因而不会启动 RuntimeProcess 或创建 pending journal。/ The
+            client object shares cache/lock/admission with other commands, but the native RPC
+            itself carries neither activation nor chunks, so it cannot start a RuntimeProcess or
+            create a pending journal.
+        """
+
+        runtime = await self._registry.resolve(command.scope)
+        if not runtime.belongs_to(command.scope):
+            raise WorkspaceRuntimeUnavailableError(
+                "Workspace runtime registry returned a cross-scope binding"
+            )
+        entry = await self._acquire(runtime.key)
+        try:
+            task = asyncio.create_task(
+                self._replay_file_entry(runtime.key, entry, command),
+                name="workspace.replay-file",
+            )
+        except BaseException:
+            await self._release(runtime.key, entry)
+            raise
+        task.add_done_callback(
+            lambda completed: self._schedule_release(runtime.key, entry, completed)
+        )
+        return await asyncio.shield(task)
+
     async def close(self) -> None:
         """@brief 停止新命令、排空已借出命令并关闭所有 client / Stop new commands, drain borrowed commands, and close all clients.
 
@@ -874,7 +936,9 @@ class WspctlRuntimeProcess(RuntimeProcess):
                 close_unclaimed = True
                 outcome = _RuntimeProcessCreationOutcome(
                     entry=None,
-                    error=WorkspaceRuntimeUnavailableError("Workspace runner is closed"),
+                    error=WorkspaceRuntimeUnavailableError(
+                        "Workspace runner is closed"
+                    ),
                 )
             elif pending.waiter_count == 0:
                 # Every caller cancelled before creation finished.  A client with no borrower is
@@ -986,7 +1050,9 @@ class WspctlRuntimeProcess(RuntimeProcess):
         """
 
         if outcome.entry is not None:
-            raise AssertionError("Successful runtime creation cannot be raised as a failure")
+            raise AssertionError(
+                "Successful runtime creation cannot be raised as a failure"
+            )
         if outcome.error is None:
             raise WorkspaceRuntimeUnavailableError(
                 "wspctl RuntimeProcess creation failed without an error"
@@ -1042,6 +1108,35 @@ class WspctlRuntimeProcess(RuntimeProcess):
             try:
                 return await asyncio.to_thread(
                     _add_file_native_process,
+                    entry.process,
+                    command,
+                )
+            finally:
+                await lease.release()
+
+    async def _replay_file_entry(
+        self,
+        key: WorkspaceRuntimeKey,
+        entry: _CachedRuntimeProcess,
+        command: ReplayFileCommand,
+    ) -> AddFileResult:
+        """@brief 在共享 serial/fair admission 下执行只读 journal replay / Execute a read-only journal replay under shared serial/fair admission.
+
+        @param key 请求 runtime key / Requested runtime key.
+        @param entry 已借出的 native client cache entry / Borrowed native-client cache entry.
+        @param command 已验证只读 replay command / Validated read-only replay command.
+        @return 规范 ``replayed=true`` 文件收据 / Canonical ``replayed=true`` file receipt.
+        @note 虽然该 native RPC 不修改 Workspace，仍与同 key 的 ``add_file``/Bash 有序，避免
+            恢复检查跨越同一 runtime session 的 payload journal 边界。/ Although this native
+            RPC does not modify the Workspace, it remains ordered with same-key ``add_file``/Bash
+            so a recovery check cannot cross a payload-journal boundary in the same runtime session.
+        """
+
+        async with entry.execution_lock:
+            lease = await self._execution_admission.acquire(key)
+            try:
+                return await asyncio.to_thread(
+                    _replay_file_native_process,
                     entry.process,
                     command,
                 )
@@ -1234,14 +1329,60 @@ def _add_file_native_process(
     return _decode_native_file_result(raw_result, command)
 
 
+def _replay_file_native_process(
+    process: NativeRuntimeProcess,
+    command: ReplayFileCommand,
+) -> AddFileResult:
+    """@brief 在工作线程内只读查询 native payload journal / Query the native payload journal read-only in a worker thread.
+
+    @param process native RuntimeProcess / Native RuntimeProcess.
+    @param command 已验证、无 chunks 的 replay command / Validated replay command with no chunks.
+    @return ``replayed=true`` 的规范文件收据 / Canonical file receipt with ``replayed=true``.
+    @raise WorkspaceFileReplayNotFoundError 仅 native 明确报告 ``not_found`` 时抛出 /
+        Raised only when native explicitly reports ``not_found``.
+    @raise WorkspaceInvocationOutcomeUnknownError native 报告 pending 或不可判定 payload 时抛出 /
+        Raised when native reports pending or an indeterminate payload.
+    @raise WorkspaceRuntimeUnavailableError 其他 native/transport 故障时抛出 /
+        Raised for other native or transport failures.
+    @note 此函数没有 fallback、chunks 或 host 文件 I/O；它只将 immutable metadata 传给
+        pybind read-only entry。/ This function has no fallback, chunks, or host file I/O; it
+        passes immutable metadata only to the pybind read-only entry.
+    """
+
+    try:
+        raw_result = process.replay_file(
+            command.opaque_id,
+            command.byte_size,
+            command.sha256,
+            request_id=str(command.request_id),
+            request_hash=str(command.request_hash),
+        )
+    except WorkspaceRuntimeUnavailableError:
+        raise
+    except Exception as error:
+        error_code = _native_error_code(error)
+        if error_code == "not_found":
+            raise WorkspaceFileReplayNotFoundError(command.request_id) from error
+        if error_code == "invocation_in_doubt":
+            raise WorkspaceInvocationOutcomeUnknownError(command.request_id) from error
+        raise WorkspaceRuntimeUnavailableError(
+            "wspctl RuntimeProcess payload replay failed"
+        ) from error
+    return _decode_native_file_result(raw_result, command, require_replayed=True)
+
+
 def _decode_native_file_result(
     raw_result: Mapping[str, object] | object,
-    command: AddFileCommand,
+    command: AddFileCommand | ReplayFileCommand,
+    *,
+    require_replayed: bool = False,
 ) -> AddFileResult:
     """@brief 验证 native 文件收据完整、有限且绑定原请求 / Verify a native file receipt is complete, bounded, and bound to its request.
 
     @param raw_result native pybind 返回值 / Return value from native pybind.
-    @param command 发起该调用的命令 / Command that initiated the publication.
+    @param command 发起该 publication 或只读 replay 的命令 / Command that initiated the publication or read-only replay.
+    @param require_replayed 为 True 时强制 native 标记 completed journal replay /
+        When True, require native to mark a completed journal replay.
     @return 已验证规范文件收据 / Verified canonical file receipt.
     @raise WorkspaceRuntimeProtocolError 返回结构、类型、路径、摘要或请求 ID 不匹配时抛出 /
         Raised when returned structure, types, path, digest, or request ID does not match.
@@ -1265,6 +1406,10 @@ def _decode_native_file_result(
         )
     if not isinstance(replayed, bool):
         raise WorkspaceRuntimeProtocolError("wspctl file replay flag must be a bool")
+    if require_replayed and replayed is not True:
+        raise WorkspaceRuntimeProtocolError(
+            "wspctl replay_file result must be marked replayed"
+        )
     if not isinstance(path, str) or path != command.runtime_path:
         raise WorkspaceRuntimeProtocolError("wspctl file result path does not match")
     if (
@@ -1272,7 +1417,9 @@ def _decode_native_file_result(
         or not isinstance(byte_size, int)
         or byte_size != command.byte_size
     ):
-        raise WorkspaceRuntimeProtocolError("wspctl file result byte size does not match")
+        raise WorkspaceRuntimeProtocolError(
+            "wspctl file result byte size does not match"
+        )
     if not isinstance(sha256, str) or sha256 != command.sha256:
         raise WorkspaceRuntimeProtocolError("wspctl file result SHA-256 does not match")
     try:
@@ -1314,7 +1461,9 @@ def _decode_native_result(
         "request_id",
     }
     if set(raw_result) != required_fields:
-        raise WorkspaceRuntimeProtocolError("wspctl result has an unsupported field set")
+        raise WorkspaceRuntimeProtocolError(
+            "wspctl result has an unsupported field set"
+        )
     stdout = raw_result["stdout"]
     stderr = raw_result["stderr"]
     request_id = raw_result["request_id"]
@@ -1322,8 +1471,13 @@ def _decode_native_result(
         raise WorkspaceRuntimeProtocolError("wspctl result output must be text")
     if not isinstance(request_id, str) or request_id != str(command.request_id):
         raise WorkspaceRuntimeProtocolError("wspctl result request ID does not match")
-    if _utf8_byte_length(stdout) + _utf8_byte_length(stderr) > command.output_limit_bytes:
-        raise WorkspaceRuntimeProtocolError("wspctl result exceeds the requested output limit")
+    if (
+        _utf8_byte_length(stdout) + _utf8_byte_length(stderr)
+        > command.output_limit_bytes
+    ):
+        raise WorkspaceRuntimeProtocolError(
+            "wspctl result exceeds the requested output limit"
+        )
     try:
         return RunBashResult(
             stdout=stdout,
@@ -1335,7 +1489,9 @@ def _decode_native_result(
             request_id=WorkspaceRequestId(request_id),
         )
     except (TypeError, ValueError) as error:
-        raise WorkspaceRuntimeProtocolError("wspctl result violates the execution contract") from error
+        raise WorkspaceRuntimeProtocolError(
+            "wspctl result violates the execution contract"
+        ) from error
 
 
 def _native_error_code(error: Exception) -> str | None:
@@ -1365,7 +1521,9 @@ def _utf8_byte_length(value: str) -> int:
     try:
         return len(value.encode("utf-8"))
     except UnicodeEncodeError as error:
-        raise WorkspaceRuntimeProtocolError("wspctl result contains non-UTF-8 text") from error
+        raise WorkspaceRuntimeProtocolError(
+            "wspctl result contains non-UTF-8 text"
+        ) from error
 
 
 __all__ = [

@@ -388,6 +388,9 @@ void append_string(std::vector<std::byte>& bytes, const std::string_view value) 
     }
     const int child_fd = openat(parent_fd, std::string(name).c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (child_fd < 0) {
+        if (errno == ENOENT) {
+            return std::unexpected(make_error(ErrorCode::not_found, std::string(purpose) + " does not exist"));
+        }
         return std::unexpected(errno_error(ErrorCode::io_failure, "open " + std::string(purpose)));
     }
     struct stat metadata {};
@@ -414,6 +417,9 @@ void append_string(std::vector<std::byte>& bytes, const std::string_view value) 
     const std::string_view runtime_key) {
     const int state_fd = open(state_root.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (state_fd < 0) {
+        if (errno == ENOENT) {
+            return std::unexpected(make_error(ErrorCode::not_found, "journal state_root does not exist"));
+        }
         return std::unexpected(errno_error(ErrorCode::io_failure, "open journal state_root"));
     }
     struct stat state_metadata {};

@@ -1077,9 +1077,22 @@ def test_blocking_offloads_have_explicit_admission_control() -> None:
     assert "process = await asyncio.to_thread" not in workspace_source
     assert "await asyncio.to_thread(entry.process.close)" not in workspace_source
     assert "await asyncio.to_thread(process.close)" not in workspace_source
-    assert workspace_source.count(
-        "lease = await self._execution_admission.acquire(key)"
-    ) == 2
+    admission_acquire = "lease = await self._execution_admission.acquire(key)"
+    assert workspace_source.count(admission_acquire) == 3
+    execution_entry_by_method = {
+        "run_bash": "_execute_entry",
+        "add_file": "_add_file_entry",
+        "replay_file": "_replay_file_entry",
+    }
+    for method_name, entry_name in execution_entry_by_method.items():
+        method_start = workspace_source.index(f"    async def {method_name}(")
+        next_method = workspace_source.find("\n    async def ", method_start + 1)
+        method_body = workspace_source[method_start:next_method]
+        assert entry_name in method_body
+        entry_start = workspace_source.index(f"    async def {entry_name}(")
+        next_entry = workspace_source.find("\n    async def ", entry_start + 1)
+        entry_body = workspace_source[entry_start:next_entry]
+        assert admission_acquire in entry_body
 
 
 def test_media_picture_and_music_have_explicit_feature_ownership() -> None:

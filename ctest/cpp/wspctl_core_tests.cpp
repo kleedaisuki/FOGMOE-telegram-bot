@@ -1,5 +1,7 @@
 #include "wspctl/infrastructure/journal.hpp"
 #include "wspctl/infrastructure/detail/launcher_transport.hpp"
+#include "wspctl/infrastructure/detail/payload_replay.hpp"
+#include "wspctl/infrastructure/detail/pidfd_control.hpp"
 #include "wspctl/infrastructure/protocol.hpp"
 #include "wspctl/infrastructure/runtime_gate.hpp"
 #include "wspctl/infrastructure/supervisor.hpp"
@@ -24,7 +26,11 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
+#include <sys/wait.h>
+
+#include <signal.h>
 
 namespace {
 
@@ -128,6 +134,19 @@ void expect(const bool condition, const std::string& message) {
         .opaque_id = "ingress-file-test",
         .byte_size = 11U,
         .sha256 = sha256_hex("hello world"),
+    };
+}
+
+/** @brief 构造与文件写入元数据严格相同的只读恢复查询 / Construct a read-only replay query with exactly the same file-ingress metadata. */
+[[nodiscard]] wspctl::PayloadReplayRequest file_replay_request() {
+    const wspctl::PayloadBeginRequest begin = file_request();
+    return wspctl::PayloadReplayRequest{
+        .runtime_key = begin.runtime_key,
+        .request_id = begin.request_id,
+        .request_hash = begin.request_hash,
+        .opaque_id = begin.opaque_id,
+        .byte_size = begin.byte_size,
+        .sha256 = begin.sha256,
     };
 }
 
@@ -241,6 +260,24 @@ void test_protocol() {
                    decoded_file_begin->sha256 == file.sha256,
                "round-trip file begin request");
     }
+    const wspctl::PayloadReplayRequest replay = file_replay_request();
+    const auto encoded_replay = wspctl::encode_payload_replay_request(replay);
+    expect(encoded_replay.has_value(), "encode activation-free file replay request");
+    if (encoded_replay) {
+        const auto decoded_replay = wspctl::decode_payload_replay_request(*encoded_replay);
+        expect(decoded_replay.has_value() && decoded_replay->runtime_key == replay.runtime_key &&
+                   decoded_replay->request_id == replay.request_id && decoded_replay->opaque_id == replay.opaque_id &&
+                   decoded_replay->byte_size == replay.byte_size && decoded_replay->sha256 == replay.sha256,
+               "round-trip activation-free file replay request");
+        const auto replay_frame = wspctl::encode_frame(wspctl::MessageKind::payload_replay, *encoded_replay);
+        const auto decoded_replay_frame = replay_frame ? wspctl::decode_frame(*replay_frame)
+                                                        : wspctl::Result<wspctl::Frame>{std::unexpected(replay_frame.error())};
+        expect(decoded_replay_frame.has_value() && decoded_replay_frame->kind == wspctl::MessageKind::payload_replay,
+               "recognize read-only file replay frame kind");
+    }
+    expect(
+        wspctl::canonical_payload_hash(file) == wspctl::canonical_payload_hash(replay),
+        "file replay canonical metadata hash matches original ingress without activation");
     const wspctl::PayloadChunk file_chunk{
         .request_id = file.request_id,
         .bytes = bytes_from_text("hello world"),
@@ -268,6 +305,9 @@ void test_protocol() {
     wspctl::PayloadBeginRequest unsafe_file = file;
     unsafe_file.opaque_id = "../escape";
     expect(!wspctl::validate_payload_begin_request(unsafe_file).has_value(), "reject traversal-shaped opaque file identifier");
+    wspctl::PayloadReplayRequest unsafe_replay = replay;
+    unsafe_replay.opaque_id = "../escape";
+    expect(!wspctl::validate_payload_replay_request(unsafe_replay).has_value(), "reject traversal-shaped opaque replay identifier");
     std::array<int, 2> pair{-1, -1};
     const int passed_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
     expect(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair.data()) == 0 && passed_fd >= 0,
@@ -423,6 +463,113 @@ void test_launcher_scm_rights_contract() {
     }
 }
 
+/**
+ * @brief 测试 helper 的 pidfd 终止与所有权清理 / Test helper pidfd termination and owned-FD cleanup.
+ *
+ * 这是不需要 namespace 或 root 的单元测试：它验证 broker recovery 使用的 production helper
+ * 会以 identity-stable pidfd 送达 ``SIGKILL``，并在成功、target 已退出和 syscall 失败时均消费
+ * descriptor。 This rootless unit test verifies that the production helper used by broker
+ * recovery delivers ``SIGKILL`` through an identity-stable pidfd and consumes the descriptor
+ * on success, after target exit, and on syscall failure.
+ */
+void test_pidfd_terminal_signal_consumes_owned_fd() {
+#ifndef SYS_pidfd_open
+    // The broker itself fails closed without pidfd_open; keep the ordinary unit suite buildable
+    // on old libc headers while privileged E2E remains unavailable there.
+    return;
+#else
+    /** @brief 持续等待 SIGKILL 的 direct child / Direct child waiting until SIGKILL. */
+    const pid_t live_child = fork();
+    expect(live_child >= 0, "fork live child for pidfd terminal-signal test");
+    if (live_child > 0) {
+        /** @brief 由 production helper 消费的 live child pidfd / Live-child pidfd consumed by the production helper. */
+        int owned_pidfd = static_cast<int>(syscall(SYS_pidfd_open, live_child, 0U));
+        expect(owned_pidfd >= 0, "open identity-stable pidfd for live child");
+        /** @brief 用于验证实际 close 的原始 descriptor number / Original descriptor number used to verify the actual close. */
+        const int original_pidfd = owned_pidfd;
+        /** @brief 通过 pidfd SIGKILL 得到的 terminal 判定 / Terminal result from pidfd SIGKILL. */
+        const bool terminal = owned_pidfd >= 0 && wspctl::detail::signal_and_close_pidfd(owned_pidfd, SIGKILL);
+        expect(terminal, "deliver SIGKILL through the owned pidfd");
+        expect(owned_pidfd == -1, "successful pidfd termination consumes the owned FD");
+        if (original_pidfd >= 0) {
+            errno = 0;
+            expect(fcntl(original_pidfd, F_GETFD) == -1 && errno == EBADF,
+                   "successful pidfd termination closes the original descriptor exactly once");
+        }
+        if (!terminal) {
+            static_cast<void>(kill(live_child, SIGKILL));
+        }
+        /** @brief live child 的 wait status / Wait status of the live child. */
+        int live_status{};
+        /** @brief live child 的 waitpid 返回值 / waitpid return value for the live child. */
+        const pid_t live_waited = waitpid(live_child, &live_status, 0);
+        expect(live_waited == live_child && WIFSIGNALED(live_status) && WTERMSIG(live_status) == SIGKILL,
+               "pidfd terminal-signal child exits by SIGKILL");
+    } else if (live_child == 0) {
+        for (;;) {
+            pause();
+        }
+    }
+
+    /** @brief 已退出 child，用于 ESRCH 可接受终态 / Exited child for the accepted ESRCH terminal state. */
+    const pid_t exited_child = fork();
+    expect(exited_child >= 0, "fork exited child for pidfd ESRCH test");
+    if (exited_child > 0) {
+        /** @brief child 尚可 wait 时取得的 pidfd / pidfd acquired while the child is still waitable. */
+        int exited_pidfd = static_cast<int>(syscall(SYS_pidfd_open, exited_child, 0U));
+        expect(exited_pidfd >= 0, "open pidfd before reaping exited child");
+        /** @brief exited child 的 wait status / Wait status of the exited child. */
+        int exited_status{};
+        /** @brief exited child 的 waitpid 返回值 / waitpid return value for the exited child. */
+        const pid_t exited_waited = waitpid(exited_child, &exited_status, 0);
+        expect(exited_waited == exited_child && WIFEXITED(exited_status), "reap exited pidfd test child");
+        /** @brief 用于验证 ESRCH path close 的 descriptor number / Descriptor number used to verify close on the ESRCH path. */
+        const int original_pidfd = exited_pidfd;
+        /** @brief 已退出 target 的 terminal 判定 / Terminal result for the exited target. */
+        const bool already_terminal = exited_pidfd >= 0 && wspctl::detail::signal_and_close_pidfd(exited_pidfd, SIGKILL);
+        expect(already_terminal, "treat ESRCH for an already reaped pidfd target as terminal");
+        expect(exited_pidfd == -1, "ESRCH pidfd path consumes the owned FD");
+        if (original_pidfd >= 0) {
+            errno = 0;
+            expect(fcntl(original_pidfd, F_GETFD) == -1 && errno == EBADF,
+                   "ESRCH pidfd path closes the original descriptor");
+        }
+    } else if (exited_child == 0) {
+        _exit(0);
+    }
+
+    /** @brief 被外部关闭的 pidfd，覆盖 syscall 失败仍消费所有权 / Externally closed pidfd covering ownership consumption after syscall failure. */
+    const pid_t invalid_child = fork();
+    expect(invalid_child >= 0, "fork child for invalid-pidfd error path");
+    if (invalid_child > 0) {
+        /** @brief 故意在 helper 前关闭的 child pidfd / Child pidfd deliberately closed before the helper. */
+        int invalid_pidfd = static_cast<int>(syscall(SYS_pidfd_open, invalid_child, 0U));
+        expect(invalid_pidfd >= 0, "open pidfd for invalid-descriptor error path");
+        if (invalid_pidfd >= 0) {
+            /** @brief 用于验证 error path 无泄漏的原 descriptor number / Original descriptor number used to verify no error-path leak. */
+            const int original_pidfd = invalid_pidfd;
+            static_cast<void>(close(invalid_pidfd));
+            expect(!wspctl::detail::signal_and_close_pidfd(invalid_pidfd, SIGKILL) && invalid_pidfd == -1,
+                   "invalid pidfd error path still consumes its owned FD slot");
+            errno = 0;
+            expect(fcntl(original_pidfd, F_GETFD) == -1 && errno == EBADF,
+                   "invalid pidfd error path never resurrects or leaks the descriptor");
+        }
+        static_cast<void>(kill(invalid_child, SIGKILL));
+        /** @brief invalid-pidfd child 的 wait status / Wait status of the invalid-pidfd child. */
+        int invalid_status{};
+        /** @brief invalid-pidfd child 的 waitpid 返回值 / waitpid return value for the invalid-pidfd child. */
+        const pid_t invalid_waited = waitpid(invalid_child, &invalid_status, 0);
+        expect(invalid_waited == invalid_child && WIFSIGNALED(invalid_status) && WTERMSIG(invalid_status) == SIGKILL,
+               "invalid pidfd error path never signals an unrelated process");
+    } else if (invalid_child == 0) {
+        for (;;) {
+            pause();
+        }
+    }
+#endif
+}
+
 /** @brief 测试 journal pending/completed/conflict 语义 / Test journal pending/completed/conflict semantics. */
 void test_journal() {
     char template_path[] = "/tmp/wspctl-journal-XXXXXX";
@@ -554,6 +701,96 @@ void test_journal() {
     wspctl::ExecuteRequest cross_operation = command;
     cross_operation.request_id = file.request_id;
     expect(!journal.begin(cross_operation).has_value(), "reject journal operation reuse under one request ID");
+    std::filesystem::remove_all(directory);
+}
+
+/**
+ * @brief 测试只读 attachment replay 的无状态缺失与对象证明语义 / Test attachment replay's stateless miss and object-proof semantics.
+ *
+ * 本测试刻意不构造 Broker、quota 或 RuntimeSession：它覆盖 replay 的两个纯 durable 边界。
+ * 首先，缺失 record 只能报告 ``not_found`` 且不得创建 ``runtimes``；其次，已完成回执所指
+ * payload 的 SHA-256 不匹配必须是 ``invocation_in_doubt``，绝不能把损坏对象当作可重新下载的
+ * 正常 miss。 This deliberately constructs no Broker, quota, or RuntimeSession: it covers the
+ * two pure durable boundaries of replay. First, a missing record must report ``not_found`` without
+ * creating ``runtimes``; second, a SHA-256 mismatch in the object named by a completed receipt
+ * must be ``invocation_in_doubt``, never a normal downloadable miss.
+ */
+void test_payload_replay_recovery_contract() {
+    /** @brief isolated durable-state test root template / Isolated durable-state test-root template. */
+    char template_path[] = "/tmp/wspctl-payload-replay-XXXXXX";
+    /** @brief mkdtemp-created test root / Test root created by mkdtemp. */
+    char* const directory = mkdtemp(template_path);
+    expect(directory != nullptr, "create payload replay temp directory");
+    if (directory == nullptr) {
+        return;
+    }
+    /** @brief replay request with the same durable identity as file ingress / Replay request sharing the durable identity of file ingress. */
+    const wspctl::PayloadReplayRequest replay = file_replay_request();
+    /** @brief journal with no runtime tree or record / Journal with no runtime tree or record. */
+    const wspctl::Journal empty_journal(directory);
+    const auto absent = wspctl::detail::resolve_payload_replay_receipt(empty_journal, replay);
+    expect(!absent && absent.error().code == wspctl::ErrorCode::not_found,
+           "no durable replay record is the sole read-only not-found result");
+    /** @brief no-write postcondition query error / No-write postcondition query error. */
+    std::error_code no_write_error;
+    expect(!std::filesystem::exists(std::filesystem::path(directory) / "runtimes", no_write_error) && !no_write_error,
+           "missing replay receipt does not create journal/runtime state");
+
+    prepare_runtime_journal(directory, replay.runtime_key);
+    /** @brief journal backed by the explicitly provisioned test layout / Journal backed by the explicitly provisioned test layout. */
+    const wspctl::Journal journal(directory);
+    const wspctl::PayloadBeginRequest begin = file_request();
+    expect(journal.begin_payload(begin).has_value(), "persist completed-replay payload pending record");
+    /** @brief durable non-replayed ingress receipt / Durable non-replayed ingress receipt. */
+    const wspctl::PayloadResult stored_receipt{
+        .request_id = replay.request_id,
+        .replayed = false,
+        .path = "/workspace/uploads/" + replay.opaque_id + "/payload",
+        .byte_size = replay.byte_size,
+        .sha256 = replay.sha256,
+    };
+    expect(journal.complete_payload(begin, stored_receipt).has_value(), "complete replay payload journal record");
+    const auto resolved = wspctl::detail::resolve_payload_replay_receipt(journal, replay);
+    expect(resolved.has_value() && resolved->replayed && resolved->request_id == replay.request_id,
+           "completed payload journal resolves to an explicitly replayed receipt");
+    if (!resolved) {
+        std::filesystem::remove_all(directory);
+        return;
+    }
+
+    /** @brief test-only runtime binding whose workspace needs no XFS for no-follow digest verification / Test-only runtime binding whose workspace needs no XFS for no-follow digest verification. */
+    const wspctl::RuntimeQuotaBinding binding{
+        .runtime_dir = std::filesystem::path(directory) / "runtime",
+        .control_dir = std::filesystem::path(directory) / "runtime" / "control",
+        .workspace_dir = std::filesystem::path(directory) / "runtime" / "workspace",
+        .control_project_id = 2U,
+        .workspace_project_id = 3U,
+    };
+    /** @brief fixed persistent payload parent / Fixed persistent payload parent. */
+    const std::filesystem::path payload_parent = binding.workspace_dir / "upper" / "uploads" / replay.opaque_id;
+    /** @brief directory-creation error / Directory-creation error. */
+    std::error_code create_error;
+    std::filesystem::create_directories(payload_parent, create_error);
+    expect(!create_error, "create persistent payload path for replay verifier");
+    /** @brief fixed persistent payload object path / Fixed persistent payload object path. */
+    const std::filesystem::path payload_path = payload_parent / "payload";
+    {
+        /** @brief matching payload output stream / Matching payload output stream. */
+        std::ofstream output(payload_path, std::ios::binary | std::ios::trunc);
+        output << "hello world";
+        expect(output.good(), "write matching persistent replay payload");
+    }
+    expect(wspctl::detail::verify_replayable_payload_object(binding, replay, *resolved).has_value(),
+           "matching persistent payload verifies read-only");
+    {
+        /** @brief deliberately digest-mismatched payload output stream / Deliberately digest-mismatched payload output stream. */
+        std::ofstream output(payload_path, std::ios::binary | std::ios::trunc);
+        output << "HELLO WORLD";
+        expect(output.good(), "write same-size digest-mismatched replay payload");
+    }
+    const auto mismatched_object = wspctl::detail::verify_replayable_payload_object(binding, replay, *resolved);
+    expect(!mismatched_object && mismatched_object.error().code == wspctl::ErrorCode::invocation_in_doubt,
+           "persistent replay object SHA-256 mismatch is invocation-in-doubt");
     std::filesystem::remove_all(directory);
 }
 
@@ -752,7 +989,9 @@ void test_supervisor() {
 int main() {
     test_protocol();
     test_launcher_scm_rights_contract();
+    test_pidfd_terminal_signal_consumes_owned_fd();
     test_journal();
+    test_payload_replay_recovery_contract();
     test_runtime_gate();
     test_xfs_quota_fail_closed_contract();
     test_supervisor();

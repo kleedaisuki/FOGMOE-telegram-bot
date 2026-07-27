@@ -52,6 +52,8 @@ constexpr std::string_view kRegistryDirectoryName{"quota-registry"};
 constexpr std::string_view kRegistryRecordsDirectoryName{"runtimes"};
 /** @brief cross-process registry lock 文件名 / Cross-process registry-lock file name. */
 constexpr std::string_view kRegistryLockName{"lock"};
+/** @brief 每个 runtime 的跨 broker activation lock 文件名 / Per-runtime cross-broker activation-lock filename. */
+constexpr std::string_view kActivationLockName{"activation.lock"};
 /** @brief 单调 project-ID allocator 文件名 / Monotonic project-ID allocator file name. */
 constexpr std::string_view kRegistryNextIdName{"next-id"};
 /** @brief runtime state parent 目录名 / Runtime-state parent directory name. */
@@ -72,6 +74,8 @@ constexpr std::string_view kWorkDirectoryName{"work"};
 constexpr std::string_view kRootDirectoryName{"root"};
 /** @brief readonly lower workspace bind directory name / Readonly lower-workspace bind directory name. */
 constexpr std::string_view kWorkspaceLowerDirectoryName{"workspace-lower"};
+/** @brief 一次 crash recovery 最多扫描的 activation staging 子目录数 / Maximum activation-staging children scanned in one crash recovery. */
+constexpr std::size_t kMaxActivationStagingEntries{256U};
 /** @brief process-local suffix sequence for atomic registry temporary names / Process-local suffix sequence for atomic registry temporary names. */
 std::atomic<std::uint64_t> g_temporary_sequence{0U};
 
@@ -172,6 +176,34 @@ public:
 private:
     /** @brief 被拥有的 Linux file descriptor / Owned Linux file descriptor. */
     int descriptor_;
+};
+
+/**
+ * @brief 一个 activation staging 目录的不可重用身份 / Non-reusable identity of one activation-staging directory.
+ */
+struct ActivationStagingEntryIdentity final {
+    /** @brief 经过 SHA-256 语法校验的 direct-child basename / SHA-256-validated direct-child basename. */
+    std::string name;
+    /** @brief 扫描时的 filesystem device identity / Filesystem device identity at scan time. */
+    dev_t device{};
+    /** @brief 扫描时的 inode identity / Inode identity at scan time. */
+    ino_t inode{};
+};
+
+/**
+ * @brief 一个打开且已验证的 staging parent 及其快照 / One open verified staging parent and its snapshot.
+ */
+struct ActivationStagingParent final {
+    /** @brief 防 TOCTOU 的 parent directory FD / Parent directory FD preventing TOCTOU path traversal. */
+    FileDescriptor descriptor;
+    /** @brief parent 的 filesystem device identity / Filesystem device identity of the parent. */
+    dev_t device{};
+    /** @brief parent 的 inode identity / Inode identity of the parent. */
+    ino_t inode{};
+    /** @brief 此 parent 的预期 XFS project ID / Expected XFS project ID for this parent. */
+    std::uint32_t project_id{};
+    /** @brief 已验证、待按 identity 删除的直接子目录 / Verified direct children to delete by identity. */
+    std::vector<ActivationStagingEntryIdentity> entries;
 };
 
 /**
@@ -878,6 +910,46 @@ private:
 }
 
 /**
+ * @brief 判断 metadata 是否属于 private root-owned directory / Check whether metadata belongs to a private root-owned directory.
+ * @param metadata 待判断的 inode metadata / Inode metadata to inspect.
+ * @return 是 private root-owned directory 时为真 / True when this is a private root-owned directory.
+ */
+[[nodiscard]] bool is_private_root_owned_directory(const struct stat& metadata) noexcept {
+    return S_ISDIR(metadata.st_mode) && metadata.st_uid == 0U &&
+           (metadata.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+/**
+ * @brief 以已打开 FD 校验目录持有预期 project ID 与 PROJINHERIT / Validate project ID and PROJINHERIT through an already-open FD.
+ * @param descriptor 已打开且不跟随 symlink 的目录 FD / Already-open no-follow directory FD.
+ * @param project_id expected project ID / Expected project ID.
+ * @param purpose 诊断语义 / Diagnostic purpose.
+ * @return 成功或 ioctl/readback 错误 / Success or an ioctl/readback error.
+ */
+[[nodiscard]] Result<void> verify_project_directory_fd(
+    const int descriptor,
+    const std::uint32_t project_id,
+    const std::string_view purpose) {
+    if (descriptor < 0) {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid XFS project-directory FD"));
+    }
+    /** @brief directory metadata / Directory metadata. */
+    struct stat metadata {};
+    if (fstat(descriptor, &metadata) != 0 || !is_private_root_owned_directory(metadata)) {
+        return std::unexpected(make_error(ErrorCode::io_failure, std::string(purpose) + " is not a private root-owned directory during readback"));
+    }
+    /** @brief XFS inode attributes / XFS inode attributes. */
+    fsxattr attributes{};
+    if (ioctl(descriptor, FS_IOC_FSGETXATTR, &attributes) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "FS_IOC_FSGETXATTR " + std::string(purpose)));
+    }
+    if (attributes.fsx_projid != project_id || (attributes.fsx_xflags & FS_XFLAG_PROJINHERIT) == 0U) {
+        return std::unexpected(make_error(ErrorCode::io_failure, std::string(purpose) + " assignment no longer matches registry"));
+    }
+    return {};
+}
+
+/**
  * @brief 校验目录持有预期 project ID 与 PROJINHERIT / Validate a directory has the expected project ID and PROJINHERIT.
  * @param path root-owned directory / Root-owned directory.
  * @param project_id expected project ID / Expected project ID.
@@ -891,21 +963,7 @@ private:
     if (descriptor.get() < 0) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "open XFS project directory for readback"));
     }
-    /** @brief directory metadata / Directory metadata. */
-    struct stat metadata {};
-    if (fstat(descriptor.get(), &metadata) != 0 || !S_ISDIR(metadata.st_mode) || metadata.st_uid != 0U ||
-        (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
-        return std::unexpected(make_error(ErrorCode::io_failure, "XFS project directory is not private root-owned during readback"));
-    }
-    /** @brief XFS inode attributes / XFS inode attributes. */
-    fsxattr attributes{};
-    if (ioctl(descriptor.get(), FS_IOC_FSGETXATTR, &attributes) != 0) {
-        return std::unexpected(errno_error(ErrorCode::io_failure, "FS_IOC_FSGETXATTR project readback"));
-    }
-    if (attributes.fsx_projid != project_id || (attributes.fsx_xflags & FS_XFLAG_PROJINHERIT) == 0U) {
-        return std::unexpected(make_error(ErrorCode::io_failure, "XFS project directory assignment no longer matches registry"));
-    }
-    return {};
+    return verify_project_directory_fd(descriptor.get(), project_id, "XFS project directory");
 }
 
 /**
@@ -1073,6 +1131,204 @@ private:
 }
 
 /**
+ * @brief 校验打开的 staging parent 仍是扫描时的 quota 目录 / Verify an open staging parent is still the quota directory scanned earlier.
+ * @param parent 已打开的 staging parent 快照 / Open staging-parent snapshot.
+ * @param purpose 诊断语义 / Diagnostic purpose.
+ * @return 成功或 fail-closed 身份错误 / Success or a fail-closed identity error.
+ */
+[[nodiscard]] Result<void> verify_activation_staging_parent(
+    const ActivationStagingParent& parent,
+    const std::string_view purpose) {
+    /** @brief 当前 parent metadata / Current parent metadata. */
+    struct stat metadata {};
+    if (fstat(parent.descriptor.get(), &metadata) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "stat " + std::string(purpose)));
+    }
+    if (!is_private_root_owned_directory(metadata) || metadata.st_dev != parent.device || metadata.st_ino != parent.inode) {
+        return std::unexpected(make_error(ErrorCode::io_failure, std::string(purpose) + " changed identity or ownership after staging scan"));
+    }
+    return verify_project_directory_fd(parent.descriptor.get(), parent.project_id, purpose);
+}
+
+/**
+ * @brief 扫描一个已验证的 activation staging parent，但不执行删除 / Snapshot one verified activation-staging parent without deleting it.
+ * @param path staging parent 的绝对路径 / Absolute staging-parent path.
+ * @param project_id 该 parent 的预期 XFS project ID / Expected XFS project ID of the parent.
+ * @param purpose 诊断语义 / Diagnostic purpose.
+ * @return 已打开、已验证且 bounded 的 direct-child 快照 / Open, verified, bounded direct-child snapshot.
+ * @note 任何非 SHA-256 direct child、非目录、越设备或 project-ID 不匹配都会让整个恢复
+ *       fail closed，避免只清理已扫描到的一部分。/ Any non-SHA-256 direct child,
+ *       non-directory, cross-device entry, or project-ID mismatch fails the whole recovery
+ *       closed, so a partially scanned set is never cleaned.
+ */
+[[nodiscard]] Result<ActivationStagingParent> scan_activation_staging_parent(
+    const std::filesystem::path& path,
+    const std::uint32_t project_id,
+    const std::string_view purpose) {
+    if (const auto verified = verify_project_directory(path, project_id); !verified) {
+        return std::unexpected(verified.error());
+    }
+    /** @brief 防 TOCTOU 的 parent directory FD / Parent directory FD preventing TOCTOU. */
+    FileDescriptor parent_fd(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    if (parent_fd.get() < 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "open " + std::string(purpose)));
+    }
+    /** @brief parent metadata captured before directory iteration / Parent metadata captured before iteration. */
+    struct stat parent_metadata {};
+    if (fstat(parent_fd.get(), &parent_metadata) != 0 || !is_private_root_owned_directory(parent_metadata)) {
+        return std::unexpected(make_error(ErrorCode::io_failure, std::string(purpose) + " is not a private root-owned directory"));
+    }
+    if (const auto verified = verify_project_directory_fd(parent_fd.get(), project_id, purpose); !verified) {
+        return std::unexpected(verified.error());
+    }
+    ActivationStagingParent snapshot{
+        .descriptor = std::move(parent_fd),
+        .device = parent_metadata.st_dev,
+        .inode = parent_metadata.st_ino,
+        .project_id = project_id,
+        .entries = {},
+    };
+    /** @brief duplicated FD owned by directory stream / Duplicated FD owned by the directory stream. */
+    const int scan_fd = fcntl(snapshot.descriptor.get(), F_DUPFD_CLOEXEC, 3);
+    if (scan_fd < 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "duplicate " + std::string(purpose) + " FD"));
+    }
+    /** @brief directory stream owning scan_fd / Directory stream owning scan_fd. */
+    DIR* directory = fdopendir(scan_fd);
+    if (directory == nullptr) {
+        const Error error = errno_error(ErrorCode::io_failure, "open " + std::string(purpose) + " stream");
+        static_cast<void>(close(scan_fd));
+        return std::unexpected(error);
+    }
+    for (;;) {
+        errno = 0;
+        /** @brief one direct child entry / One direct-child entry. */
+        dirent* const entry = readdir(directory);
+        if (entry == nullptr) {
+            const int read_error = errno;
+            if (closedir(directory) != 0 && read_error == 0) {
+                return std::unexpected(errno_error(ErrorCode::io_failure, "close " + std::string(purpose) + " stream"));
+            }
+            if (read_error != 0) {
+                errno = read_error;
+                return std::unexpected(errno_error(ErrorCode::io_failure, "read " + std::string(purpose) + " stream"));
+            }
+            break;
+        }
+        const std::string_view name{entry->d_name};
+        if (name == "." || name == "..") {
+            continue;
+        }
+        if (!is_sha256_component(name)) {
+            static_cast<void>(closedir(directory));
+            return std::unexpected(make_error(ErrorCode::io_failure, std::string(purpose) + " contains a non-activation direct child"));
+        }
+        if (snapshot.entries.size() >= kMaxActivationStagingEntries) {
+            static_cast<void>(closedir(directory));
+            return std::unexpected(make_error(ErrorCode::io_failure, std::string(purpose) + " exceeds the bounded crash-recovery staging limit"));
+        }
+        /** @brief direct child metadata / Direct-child metadata. */
+        struct stat metadata {};
+        if (fstatat(snapshot.descriptor.get(), entry->d_name, &metadata, AT_SYMLINK_NOFOLLOW) != 0) {
+            const Error error = errno_error(ErrorCode::io_failure, "stat " + std::string(purpose) + " child");
+            static_cast<void>(closedir(directory));
+            return std::unexpected(error);
+        }
+        if (!is_private_root_owned_directory(metadata) || metadata.st_dev != snapshot.device) {
+            static_cast<void>(closedir(directory));
+            return std::unexpected(make_error(ErrorCode::io_failure, std::string(purpose) + " contains an unowned or cross-device direct child"));
+        }
+        /** @brief no-follow child descriptor / No-follow child descriptor. */
+        FileDescriptor child_fd(openat(
+            snapshot.descriptor.get(),
+            entry->d_name,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+        if (child_fd.get() < 0) {
+            const Error error = errno_error(ErrorCode::io_failure, "open " + std::string(purpose) + " child");
+            static_cast<void>(closedir(directory));
+            return std::unexpected(error);
+        }
+        /** @brief child metadata re-read through opened FD / Child metadata re-read through opened FD. */
+        struct stat opened_metadata {};
+        if (fstat(child_fd.get(), &opened_metadata) != 0 || !is_private_root_owned_directory(opened_metadata) ||
+            opened_metadata.st_dev != metadata.st_dev || opened_metadata.st_ino != metadata.st_ino) {
+            static_cast<void>(closedir(directory));
+            return std::unexpected(make_error(ErrorCode::io_failure, std::string(purpose) + " child changed identity during staging scan"));
+        }
+        if (const auto verified = verify_project_directory_fd(child_fd.get(), project_id, std::string(purpose) + " child"); !verified) {
+            static_cast<void>(closedir(directory));
+            return std::unexpected(verified.error());
+        }
+        snapshot.entries.push_back(ActivationStagingEntryIdentity{
+            .name = std::string(name),
+            .device = metadata.st_dev,
+            .inode = metadata.st_ino,
+        });
+    }
+    if (const auto verified = verify_activation_staging_parent(snapshot, purpose); !verified) {
+        return std::unexpected(verified.error());
+    }
+    return snapshot;
+}
+
+/**
+ * @brief 以扫描时 inode 身份删除一个 activation staging child / Delete one activation-staging child by its scanned inode identity.
+ * @param parent 已打开的 staging parent 快照 / Open staging-parent snapshot.
+ * @param entry 待删 child 的扫描身份 / Scanned identity of the child to delete.
+ * @param purpose 诊断语义 / Diagnostic purpose.
+ * @return 成功或 fail-closed 删除错误 / Success or a fail-closed deletion error.
+ */
+[[nodiscard]] Result<void> remove_scanned_activation_staging_entry(
+    const ActivationStagingParent& parent,
+    const ActivationStagingEntryIdentity& entry,
+    const std::string_view purpose) {
+    if (const auto verified_parent = verify_activation_staging_parent(parent, purpose); !verified_parent) {
+        return std::unexpected(verified_parent.error());
+    }
+    /** @brief child metadata immediately before deletion / Child metadata immediately before deletion. */
+    struct stat metadata {};
+    if (fstatat(parent.descriptor.get(), entry.name.c_str(), &metadata, AT_SYMLINK_NOFOLLOW) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "stat " + std::string(purpose) + " child before deletion"));
+    }
+    if (!is_private_root_owned_directory(metadata) || metadata.st_dev != parent.device ||
+        metadata.st_dev != entry.device || metadata.st_ino != entry.inode) {
+        return std::unexpected(make_error(ErrorCode::io_failure, std::string(purpose) + " child identity or ownership changed before deletion"));
+    }
+    /** @brief no-follow child descriptor / No-follow child descriptor. */
+    FileDescriptor child_fd(openat(
+        parent.descriptor.get(),
+        entry.name.c_str(),
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    if (child_fd.get() < 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "open " + std::string(purpose) + " child before deletion"));
+    }
+    /** @brief child metadata read through opened FD / Child metadata read through opened FD. */
+    struct stat opened_metadata {};
+    if (fstat(child_fd.get(), &opened_metadata) != 0 || !is_private_root_owned_directory(opened_metadata) ||
+        opened_metadata.st_dev != entry.device || opened_metadata.st_ino != entry.inode) {
+        return std::unexpected(make_error(ErrorCode::io_failure, std::string(purpose) + " child changed identity while opening for deletion"));
+    }
+    if (const auto verified = verify_project_directory_fd(child_fd.get(), parent.project_id, std::string(purpose) + " child"); !verified) {
+        return std::unexpected(verified.error());
+    }
+    if (const auto removed = remove_directory_contents_at(child_fd.get()); !removed) {
+        return std::unexpected(removed.error());
+    }
+    child_fd.close();
+    /** @brief child metadata rechecked after content deletion / Child metadata rechecked after content deletion. */
+    struct stat after_emptying {};
+    if (fstatat(parent.descriptor.get(), entry.name.c_str(), &after_emptying, AT_SYMLINK_NOFOLLOW) != 0 ||
+        !is_private_root_owned_directory(after_emptying) || after_emptying.st_dev != entry.device ||
+        after_emptying.st_ino != entry.inode) {
+        return std::unexpected(make_error(ErrorCode::io_failure, std::string(purpose) + " child changed identity before unlink"));
+    }
+    if (unlinkat(parent.descriptor.get(), entry.name.c_str(), AT_REMOVEDIR) != 0 || fsync(parent.descriptor.get()) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "remove and fsync " + std::string(purpose) + " child"));
+    }
+    return {};
+}
+
+/**
  * @brief 从 binding 得到静态 runtime layout / Derive the static runtime layout from a binding.
  * @param state_root configured state root / Configured state root.
  * @param runtime_key canonical runtime UUID / Canonical runtime UUID.
@@ -1167,6 +1423,40 @@ private:
 }
 
 /**
+ * @brief 打开并取得一个 runtime 的非阻塞 activation ``flock`` / Open and acquire a runtime's nonblocking activation ``flock``.
+ * @param binding 已验证的 runtime quota binding / Verified runtime quota binding.
+ * @return 持有 ``LOCK_EX`` 的 private regular-file FD，或 ``busy`` / Private regular-file FD holding ``LOCK_EX``, or ``busy``.
+ * @note 这个锁位于 control project 下；它不记录业务状态，只排他 activation staging 的创建、
+ *       回收与删除。/ This lock lives under the control project; it records no business state and
+ *       only serializes activation-staging creation, reclamation, and removal.
+ */
+[[nodiscard]] Result<FileDescriptor> lock_runtime_activation(const RuntimeQuotaBinding& binding) {
+    /** @brief activation lock path / Activation-lock path. */
+    const std::filesystem::path lock_path = binding.control_dir / kActivationLockName;
+    /** @brief activation lock descriptor / Activation-lock descriptor. */
+    FileDescriptor lock_fd(open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600));
+    if (lock_fd.get() < 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "open runtime activation lock"));
+    }
+    /** @brief activation lock metadata / Activation-lock metadata. */
+    struct stat metadata {};
+    if (fstat(lock_fd.get(), &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_uid != 0U ||
+        metadata.st_nlink != 1 || (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return std::unexpected(make_error(ErrorCode::io_failure, "runtime activation lock is not a private root-owned regular file"));
+    }
+    if (fchmod(lock_fd.get(), 0600) != 0 || fchown(lock_fd.get(), 0, 0) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "protect runtime activation lock"));
+    }
+    if (flock(lock_fd.get(), LOCK_EX | LOCK_NB) != 0) {
+        if (errno == EACCES || errno == EAGAIN) {
+            return std::unexpected(make_error(ErrorCode::busy, "runtime activation is owned by another broker"));
+        }
+        return std::unexpected(errno_error(ErrorCode::io_failure, "lock runtime activation"));
+    }
+    return lock_fd;
+}
+
+/**
  * @brief 在已预留 pair 上创建并验证 runtime base layout / Create and validate the runtime base layout on an already-reserved pair.
  * @param state_root configured state root / Configured state root.
  * @param config quota configuration / Quota configuration.
@@ -1248,6 +1538,37 @@ private:
     }
     if (flock(lock_fd.get(), LOCK_EX) != 0) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "lock quota registry"));
+    }
+    return lock_fd;
+}
+
+/**
+ * @brief 以 shared flock 只读锁定既有 registry / Lock an existing registry read-only with a shared flock.
+ * @param registry_root 已存在的 root-owned registry root / Existing root-owned registry root.
+ * @return 持有 ``LOCK_SH`` 的 lock FD，或 not-found/fail-closed 错误 / Lock FD holding ``LOCK_SH``, or not-found/fail-closed error.
+ * @note 与 allocation path 不同，此函数没有 ``O_CREAT``、``fchmod`` 或 ``fchown``，所以 replay
+ *       lookup 不会把缺失状态变成持久状态。/ Unlike the allocation path, this has no ``O_CREAT``,
+ *       ``fchmod``, or ``fchown``; a replay lookup cannot turn absent state into durable state.
+ */
+[[nodiscard]] Result<FileDescriptor> lock_existing_registry_shared(const std::filesystem::path& registry_root) {
+    /** @brief existing lock file descriptor / Existing lock-file descriptor. */
+    FileDescriptor lock_fd(open(
+        (registry_root / kRegistryLockName).c_str(),
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+    if (lock_fd.get() < 0) {
+        if (errno == ENOENT) {
+            return std::unexpected(make_error(ErrorCode::not_found, "quota registry lock does not exist"));
+        }
+        return std::unexpected(errno_error(ErrorCode::io_failure, "open existing quota registry lock"));
+    }
+    /** @brief existing lock metadata / Existing lock metadata. */
+    struct stat metadata {};
+    if (fstat(lock_fd.get(), &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_uid != 0U ||
+        metadata.st_nlink != 1 || (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return std::unexpected(make_error(ErrorCode::io_failure, "existing quota registry lock is not a private root-owned regular file"));
+    }
+    if (flock(lock_fd.get(), LOCK_SH) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "shared-lock existing quota registry"));
     }
     return lock_fd;
 }
@@ -1538,6 +1859,33 @@ private:
 
 }  // namespace
 
+RuntimeActivationLease::RuntimeActivationLease(RuntimeQuotaBinding binding, const int lock_fd) noexcept
+    : binding_(std::move(binding)), lock_fd_(lock_fd) {}
+
+RuntimeActivationLease::~RuntimeActivationLease() {
+    if (lock_fd_ >= 0) {
+        static_cast<void>(close(lock_fd_));
+    }
+}
+
+RuntimeActivationLease::RuntimeActivationLease(RuntimeActivationLease&& other) noexcept
+    : binding_(std::move(other.binding_)), lock_fd_(std::exchange(other.lock_fd_, -1)) {}
+
+RuntimeActivationLease& RuntimeActivationLease::operator=(RuntimeActivationLease&& other) noexcept {
+    if (this != &other) {
+        if (lock_fd_ >= 0) {
+            static_cast<void>(close(lock_fd_));
+        }
+        binding_ = std::move(other.binding_);
+        lock_fd_ = std::exchange(other.lock_fd_, -1);
+    }
+    return *this;
+}
+
+const RuntimeQuotaBinding& RuntimeActivationLease::binding() const noexcept {
+    return binding_;
+}
+
 Result<void> preflight_xfs_project_quota(
     const XfsProjectQuotaConfig& config,
     const std::filesystem::path& state_root) {
@@ -1591,6 +1939,22 @@ Result<void> preflight_xfs_project_quota(
 
 XfsProjectQuota::XfsProjectQuota(std::filesystem::path state_root, XfsProjectQuotaConfig config)
     : state_root_(std::move(state_root)), config_(std::move(config)) {}
+
+Result<void> XfsProjectQuota::validate_activation_lease(const RuntimeActivationLease& lease) const {
+    if (lease.lock_fd_ < 0) {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, "runtime activation lease no longer owns an activation lock"));
+    }
+    /** @brief activation-lock metadata / Activation-lock metadata. */
+    struct stat lock_metadata {};
+    if (fstat(lease.lock_fd_, &lock_metadata) != 0 || !S_ISREG(lock_metadata.st_mode) || lock_metadata.st_uid != 0U ||
+        lock_metadata.st_nlink != 1 || (lock_metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return std::unexpected(make_error(ErrorCode::io_failure, "runtime activation lease lock is no longer a private root-owned regular file"));
+    }
+    if (const auto preflight = preflight_xfs_project_quota(config_, state_root_); !preflight) {
+        return std::unexpected(preflight.error());
+    }
+    return verify_ready_binding(state_root_, config_, lease.binding_);
+}
 
 Result<RuntimeQuotaBinding> XfsProjectQuota::ensure_runtime(const std::string_view runtime_key) const {
     const auto parsed_runtime = domain::RuntimeId::parse(std::string(runtime_key));
@@ -1685,45 +2049,149 @@ Result<RuntimeQuotaBinding> XfsProjectQuota::ensure_runtime(const std::string_vi
     return binding;
 }
 
-Result<RuntimeQuotaActivationStorage> XfsProjectQuota::prepare_activation_storage(
-    const RuntimeQuotaBinding& binding,
-    const std::string_view activation_id) const {
-    const auto parsed_activation = domain::ActivationId::parse(std::string(activation_id));
-    if (!parsed_activation) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, parsed_activation.error().message));
+Result<RuntimeQuotaBinding> XfsProjectQuota::find_ready_runtime(const std::string_view runtime_key) const {
+    const auto parsed_runtime = domain::RuntimeId::parse(std::string(runtime_key));
+    if (!parsed_runtime) {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, parsed_runtime.error().message));
     }
     if (const auto preflight = preflight_xfs_project_quota(config_, state_root_); !preflight) {
         return std::unexpected(preflight.error());
     }
-    if (const auto binding_valid = verify_ready_binding(state_root_, config_, binding); !binding_valid) {
-        return std::unexpected(binding_valid.error());
+
+    // This intentionally bypasses the allocation helper: replay must be observational.
+    // In particular, a missing registry/records/lock tree must stay missing after this call.
+    const std::filesystem::path registry_root = state_root_ / kRegistryDirectoryName;
+    const auto registry_exists = path_exists_no_follow(registry_root);
+    if (!registry_exists) {
+        return std::unexpected(registry_exists.error());
     }
-    const std::string activation_component = hash_component(parsed_activation->value());
-    return create_activation_storage(binding, activation_component);
+    if (!*registry_exists) {
+        return std::unexpected(make_error(ErrorCode::not_found, "quota registry does not exist"));
+    }
+    if (const auto registry_directory = validate_private_directory(registry_root, "existing quota registry root"); !registry_directory) {
+        return std::unexpected(registry_directory.error());
+    }
+    const std::filesystem::path records_directory = registry_root / kRegistryRecordsDirectoryName;
+    const auto records_exists = path_exists_no_follow(records_directory);
+    if (!records_exists) {
+        return std::unexpected(records_exists.error());
+    }
+    if (!*records_exists) {
+        return std::unexpected(make_error(ErrorCode::not_found, "quota registry records do not exist"));
+    }
+
+    const auto registry_lock = lock_existing_registry_shared(registry_root);
+    if (!registry_lock) {
+        return std::unexpected(registry_lock.error());
+    }
+    const auto snapshot = read_registry_snapshot(registry_root, config_);
+    if (!snapshot) {
+        return std::unexpected(snapshot.error());
+    }
+    const auto existing = snapshot->records.find(parsed_runtime->value());
+    if (existing == snapshot->records.end()) {
+        return std::unexpected(make_error(ErrorCode::not_found, "runtime has no persisted XFS quota binding"));
+    }
+    if (existing->second.state != RegistryState::ready) {
+        return std::unexpected(make_error(
+            ErrorCode::invocation_in_doubt,
+            "runtime XFS quota binding is not ready; replay cannot provision or recover it"));
+    }
+
+    RuntimeQuotaBinding binding = make_binding(state_root_, parsed_runtime->value(), existing->second);
+    if (const auto verified = verify_ready_binding(state_root_, config_, binding); !verified) {
+        return std::unexpected(make_error(
+            ErrorCode::invocation_in_doubt,
+            "ready XFS quota binding failed read-only verification: " + verified.error().message));
+    }
+    return binding;
 }
 
-Result<void> XfsProjectQuota::cleanup_activation_storage(
-    const RuntimeQuotaBinding& binding,
+Result<RuntimeActivationLease> XfsProjectQuota::acquire_activation_lease(const std::string_view runtime_key) const {
+    auto binding = ensure_runtime(runtime_key);
+    if (!binding) {
+        return std::unexpected(binding.error());
+    }
+    auto lock = lock_runtime_activation(*binding);
+    if (!lock) {
+        return std::unexpected(lock.error());
+    }
+    if (const auto verified = verify_ready_binding(state_root_, config_, *binding); !verified) {
+        return std::unexpected(verified.error());
+    }
+    return RuntimeActivationLease{std::move(*binding), lock->release()};
+}
+
+Result<RuntimeQuotaActivationStorage> XfsProjectQuota::prepare_activation_storage(
+    const RuntimeActivationLease& lease,
     const std::string_view activation_id) const {
     const auto parsed_activation = domain::ActivationId::parse(std::string(activation_id));
     if (!parsed_activation) {
         return std::unexpected(make_error(ErrorCode::invalid_argument, parsed_activation.error().message));
     }
-    if (const auto binding_shape = validate_binding_shape(state_root_, config_, binding); !binding_shape) {
-        return std::unexpected(binding_shape.error());
+    if (const auto lease_valid = validate_activation_lease(lease); !lease_valid) {
+        return std::unexpected(lease_valid.error());
+    }
+    const std::string activation_component = hash_component(parsed_activation->value());
+    return create_activation_storage(lease.binding_, activation_component);
+}
+
+Result<void> XfsProjectQuota::cleanup_activation_storage(
+    const RuntimeActivationLease& lease,
+    const std::string_view activation_id) const {
+    const auto parsed_activation = domain::ActivationId::parse(std::string(activation_id));
+    if (!parsed_activation) {
+        return std::unexpected(make_error(ErrorCode::invalid_argument, parsed_activation.error().message));
+    }
+    if (const auto lease_valid = validate_activation_lease(lease); !lease_valid) {
+        return std::unexpected(lease_valid.error());
     }
     const std::string activation_component = hash_component(parsed_activation->value());
     if (const auto control = remove_private_child_directory(
-            binding.control_dir / kMountsDirectoryName,
+            lease.binding_.control_dir / kMountsDirectoryName,
             activation_component,
             "control activation cleanup directory"); !control) {
         return std::unexpected(control.error());
     }
     if (const auto workspace = remove_private_child_directory(
-            binding.workspace_dir / kWorkDirectoryName,
+            lease.binding_.workspace_dir / kWorkDirectoryName,
             activation_component,
             "workspace activation cleanup directory"); !workspace) {
         return std::unexpected(workspace.error());
+    }
+    return {};
+}
+
+Result<void> XfsProjectQuota::reclaim_dead_activation_storage(const RuntimeActivationLease& lease) const {
+    if (const auto lease_valid = validate_activation_lease(lease); !lease_valid) {
+        return std::unexpected(lease_valid.error());
+    }
+    // Snapshot both parents before the first unlink. A malformed entry in either tree therefore
+    // leaves every staging entry intact for operator diagnosis instead of producing a misleading
+    // partial recovery.
+    const auto control = scan_activation_staging_parent(
+        lease.binding_.control_dir / kMountsDirectoryName,
+        lease.binding_.control_project_id,
+        "control activation staging parent");
+    if (!control) {
+        return std::unexpected(control.error());
+    }
+    const auto workspace = scan_activation_staging_parent(
+        lease.binding_.workspace_dir / kWorkDirectoryName,
+        lease.binding_.workspace_project_id,
+        "workspace activation staging parent");
+    if (!workspace) {
+        return std::unexpected(workspace.error());
+    }
+    for (const ActivationStagingEntryIdentity& entry : control->entries) {
+        if (const auto removed = remove_scanned_activation_staging_entry(*control, entry, "control activation staging parent"); !removed) {
+            return std::unexpected(removed.error());
+        }
+    }
+    for (const ActivationStagingEntryIdentity& entry : workspace->entries) {
+        if (const auto removed = remove_scanned_activation_staging_entry(*workspace, entry, "workspace activation staging parent"); !removed) {
+            return std::unexpected(removed.error());
+        }
     }
     return {};
 }

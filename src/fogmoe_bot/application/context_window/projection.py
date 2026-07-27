@@ -30,6 +30,10 @@ from fogmoe_bot.domain.conversation.message import (
     MessageRole,
 )
 from fogmoe_bot.domain.temporal import ensure_utc
+from fogmoe_bot.domain.workspace.attachment import (
+    workspace_attachment_blocks_compaction,
+    workspace_attachment_is_model_visible,
+)
 
 from .cache import CachedContextWindow, ContextWindowCache
 
@@ -243,11 +247,14 @@ class _ProjectedRow:
     @param sequence 原 conversation sequence / Original conversation sequence.
     @param messages 该 row 投影出的零到多条消息 / Zero or more messages projected from the row.
     @param non_tool_count 非 tool provider 消息数 / Number of non-tool provider messages.
+    @param blocks_compaction 未决附件是否禁止 checkpoint 越过该 row /
+        Whether an unresolved attachment prevents a checkpoint from crossing this row.
     """
 
     sequence: int
     messages: tuple[CanonicalMessage, ...]
     non_tool_count: int
+    blocks_compaction: bool
 
 
 class ContextWindowProjector:
@@ -362,6 +369,9 @@ class ContextWindowProjector:
                     non_tool_count=sum(
                         item.role is not MessageRole.TOOL for item in projected
                     ),
+                    blocks_compaction=workspace_attachment_blocks_compaction(
+                        message.draft.content
+                    ),
                 )
             )
         projected_rows = tuple(projected_rows_values)
@@ -473,6 +483,15 @@ class ContextWindowProjector:
 
         if self._cache is None:
             return
+        if any(
+            workspace_attachment_blocks_compaction(message.draft.content)
+            for message in rows
+        ):
+            # A receipt commits in PostgreSQL after this projector read.  Do not make a pending
+            # row a process-local 15-minute fact: another process cannot receive our local
+            # invalidation signal.  保持 pending 行不进入缓存：receipt 可能在本次 DB 读取后
+            # 提交，其他进程也无法收到本地失效信号。
+            return
         self._cache.put(
             CachedContextWindow(
                 conversation_id=request.conversation_id,
@@ -578,8 +597,24 @@ class ContextWindowProjector:
                 break
             tail_index = index
             retained_non_tool += rows[index].non_tool_count
+        # A pending attachment projects to no model message, but it is not semantically empty:
+        # compacting past it would make a later verified receipt permanently unreachable from
+        # history.  Keep the unresolved row and its later suffix in the raw tail until it becomes
+        # imported (or is explicitly unavailable).  未决附件在模型层投影为空，但语义上不能当成
+        # 空行；越过它压缩会让以后成功的 receipt 永远无法从历史访问。因此在 imported 或
+        # explicit unavailable 之前保留该行及其后缀。
+        compaction_stop = next(
+            (
+                index
+                for index, row in enumerate(rows[:tail_index])
+                if row.blocks_compaction
+            ),
+            tail_index,
+        )
         eligible = [
-            row for row in rows[:tail_index] if row.sequence < bounds.first_sequence
+            row
+            for row in rows[:compaction_stop]
+            if row.sequence < bounds.first_sequence
         ]
         if not eligible:
             return None
@@ -639,7 +674,9 @@ class ContextWindowInvariantError(RuntimeError):
     """@brief durable history 或 compaction artifact 违反不变量 / Durable history or compaction artifact violated an invariant."""
 
 
-def project_conversation_message(message: ConversationMessage) -> list[CanonicalMessage]:
+def project_conversation_message(
+    message: ConversationMessage,
+) -> list[CanonicalMessage]:
     """@brief 将一条 append-only row 投影为 canonical V2 消息 / Project one row into canonical V2 messages.
 
     @param message durable conversation message / Durable conversation message.
@@ -651,6 +688,7 @@ def project_conversation_message(message: ConversationMessage) -> list[Canonical
     if (
         message.draft.role is MessageRole.SYSTEM
         or message.draft.content.get("exclude_from_assistant") is True
+        or not workspace_attachment_is_model_visible(message.draft.content)
     ):
         return []
     content = message.draft.content

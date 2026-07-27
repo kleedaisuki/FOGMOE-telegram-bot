@@ -70,6 +70,12 @@ from fogmoe_bot.infrastructure.database.assistant_tool_effects import (
     PostgresAssistantToolStore,
 )
 from fogmoe_bot.infrastructure.database.context_window import PostgresContextWindowStore
+from fogmoe_bot.infrastructure.database.workspace_attachment_receipts import (
+    PostgresWorkspaceAttachmentReceiptStore,
+)
+from fogmoe_bot.infrastructure.database.workspace_attachment_intents import (
+    PostgresWorkspaceAttachmentImportIntentStore,
+)
 from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
     PostgresOutboxRepository,
 )
@@ -95,7 +101,9 @@ from fogmoe_bot.infrastructure.media.file_rate_limiter import FileSlidingWindowL
 from fogmoe_bot.infrastructure.retrieval import OpenAICompatibleEmbeddings
 from fogmoe_bot.infrastructure.user_profile.dreaming_model import ProviderDreamingModel
 from fogmoe_bot.infrastructure.workspace.lifecycle import RuntimeProcessLifecycle
-from fogmoe_bot.infrastructure.workspace.registry import PostgresWorkspaceRuntimeRegistry
+from fogmoe_bot.infrastructure.workspace.registry import (
+    PostgresWorkspaceRuntimeRegistry,
+)
 from fogmoe_bot.infrastructure.workspace.wspctl import (
     WspctlRuntimeProcessFactory,
     WspctlRuntimeProcess,
@@ -204,14 +212,15 @@ def build_durable_assistant(
         lease_for=timedelta(seconds=retrieval_worker.lease_seconds),
     )
     budget = _context_window_budget(assistant_settings)
+    history_cache = ContextWindowCache(
+        capacity=assistant_settings.history_cache.capacity,
+        ttl_seconds=assistant_settings.history_cache.ttl_seconds,
+    )
     history = ContextWindowProjector(
         persistence=context_window_store,
         token_counter=ConservativeHistoryTokenCounter(guard_ratio=budget.guard_ratio),
         budget=budget,
-        cache=ContextWindowCache(
-            capacity=assistant_settings.history_cache.capacity,
-            ttl_seconds=assistant_settings.history_cache.ttl_seconds,
-        ),
+        cache=history_cache,
     )
     artifacts = FileArtifactStore(resources.generated_artifact_directory)
     external_settings = ExternalReadSettings(
@@ -265,6 +274,9 @@ def build_durable_assistant(
         CurrentTurnWorkspaceAttachmentPreprocessor(
             source=current_turn_upload_source,
             runtime_process=runtime_process,
+            intents=PostgresWorkspaceAttachmentImportIntentStore(),
+            receipts=PostgresWorkspaceAttachmentReceiptStore(),
+            history_invalidator=history_cache,
         )
         if current_turn_upload_source is not None
         else None

@@ -117,12 +117,18 @@ class InferencePersistence(Protocol):
         failed_at: datetime,
         error: str,
     ) -> None:
-        """@brief 原子终结活动与 Turn / Atomically fail activity and Turn finally.
+        """@brief 原子终结活动、Turn 与未决当前附件 / Atomically fail activity, Turn, and a pending current attachment.
 
         @param claim 当前 claim / Current claim.
         @param failed_at 最终失败时间 / Final-failure time.
         @param error 错误摘要 / Error summary.
         @return None / None.
+        @note 若该 durable request 含当前附件，持久化实现必须在同一事务内仅将其严格
+            ``pending`` marker 终结为 ``unavailable``。已有 receipt 的 ``imported`` 行必须
+            保持不变；可重试失败绝不能调用此方法。/ When the durable request carries a current
+            attachment, the persistence implementation must terminalize only its strict
+            ``pending`` marker to ``unavailable`` in the same transaction. An ``imported`` row
+            with a receipt must remain unchanged; retryable failures must never call this method.
         """
 
         ...

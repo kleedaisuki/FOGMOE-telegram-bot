@@ -26,11 +26,7 @@ SYSTEMD_UNIT_TEMPLATE_PATH = (
 )
 #: @brief host broker 环境文件模板路径 / Host-broker environment-template path.
 SYSTEMD_ENVIRONMENT_TEMPLATE_PATH = (
-    REPOSITORY_ROOT
-    / "deploy"
-    / "wspctl"
-    / "systemd"
-    / "wspctld.env.example.in"
+    REPOSITORY_ROOT / "deploy" / "wspctl" / "systemd" / "wspctld.env.example.in"
 )
 #: @brief 部署说明路径 / Deployment guide path.
 DEPLOYMENT_GUIDE_PATH = REPOSITORY_ROOT / "docs" / "wspctl-deployment.md"
@@ -56,10 +52,13 @@ def test_bot_image_builds_native_client_but_excludes_host_broker_programs() -> N
     assert "libseccomp-dev" in dockerfile
     assert "libcap-dev" in dockerfile
     assert "--config-settings=cmake.define.WSPCTL_INSTALL_HOST_TOOLS=OFF" in dockerfile
-    assert re.search(
-        r'option\(WSPCTL_INSTALL_HOST_TOOLS\s+"[^"]+"\s+OFF\)',
-        cmake,
-    ) is not None
+    assert (
+        re.search(
+            r'option\(WSPCTL_INSTALL_HOST_TOOLS\s+"[^"]+"\s+OFF\)',
+            cmake,
+        )
+        is not None
+    )
     assert "src/wspctl" not in wheel_packages
     assert "AS bot-runtime" in dockerfile
     assert (
@@ -67,14 +66,20 @@ def test_bot_image_builds_native_client_but_excludes_host_broker_programs() -> N
         "    add_subdirectory(deploy/wspctl)\n"
         "endif()" in root_cmake
     )
-    assert re.search(
-        r"install\(TARGETS\s+wspctld\s+wspctl-image\s+RUNTIME DESTINATION bin\)",
-        cmake,
-    ) is not None
-    assert re.search(
-        r"install\(TARGETS\s+wsp-systemd\s+RUNTIME DESTINATION libexec/wspctl\)",
-        cmake,
-    ) is not None
+    assert (
+        re.search(
+            r"install\(TARGETS\s+wspctld\s+wspctl-image\s+RUNTIME DESTINATION bin\)",
+            cmake,
+        )
+        is not None
+    )
+    assert (
+        re.search(
+            r"install\(TARGETS\s+wsp-systemd\s+RUNTIME DESTINATION libexec/wspctl\)",
+            cmake,
+        )
+        is not None
+    )
     assert "USER 65532:65532" in dockerfile
     assert 'CMD ["fogmoe-bot", "--config", "/app/config.json"]' in dockerfile
 
@@ -122,6 +127,7 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_generation_mount() -> 
     assert "RuntimeDirectory=" not in unit
     assert "StateDirectory=" not in unit
     assert "EnvironmentFile=@WSPCTL_HOST_ENVIRONMENT_PATH@" in unit
+    assert "ExecStart=@WSPCTL_HOST_BROKER_EXECUTABLE@" in unit
     assert "RequiresMountsFor=@WSPCTL_HOST_STATE_ROOT@" in unit
     assert "ConditionPathIsMountPoint=@WSPCTL_HOST_STATE_ROOT@" in unit
     assert "--mode=0700 @WSPCTL_HOST_STATE_ROOT@" not in unit
@@ -141,7 +147,10 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_generation_mount() -> 
     assert "--xfs-project-id-min ${WSPCTL_XFS_PROJECT_ID_MIN}" in unit
     assert "--xfs-project-id-max ${WSPCTL_XFS_PROJECT_ID_MAX}" in unit
     assert "--runtime-control-hard-bytes ${WSPCTL_RUNTIME_CONTROL_HARD_BYTES}" in unit
-    assert "--runtime-workspace-hard-inodes ${WSPCTL_RUNTIME_WORKSPACE_HARD_INODES}" in unit
+    assert (
+        "--runtime-workspace-hard-inodes ${WSPCTL_RUNTIME_WORKSPACE_HARD_INODES}"
+        in unit
+    )
     assert "--xfs-global-admission-bytes ${WSPCTL_XFS_GLOBAL_ADMISSION_BYTES}" in unit
     assert "--xfs-system-reserve-inodes ${WSPCTL_XFS_SYSTEM_RESERVE_INODES}" in unit
     assert "WSPCTL_SOCKET=@WSPCTL_HOST_SOCKET_PATH@" in environment
@@ -176,7 +185,14 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_generation_mount() -> 
     assert "--allow-insecure-dev-root" in deployment_cmake
     assert "WSPCTL_HOST_WORKDIR is mandatory" in deployment_cmake
     assert "WSPCTL_HOST_ENVIRONMENT_PATH" in deployment_cmake
-    assert 'DESTINATION "${CMAKE_INSTALL_DATADIR}/fogmoe-wspctl/systemd"' in deployment_cmake
+    assert (
+        'set(WSPCTL_HOST_BROKER_EXECUTABLE "${CMAKE_INSTALL_FULL_BINDIR}/wspctld")'
+        in deployment_cmake
+    )
+    assert (
+        'DESTINATION "${CMAKE_INSTALL_DATADIR}/fogmoe-wspctl/systemd"'
+        in deployment_cmake
+    )
     assert "local developer 纳入 trusted control plane" in deployment_guide
 
 

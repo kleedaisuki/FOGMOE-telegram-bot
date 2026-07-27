@@ -292,6 +292,58 @@ public:
         return dictionary;
     }
 
+    /**
+     * @brief 只读恢复已完成 add_file 的 durable receipt / Read-only replay of a completed add_file durable receipt.
+     * @param opaque_id 可信上层保存的 opaque directory capability / Opaque directory capability persisted by the trusted upper layer.
+     * @param byte_size 已保存的完整文件字节数 / Persisted complete file byte count.
+     * @param sha256 已保存的完整文件 SHA-256 / Persisted complete file SHA-256.
+     * @param request_id 原始稳定 journal 调用 ID / Original stable journal invocation ID.
+     * @param request_hash 原始调用方语义 SHA-256 / Original caller semantic SHA-256.
+     * @return ``replayed=true`` 的 Python 文件收据 dictionary / Python file-receipt dictionary with ``replayed=true``.
+     * @note 该入口刻意不使用此 handle 的 activation；它不会启动/替换 RuntimeProcess，也不会
+     *       读取 Python bytes 或创建 pending journal。/ This entry deliberately does not use this
+     *       handle's activation; it does not start/replace a RuntimeProcess, read Python bytes,
+     *       or create a pending journal.
+     */
+    [[nodiscard]] py::dict replay_file(
+        const std::string& opaque_id,
+        const std::size_t byte_size,
+        const std::string& sha256,
+        const std::string& request_id,
+        const std::string& request_hash) {
+        std::lock_guard lock(mutex_);
+        if (closed_) {
+            throw NativeFailure(make_error(ErrorCode::permission_denied, "RuntimeProcess is closed"), request_id);
+        }
+        presentation::ClientReplayFileRequest request{
+            .runtime_key = runtime_key_,
+            .request_id = request_id,
+            .request_hash = request_hash,
+            .opaque_id = opaque_id,
+            .byte_size = byte_size,
+            .sha256 = sha256,
+        };
+        presentation::ClientAddFileResult result;
+        {
+            py::gil_scoped_release release;
+            const auto replayed = gateway_.replay_file(request);
+            if (!replayed) {
+                throw NativeFailure(replayed.error(), request_id);
+            }
+            result = *replayed;
+        }
+        if (!result.replayed) {
+            throw NativeFailure(make_error(ErrorCode::protocol_violation, "broker returned a non-replayed receipt for replay_file"), request_id);
+        }
+        py::dict dictionary;
+        dictionary["request_id"] = result.request_id;
+        dictionary["replayed"] = result.replayed;
+        dictionary["path"] = result.path;
+        dictionary["byte_size"] = result.byte_size;
+        dictionary["sha256"] = result.sha256;
+        return dictionary;
+    }
+
     /** @brief 关闭逻辑 handle / Close the logical handle. */
     void close() noexcept {
         std::lock_guard lock(mutex_);
@@ -352,6 +404,14 @@ PYBIND11_MODULE(_native, module) {
             &wspctl::RuntimeProcess::add_file,
             py::arg("opaque_id"),
             py::arg("chunks"),
+            py::arg("byte_size"),
+            py::arg("sha256"),
+            py::arg("request_id") = "",
+            py::arg("request_hash") = "")
+        .def(
+            "replay_file",
+            &wspctl::RuntimeProcess::replay_file,
+            py::arg("opaque_id"),
             py::arg("byte_size"),
             py::arg("sha256"),
             py::arg("request_id") = "",

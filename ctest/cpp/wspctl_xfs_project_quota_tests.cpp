@@ -18,6 +18,7 @@
 #include <sys/wait.h>
 
 #include <cerrno>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -284,6 +285,35 @@ constexpr std::uint64_t kQuotaBlockBytes{512U};
 }
 
 /**
+ * @brief 读取一个已存在私有目录的直接 child 数 / Count direct children of one existing private directory.
+ * @param directory 待枚举目录 / Directory to enumerate.
+ * @param purpose 诊断语义 / Diagnostic purpose.
+ * @return 直接 child 数，或枚举错误 / Direct-child count, or an enumeration error.
+ * @note 该 helper 只读取目录项，用于证明只读 quota lookup 没有偷偷 provision 新状态。
+ *       This helper only reads directory entries and proves a read-only quota lookup did not
+ *       silently provision new state.
+ */
+[[nodiscard]] wspctl::Result<std::size_t> direct_entry_count(
+    const std::filesystem::path& directory,
+    const std::string_view purpose) {
+    /** @brief directory-iterator construction error / Directory-iterator construction error. */
+    std::error_code error;
+    std::filesystem::directory_iterator iterator(directory, std::filesystem::directory_options::none, error);
+    if (error) {
+        return std::unexpected(wspctl::make_error(
+            wspctl::ErrorCode::io_failure,
+            std::string("enumerate ") + std::string(purpose) + ": " + error.message()));
+    }
+    /** @brief observed direct-child count / Observed direct-child count. */
+    std::size_t count{0U};
+    for (const std::filesystem::directory_entry& entry : iterator) {
+        static_cast<void>(entry);
+        ++count;
+    }
+    return count;
+}
+
+/**
  * @brief 运行显式 XFS project-quota integration test / Run the explicit XFS project-quota integration test.
  * @return POSIX/CTest exit status / POSIX/CTest exit status.
  */
@@ -328,15 +358,99 @@ constexpr std::uint64_t kQuotaBlockBytes{512U};
         }
         const wspctl::XfsProjectQuota quota(*state_root, config);
         constexpr std::string_view kRuntime{"123e4567-e89b-42d3-a456-426614174001"};
+        constexpr std::string_view kMissingRuntime{"123e4567-e89b-42d3-a456-426614174002"};
+        // A replay lookup before any allocation is the critical non-provisioning contract:
+        // it must not manufacture quota-registry, registry lock/records, or a runtime layout.
+        const auto absent_without_registry = quota.find_ready_runtime(kMissingRuntime);
+        if (absent_without_registry || absent_without_registry.error().code != wspctl::ErrorCode::not_found) {
+            std::cerr << "FAIL: no-record read-only lookup did not return not_found before registry provisioning\n";
+            break;
+        }
+        /** @brief no-registry postcondition error / No-registry postcondition error. */
+        std::error_code absent_state_error;
+        if (std::filesystem::exists(*state_root / "quota-registry", absent_state_error) ||
+            std::filesystem::exists(*state_root / "runtimes", absent_state_error) || absent_state_error) {
+            std::cerr << "FAIL: no-record read-only lookup created quota registry or runtime state\n";
+            break;
+        }
         const auto binding = quota.ensure_runtime(kRuntime);
         if (!binding) {
             std::cerr << "FAIL: provision XFS project pair: " << binding.error().message << '\n';
+            break;
+        }
+        const auto lookup_ready = quota.find_ready_runtime(kRuntime);
+        if (!lookup_ready || lookup_ready->control_project_id != binding->control_project_id ||
+            lookup_ready->workspace_project_id != binding->workspace_project_id) {
+            std::cerr << "FAIL: read-only lookup did not recover the existing ready binding\n";
+            break;
+        }
+        const auto runtime_entries_before = direct_entry_count(*state_root / "runtimes", "runtime state root before missing lookup");
+        const auto record_entries_before = direct_entry_count(*state_root / "quota-registry" / "runtimes", "quota registry records before missing lookup");
+        if (!runtime_entries_before || !record_entries_before) {
+            std::cerr << "FAIL: cannot snapshot quota state before missing-binding lookup\n";
+            break;
+        }
+        const auto absent_with_registry = quota.find_ready_runtime(kMissingRuntime);
+        if (absent_with_registry || absent_with_registry.error().code != wspctl::ErrorCode::not_found) {
+            std::cerr << "FAIL: missing ready binding did not return not_found\n";
+            break;
+        }
+        const auto runtime_entries_after = direct_entry_count(*state_root / "runtimes", "runtime state root after missing lookup");
+        const auto record_entries_after = direct_entry_count(*state_root / "quota-registry" / "runtimes", "quota registry records after missing lookup");
+        if (!runtime_entries_after || !record_entries_after || *runtime_entries_before != *runtime_entries_after ||
+            *record_entries_before != *record_entries_after) {
+            std::cerr << "FAIL: missing ready-binding lookup provisioned a runtime or registry record\n";
             break;
         }
         const auto recovered = quota.ensure_runtime(kRuntime);
         if (!recovered || recovered->control_project_id != binding->control_project_id ||
             recovered->workspace_project_id != binding->workspace_project_id) {
             std::cerr << "FAIL: XFS project pair was not stable across recovery verification\n";
+            break;
+        }
+        constexpr std::string_view kLeaseActivation{"xfs-quota-lease-regression"};
+        {
+            /** @brief first broker-like activation lease / First broker-like activation lease. */
+            const auto lease = quota.acquire_activation_lease(kRuntime);
+            if (!lease) {
+                std::cerr << "FAIL: acquire initial XFS activation lease: " << lease.error().message << '\n';
+                break;
+            }
+            /** @brief competing independent lock acquisition / Competing independent lock acquisition. */
+            const auto competing = quota.acquire_activation_lease(kRuntime);
+            if (competing || competing.error().code != wspctl::ErrorCode::busy) {
+                std::cerr << "FAIL: second XFS activation lease was not rejected as busy\n";
+                break;
+            }
+            /** @brief lease-owned transient staging storage / Lease-owned transient staging storage. */
+            const auto storage = quota.prepare_activation_storage(*lease, kLeaseActivation);
+            if (!storage) {
+                std::cerr << "FAIL: create lease-owned activation staging: " << storage.error().message << '\n';
+                break;
+            }
+            /** @brief staging-existence query error / Staging-existence query error. */
+            std::error_code staging_error;
+            if (!std::filesystem::is_directory(storage->control_activation_dir, staging_error) ||
+                !std::filesystem::is_directory(storage->workspace_work_dir, staging_error) || staging_error) {
+                std::cerr << "FAIL: activation lease did not own both transient staging directories\n";
+                break;
+            }
+            if (const auto reclaimed = quota.reclaim_dead_activation_storage(*lease); !reclaimed) {
+                std::cerr << "FAIL: reclaim task-free lease staging: " << reclaimed.error().message << '\n';
+                break;
+            }
+            /** @brief post-reclaim existence query error / Post-reclaim existence query error. */
+            std::error_code reclaimed_error;
+            if (std::filesystem::exists(storage->control_activation_dir, reclaimed_error) ||
+                std::filesystem::exists(storage->workspace_work_dir, reclaimed_error) || reclaimed_error) {
+                std::cerr << "FAIL: reclaim left an activation transient staging directory behind\n";
+                break;
+            }
+        }
+        /** @brief post-destruction lease acquisition / Lease acquisition after the first RAII lease is destroyed. */
+        const auto reacquired_lease = quota.acquire_activation_lease(kRuntime);
+        if (!reacquired_lease) {
+            std::cerr << "FAIL: activation lease was not released by RAII destruction: " << reacquired_lease.error().message << '\n';
             break;
         }
         if (const auto inode_probe = run_boundary_probe(

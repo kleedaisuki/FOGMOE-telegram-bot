@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Protocol
 
@@ -467,12 +467,20 @@ class PostgresInferenceRepository:
         failed_at: datetime,
         error: str,
     ) -> None:
-        """@brief 原子终结活动与 Turn / Atomically fail the activity and Turn finally.
+        """@brief 原子终结活动、Turn 与未决当前附件 / Atomically fail the activity, Turn, and a pending current attachment.
 
         @param claim 当前活动 claim / Current activity claim.
         @param failed_at 最终失败时间 / Final-failure time.
         @param error 有界错误摘要 / Bounded error summary.
         @return None / None.
+        @note activity fencing 成功后、Turn 终态转移前，当前附件的 strict pending marker
+            会在同一事务中转为 unavailable。receipt 竞争若先完成 imported，条件更新返回
+            零行而保留 receipt；finalizer 若先胜出，后续 receipt publish 会因 unavailable
+            冲突而回滚。/ After activity fencing succeeds and before the Turn enters its terminal
+            state, a current attachment's strict pending marker becomes unavailable in the same
+            transaction. If a receipt race already completed imported, the conditional update
+            affects zero rows and preserves it; if finalization wins, later receipt publication
+            conflicts on unavailable and rolls back.
         """
 
         failure_time = ensure_utc(failed_at)
@@ -516,6 +524,10 @@ class PostgresInferenceRepository:
                 connection=connection,
             )
             _require_claim_update(rowcount, "inference", str(current.activity_id))
+            await self._terminalize_pending_current_attachment(
+                current,
+                connection=connection,
+            )
             failed = turn.transition(
                 TurnEvent.FAIL_FINAL,
                 occurred_at=failure_time,
@@ -526,6 +538,39 @@ class PostgresInferenceRepository:
                 expected_version=turn.version,
                 connection=connection,
             )
+
+    @staticmethod
+    async def _terminalize_pending_current_attachment(
+        activity: InferenceActivity,
+        *,
+        connection: AsyncConnection,
+    ) -> None:
+        """@brief 将最终失败当前附件的 pending marker 终结为 unavailable / Terminalize a finally failed current attachment's pending marker as unavailable.
+
+        @param activity 已 fencing 为 failed 的 durable activity / Durable activity already fenced as failed.
+        @param connection 当前 failure transaction 连接 / Connection of the current failure transaction.
+        @return None / None.
+        @note 只匹配严格 marker；畸形数据保持 fail-closed，不在这里“修复”或伪造 receipt。
+            数据库 transition trigger 还会验证同 Turn activity 已为 failed 且没有 receipt。
+            / Only a strict marker matches; malformed data stays fail-closed and is neither
+            repaired nor given a fabricated receipt here. The database transition trigger also
+            verifies that the same Turn activity is failed and has no receipt.
+        """
+
+        if not _has_matching_current_turn_upload(activity.draft.request):
+            return
+        await db.execute(
+            "UPDATE conversation.conversation_messages SET content = jsonb_set("
+            "content, '{workspace_attachment,state}', '\"unavailable\"'::JSONB, false) "
+            "WHERE turn_id = CAST(%s AS UUID) AND conversation_id = %s AND role = 'user' "
+            "AND jsonb_typeof(content -> 'workspace_attachment') = 'object' "
+            "AND jsonb_typeof(content #> '{workspace_attachment,version}') = 'number' "
+            "AND content #>> '{workspace_attachment,version}' = '1' "
+            "AND jsonb_typeof(content #> '{workspace_attachment,state}') = 'string' "
+            "AND content #>> '{workspace_attachment,state}' = 'pending'",
+            (str(activity.turn_id), str(activity.conversation_id)),
+            connection=connection,
+        )
 
     async def recover_expired_inference_leases(self, *, now: datetime) -> int:
         """@brief 原子回收过期活动租约并同步 Turn / Atomically recover expired activity leases and synchronize Turns.
@@ -607,6 +652,51 @@ class PostgresInferenceRepository:
         values = _row_values(row, 15)
         token = LeaseToken.parse(_uuid(values[14])) if values[14] is not None else None
         return _map_inference_activity(values[:14]), token
+
+
+def _has_matching_current_turn_upload(request: Mapping[str, object]) -> bool:
+    """@brief 判断 request 是否含可授权 unavailable 转移的当前上传引用 / Determine whether a request carries a current-upload reference that may authorize an unavailable transition.
+
+    @param request durable inference request JSON / Durable inference request JSON.
+    @return 当 ``current_turn_upload.source_message_id`` 与 ``scope.message_id`` 均为 JSON
+        整数且精确相同、scope 的个人/群 grammar 有效时为 True / ``True`` only when
+        ``current_turn_upload.source_message_id`` and ``scope.message_id`` are equal JSON
+        integers and the personal/group scope grammar is valid.
+    @note 此 predicate 与 0071 PostgreSQL trigger 的最小授权条件对齐。畸形 request 不得
+        借 ``failed`` 状态把无关 pending marker 终结为 ``unavailable``；它会保持
+        fail-closed。/ This predicate aligns with the minimal authorization condition in the
+        0071 PostgreSQL trigger. A malformed request must not use a ``failed`` state to
+        terminalize an unrelated pending marker as ``unavailable``; it remains fail-closed.
+    """
+
+    upload = request.get("current_turn_upload")
+    scope = request.get("scope")
+    if not isinstance(upload, Mapping) or not isinstance(scope, Mapping):
+        return False
+    source_message_id = upload.get("source_message_id")
+    scope_message_id = scope.get("message_id")
+    is_group = scope.get("is_group")
+    if (
+        not isinstance(is_group, bool)
+        or not isinstance(source_message_id, int)
+        or isinstance(source_message_id, bool)
+        or not isinstance(scope_message_id, int)
+        or isinstance(scope_message_id, bool)
+        or source_message_id != scope_message_id
+    ):
+        return False
+    if is_group:
+        group_id = scope.get("group_id")
+        return (
+            isinstance(group_id, int)
+            and not isinstance(group_id, bool)
+            and group_id != 0
+        )
+    user = request.get("user")
+    if not isinstance(user, Mapping):
+        return False
+    user_id = user.get("user_id")
+    return isinstance(user_id, int) and not isinstance(user_id, bool) and user_id > 0
 
 
 __all__ = ["InferenceOutboxWriter", "PostgresInferenceRepository"]

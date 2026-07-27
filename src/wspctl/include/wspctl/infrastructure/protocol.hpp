@@ -58,6 +58,8 @@ enum class MessageKind : std::uint16_t {
     payload_ack = 10,
     /** @brief 文件写入收据 / File-ingress receipt. */
     payload_result = 11,
+    /** @brief 已完成文件收据的只读恢复查询 / Read-only recovery lookup for a completed file receipt. */
+    payload_replay = 12,
 };
 
 /**
@@ -143,6 +145,30 @@ struct PayloadBeginRequest final {
     std::string sha256;
 };
 
+/**
+ * @brief 已完成文件收据的只读恢复查询 / Read-only recovery lookup for a completed file receipt.
+ *
+ * 该请求刻意不带 activation：它绝不能激活、替换或终止一个 RuntimeProcess。它仅证明指定的
+ * durable ingress receipt 是否仍对应可恢复的 persistent workspace object。/ This request
+ * deliberately carries no activation: it must never activate, replace, or retire a
+ * RuntimeProcess. It only proves whether the specified durable ingress receipt still corresponds
+ * to a recoverable persistent-workspace object.
+ */
+struct PayloadReplayRequest final {
+    /** @brief 持久 runtime 标识 / Persistent runtime key. */
+    std::string runtime_key;
+    /** @brief 稳定、可去重的原始写入调用标识 / Stable deduplicable original ingress invocation ID. */
+    std::string request_id;
+    /** @brief 原始写入调用方计算的语义 SHA-256 / Caller-computed semantic SHA-256 of the original ingress. */
+    std::string request_hash;
+    /** @brief 受限 uploads 子目录 opaque component / Constrained uploads-subdirectory opaque component. */
+    std::string opaque_id;
+    /** @brief 原始完整文件字节数 / Original complete file byte count. */
+    std::size_t byte_size{};
+    /** @brief 原始完整内容的规范小写 SHA-256 / Canonical lowercase SHA-256 of the original complete content. */
+    std::string sha256;
+};
+
 /** @brief 一个未经解释的文件 bytes 分块 / One uninterpreted file-byte chunk. */
 struct PayloadChunk final {
     /** @brief 所属稳定调用标识 / Owning stable invocation ID. */
@@ -204,6 +230,13 @@ struct Frame final {
 [[nodiscard]] Result<void> validate_payload_begin_request(const PayloadBeginRequest& request);
 
 /**
+ * @brief 校验只读文件恢复查询的 capability 与资源上限 / Validate a read-only file-replay query's capability and resource caps.
+ * @param request 待校验恢复查询 / Replay query to validate.
+ * @return 成功或精确错误 / Success or precise error.
+ */
+[[nodiscard]] Result<void> validate_payload_replay_request(const PayloadReplayRequest& request);
+
+/**
  * @brief 校验一个文件原始分块 / Validate one raw file chunk.
  * @param chunk 待校验分块 / Chunk to validate.
  * @return 成功或精确错误 / Success or precise error.
@@ -239,6 +272,17 @@ struct Frame final {
 [[nodiscard]] std::string canonical_payload_hash(const PayloadBeginRequest& request);
 
 /**
+ * @brief 计算与原始文件 ingress 相同的规范元数据 SHA-256 / Compute the same canonical metadata SHA-256 as the original file ingress.
+ * @param request 已验证只读恢复查询 / Validated read-only replay query.
+ * @return 64 位小写十六进制 SHA-256 / Lowercase 64-character SHA-256.
+ * @note 此值与相同 runtime/request/opaque/size/content-digest 的 ``PayloadBeginRequest`` 完全
+ *       相同，且不含 activation/request_hash。/ This is exactly equal to the
+ *       ``PayloadBeginRequest`` hash for the same runtime/request/opaque/size/content digest;
+ *       it excludes activation and request_hash.
+ */
+[[nodiscard]] std::string canonical_payload_hash(const PayloadReplayRequest& request);
+
+/**
  * @brief 编码执行请求 / Encode an execution request.
  * @param request 已校验请求 / Validated request.
  * @return 二进制载荷 / Binary payload.
@@ -256,6 +300,10 @@ struct Frame final {
 [[nodiscard]] Result<std::vector<std::byte>> encode_payload_begin_request(const PayloadBeginRequest& request);
 /** @brief 解码文件开始请求 / Decode a file-begin request. */
 [[nodiscard]] Result<PayloadBeginRequest> decode_payload_begin_request(std::span<const std::byte> payload);
+/** @brief 编码只读文件恢复查询 / Encode a read-only file-replay query. */
+[[nodiscard]] Result<std::vector<std::byte>> encode_payload_replay_request(const PayloadReplayRequest& request);
+/** @brief 解码只读文件恢复查询 / Decode a read-only file-replay query. */
+[[nodiscard]] Result<PayloadReplayRequest> decode_payload_replay_request(std::span<const std::byte> payload);
 /** @brief 编码一个文件分块 / Encode one file chunk. */
 [[nodiscard]] Result<std::vector<std::byte>> encode_payload_chunk(const PayloadChunk& chunk);
 /** @brief 解码一个文件分块 / Decode one file chunk. */

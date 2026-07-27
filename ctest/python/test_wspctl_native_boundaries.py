@@ -8,22 +8,70 @@ from pathlib import Path
 #: @brief 仓库根目录 / Repository root directory.
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 #: @brief 纯领域头路径 / Pure-domain header path.
-DOMAIN_HEADER = REPOSITORY_ROOT / "src" / "wspctl" / "include" / "wspctl" / "domain" / "runtime.hpp"
+DOMAIN_HEADER = (
+    REPOSITORY_ROOT / "src" / "wspctl" / "include" / "wspctl" / "domain" / "runtime.hpp"
+)
 #: @brief 领域实现路径 / Domain implementation path.
 DOMAIN_SOURCE = REPOSITORY_ROOT / "src" / "wspctl" / "src" / "domain" / "runtime.cpp"
 #: @brief 应用用例头路径 / Application use-case header path.
 APPLICATION_HEADER = (
-    REPOSITORY_ROOT / "src" / "wspctl" / "include" / "wspctl" / "application" / "runtime_activation.hpp"
+    REPOSITORY_ROOT
+    / "src"
+    / "wspctl"
+    / "include"
+    / "wspctl"
+    / "application"
+    / "runtime_activation.hpp"
 )
 #: @brief sandbox 实现路径 / Sandbox implementation path.
-SANDBOX_SOURCE = REPOSITORY_ROOT / "src" / "wspctl" / "src" / "infrastructure" / "sandbox.cpp"
+SANDBOX_SOURCE = (
+    REPOSITORY_ROOT / "src" / "wspctl" / "src" / "infrastructure" / "sandbox.cpp"
+)
 #: @brief broker 实现路径 / Broker implementation path.
-BROKER_SOURCE = REPOSITORY_ROOT / "src" / "wspctl" / "src" / "infrastructure" / "broker.cpp"
+BROKER_SOURCE = (
+    REPOSITORY_ROOT / "src" / "wspctl" / "src" / "infrastructure" / "broker.cpp"
+)
+#: @brief XFS quota 实现路径 / XFS quota implementation path.
+XFS_QUOTA_SOURCE = (
+    REPOSITORY_ROOT
+    / "src"
+    / "wspctl"
+    / "src"
+    / "infrastructure"
+    / "xfs_project_quota.cpp"
+)
+#: @brief 只读 payload replay verifier 实现路径 / Read-only payload replay verifier implementation path.
+PAYLOAD_REPLAY_SOURCE = (
+    REPOSITORY_ROOT / "src" / "wspctl" / "src" / "infrastructure" / "payload_replay.cpp"
+)
+#: @brief pidfd ownership helper 头路径 / pidfd ownership-helper header path.
+PIDFD_CONTROL_HEADER = (
+    REPOSITORY_ROOT
+    / "src"
+    / "wspctl"
+    / "include"
+    / "wspctl"
+    / "infrastructure"
+    / "detail"
+    / "pidfd_control.hpp"
+)
+#: @brief pidfd ownership helper 实现路径 / pidfd ownership-helper implementation path.
+PIDFD_CONTROL_SOURCE = (
+    REPOSITORY_ROOT / "src" / "wspctl" / "src" / "infrastructure" / "pidfd_control.cpp"
+)
 #: @brief supervisor 实现路径 / Supervisor implementation path.
-SUPERVISOR_SOURCE = REPOSITORY_ROOT / "src" / "wspctl" / "src" / "infrastructure" / "supervisor.cpp"
+SUPERVISOR_SOURCE = (
+    REPOSITORY_ROOT / "src" / "wspctl" / "src" / "infrastructure" / "supervisor.cpp"
+)
 #: @brief presentation Unix gateway 头路径 / Presentation Unix gateway header path.
 PRESENTATION_GATEWAY_HEADER = (
-    REPOSITORY_ROOT / "src" / "wspctl" / "include" / "wspctl" / "presentation" / "unix_gateway.hpp"
+    REPOSITORY_ROOT
+    / "src"
+    / "wspctl"
+    / "include"
+    / "wspctl"
+    / "presentation"
+    / "unix_gateway.hpp"
 )
 #: @brief presentation Unix gateway 实现路径 / Presentation Unix gateway implementation path.
 PRESENTATION_GATEWAY_SOURCE = (
@@ -39,7 +87,9 @@ def test_domain_has_no_host_or_transport_dependencies() -> None:
     @return None / None.
     """
 
-    combined = DOMAIN_HEADER.read_text(encoding="utf-8") + DOMAIN_SOURCE.read_text(encoding="utf-8")
+    combined = DOMAIN_HEADER.read_text(encoding="utf-8") + DOMAIN_SOURCE.read_text(
+        encoding="utf-8"
+    )
     prohibited = (
         '"wspctl/common.hpp"',
         "<filesystem>",
@@ -76,7 +126,10 @@ def test_proc_mount_hides_peers_and_fails_closed() -> None:
     """
 
     text = SANDBOX_SOURCE.read_text(encoding="utf-8")
-    assert 'mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, "hidepid=2,subset=pid")' in text
+    assert (
+        'mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, "hidepid=2,subset=pid")'
+        in text
+    )
 
 
 def test_workspace_overlay_remains_executable_for_untrusted_payload_scripts() -> None:
@@ -87,7 +140,9 @@ def test_workspace_overlay_remains_executable_for_untrusted_payload_scripts() ->
 
     text = SANDBOX_SOURCE.read_text(encoding="utf-8")
     overlay_mount = next(
-        line for line in text.splitlines() if 'mount("overlay", layer.merged_dir.c_str(), "overlay"' in line
+        line
+        for line in text.splitlines()
+        if 'mount("overlay", layer.merged_dir.c_str(), "overlay"' in line
     )
     assert "MS_NOSUID | MS_NODEV" in overlay_mount
     assert "MS_NOEXEC" not in overlay_mount
@@ -112,7 +167,14 @@ def test_task_seccomp_denies_global_keyring_and_module_operations() -> None:
     """
 
     text = SANDBOX_SOURCE.read_text(encoding="utf-8")
-    for syscall in ("keyctl", "add_key", "request_key", "init_module", "finit_module", "delete_module"):
+    for syscall in (
+        "keyctl",
+        "add_key",
+        "request_key",
+        "init_module",
+        "finit_module",
+        "delete_module",
+    ):
         assert f"SCMP_SYS({syscall})" in text
 
 
@@ -140,7 +202,9 @@ def test_payload_resource_limits_are_irreversible_and_scoped() -> None:
     assert "setrlimit(RLIMIT_NOFILE, &nofile)" in text
     assert "setrlimit(RLIMIT_CORE, &core)" in text
     assert "RLIMIT_FSIZE is deliberately not set here" in text
-    assert text.index("install_task_rlimits()") < text.index("harden_task(config.sandbox_uid, config.sandbox_gid)")
+    assert text.index("install_task_rlimits()") < text.index(
+        "harden_task(config.sandbox_uid, config.sandbox_gid)"
+    )
 
 
 def test_broker_uses_application_lifecycle_port_in_real_paths() -> None:
@@ -160,20 +224,84 @@ def test_broker_uses_application_lifecycle_port_in_real_paths() -> None:
     assert ".runtime.mark_ready(" not in broker
     assert ".runtime.begin_retirement(" not in broker
     assert ".runtime.finish_retirement(" not in broker
-    infrastructure_block = cmake[cmake.index("target_link_libraries(wspctl_infrastructure") : cmake.index("wspctl_enable_warnings(wspctl_infrastructure)")]
+    infrastructure_block = cmake[
+        cmake.index("target_link_libraries(wspctl_infrastructure") : cmake.index(
+            "wspctl_enable_warnings(wspctl_infrastructure)"
+        )
+    ]
     assert "PRIVATE\n        wspctl_application" in infrastructure_block
 
 
-def test_helper_cleanup_uses_pidfd_not_reusable_pid1_number() -> None:
-    """@brief fork helper 必须以 PID1 pidfd 终止 namespace，不能以可重用 host PID 发送信号 / The fork helper must terminate a namespace through its PID1 pidfd and never signal a reusable host PID.
+def test_payload_replay_never_activates_or_provisions_state() -> None:
+    """@brief attachment replay 只能读取既有回执/binding/object，绝不能激活 Runtime 或 provision XFS 状态 / Attachment replay may only read existing receipt/binding/object; it must never activate a Runtime or provision XFS state.
 
     @return None / None.
     """
 
     broker = BROKER_SOURCE.read_text(encoding="utf-8")
-    assert "int pid1_pidfd = static_cast<int>(syscall(SYS_pidfd_open, *pid1, 0U))" in broker
-    assert "signal_pidfd(record.pid1_pidfd, SIGTERM)" in broker
-    assert "close_fd(record.pid1_pidfd);" in broker
+    quota = XFS_QUOTA_SOURCE.read_text(encoding="utf-8")
+    verifier = PAYLOAD_REPLAY_SOURCE.read_text(encoding="utf-8")
+    replay_start = broker.index("Result<PayloadResult> Broker::replay_payload(")
+    replay_end = broker.index(
+        "Result<void> Broker::dispatch_payload_stream(", replay_start
+    )
+    replay_block = broker[replay_start:replay_end]
+    assert "detail::resolve_payload_replay_receipt(journal_, request)" in replay_block
+    assert "execution_gate_.try_acquire(admission->runtime.value())" in replay_block
+    assert "quota_.find_ready_runtime(admission->runtime.value())" in replay_block
+    for forbidden in (
+        "acquire_session(",
+        "ensure_runtime(",
+        "journal_.begin",
+        "journal_.begin_payload",
+        "dispatch_payload_stream(",
+    ):
+        assert forbidden not in replay_block, f"replay must not perform {forbidden}"
+    lookup_start = quota.index(
+        "Result<RuntimeQuotaBinding> XfsProjectQuota::find_ready_runtime("
+    )
+    lookup_end = quota.index(
+        "Result<RuntimeActivationLease> XfsProjectQuota::acquire_activation_lease(",
+        lookup_start,
+    )
+    lookup_block = quota[lookup_start:lookup_end]
+    assert "lock_existing_registry_shared(registry_root)" in lookup_block
+    for forbidden in (
+        "ensure_registry_directories(",
+        "lock_registry(",
+        "O_CREAT",
+        "fchmod",
+        "fchown",
+    ):
+        assert forbidden not in lookup_block, (
+            f"read-only binding lookup must not perform {forbidden}"
+        )
+    assert "O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW" in verifier
+    assert "ErrorCode::invocation_in_doubt" in verifier
+    assert "O_CREAT" not in verifier
+
+
+def test_helper_cleanup_uses_pidfd_not_reusable_pid1_number() -> None:
+    """@brief fork helper 必须以 PID1 pidfd SIGKILL 终止 namespace，并消费 descriptor / The fork helper must terminate a namespace with PID1 pidfd SIGKILL and consume the descriptor.
+
+    @return None / None.
+    """
+
+    broker = BROKER_SOURCE.read_text(encoding="utf-8")
+    helper_header = PIDFD_CONTROL_HEADER.read_text(encoding="utf-8")
+    helper = PIDFD_CONTROL_SOURCE.read_text(encoding="utf-8")
+    assert (
+        "int pid1_pidfd = static_cast<int>(syscall(SYS_pidfd_open, *pid1, 0U))"
+        in broker
+    )
+    assert '#include "wspctl/infrastructure/detail/pidfd_control.hpp"' in broker
+    assert "detail::signal_and_close_pidfd(record.pid1_pidfd, SIGKILL)" in broker
+    assert (
+        "signal_and_close_pidfd(int& owned_pidfd, int signal) noexcept" in helper_header
+    )
+    assert "const int pidfd = std::exchange(owned_pidfd, -1);" in helper
+    assert "errno == ESRCH" in helper
+    assert "static_cast<void>(close(pidfd));" in helper
     assert "kill(record.pid1_pid" not in broker
 
 
@@ -185,8 +313,11 @@ def test_launcher_self_joins_supervisor_cgroup_before_forking_pid1() -> None:
 
     broker = BROKER_SOURCE.read_text(encoding="utf-8")
     sandbox = SANDBOX_SOURCE.read_text(encoding="utf-8")
-    assert "constexpr std::string_view kSelf{\"0\"};" in broker
-    assert "join_cgroup_self(static_cast<int>(LaunchFd::supervisor_cgroup_procs))" in broker
+    assert 'constexpr std::string_view kSelf{"0"};' in broker
+    assert (
+        "join_cgroup_self(static_cast<int>(LaunchFd::supervisor_cgroup_procs))"
+        in broker
+    )
     assert "cgroup.supervisor_procs_fd" in broker
     assert ".supervisor_procs_fd = supervisor_procs_fd" in sandbox
     assert "place_in_runtime_cgroup" not in broker
@@ -203,8 +334,19 @@ def test_physical_src_layout_has_only_layered_roots() -> None:
     for layer in ("domain", "application", "infrastructure", "presentation"):
         assert (wspctl_root / "include" / "wspctl" / layer).is_dir()
         assert (wspctl_root / "src" / layer).is_dir()
-    for retired_root in ("domain", "application", "infrastructure", "presentation", "image", "python", "systemd", "broker"):
-        assert not (wspctl_root / retired_root).exists(), f"legacy flat root remains: {retired_root}"
+    for retired_root in (
+        "domain",
+        "application",
+        "infrastructure",
+        "presentation",
+        "image",
+        "python",
+        "systemd",
+        "broker",
+    ):
+        assert not (wspctl_root / retired_root).exists(), (
+            f"legacy flat root remains: {retired_root}"
+        )
 
 
 def test_presentation_exposes_a_real_unix_gateway_adapter() -> None:
@@ -252,6 +394,7 @@ def _run_contract_tests() -> None:
     test_task_seccomp_preserves_broker_owned_xfs_project_quota()
     test_payload_resource_limits_are_irreversible_and_scoped()
     test_broker_uses_application_lifecycle_port_in_real_paths()
+    test_payload_replay_never_activates_or_provisions_state()
     test_helper_cleanup_uses_pidfd_not_reusable_pid1_number()
     test_launcher_self_joins_supervisor_cgroup_before_forking_pid1()
     test_physical_src_layout_has_only_layered_roots()

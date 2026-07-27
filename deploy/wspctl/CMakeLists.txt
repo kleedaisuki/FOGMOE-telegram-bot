@@ -73,6 +73,21 @@ if(WSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT)
     set(WSPCTL_INSECURE_DEVELOPMENT_ROOT_ARGUMENT "--allow-insecure-dev-root")
 endif()
 
+#: @brief GNU 安装目录定义 / GNU installation-directory definitions.
+#:
+#: 必须在配置 service unit 前加载，以便 ``CMAKE_INSTALL_FULL_BINDIR`` 已经按 configure
+#: 阶段的 ``CMAKE_INSTALL_PREFIX`` 展开。/ This must be loaded before configuring the
+#: service unit so ``CMAKE_INSTALL_FULL_BINDIR`` has expanded according to the
+#: configure-time ``CMAKE_INSTALL_PREFIX``.
+include(GNUInstallDirs)
+#: @brief 已安装 host broker 的绝对路径 / Absolute path of the installed host broker.
+#:
+#: systemd 的 ``ExecStart=`` 不经过 shell，也不能依赖 ``PATH``；将此值由 CMake 的安装
+#: prefix 单一定义，防止 unit 与安装的 binary 漂移。/ systemd's ``ExecStart=`` does not
+#: pass through a shell and must not rely on ``PATH``. Defining this from CMake's sole install
+#: prefix prevents the unit from drifting away from the installed binary.
+set(WSPCTL_HOST_BROKER_EXECUTABLE "${CMAKE_INSTALL_FULL_BINDIR}/wspctld")
+
 #: @brief CMake 生成的 systemd 资产目录 / CMake-generated systemd asset directory.
 set(WSPCTL_SYSTEMD_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/systemd")
 file(MAKE_DIRECTORY "${WSPCTL_SYSTEMD_OUTPUT_DIRECTORY}")
@@ -87,7 +102,6 @@ configure_file(
     @ONLY
 )
 
-include(GNUInstallDirs)
 install(
     FILES
         "${WSPCTL_SYSTEMD_OUTPUT_DIRECTORY}/wspctld.service"

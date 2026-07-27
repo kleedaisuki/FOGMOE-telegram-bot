@@ -79,7 +79,9 @@ class WorkspaceMigrationTests(unittest.TestCase):
         ]
         self.assertIn("Successful historical ``execute_python_code`` receipts", upgrade)
         self.assertIn("They are not translated to", upgrade)
-        self.assertIn("Judge0 and a persistent Workspace have different authority", upgrade)
+        self.assertIn(
+            "Judge0 and a persistent Workspace have different authority", upgrade
+        )
         self.assertIn("no retained checkpoint can execute legacy Python again", upgrade)
 
     def test_workspace_identity_is_unique_and_immutable(self) -> None:
@@ -95,7 +97,10 @@ class WorkspaceMigrationTests(unittest.TestCase):
         self.assertIn("CREATE TABLE workspace.runtimes", upgrade)
         self.assertIn("runtime_key UUID PRIMARY KEY", upgrade)
         self.assertIn("scope_kind IN ('personal', 'group')", upgrade)
-        self.assertIn("CONSTRAINT workspace_runtimes_scope_uq UNIQUE (scope_kind, scope_id)", upgrade)
+        self.assertIn(
+            "CONSTRAINT workspace_runtimes_scope_uq UNIQUE (scope_kind, scope_id)",
+            upgrade,
+        )
         self.assertIn("scope_kind = 'personal' AND scope_id > 0", upgrade)
         self.assertIn("scope_kind = 'group' AND scope_id <> 0", upgrade)
         self.assertIn("CREATE FUNCTION workspace.forbid_runtime_mutation", upgrade)
@@ -104,7 +109,9 @@ class WorkspaceMigrationTests(unittest.TestCase):
         self.assertNotIn("ConversationId", upgrade)
         self.assertNotIn("message_thread_id", upgrade)
 
-    def test_migration_uses_controlled_access_policy_not_a_second_grant_surface(self) -> None:
+    def test_migration_uses_controlled_access_policy_not_a_second_grant_surface(
+        self,
+    ) -> None:
         """@brief 新 schema 不在迁移中私自创建漂移的 app GRANT / New schema does not create a drifting app GRANT surface inside the migration.
 
         @return None / None.
@@ -143,7 +150,10 @@ class WorkspaceMigrationTests(unittest.TestCase):
         statements = runner._split_sql_statements(upgrade)
         self.assertGreaterEqual(len(statements), 13)
         self.assertTrue(
-            any("LOCK TABLE conversation.inference_activities" in item for item in statements)
+            any(
+                "LOCK TABLE conversation.inference_activities" in item
+                for item in statements
+            )
         )
         self.assertTrue(
             any(
@@ -152,18 +162,25 @@ class WorkspaceMigrationTests(unittest.TestCase):
             )
         )
         self.assertTrue(
-            any("CREATE TRIGGER workspace_runtimes_immutable_tr" in item for item in statements)
+            any(
+                "CREATE TRIGGER workspace_runtimes_immutable_tr" in item
+                for item in statements
+            )
         )
 
-    def test_snapshot_retains_the_0069_workspace_delta_at_the_current_head(self) -> None:
+    def test_snapshot_retains_the_0069_workspace_delta_at_the_current_head(
+        self,
+    ) -> None:
         """@brief schema snapshot 保留 0069 Workspace DDL 且同步当前 head / Schema snapshot retains 0069 Workspace DDL while synchronizing the current head.
 
         @return None / None.
         """
 
         snapshot = _SCHEMA_PATH.read_text(encoding="utf-8")
-        self.assertIn("through 0070_workspace_attachment_model_boundary", snapshot)
-        self.assertIn("Alembic head: 0070_workspace_attachment_model_boundary", snapshot)
+        self.assertIn("through 0072_workspace_attachment_import_intents", snapshot)
+        self.assertIn(
+            "Alembic head: 0072_workspace_attachment_import_intents", snapshot
+        )
         self.assertIn("CREATE SCHEMA IF NOT EXISTS workspace", snapshot)
         self.assertIn("CREATE TABLE workspace.runtimes", snapshot)
         self.assertIn("CREATE FUNCTION workspace.forbid_runtime_mutation", snapshot)
