@@ -54,7 +54,9 @@ cmake -S . -B build/wspctl-dev \
 
 脚本首次会在 checkout 内创建 root-owned、**预分配 32 GiB** 的
 `./.wspctl/state.xfs.img`，将其作为独立的 XFS `prjquota` mount 到 `./.wspctl/state`；它不使用稀疏
-文件，因此 image 容量会立即从 host filesystem 保留。随后脚本会在产物缺失时创建项目 `.venv`、执行 `pip install --editable .` 并实际导入
+文件，因此 image 容量会立即从 host filesystem 保留。随后脚本会在 `.venv` 缺失、native CMake 输入或
+`pyproject.toml` 变化时才执行 `pip install --editable .`，普通重复启动只验证 `wspctl._native` 可导入而不会触发 pip；
+之后它实际导入
 `wspctl._native`，接着构建/安装 `wspctld`、`wsp-systemd` 与 `wspctl-image`；只有 generation 缺失时才构建
 rootfs，并将它以真实的 readonly bind mount 发布。它用 unit、environment、host executable 与 generation 的
 fingerprint 判定是否需要重启，因此普通的重复调用只检查健康 socket，不会冲掉 15 分钟 activation cache。
@@ -63,7 +65,9 @@ fingerprint 判定是否需要重启，因此普通的重复调用只检查健�
 `./runBot.sh start` 在启动 Bot 前自动调用该脚本；sudo 只发生在交互式开发者终端，Bot 进程从不持有 sudo。
 直接在 host 上运行 `runBot.sh` 时，脚本默认允许当前 UID 连接 socket；若 Bot 由 Compose 的固定 UID
 `65532` 运行，改为 `WSPCTL_CLIENT_UID=65532 ./scripts/start-wspctld.sh`。可用
-`WSPCTL_GENERATION=<new-name>` 显式发布新的开发 generation；已有 generation 从不覆盖。
+`WSPCTL_GENERATION=<new-name>` 显式发布新的开发 generation；已有 generation 从不覆盖。默认 generation
+由 rootfs 输入（Python source、依赖集合、image builder、`wsp-systemd` 与 sealer）内容寻址，而不是整个 Git
+commit，因此文档或启动脚本的提交不会导致“generation missing”或重建 rootfs。
 要在首次创建时调整容量，传 `WSPCTL_LOOP_SIZE=48G`；已有 image 不自动扩容或重建。
 
 开发态的只读观测入口在仓库根目录：

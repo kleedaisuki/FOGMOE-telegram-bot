@@ -35,12 +35,14 @@ BUILD_DIRECTORY="$REPOSITORY_ROOT/build/wspctld-dev"
 SERVICE_NAME="wspctld.service"
 # @brief expected client UID; default is direct host runBot user / Expected client UID; default is the direct-host runBot user.
 CLIENT_UID="${WSPCTL_CLIENT_UID:-$(id -u)}"
-# @brief immutable image generation name / Immutable image generation name.
-GENERATION="${WSPCTL_GENERATION:-dev-$(git -C "$REPOSITORY_ROOT" rev-parse --verify --short=12 HEAD 2>/dev/null || printf 'unversioned')}"
+# @brief 可选的 operator 指定 generation 名 / Optional operator-specified generation name.
+GENERATION="${WSPCTL_GENERATION:-}"
 # @brief checkout-local lifecycle lock / Checkout-local lifecycle lock.
 LOCK_FILE="$REPOSITORY_ROOT/.runtime/wspctld-control.lock"
 # @brief 最近一次已应用 broker 配置的 fingerprint / Fingerprint of the most recently applied broker configuration.
 FINGERPRINT_FILE="$REPOSITORY_ROOT/.runtime/wspctld-fingerprint"
+# @brief 最近一次成功同步 editable native client 的输入 fingerprint / Input fingerprint of the most recently synchronized editable native client.
+EDITABLE_FINGERPRINT_FILE="$REPOSITORY_ROOT/.runtime/wspctl-editable-fingerprint"
 # @brief 由本 checkout 安装的 host artifacts 清单 / Manifest of host artifacts installed by this checkout.
 INSTALL_MANIFEST_FILE="$WORK_ROOT/install-manifest"
 # @brief daemon socket path / Daemon socket path.
@@ -86,14 +88,33 @@ require_loop_size() {
 # @brief 验证开发机的基础命令 / Verify development-machine prerequisite commands.
 require_commands() {
     local command_name
-    for command_name in cmake sudo systemctl findmnt mountpoint mount install readelf ldconfig bash sha256sum flock grep tr stat awk git fallocate losetup mkfs.xfs blkid; do
+    for command_name in cmake sudo systemctl findmnt mountpoint mount install readelf ldconfig bash sha256sum flock grep tr stat awk fallocate losetup mkfs.xfs blkid find sort xargs; do
         command -v "$command_name" >/dev/null 2>&1 \
             || die "缺少必需命令: $command_name"
     done
 }
 
-# @brief 建立或修复项目 virtual environment，并确保 editable mapping 已生成 / Create or repair the project virtual environment and ensure editable mapping exists.
+# @brief 计算会影响 editable native module 的输入 fingerprint / Compute the inputs fingerprint for the editable native module.
+# @return SHA-256 fingerprint / SHA-256 fingerprint.
+editable_input_fingerprint() {
+    {
+        printf 'editable-native-v1\n'
+        sha256sum "$REPOSITORY_ROOT/pyproject.toml" "$REPOSITORY_ROOT/CMakeLists.txt" "$REPOSITORY_ROOT/src/wspctl/CMakeLists.txt"
+        find "$REPOSITORY_ROOT/src/wspctl" -type f -print0 | sort -z | xargs -0 sha256sum
+    } | sha256sum | awk '{print $1}'
+}
+
+# @brief 判定当前 virtual environment 能否导入 native client / Determine whether the current virtual environment can import the native client.
+# @return 0 表示可导入 / Zero when importable.
+native_client_is_importable() {
+    "$PYTHON_EXECUTABLE" -c 'import wspctl._native' >/dev/null 2>&1
+}
+
+# @brief 建立或修复项目 virtual environment，并按输入增量同步 editable mapping / Create or repair the project virtual environment and synchronize the editable mapping only when inputs change.
 ensure_editable_client() {
+    local desired_fingerprint
+    local previous_fingerprint=""
+
     if [[ ! -x "$PYTHON_EXECUTABLE" ]]; then
         command -v python >/dev/null 2>&1 || die "找不到 python，无法创建 $VENV_DIR"
         note "创建项目 virtual environment: $VENV_DIR"
@@ -101,11 +122,21 @@ ensure_editable_client() {
     fi
     "$PYTHON_EXECUTABLE" -c 'import sys; raise SystemExit(sys.version_info < (3, 14))' \
         || die "项目 virtual environment 必须使用 Python 3.14 或更新版本"
-
-    note "同步 editable Python client（含 wspctl._native）"
+    desired_fingerprint="$(editable_input_fingerprint)"
+    if [[ -r "$EDITABLE_FINGERPRINT_FILE" ]]; then
+        previous_fingerprint="$(<"$EDITABLE_FINGERPRINT_FILE")"
+    fi
+    if native_client_is_importable && [[ "$desired_fingerprint" == "$previous_fingerprint" ]]; then
+        note "editable Python client 已就绪；跳过 pip"
+        return 0
+    fi
+    note "同步发生变化或缺失的 editable Python client（含 wspctl._native）"
     "$PYTHON_EXECUTABLE" -m pip install --editable "$REPOSITORY_ROOT"
-    "$PYTHON_EXECUTABLE" -c 'import wspctl._native' \
+    native_client_is_importable \
         || die "editable 安装没有产生可导入的 wspctl._native"
+    local temporary_fingerprint_file="$EDITABLE_FINGERPRINT_FILE.$$.tmp"
+    printf '%s\n' "$desired_fingerprint" > "$temporary_fingerprint_file"
+    mv -f -- "$temporary_fingerprint_file" "$EDITABLE_FINGERPRINT_FILE"
 }
 
 # @brief 配置、编译并安装 host broker 工件 / Configure, build, and install host-broker artifacts.
@@ -155,6 +186,35 @@ write_install_manifest() {
     done
     sudo install -o root -g root -m 0600 "$temporary_file" "$INSTALL_MANIFEST_FILE"
     rm -f -- "$temporary_file"
+}
+
+# @brief 计算默认 immutable generation 的 rootfs 输入 fingerprint / Compute the rootfs-input fingerprint for the default immutable generation.
+#
+# 不以整个 Git commit 命名：文档、脚本或无关业务提交不应触发昂贵的 rootfs rebuild。/
+# This deliberately does not use the complete Git commit as its name: documentation, scripts,
+# or unrelated application commits must not trigger an expensive rootfs rebuild.
+# @return 短 generation 名 / Short generation name.
+default_generation_name() {
+    local rootfs_fingerprint
+
+    rootfs_fingerprint="$(
+        {
+            printf 'rootfs-input-v1\n'
+            sha256sum "$REPOSITORY_ROOT/pyproject.toml" "$REPOSITORY_ROOT/tools/build_wspctl_image.py"
+            find "$REPOSITORY_ROOT/src" -type f ! -name '*.pyc' -print0 | sort -z | xargs -0 sha256sum
+            "$PYTHON_EXECUTABLE" -m pip freeze --all | sort
+            sha256sum "$BUILD_DIRECTORY/src/wspctl/wsp-systemd" "$BUILD_DIRECTORY/src/wspctl/wspctl-image"
+        } | sha256sum | awk '{print $1}'
+    )"
+    printf 'dev-%s\n' "${rootfs_fingerprint:0:12}"
+}
+
+# @brief 在 build 完成后选择 operator generation 或输入寻址 generation / Select the operator generation or an input-addressed generation after the build completes.
+select_generation() {
+    if [[ -z "$GENERATION" ]]; then
+        GENERATION="$(default_generation_name)"
+    fi
+    require_generation "$GENERATION"
 }
 
 # @brief 在首次开发启动时创建并挂载 loopback XFS / Create and mount the loopback XFS on the first development start.
@@ -406,7 +466,6 @@ stop_service() {
 # @brief 执行启动流程 / Execute the start flow.
 start() {
     require_uid "$CLIENT_UID"
-    require_generation "$GENERATION"
     require_loop_size "$LOOP_SIZE"
     require_commands
     mkdir -p "$REPOSITORY_ROOT/.runtime"
@@ -417,6 +476,7 @@ start() {
     require_state_mount
     ensure_editable_client
     ensure_host_artifacts
+    select_generation
     ensure_generation
     install_service_configuration
     prepare_restart_decision
@@ -434,7 +494,7 @@ immutable generation，再确保 systemd 的 wspctld.service 和 socket 可用�
 
 环境变量：
   WSPCTL_CLIENT_UID   broker 接受的 Bot UID；默认当前运行 runBot.sh 的 UID。
-  WSPCTL_GENERATION   immutable generation 名；默认当前 git commit 的 dev-<short-sha>。
+  WSPCTL_GENERATION   可选 immutable generation 名；默认 rootfs 输入指纹的 dev-<hash>。
   WSPCTL_LOOP_SIZE    首次创建 image 的容量；默认 32G，已有 image 不会自动 resize。
 EOF
 }
