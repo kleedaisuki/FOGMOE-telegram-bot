@@ -203,6 +203,144 @@ class ImageBuilderContractTests(unittest.TestCase):
             self.assertTrue(assembler._requires_venv_text_relocation(script))
             self.assertTrue(assembler._requires_venv_text_relocation(pth))
 
+    def test_headless_profile_excludes_tk_before_elf_closure(self) -> None:
+        """@brief headless profile 在 ELF 扫描前排除 Tcl/Tk GUI 子树 / The headless profile excludes Tcl/Tk GUI entries before ELF scanning.
+
+        @return None / None.
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "cpython"
+            standard_library = base / "lib" / "python3.14"
+            dynamic_extensions = standard_library / "lib-dynload"
+            interpreter = base / "bin" / "python3.14"
+            rootfs = root / "rootfs"
+            interpreter.parent.mkdir(parents=True)
+            dynamic_extensions.mkdir(parents=True)
+            rootfs.mkdir()
+            interpreter.write_bytes(b"base-interpreter")
+            (standard_library / "json.py").write_text(
+                "VALUE = 'retained'\n", encoding="utf-8"
+            )
+            for directory_name in ("tkinter", "idlelib", "turtledemo"):
+                package = standard_library / directory_name
+                package.mkdir()
+                (package / "__init__.py").write_text(
+                    "VALUE = 'excluded'\n", encoding="utf-8"
+                )
+            (standard_library / "turtle.py").write_text(
+                "VALUE = 'excluded'\n", encoding="utf-8"
+            )
+            tkinter_extension = (
+                dynamic_extensions / "_tkinter.cpython-314-x86_64-linux-gnu.so"
+            )
+            retained_extension = (
+                dynamic_extensions / "_sqlite3.cpython-314-x86_64-linux-gnu.so"
+            )
+            _write_minimal_elf_header(
+                tkinter_extension,
+                elf_class=_BUILDER._ELFCLASS64,
+                data_encoding=_BUILDER._ELFDATA2LSB,
+                machine=62,
+            )
+            _write_minimal_elf_header(
+                retained_extension,
+                elf_class=_BUILDER._ELFCLASS64,
+                data_encoding=_BUILDER._ELFDATA2LSB,
+                machine=62,
+            )
+            os.symlink(tkinter_extension.name, dynamic_extensions / "tk-alias.so")
+            layout = _BUILDER.PythonRuntimeLayout(
+                venv=root / "venv",
+                base_prefix=base,
+                interpreter=interpreter,
+                standard_library=standard_library,
+                library_directory=base / "lib",
+                version="3.14",
+            )
+            assembler = _BUILDER.RootfsAssembler(
+                rootfs=rootfs,
+                layout=layout,
+                python_sources=(),
+                readelf=Path("/usr/bin/readelf"),
+                ldconfig=Path("/sbin/ldconfig"),
+            )
+            with (
+                patch.object(_BUILDER.os, "chown", return_value=None),
+                patch.object(_BUILDER.os, "fchown", return_value=None),
+                patch.object(_BUILDER.os, "lchown", return_value=None),
+            ):
+                assembler._create_required_directories()
+                assembler._copy_python_distribution()
+
+            copied_stdlib = rootfs / "usr" / "local" / "lib" / "python3.14"
+            self.assertEqual(
+                _BUILDER._HEADLESS_PYTHON_RUNTIME_PROFILE.identifier,
+                "headless-python-v1",
+            )
+            self.assertTrue((copied_stdlib / "json.py").is_file())
+            self.assertTrue(
+                (copied_stdlib / "lib-dynload" / retained_extension.name).is_file()
+            )
+            for excluded in (
+                copied_stdlib / "tkinter",
+                copied_stdlib / "idlelib",
+                copied_stdlib / "turtledemo",
+                copied_stdlib / "turtle.py",
+                copied_stdlib / "lib-dynload" / tkinter_extension.name,
+                copied_stdlib / "lib-dynload" / "tk-alias.so",
+            ):
+                self.assertFalse(os.path.lexists(excluded), excluded)
+            queued_sources = {source for source, _ in assembler._elf_queue}
+            self.assertIn(retained_extension.resolve(), queued_sources)
+            self.assertNotIn(tkinter_extension.resolve(), queued_sources)
+
+    def test_headless_profile_keeps_other_elf_dependencies_fail_closed(self) -> None:
+        """@brief profile 不会放宽其他动态模块的 closure 失败语义 / The profile does not relax closure failures for other dynamic modules.
+
+        @return None / None.
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "lib-dynload" / "_sqlite3.so"
+            source.parent.mkdir(parents=True)
+            _write_minimal_elf_header(
+                source,
+                elf_class=_BUILDER._ELFCLASS64,
+                data_encoding=_BUILDER._ELFDATA2LSB,
+                machine=62,
+            )
+            layout = _BUILDER.PythonRuntimeLayout(
+                venv=root / "venv",
+                base_prefix=root / "cpython",
+                interpreter=source,
+                standard_library=root / "cpython",
+                library_directory=root / "cpython",
+                version="3.14",
+            )
+            assembler = _BUILDER.RootfsAssembler(
+                rootfs=root / "rootfs",
+                layout=layout,
+                python_sources=(),
+                readelf=Path("/usr/bin/readelf"),
+                ldconfig=Path("/sbin/ldconfig"),
+            )
+            assembler._library_cache = {}
+            metadata = _BUILDER.ElfMetadata(
+                needed=(),
+                interpreter=None,
+                search_paths=(),
+                abi=_BUILDER._read_elf_abi(source),
+            )
+            with self.assertRaisesRegex(
+                _BUILDER.ImageBuildError, "no candidate with a matching ELF ABI"
+            ):
+                assembler._resolve_needed_library(
+                    source, metadata, "lib-not-present.so"
+                )
+
     def test_layout_probe_never_executes_validated_editable_pth(self) -> None:
         """@brief layout probe 用 ``-S``，不执行可静态接受的 PEP 660 hook / The layout probe uses ``-S`` and never executes a statically accepted PEP 660 hook.
 

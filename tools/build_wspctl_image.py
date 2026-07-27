@@ -682,6 +682,72 @@ class PythonRuntimeLayout:
 
 
 @dataclass(frozen=True, slots=True)
+class PythonRuntimeProfile:
+    """@brief 一个明确的 CPython runtime 内容契约 / An explicit CPython runtime-content contract.
+
+    ``wspctl`` 的 base image 不是通用桌面 Python distribution。profile 以 source path 为准，
+    在进入 ELF closure 之前排除不属于该 runtime 的 stdlib subtree 和 extension module；因此它不会
+    通过忽略一个已复制 ELF 的缺失 dependency 来改变 closure 的 fail-closed 语义。/
+    A ``wspctl`` base image is not a general-purpose desktop Python distribution.  This profile
+    selects by source path and excludes stdlib subtrees and extension modules before they enter
+    the ELF closure; it therefore does not weaken fail-closed closure semantics by ignoring a
+    missing dependency of an already-copied ELF.
+
+    @param identifier 稳定、可审计的 profile 标识 / Stable auditable profile identifier.
+    @param omitted_stdlib_roots 必须从 stdlib 根排除的顶层 entry 名 / Top-level entry names omitted from stdlib.
+    @param omitted_dynload_modules 必须从 ``lib-dynload`` 排除的 extension module 名 /
+        Extension-module names omitted from ``lib-dynload``.
+    """
+
+    identifier: str
+    omitted_stdlib_roots: frozenset[str]
+    omitted_dynload_modules: frozenset[str]
+
+    def omits_standard_library_path(self, standard_library: Path, source: Path) -> bool:
+        """@brief 判断一个 lexical stdlib path 是否不属于 profile / Decide whether one lexical stdlib path is outside the profile.
+
+        @param standard_library CPython ``sysconfig`` 返回的 stdlib root / CPython stdlib root returned by ``sysconfig``.
+        @param source 待复制的 lexical source path；不预先 resolve symlink /
+            Lexical source path considered for copying; deliberately not pre-resolved through symlinks.
+        @return 被 profile 排除时为真 / True when the profile excludes it.
+
+        @note 递归器还会把这个 predicate 应用于 symlink 的 resolved target，避免一个不在
+            allowlist 中的 alias 把排除模块重新带回 image。/ The recursive copier also applies
+            this predicate to a symlink's resolved target, so an alias outside the allowlist cannot
+            reintroduce an excluded module into the image.
+        """
+
+        try:
+            relative = source.relative_to(standard_library)
+        except ValueError:
+            return False
+        if not relative.parts:
+            return False
+        if relative.parts[0] in self.omitted_stdlib_roots:
+            return True
+        if len(relative.parts) != 2 or relative.parts[0] != "lib-dynload":
+            return False
+        extension_module = relative.parts[1].split(".", maxsplit=1)[0]
+        return extension_module in self.omitted_dynload_modules
+
+
+#: @brief 供无桌面 Bot workspace 使用的 CPython profile / CPython profile for the headless Bot workspace.
+#:
+#: Tcl/Tk 仅是 CPython 的 optional module；``idlelib``、``turtle`` 与 ``turtledemo`` 都建立在
+#: Tk GUI 上。这个 profile 保留完整的非 GUI stdlib 与所有其余 extension modules，因而任何真正
+#: 纳入 image 的 ELF 仍必须拥有完整、ABI 匹配的 dependency closure。/
+#: Tcl/Tk is an optional CPython module; ``idlelib``, ``turtle``, and ``turtledemo`` all depend on
+#: the Tk GUI.  This profile retains the complete non-GUI stdlib and every other extension module,
+#: so each ELF actually admitted to the image must still have a complete ABI-matching dependency
+#: closure.
+_HEADLESS_PYTHON_RUNTIME_PROFILE: Final = PythonRuntimeProfile(
+    identifier="headless-python-v1",
+    omitted_stdlib_roots=frozenset({"idlelib", "tkinter", "turtledemo", "turtle.py"}),
+    omitted_dynload_modules=frozenset({"_tkinter"}),
+)
+
+
+@dataclass(frozen=True, slots=True)
 class ElfAbi:
     """@brief ELF loader ABI 身份 / ELF loader ABI identity.
 
@@ -732,6 +798,7 @@ class BuildSpec:
     @param readelf 只读 ELF metadata reader / Read-only ELF metadata reader.
     @param ldconfig 动态 loader cache reader / Dynamic-loader cache reader.
     @param venv_relocation 已验证的 venv startup-hook 重定位计划 / Verified venv startup-hook relocation plan.
+    @param python_runtime_profile 固定的 CPython runtime 内容契约 / Fixed CPython runtime-content contract.
     """
 
     generation: str
@@ -745,6 +812,7 @@ class BuildSpec:
     readelf: Path
     ldconfig: Path
     venv_relocation: VenvRelocationPlan = VenvRelocationPlan()
+    python_runtime_profile: PythonRuntimeProfile = _HEADLESS_PYTHON_RUNTIME_PROFILE
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -1142,6 +1210,7 @@ class RootfsAssembler:
         readelf: Path,
         ldconfig: Path,
         venv_relocation: VenvRelocationPlan = VenvRelocationPlan(),
+        python_runtime_profile: PythonRuntimeProfile = _HEADLESS_PYTHON_RUNTIME_PROFILE,
     ) -> None:
         """@brief 初始化一个尚未 seal 的 rootfs assembler / Initialize an as-yet-unsealed rootfs assembler.
 
@@ -1151,6 +1220,7 @@ class RootfsAssembler:
         @param readelf 可信 readelf binary / Trusted readelf binary.
         @param ldconfig 可信 ldconfig binary / Trusted ldconfig binary.
         @param venv_relocation 已验证的 venv startup-hook 重定位计划 / Verified venv startup-hook relocation plan.
+        @param python_runtime_profile 固定的 CPython runtime 内容契约 / Fixed CPython runtime-content contract.
         @return None / None.
         """
 
@@ -1159,6 +1229,7 @@ class RootfsAssembler:
         self._readelf = readelf
         self._ldconfig = ldconfig
         self._venv_relocation = venv_relocation
+        self._python_runtime_profile = python_runtime_profile
         self._source_maps: list[tuple[Path, PurePosixPath]] = [
             (layout.venv, _RUNTIME_VENV),
             (layout.base_prefix, PurePosixPath("/usr/local")),
@@ -1500,6 +1571,7 @@ class RootfsAssembler:
         *,
         transform: Callable[[Path, bytes], bytes] | None = None,
         transform_when: Callable[[Path], bool] | None = None,
+        omit: Callable[[Path], bool] | None = None,
     ) -> None:
         """@brief 递归复制一个受准 inode / Recursively copy one admitted inode.
 
@@ -1507,13 +1579,16 @@ class RootfsAssembler:
         @param runtime_path 对应 runtime destination / Corresponding runtime destination.
         @param transform regular file 的可选转换 / Optional transformation for regular files.
         @param transform_when 选择需要转换的 regular file 的 predicate / Predicate selecting regular files to transform.
+        @param omit 可选的 source-path exclusion predicate / Optional source-path exclusion predicate.
         @return None / None.
         @raise ImageBuildError 遇到 device、FIFO、外逃链接或循环时抛出 /
             Raised on a device, FIFO, escaping link, or copy cycle.
         """
 
         checked_runtime = _runtime_path(runtime_path)
-        if _is_omitted_python_cache_entry(source):
+        if _is_omitted_python_cache_entry(source) or (
+            omit is not None and omit(source)
+        ):
             return
         try:
             metadata = os.lstat(source)
@@ -1542,6 +1617,7 @@ class RootfsAssembler:
                         child_runtime,
                         transform=transform,
                         transform_when=transform_when,
+                        omit=omit,
                     )
             finally:
                 self._copying.remove(identity)
@@ -1573,6 +1649,7 @@ class RootfsAssembler:
                 checked_runtime,
                 transform=transform,
                 transform_when=transform_when,
+                omit=omit,
             )
             return
         raise ImageBuildError(
@@ -1586,6 +1663,7 @@ class RootfsAssembler:
         *,
         transform: Callable[[Path, bytes], bytes] | None = None,
         transform_when: Callable[[Path], bool] | None = None,
+        omit: Callable[[Path], bool] | None = None,
     ) -> None:
         """@brief 复制一个受准目录树 / Copy one admitted directory tree.
 
@@ -1593,13 +1671,18 @@ class RootfsAssembler:
         @param runtime_path 固定 runtime root / Fixed runtime root.
         @param transform regular file 的可选转换 / Optional transformation for regular files.
         @param transform_when 选择需要转换的 regular file 的 predicate / Predicate selecting regular files to transform.
+        @param omit 可选的 source-path exclusion predicate / Optional source-path exclusion predicate.
         @return None / None.
         """
 
         if not source.is_dir():
             raise ImageBuildError("trusted tree source must be a directory")
         self._copy_entry(
-            source, runtime_path, transform=transform, transform_when=transform_when
+            source,
+            runtime_path,
+            transform=transform,
+            transform_when=transform_when,
+            omit=omit,
         )
 
     def _copy_symlink(
@@ -1609,6 +1692,7 @@ class RootfsAssembler:
         *,
         transform: Callable[[Path, bytes], bytes] | None,
         transform_when: Callable[[Path], bool] | None,
+        omit: Callable[[Path], bool] | None,
     ) -> None:
         """@brief 重定位 source symlink，不保留任何 host-absolute target / Relocate a source symlink without retaining any host-absolute target.
 
@@ -1617,6 +1701,7 @@ class RootfsAssembler:
         @param transform 递归 materialization 时使用的 file 转换 / File transformation used during recursive materialization.
         @param transform_when 选择 materialized regular file 的转换 predicate /
             Predicate selecting materialized regular files for transformation.
+        @param omit 可选的 source-path exclusion predicate / Optional source-path exclusion predicate.
         @return None / None.
         @raise ImageBuildError target 不存在、未受准或逃出 rootfs 时抛出 /
             Raised when the target is missing, unadmitted, or would escape rootfs.
@@ -1627,7 +1712,9 @@ class RootfsAssembler:
             resolved_target = (source.parent / raw_target).resolve(strict=True)
         except OSError as error:
             raise ImageBuildError("cannot resolve trusted symlink target") from error
-        if _is_omitted_python_cache_entry(resolved_target):
+        if _is_omitted_python_cache_entry(resolved_target) or (
+            omit is not None and omit(resolved_target)
+        ):
             return
         target_runtime = self._map_source_to_runtime(resolved_target)
         if target_runtime is None:
@@ -1640,6 +1727,7 @@ class RootfsAssembler:
                 target_runtime,
                 transform=transform,
                 transform_when=transform_when,
+                omit=omit,
             )
         self._create_symlink(runtime_path, target_runtime)
 
@@ -1660,7 +1748,11 @@ class RootfsAssembler:
                 self._layout.base_prefix
             ).as_posix()
         )
-        self._copy_tree(self._layout.standard_library, stdlib_runtime)
+        self._copy_tree(
+            self._layout.standard_library,
+            stdlib_runtime,
+            omit=self._omits_python_runtime_profile_path,
+        )
         pattern = f"libpython{self._layout.version}.so*"
         for library in sorted(
             self._layout.library_directory.glob(pattern), key=lambda item: item.name
@@ -1670,6 +1762,17 @@ class RootfsAssembler:
                 / library.relative_to(self._layout.base_prefix).as_posix()
             )
             self._copy_entry(library, runtime_library)
+
+    def _omits_python_runtime_profile_path(self, source: Path) -> bool:
+        """@brief 将当前 stdlib source 交给固定 runtime profile / Apply the fixed runtime profile to one stdlib source.
+
+        @param source 待递归复制的 lexical stdlib path / Lexical stdlib path considered by recursive copying.
+        @return 该 source 应从 base image 排除时为真 / True when the source must stay out of the base image.
+        """
+
+        return self._python_runtime_profile.omits_standard_library_path(
+            self._layout.standard_library, source
+        )
 
     def _copy_admitted_python_sources(self) -> None:
         """@brief 复制显式允许的 path-only ``.pth`` Python sources / Copy explicitly admitted path-only ``.pth`` Python sources.
@@ -2652,6 +2755,7 @@ def build_image(spec: BuildSpec) -> tuple[Path, str]:
             readelf=spec.readelf,
             ldconfig=spec.ldconfig,
             venv_relocation=spec.venv_relocation,
+            python_runtime_profile=spec.python_runtime_profile,
         )
         assembler.build(
             bash=spec.bash, gnu_commands=spec.gnu_commands, supervisor=spec.supervisor

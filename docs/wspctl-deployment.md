@@ -211,6 +211,21 @@ artifact store 同一 filesystem 的私有 staging 目录写入；然后调用 `
 generation 永不覆盖。下面的命令只是一份小 GNU allowlist；要增加工具时必须逐一审查并新增
 `--gnu-command`，不能把宿主 `/usr/bin` 整体复制进去。
 
+### Headless Python runtime profile
+
+当前构建器固定使用可审计的 `headless-python-v1` profile，而不是把 CPython 的整棵 stdlib 当作
+runtime contract。它在 ELF dependency closure（ELF 依赖闭包）扫描**之前**排除 Tcl/Tk GUI 的
+`tkinter/`、`_tkinter.*`、`idlelib/`、`turtle.py` 与 `turtledemo/`。这是一个有意的 API 边界：
+workspace 内 `import tkinter` 不受支持；不能通过在 host 安装 Tcl/Tk，或忽略一个已复制 `_tkinter`
+ELF 的缺失 library，来“修复” image build。CPython 本身也将 `tkinter` 定义为 optional module（可选模块），
+并将其作为 Tcl/Tk 的 Python interface（Python 接口）[Python 3.14 文档](https://docs.python.org/3/library/tkinter.html)。
+
+该排除**不**是对 ELF 错误的宽容策略。所有仍纳入 profile 的 extension module、Bash、GNU command 与
+`wsp-systemd` 继续以 `readelf`、受控 RPATH/RUNPATH 和 `ldconfig` 求完整且 ABI 匹配的 closure；任何
+缺库、ABI 不匹配或 host-specific library path 都会使 build 失败且不会发布 generation。未来若确实要支持
+GUI，必须新增一个独立、版本化 profile，并在该 profile 的闭包、运行时行为与安全边界均有测试后才可启用；
+不得向现有 headless profile 添加隐式 fallback。
+
 ```bash
 build_dir="$PWD/build/wspctl-prod"
 artifact_store=/srv/fogmoe-wspctl-image-store
