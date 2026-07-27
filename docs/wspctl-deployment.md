@@ -46,23 +46,25 @@ cmake -S . -B build/wspctl-dev \
 
 ### 本机开发的单一启动入口
 
-开发机不需要手工拼接 CMake、image builder、unit 与 socket 检查。先由操作者准备好
-`./.wspctl/state` 这个**独立**的 XFS `prjquota`/`pquota` mount（不能是 checkout 的普通目录），随后执行：
+开发机不需要手工拼接 loopback XFS、CMake、image builder、unit 与 socket 检查；随后直接执行：
 
 ```bash
 ./scripts/start-wspctld.sh
 ```
 
-脚本会在产物缺失时创建项目 `.venv`、执行 `pip install --editable .` 并实际导入
+脚本首次会在 checkout 内创建 root-owned、**预分配 32 GiB** 的
+`./.wspctl/state.xfs.img`，将其作为独立的 XFS `prjquota` mount 到 `./.wspctl/state`；它不使用稀疏
+文件，因此 image 容量会立即从 host filesystem 保留。随后脚本会在产物缺失时创建项目 `.venv`、执行 `pip install --editable .` 并实际导入
 `wspctl._native`，接着构建/安装 `wspctld`、`wsp-systemd` 与 `wspctl-image`；只有 generation 缺失时才构建
 rootfs，并将它以真实的 readonly bind mount 发布。它用 unit、environment、host executable 与 generation 的
 fingerprint 判定是否需要重启，因此普通的重复调用只检查健康 socket，不会冲掉 15 分钟 activation cache。
-它绝不 `mkfs`、自动选盘或以普通 filesystem 替代 XFS quota。
+它只会在刚创建的自己的 loop image 上执行一次 `mkfs.xfs`；已有 image 若不是 XFS 会失败，绝不重格式化。
 
 `./runBot.sh start` 在启动 Bot 前自动调用该脚本；sudo 只发生在交互式开发者终端，Bot 进程从不持有 sudo。
 直接在 host 上运行 `runBot.sh` 时，脚本默认允许当前 UID 连接 socket；若 Bot 由 Compose 的固定 UID
 `65532` 运行，改为 `WSPCTL_CLIENT_UID=65532 ./scripts/start-wspctld.sh`。可用
 `WSPCTL_GENERATION=<new-name>` 显式发布新的开发 generation；已有 generation 从不覆盖。
+要在首次创建时调整容量，传 `WSPCTL_LOOP_SIZE=48G`；已有 image 不自动扩容或重建。
 
 生产构建不允许隐式选择该目录，必须给出绝对 host root：
 

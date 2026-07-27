@@ -21,6 +21,10 @@ PYTHON_EXECUTABLE="$VENV_DIR/bin/python"
 WORK_ROOT="$REPOSITORY_ROOT/.wspctl"
 # @brief XFS persistent-state mountpoint / XFS persistent-state mountpoint.
 STATE_ROOT="$WORK_ROOT/state"
+# @brief checkout-local loopback XFS image / Checkout-local loopback XFS image.
+LOOP_IMAGE="$WORK_ROOT/state.xfs.img"
+# @brief 首次创建 loopback image 的容量 / Capacity used when initially creating the loopback image.
+LOOP_SIZE="${WSPCTL_LOOP_SIZE:-32G}"
 # @brief readonly generation publication root / Readonly generation publication root.
 IMAGES_ROOT="$WORK_ROOT/images"
 # @brief root-owned source generation store / Root-owned source generation store.
@@ -70,10 +74,17 @@ require_generation() {
         || die "WSPCTL_GENERATION 只能包含字母、数字、点、下划线和连字符，且不能以点开头"
 }
 
+# @brief 校验首次创建 loopback image 的容量拼写 / Validate the capacity spelling for initial loopback-image creation.
+# @param $1 容量文本 / Capacity text.
+require_loop_size() {
+    [[ "$1" =~ ^[1-9][0-9]*[KMGTP]$ ]] \
+        || die "WSPCTL_LOOP_SIZE 必须是类似 20G 的正整数 IEC 容量"
+}
+
 # @brief 验证开发机的基础命令 / Verify development-machine prerequisite commands.
 require_commands() {
     local command_name
-    for command_name in cmake sudo systemctl findmnt mountpoint mount install readelf ldconfig bash sha256sum flock grep tr stat awk git; do
+    for command_name in cmake sudo systemctl findmnt mountpoint mount install readelf ldconfig bash sha256sum flock grep tr stat awk git fallocate losetup mkfs.xfs blkid; do
         command -v "$command_name" >/dev/null 2>&1 \
             || die "缺少必需命令: $command_name"
     done
@@ -112,6 +123,49 @@ ensure_host_artifacts() {
         || die "CMake 没有产生 wsp-systemd"
     [[ -x "$BUILD_DIRECTORY/src/wspctl/wspctl-image" ]] \
         || die "CMake 没有产生 wspctl-image"
+}
+
+# @brief 在首次开发启动时创建并挂载 loopback XFS / Create and mount the loopback XFS on the first development start.
+#
+# 镜像放在 state mountpoint 的同级目录，因而不会被自身挂载遮蔽。已存在的镜像绝不重新
+# format：若其不是 XFS，直接失败而不是猜测使用者是否愿意丢失数据。/
+# The image lives beside the state mountpoint and is therefore never hidden by its own mount.
+# An existing image is never reformatted: if it is not XFS, fail rather than guessing whether
+# the user agrees to lose data.
+ensure_loopback_state_mount() {
+    local loop_device=""
+    local filesystem_type=""
+    local created_image=false
+
+    if sudo mountpoint -q "$STATE_ROOT"; then
+        return 0
+    fi
+    if ! sudo test -e "$LOOP_IMAGE"; then
+        note "创建预分配的 $LOOP_SIZE loopback XFS image: $LOOP_IMAGE"
+        sudo fallocate --length "$LOOP_SIZE" "$LOOP_IMAGE"
+        sudo chown root:root "$LOOP_IMAGE"
+        sudo chmod 0600 "$LOOP_IMAGE"
+        created_image=true
+    fi
+
+    loop_device="$(sudo losetup --associated "$LOOP_IMAGE" | awk -F: 'NR == 1 {print $1}')"
+    if [[ -z "$loop_device" ]]; then
+        loop_device="$(sudo losetup --find --show "$LOOP_IMAGE")"
+    fi
+    [[ "$loop_device" = /dev/loop* ]] \
+        || die "无法为 loopback image 获得 loop device: $LOOP_IMAGE"
+
+    if [[ "$created_image" == true ]]; then
+        sudo mkfs.xfs "$loop_device"
+    else
+        filesystem_type="$(sudo blkid --output value --tag TYPE "$loop_device" 2>/dev/null || true)"
+        [[ "$filesystem_type" == "xfs" ]] \
+            || die "已有 loopback image 不是 XFS；拒绝重新格式化: $LOOP_IMAGE"
+    fi
+
+    sudo install -d -o root -g root -m 0700 "$STATE_ROOT"
+    note "挂载 loopback XFS project-quota state: $loop_device -> $STATE_ROOT"
+    sudo mount -t xfs -o rw,prjquota "$loop_device" "$STATE_ROOT"
 }
 
 # @brief 确认 state root 是已经准备好的强制 XFS project-quota mount / Confirm state root is a provisioned enforcing XFS project-quota mount.
@@ -193,6 +247,12 @@ install_service_configuration() {
     local environment_template="$BUILD_DIRECTORY/deploy/wspctl/systemd/wspctld.env.example"
     local environment_file="$WORK_ROOT/wspctld.env"
     local base_root="$IMAGES_ROOT/$GENERATION/rootfs"
+    local filesystem_bytes
+    local filesystem_inodes
+    local reserve_bytes
+    local reserve_inodes
+    local admission_bytes
+    local admission_inodes
 
     [[ -f "$unit_source" && -f "$environment_template" ]] \
         || die "CMake 没有生成 systemd 部署资产"
@@ -205,6 +265,30 @@ install_service_configuration() {
         "$environment_file"
     sudo sed --in-place --regexp-extended \
         "s|^WSPCTL_BASE_ROOT=.*$|WSPCTL_BASE_ROOT=$base_root|" \
+        "$environment_file"
+    # Loopback image 的容量是显式上限，不能沿用生产模板的 50 GiB admission budget。
+    # The loopback image is an explicit capacity ceiling and must not inherit the production
+    # template's 50 GiB admission budget.
+    filesystem_bytes="$(sudo stat --file-system --format='%S * %b' "$STATE_ROOT")"
+    filesystem_inodes="$(sudo stat --file-system --format='%c' "$STATE_ROOT")"
+    filesystem_bytes=$((filesystem_bytes))
+    reserve_bytes=$((filesystem_bytes / 5))
+    admission_bytes=$((filesystem_bytes - reserve_bytes))
+    reserve_inodes=$((filesystem_inodes / 5))
+    admission_inodes=$((filesystem_inodes - reserve_inodes))
+    (( admission_bytes >= 1090519040 && admission_inodes >= 139264 )) \
+        || die "loopback XFS 太小，至少需要容纳一个 1 GiB workspace 配额与 control layer"
+    sudo sed --in-place --regexp-extended \
+        "s|^WSPCTL_XFS_GLOBAL_ADMISSION_BYTES=.*$|WSPCTL_XFS_GLOBAL_ADMISSION_BYTES=$admission_bytes|" \
+        "$environment_file"
+    sudo sed --in-place --regexp-extended \
+        "s|^WSPCTL_XFS_SYSTEM_RESERVE_BYTES=.*$|WSPCTL_XFS_SYSTEM_RESERVE_BYTES=$reserve_bytes|" \
+        "$environment_file"
+    sudo sed --in-place --regexp-extended \
+        "s|^WSPCTL_XFS_GLOBAL_ADMISSION_INODES=.*$|WSPCTL_XFS_GLOBAL_ADMISSION_INODES=$admission_inodes|" \
+        "$environment_file"
+    sudo sed --in-place --regexp-extended \
+        "s|^WSPCTL_XFS_SYSTEM_RESERVE_INODES=.*$|WSPCTL_XFS_SYSTEM_RESERVE_INODES=$reserve_inodes|" \
         "$environment_file"
     sudo chown root:root "$environment_file"
     sudo chmod 0600 "$environment_file"
@@ -291,11 +375,13 @@ stop_service() {
 start() {
     require_uid "$CLIENT_UID"
     require_generation "$GENERATION"
+    require_loop_size "$LOOP_SIZE"
     require_commands
     mkdir -p "$REPOSITORY_ROOT/.runtime"
     exec 9>"$LOCK_FILE"
     flock 9
     prepare_control_plane_directories
+    ensure_loopback_state_mount
     require_state_mount
     ensure_editable_client
     ensure_host_artifacts
@@ -310,13 +396,14 @@ show_help() {
     cat <<'EOF'
 用法: scripts/start-wspctld.sh [start|status|stop|help]
 
-start（默认）会构建缺失的 editable client、host binaries 与 immutable generation，
-再确保 systemd 的 wspctld.service 和 socket 可用。它要求 ./.wspctl/state 已经是
-专用 XFS prjquota/pquota mount；脚本绝不格式化或猜测磁盘设备。
+start（默认）会在 ./.wspctl/state.xfs.img 首次创建预分配的 loopback XFS（32G），
+以 prjquota 挂载到 ./.wspctl/state，构建缺失的 editable client、host binaries 与
+immutable generation，再确保 systemd 的 wspctld.service 和 socket 可用。
 
 环境变量：
   WSPCTL_CLIENT_UID   broker 接受的 Bot UID；默认当前运行 runBot.sh 的 UID。
   WSPCTL_GENERATION   immutable generation 名；默认当前 git commit 的 dev-<short-sha>。
+  WSPCTL_LOOP_SIZE    首次创建 image 的容量；默认 32G，已有 image 不会自动 resize。
 EOF
 }
 

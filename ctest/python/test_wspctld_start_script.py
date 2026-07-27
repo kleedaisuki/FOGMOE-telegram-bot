@@ -33,9 +33,17 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
     assert "import wspctl._native" in script
     assert "-DWSPCTL_INSTALL_HOST_TOOLS=ON" in script
     assert "-DWSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT=ON" in script
+    assert "WSPCTL_LOOP_SIZE" in script
+    assert 'LOOP_SIZE="${WSPCTL_LOOP_SIZE:-32G}"' in script
+    assert "fallocate --length" in script
+    assert "losetup --find --show" in script
+    assert "mkfs.xfs" in script
+    assert "已有 loopback image 不是 XFS；拒绝重新格式化" in script
     assert 'mountpoint -q "$STATE_ROOT"' in script
     assert "prjquota" in script
     assert "pqnoenforce" in script
+    assert "WSPCTL_XFS_GLOBAL_ADMISSION_BYTES" in script
+    assert "WSPCTL_XFS_SYSTEM_RESERVE_BYTES" in script
     assert "--allow-insecure-development-output" in script
     assert "mount -o remount,bind,ro" in script
     assert "systemctl start" in script
