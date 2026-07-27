@@ -117,7 +117,10 @@ def test_safe_mapper_extracts_text_edits_and_media_without_sdk_objects() -> None
     assert edited is not None and edited.edited and edited.content == "edited"
     assert edited.updated_at > edited.created_at
     assert sticker is not None and sticker.kind is GroupMessageKind.STICKER
-    assert sticker.content == "🔥"
+    # 群媒体只作为观察标记；emoji/caption/filename 不得经 fetch_group_context 回流模型。
+    # Group media is only an observation marker; emoji/caption/filename must not reach the
+    # model through fetch_group_context.
+    assert sticker.content == "<group_attachment />"
 
     malformed = _update(4)
     malformed.payload["update_id"] = 999

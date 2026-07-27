@@ -68,6 +68,17 @@
       // 关闭进程时等待 durable drain 的全局截止秒数；Compose 部署要求 1..190。
       "shutdown_grace_seconds": 180.0
     },
+    // wspctl 的无特权 Bot client；host mount、base image 与 cgroup 策略只能由 wspctld 服务配置。
+    "workspace": {
+      // 开发态由 root-owned wspctld 在本配置文件相邻 .wspctl/run/ 下创建的 Unix SOCK_SEQPACKET socket。
+      // 相对路径只在 JSONC 读取时解析；Docker 生产态保持这个 container-visible 路径，
+      // 只需把 root-owned host socket 目录映射到 /app/.wspctl/run。直接 host client 才写绝对路径。
+      "broker_socket_path": ".wspctl/run/wspctld.sock",
+      // 固定为 15 分钟：Bot 的本地 RuntimeProcess handle 与 broker activation 的空闲缓存期限。
+      "client_idle_cache_seconds": 900,
+      // 单次 run_bash 合并 stdout/stderr 可返回给 Agent 的最大字节数。
+      "output_limit_bytes": 65536
+    },
     // 定时任务调度器。
     "scheduling": {
       // 调度 worker 数量。
@@ -105,10 +116,10 @@
       "max_poll_interval_seconds": 0.5,
       // 单个 provider 调用的超时秒数。
       "provider_timeout_seconds": 90,
-      // 推理作业租约秒数。
-      "lease_seconds": 180,
-      // 包含 provider fallback 的单次尝试总超时秒数。
-      "attempt_timeout_seconds": 120
+      // 推理作业租约秒数：覆盖一次最长 run_bash、后续模型收尾与 durable finalize。
+      "lease_seconds": 600,
+      // 包含 provider fallback、一次最长 300 秒 run_bash 与收尾的单次尝试总超时秒数。
+      "attempt_timeout_seconds": 540
     },
     // Telegram 出站投递工作队列。
     "outbox": {
@@ -381,6 +392,7 @@
         "retrieval",
         "user_profile",
         "assistant",
+        "workspace",
         "bank",
         "billing",
         "town",
@@ -430,13 +442,6 @@
     "search": {
       // SerpApi API 密钥。
       "serpapi_api_key": null
-    },
-    // 代码执行服务（Judge0）。
-    "code_execution": {
-      // Judge0 API 基础 URL。
-      "judge0_api_url": "https://ce.judge0.com",
-      // Judge0 API 密钥。
-      "judge0_api_key": null
     },
     // 图片生成服务。
     "image_generation": {

@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.11", "pybind11>=3,<4"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "fogmoe-telegram-bot"
@@ -41,7 +41,7 @@ dev = [
 [tool.mypy]
 python_version = "3.14"
 strict = true
-packages = ["fogmoe_bot", "fogmoe_config", "fogmoe_dashboard", "fogmoe_dbctl"]
+packages = ["fogmoe_bot", "fogmoe_config", "fogmoe_dashboard", "fogmoe_dbctl", "wspctl"]
 exclude = ["^tests/"]
 warn_unreachable = true
 show_error_codes = true
@@ -52,6 +52,7 @@ include = [
     "src/fogmoe_config",
     "src/fogmoe_dashboard",
     "src/fogmoe_dbctl",
+    "src/wspctl",
 ]
 pythonVersion = "3.14"
 venvPath = "."
@@ -63,15 +64,23 @@ fogmoe-dashboard = "fogmoe_dashboard.presentation.cli:main"
 fogmoe-dashboard-gui = "fogmoe_dashboard.presentation.gui.app:main"
 fogmoe-dbctl = "fogmoe_dbctl.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-fogmoe_dbctl = ["migrations/sql/postgresql/*.sql", "py.typed"]
-fogmoe_bot = ["py.typed"]
-fogmoe_config = ["py.typed"]
-fogmoe_dashboard = ["py.typed"]
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.28"
+ninja.version = ">=1.11"
+wheel.packages = [
+    "src/fogmoe_bot",
+    "src/fogmoe_config",
+    "src/fogmoe_dashboard",
+    "src/fogmoe_dbctl",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pybind11>=3,<4",
+    "scikit-build-core>=0.11",
+]

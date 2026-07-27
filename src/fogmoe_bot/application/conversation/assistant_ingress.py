@@ -15,6 +15,10 @@ from fogmoe_bot.application.assistant.inference_command import (
     DurableAssistantUser,
     DurableUserProfile,
 )
+from fogmoe_bot.application.assistant.current_turn_upload import (
+    CURRENT_TURN_UPLOAD_MAX_BYTES,
+    CurrentTurnUploadReference,
+)
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCapability,
     StandaloneOutboundCommand,
@@ -47,8 +51,12 @@ from fogmoe_bot.domain.user_profile.models import UserProfileSnapshot
 ASSISTANT_TEXT_LIMIT = 4096
 """@brief Assistant 文本输入上限 / Assistant text-input limit."""
 
-ASSISTANT_MEDIA_LIMIT_BYTES = 8 * 1024 * 1024
-"""@brief Assistant 单媒体下载上限 / Per-media Assistant download limit."""
+ASSISTANT_MEDIA_LIMIT_BYTES = CURRENT_TURN_UPLOAD_MAX_BYTES
+"""@brief Assistant 单媒体下载上限 / Per-media Assistant download limit.
+
+该兼容名称与 ``CURRENT_TURN_UPLOAD_MAX_BYTES`` 指向同一边界。/ This compatibility
+name points to the same boundary as ``CURRENT_TURN_UPLOAD_MAX_BYTES``.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +114,9 @@ class AssistantTurnRequest:
     @param task_kind 推理任务种类 / Inference task kind.
     @param translation_input 翻译活动的隔离输入 / Isolated translation input.
     @param meta 用户定义的请求 metadata；默认空对象 / User-defined request metadata; defaults to an empty object.
+    @param current_turn_upload 可选的当前 Telegram 附件强类型引用；只适用于普通
+        Assistant Turn / Optional strongly typed current Telegram attachment reference; valid only
+        for a regular Assistant Turn.
     """
 
     update_id: UpdateId
@@ -124,6 +135,7 @@ class AssistantTurnRequest:
     task_kind: AssistantTaskKind = "assistant"
     translation_input: str | None = None
     meta: RequestMeta = field(default_factory=lambda: normalize_request_meta({}))
+    current_turn_upload: CurrentTurnUploadReference | None = None
 
     def __post_init__(self) -> None:
         """@brief 校验请求身份与 JSON / Validate request identity and JSON.
@@ -164,6 +176,24 @@ class AssistantTurnRequest:
                 )
         elif self.translation_input is not None:
             raise ValueError("translation_input is only valid for translation tasks")
+        upload = self.current_turn_upload
+        if upload is not None:
+            if not isinstance(upload, CurrentTurnUploadReference):
+                raise TypeError(
+                    "current_turn_upload must be a CurrentTurnUploadReference or None"
+                )
+            if self.task_kind != "assistant":
+                raise ValueError(
+                    "current_turn_upload is valid only for assistant tasks"
+                )
+            if upload.source_update_id != self.update_id.value:
+                raise ValueError(
+                    "current_turn_upload source_update_id must match update_id"
+                )
+            if upload.source_message_id != self.message_id:
+                raise ValueError(
+                    "current_turn_upload source_message_id must match message_id"
+                )
         object.__setattr__(self, "received_at", ensure_utc(self.received_at))
         object.__setattr__(self, "display_name", self.display_name.strip())
         if self.username is not None:
@@ -238,6 +268,7 @@ class AssistantTurnRequest:
             protect_content=False,
             disable_web_page_preview=False,
             meta=request_meta_to_json(self.meta),
+            current_turn_upload=self.current_turn_upload,
         ).to_json()
         return AcceptConversationTurn(
             source=source,

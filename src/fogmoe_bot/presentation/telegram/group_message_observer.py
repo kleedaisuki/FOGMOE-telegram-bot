@@ -19,6 +19,19 @@ from fogmoe_bot.domain.conversation.payloads import (
 )
 
 
+_GROUP_ATTACHMENT_MARKER = "<group_attachment />"
+"""@brief 未导入群附件的非可执行模型标记 / Non-actionable model marker for an unimported group attachment.
+
+@note 群消息观察器没有当前 Assistant Turn 的 ``RuntimeProcess.add_file`` 成功 receipt，
+    因而绝不能把任何群媒体伪装成 ``<workspace_file>``。/ The group-message
+    observer has no successful current-Assistant-Turn ``RuntimeProcess.add_file`` receipt, so it
+    must never present any group media as a ``<workspace_file>``.
+"""
+
+_GROUP_SERVICE_MESSAGE_MARKER = "[service message]"
+"""@brief 非媒体 service 更新的固定可读标记 / Stable readable marker for a non-media service update."""
+
+
 class GroupMessageIngressObserver:
     """@brief 将 durable Update 投影到规范群消息表 / Project durable Updates into canonical group messages.
 
@@ -182,36 +195,34 @@ def extract_group_message_observation(
 
 
 def _content(message: JsonObject) -> tuple[GroupMessageKind, str]:
-    """@brief 将 Telegram 内容规范为有界可读文本 / Normalize Telegram content to bounded readable text."""
+    """@brief 将 Telegram 内容规范为模型安全的群上下文 / Normalize Telegram content into model-safe group context.
+
+    @param message Telegram Update 中的规范 message JSON / Canonical message JSON from a Telegram Update.
+    @return 文本保留原文；所有媒体仅保留类别和固定标记 / Text retains its body; all media retain only kind and a fixed marker.
+    @note 此观察投影用于 ``fetch_group_context``，而不是当前 Turn 的 Workspace 导入。
+        caption、文件名、贴纸 emoji 与 provider ID 可能是用户内容或能力，因此均不得进入此
+        projection。/ This observer projection is for ``fetch_group_context``, not the current
+        Turn Workspace import. Captions, filenames, sticker emoji, and provider IDs may be user
+        content or capabilities, so none may enter this projection.
+    """
 
     text = message.get("text")
     if isinstance(text, str):
         return GroupMessageKind.TEXT, text
-    caption = message.get("caption")
-    caption_text = caption if isinstance(caption, str) else ""
     if isinstance(message.get("photo"), list):
-        return GroupMessageKind.PHOTO, caption_text or "[photo]"
-    sticker = _object(message.get("sticker"))
-    if sticker is not None:
-        emoji = sticker.get("emoji")
-        return GroupMessageKind.STICKER, emoji if isinstance(
-            emoji, str
-        ) else "[sticker]"
+        return GroupMessageKind.PHOTO, _GROUP_ATTACHMENT_MARKER
+    if _object(message.get("sticker")) is not None:
+        return GroupMessageKind.STICKER, _GROUP_ATTACHMENT_MARKER
     if _object(message.get("voice")) is not None:
-        return GroupMessageKind.VOICE, caption_text or "[voice message]"
+        return GroupMessageKind.VOICE, _GROUP_ATTACHMENT_MARKER
     if (
         _object(message.get("video")) is not None
         or _object(message.get("animation")) is not None
     ):
-        return GroupMessageKind.VIDEO, caption_text or "[video message]"
-    document = _object(message.get("document"))
-    if document is not None:
-        file_name = document.get("file_name")
-        return (
-            GroupMessageKind.DOCUMENT,
-            caption_text or (file_name if isinstance(file_name, str) else "[document]"),
-        )
-    return GroupMessageKind.OTHER, caption_text or "[service message]"
+        return GroupMessageKind.VIDEO, _GROUP_ATTACHMENT_MARKER
+    if _object(message.get("document")) is not None:
+        return GroupMessageKind.DOCUMENT, _GROUP_ATTACHMENT_MARKER
+    return GroupMessageKind.OTHER, _GROUP_SERVICE_MESSAGE_MARKER
 
 
 def _object(value: JsonValue | None) -> JsonObject | None:

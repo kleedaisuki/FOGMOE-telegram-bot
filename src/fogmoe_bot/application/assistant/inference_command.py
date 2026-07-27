@@ -24,6 +24,10 @@ from pydantic import (
     model_validator,
 )
 
+from fogmoe_bot.application.assistant.current_turn_upload import (
+    CURRENT_TURN_UPLOAD_MAX_BYTES,
+    CurrentTurnUploadReference,
+)
 from fogmoe_bot.application.conversation.telegram_identity import (
     TelegramConversationAddress,
 )
@@ -191,6 +195,8 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
     @param allow_tools 当前 Turn 是否具有工具 capability / Whether this Turn has tool capability.
     @param allowed_tools 可选 Turn 级工具 allowlist；None 表示完整目录 /
         Optional turn-level tool allowlist; None means the complete catalog.
+    @param current_turn_upload 可选的当前 Telegram 附件引用；旧 durable JSON 可省略 /
+        Optional current Telegram attachment reference; older durable JSON may omit it.
     @param meta 用户定义、显式可映射的请求 metadata / User-defined, explicitly mappable request metadata.
     """
 
@@ -210,6 +216,7 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
     disable_web_page_preview: bool = True
     allow_tools: bool = True
     allowed_tools: tuple[str, ...] | None = Field(default=None, max_length=32)
+    current_turn_upload: CurrentTurnUploadReference | None = None
     meta: RequestMeta = Field(default_factory=lambda: normalize_request_meta({}))
 
     @field_validator("meta")
@@ -307,6 +314,27 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
             raise ValueError("translation_input is only valid for translation")
         if not self.allow_tools and self.allowed_tools is not None:
             raise ValueError("allowed_tools requires allow_tools")
+        upload = self.current_turn_upload
+        if upload is not None:
+            if self.task_kind != "assistant":
+                raise ValueError(
+                    "current_turn_upload is valid only for assistant tasks"
+                )
+            if self.scope.message_id is None:
+                raise ValueError(
+                    "current_turn_upload requires a current scope message_id"
+                )
+            if upload.source_message_id != self.scope.message_id:
+                raise ValueError(
+                    "current_turn_upload source_message_id must match scope message_id"
+                )
+            if (
+                upload.declared_byte_size is not None
+                and upload.declared_byte_size > CURRENT_TURN_UPLOAD_MAX_BYTES
+            ):
+                raise ValueError(
+                    "current_turn_upload declared_byte_size exceeds the 8 MiB limit"
+                )
         if self.scope.is_group:
             if not isinstance(self.chat_id, int):
                 raise ValueError("group scope requires an integer chat_id")
@@ -372,7 +400,13 @@ class DurableAssistantInferenceCommand(_StrictFrozenModel):
         @return 只含 JSON 值的深拷贝 / Deep copy containing only JSON values.
         """
 
-        return cast(JsonObject, self.model_dump(mode="json"))
+        payload = self.model_dump(mode="json")
+        # 保持没有 Document 的既有 durable JSON 形状，使旧 activity 行在新 reader 中
+        # 仍以缺省值重建。 Preserve the established durable JSON shape when no Document is
+        # present, so older activity rows rebuild through the default value in a new reader.
+        if self.current_turn_upload is None:
+            payload.pop("current_turn_upload", None)
+        return cast(JsonObject, payload)
 
     @classmethod
     def from_json(cls, payload: JsonObject) -> Self:

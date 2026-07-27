@@ -36,6 +36,20 @@ from fogmoe_config.jsonc import JsoncDecodeError, JSONValue, load_jsonc
 SCHEMA_VERSION: Final[int] = 2
 #: @brief Compose 强制终止前允许的最大运行时排空秒数 / Maximum runtime drain seconds before Compose escalation.
 MAX_SHUTDOWN_GRACE_SECONDS: Final[int] = 190
+#: @brief 源码树开发态 wspctl 工作根 / Source-tree development wspctl work root.
+#:
+#: 这是 ``BotSettings()`` 未经 JSONC 文件边界构造时使用的本地默认值。正式部署的 JSONC
+#: 可以保留相对的 container-visible socket（由配置文件位置解析），或提供显式的 client-visible
+#: 绝对路径；host 的 state/image root 从不由此配置下放。/
+#: This is the local default used when ``BotSettings()`` is constructed without the JSONC
+#: file boundary. Production JSONC may retain a relative container-visible socket (resolved
+#: from the configuration-file location) or provide an explicit client-visible absolute path;
+#: this configuration never delegates host state/image roots.
+DEVELOPMENT_WSPCTL_WORK_ROOT: Final[Path] = Path(__file__).resolve().parents[2] / ".wspctl"
+#: @brief 源码树开发态 broker socket 路径 / Source-tree development broker socket path.
+DEVELOPMENT_WSPCTL_SOCKET_PATH: Final[str] = str(
+    DEVELOPMENT_WSPCTL_WORK_ROOT / "run" / "wspctld.sock"
+)
 
 
 #: @brief 配置允许的日志级别 / Allowed logging levels.
@@ -178,6 +192,43 @@ class MailboxRuntimeSettings(_FrozenSettings):
         return self
 
 
+class WorkspaceRuntimeSettings(_FrozenSettings):
+    """@brief wspctl 客户端运行时设置 / Runtime settings for the wspctl client.
+
+    特权 broker 的 base image、host mount、cgroup 与状态根均不属于 Bot 配置；它们由
+    单独的 host service 固定。Bot 只知道受权限保护的 Unix socket 与不可改变的本地
+    handle 缓存期限。/ The privileged broker's base image, host mounts, cgroups, and state
+    root do not belong in Bot configuration; a separate host service fixes them. The Bot knows
+    only the permission-protected Unix socket and the fixed local-handle cache lifetime.
+    """
+
+    broker_socket_path: str = DEVELOPMENT_WSPCTL_SOCKET_PATH
+    client_idle_cache_seconds: Literal[900] = 900
+    output_limit_bytes: Annotated[int, Field(ge=4_096, le=96 * 1024)] = 65_536
+
+    @field_validator("broker_socket_path")
+    @classmethod
+    def _validate_broker_socket_path(cls, value: str) -> str:
+        """@brief 校验 broker Unix socket 的绝对路径 / Validate the broker Unix-socket absolute path.
+
+        @param value 原始 socket 路径 / Raw socket path.
+        @return 已裁剪绝对路径 / Trimmed absolute path.
+        @raise ValueError 路径为空、含 NUL 或不是绝对路径时抛出 /
+            Raised for a blank, NUL-containing, or non-absolute path.
+
+        @note JSONC 输入边界会先把受限的 ``.wspctl/...`` 相对路径解析为绝对路径；
+            模型本身始终只存绝对路径。/
+            The JSONC input boundary first resolves a restricted ``.wspctl/...`` relative
+            path to an absolute client-visible one; the model itself always stores an absolute
+            path.
+        """
+
+        normalized = _non_blank(value, field_name="broker_socket_path")
+        if "\x00" in normalized or not normalized.startswith("/"):
+            raise ValueError("broker_socket_path must be a NUL-free absolute path")
+        return normalized
+
+
 class SchedulingRuntimeSettings(_FrozenSettings):
     """@brief 定时任务 worker 设置 / Scheduling worker settings."""
 
@@ -264,8 +315,8 @@ class InferenceRuntimeSettings(_AdaptivePollingSettings):
     poll_interval_seconds: PositiveFloat = 0.25
     max_poll_interval_seconds: PositiveFloat = 0.5
     provider_timeout_seconds: PositiveInt = 90
-    lease_seconds: PositiveInt = 180
-    attempt_timeout_seconds: PositiveInt = 120
+    lease_seconds: PositiveInt = 600
+    attempt_timeout_seconds: PositiveInt = 540
 
     @model_validator(mode="after")
     def _validate_lease(self) -> InferenceRuntimeSettings:
@@ -378,6 +429,9 @@ class RuntimeSettings(_FrozenSettings):
     """@brief 进程并发与 durable worker 设置 / Process concurrency and durable-worker settings."""
 
     mailbox: MailboxRuntimeSettings = Field(default_factory=MailboxRuntimeSettings)
+    workspace: WorkspaceRuntimeSettings = Field(
+        default_factory=WorkspaceRuntimeSettings
+    )
     scheduling: SchedulingRuntimeSettings = Field(
         default_factory=SchedulingRuntimeSettings
     )
@@ -906,6 +960,7 @@ class ApplicationDatabaseSettings(_FrozenSettings):
         "retrieval",
         "user_profile",
         "assistant",
+        "workspace",
         "bank",
         "billing",
         "town",
@@ -964,13 +1019,6 @@ class SearchIntegrationSettings(_FrozenSettings):
     serpapi_api_key: SecretStr | None = None
 
 
-class CodeExecutionIntegrationSettings(_FrozenSettings):
-    """@brief 代码执行工具设置 / Code-execution tool settings."""
-
-    judge0_api_url: str = "https://ce.judge0.com"
-    judge0_api_key: SecretStr | None = None
-
-
 class ImageGenerationIntegrationSettings(_FrozenSettings):
     """@brief 图片生成工具设置 / Image-generation tool settings."""
 
@@ -992,9 +1040,6 @@ class IntegrationsSettings(_FrozenSettings):
     """@brief 外部工具与 API 设置 / External tool and API settings."""
 
     search: SearchIntegrationSettings = Field(default_factory=SearchIntegrationSettings)
-    code_execution: CodeExecutionIntegrationSettings = Field(
-        default_factory=CodeExecutionIntegrationSettings
-    )
     image_generation: ImageGenerationIntegrationSettings = Field(
         default_factory=ImageGenerationIntegrationSettings
     )
@@ -1089,7 +1134,7 @@ def read_bot_settings(path: Path | None = None) -> BotSettings:
     source_path = path or default_config_path()
     try:
         document = load_jsonc(source_path)
-        payload = _bot_payload(document)
+        payload = _bot_payload(document, source_path=source_path)
         return BotSettings.model_validate(payload)
     except JsoncDecodeError as error:
         raise ConfigurationError(str(error)) from error
@@ -1103,10 +1148,14 @@ def read_bot_settings(path: Path | None = None) -> BotSettings:
         ) from error
 
 
-def _bot_payload(document: Mapping[str, JSONValue]) -> dict[str, object]:
+def _bot_payload(
+    document: Mapping[str, JSONValue], *, source_path: Path | None = None
+) -> dict[str, object]:
     """@brief 提取 Bot 拥有的语义路径 / Extract semantic paths owned by the Bot.
 
     @param document 完整 JSONC 文档 / Complete JSONC document.
+    @param source_path 可选 JSONC 来源路径；用于稳定地解析开发态相对 socket /
+        Optional JSONC source path; used to resolve the development-relative socket stably.
     @return 供 BotSettings 验证的投影 / Projection for BotSettings validation.
     @raise ConfigurationError 某个所需路径不是对象时抛出 /
         Raised when a required path is not an object.
@@ -1115,7 +1164,7 @@ def _bot_payload(document: Mapping[str, JSONValue]) -> dict[str, object]:
     _require_schema_version(document)
     database = _object_at(document, "database")
     observability = _object_at(document, "observability")
-    return {
+    payload: dict[str, object] = {
         "identity": _object_at(document, "identity"),
         "telegram": _object_at(document, "telegram"),
         "runtime": _object_at(document, "runtime"),
@@ -1133,6 +1182,60 @@ def _bot_payload(document: Mapping[str, JSONValue]) -> dict[str, object]:
             key: value for key, value in observability.items() if key != "dashboard"
         },
     }
+    _resolve_workspace_socket_path(payload, source_path or default_config_path())
+    return payload
+
+
+def _resolve_workspace_socket_path(
+    payload: dict[str, object], source_path: Path
+) -> None:
+    """@brief 将 JSONC 中受限的开发态 socket 相对路径解析为绝对路径 / Resolve a restricted development socket-relative path from JSONC to an absolute path.
+
+    @param payload Bot 配置投影，将被原地更新 / Bot configuration projection, updated in place.
+    @param source_path JSONC 配置文件路径 / JSONC configuration-file path.
+    @return None / None.
+    @raise ConfigurationError 相对路径逃出配置相邻 ``.wspctl`` 目录时抛出 /
+        Raised when a relative path escapes the ``.wspctl`` directory beside the configuration.
+
+    @note 只有 JSONC 文件输入可使用相对写法，避免调用方的 current working directory（当前工作目录）
+        改变 socket 指向。Docker production 可以保留相对路径，令 Compose 把 host socket
+        directory 映射到相同的 container-visible 位置；直接 host client 则使用绝对 socket 路径。/
+        Only JSONC file input may use the relative spelling, preventing the caller's current
+        working directory from changing the socket target. Docker production may retain the
+        relative spelling while Compose maps the host socket directory to the same
+        container-visible location; a direct host client uses an absolute socket path.
+    """
+
+    runtime = payload.get("runtime")
+    if not isinstance(runtime, Mapping):
+        return
+    workspace = runtime.get("workspace")
+    if not isinstance(workspace, Mapping):
+        return
+    raw_socket_path = workspace.get("broker_socket_path")
+    if not isinstance(raw_socket_path, str) or raw_socket_path.startswith("/"):
+        return
+    if "\x00" in raw_socket_path:
+        return
+
+    relative_path = Path(raw_socket_path)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise ConfigurationError(
+            f"{source_path}: runtime.workspace.broker_socket_path must be absolute "
+            "or stay below .wspctl"
+        )
+    workspace_root = (source_path.parent / ".wspctl").resolve(strict=False)
+    resolved_socket_path = (source_path.parent / relative_path).resolve(strict=False)
+    if not resolved_socket_path.is_relative_to(workspace_root):
+        raise ConfigurationError(
+            f"{source_path}: runtime.workspace.broker_socket_path must stay below .wspctl"
+        )
+
+    resolved_runtime = dict(runtime)
+    resolved_workspace = dict(workspace)
+    resolved_workspace["broker_socket_path"] = str(resolved_socket_path)
+    resolved_runtime["workspace"] = resolved_workspace
+    payload["runtime"] = resolved_runtime
 
 
 def _object_at(document: Mapping[str, JSONValue], key: str) -> Mapping[str, JSONValue]:
@@ -1198,6 +1301,7 @@ __all__ = [
     "RuntimeSettings",
     "SCHEMA_VERSION",
     "TelegramSettings",
+    "WorkspaceRuntimeSettings",
     "default_config_path",
     "read_bot_settings",
     "reveal_secret",

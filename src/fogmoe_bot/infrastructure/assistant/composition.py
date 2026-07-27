@@ -6,12 +6,18 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from fogmoe_bot.application.assistant.agent_loop import AgentLoop
+from fogmoe_bot.application.assistant.current_turn_upload import (
+    CurrentTurnUploadSource,
+)
 from fogmoe_bot.application.assistant.durable_inference import (
     DurableAssistantInferenceAdapter,
 )
 from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
 from fogmoe_bot.application.assistant.tool_runtime import AgentRuntime
 from fogmoe_bot.application.assistant.tools.catalog import DEFAULT_TOOL_CATALOG
+from fogmoe_bot.application.assistant.workspace_attachment_preprocessor import (
+    CurrentTurnWorkspaceAttachmentPreprocessor,
+)
 from fogmoe_bot.application.context_window.cache import ContextWindowCache
 from fogmoe_bot.application.context_window.projection import ContextWindowProjector
 from fogmoe_bot.application.context_window.worker import CompactionWorker
@@ -88,6 +94,12 @@ from fogmoe_bot.infrastructure.media.file_artifact_store import FileArtifactStor
 from fogmoe_bot.infrastructure.media.file_rate_limiter import FileSlidingWindowLimiter
 from fogmoe_bot.infrastructure.retrieval import OpenAICompatibleEmbeddings
 from fogmoe_bot.infrastructure.user_profile.dreaming_model import ProviderDreamingModel
+from fogmoe_bot.infrastructure.workspace.lifecycle import RuntimeProcessLifecycle
+from fogmoe_bot.infrastructure.workspace.registry import PostgresWorkspaceRuntimeRegistry
+from fogmoe_bot.infrastructure.workspace.wspctl import (
+    WspctlRuntimeProcessFactory,
+    WspctlRuntimeProcess,
+)
 from fogmoe_bot.resources import BotResources
 
 
@@ -104,6 +116,8 @@ class DurableAssistantComposition:
     @param artifacts outbox delivery 共享 artifact store / Artifact store shared with outbox delivery.
     @param blocking_bulkheads 由顶层运行时关停的阻塞 SDK 隔舱 /
         Blocking SDK bulkheads closed by the top-level runtime.
+    @param runtime_process_lifecycle 由顶层运行时关停的 RuntimeProcess cache lifecycle /
+        RuntimeProcess-cache lifecycle closed by the top-level runtime.
     """
 
     inference: DurableAssistantInferenceAdapter
@@ -114,6 +128,7 @@ class DurableAssistantComposition:
     llm_client: ProviderCompletionClient
     artifacts: FileArtifactStore
     blocking_bulkheads: tuple[AsyncBlockingBulkhead, ...]
+    runtime_process_lifecycle: RuntimeProcessLifecycle
 
 
 def build_durable_assistant(
@@ -122,6 +137,7 @@ def build_durable_assistant(
     resources: BotResources,
     context_window: PostgresContextWindowStore | None = None,
     telemetry: Telemetry,
+    current_turn_upload_source: CurrentTurnUploadSource | None = None,
 ) -> DurableAssistantComposition:
     """@brief 装配 durable Assistant 及其外部 adapters / Compose the durable Assistant and its external adapters.
 
@@ -130,6 +146,9 @@ def build_durable_assistant(
     @param resources 组合根加载的只读资源 / Read-only resources loaded by the composition root.
     @param context_window 可替换 Context Window store / Replaceable Context Window store.
     @param telemetry 进程 typed telemetry / Process typed telemetry.
+    @param current_turn_upload_source 已初始化 Telegram Bot 的当前附件下载端口；None 仅允许
+        没有附件的旧 durable activity / Current-attachment download port backed by the
+        initialized Telegram Bot; None permits only legacy durable activities without attachments.
     @return 推理、后台 worker 与需关停资源 / Inference, background workers, and resources requiring shutdown.
     @note 本函数是外层 composition，不读取文件或环境；secret 仅在第三方 SDK 边界揭示。/
         This outer composition reads no files or environment; secrets are revealed only at third-party SDK boundaries.
@@ -197,9 +216,6 @@ def build_durable_assistant(
     artifacts = FileArtifactStore(resources.generated_artifact_directory)
     external_settings = ExternalReadSettings(
         serpapi_key=reveal_secret(settings.integrations.search.serpapi_api_key) or "",
-        judge0_url=settings.integrations.code_execution.judge0_api_url,
-        judge0_key=reveal_secret(settings.integrations.code_execution.judge0_api_key)
-        or "",
     )
     image_settings = settings.integrations.image_generation
     image_model = image_settings.model or ""
@@ -238,6 +254,21 @@ def build_durable_assistant(
         bulkhead=media_bulkhead,
         telemetry=telemetry,
     )
+    runtime_process = WspctlRuntimeProcess(
+        registry=PostgresWorkspaceRuntimeRegistry(),
+        process_factory=WspctlRuntimeProcessFactory(
+            runtime.workspace.broker_socket_path
+        ),
+        idle_ttl_seconds=runtime.workspace.client_idle_cache_seconds,
+    )
+    attachment_preprocessor = (
+        CurrentTurnWorkspaceAttachmentPreprocessor(
+            source=current_turn_upload_source,
+            runtime_process=runtime_process,
+        )
+        if current_turn_upload_source is not None
+        else None
+    )
     operations = AssistantToolOperationDispatcher(
         help_text=resources.help_text,
         external_reads=RequestsExternalReadTools(
@@ -263,8 +294,18 @@ def build_durable_assistant(
             default_time_zone=TimeZoneId(assistant_settings.time.default_timezone)
         ),
         scheduling=SchedulingService(),
+        runtime_process=runtime_process,
+        workspace_output_limit_bytes=runtime.workspace.output_limit_bytes,
     )
-    store = PostgresAssistantToolStore(operations=operations)
+    store = PostgresAssistantToolStore(
+        operations=operations,
+        # ``run_bash`` 允许 300 秒 wall-clock timeout；lease 必须覆盖命令、cold activation、supervisor
+        # 清理和 DB finalize，避免活跃命令在 receipt 尚未终结时被第二 worker 重领。
+        # / ``run_bash`` permits a 300-second wall-clock timeout. The lease must cover the
+        # command, supervisor cleanup, and DB finalization so a second worker cannot reclaim
+        # an active command before its receipt reaches a terminal state.
+        lease_for=timedelta(minutes=8),
+    )
     completion = ProviderCompletionClient(telemetry=telemetry)
     agent = AgentLoop(
         runtime=AgentRuntime(
@@ -362,6 +403,7 @@ def build_durable_assistant(
             ),
             inference=service,
             translation_inference=translation_service,
+            attachment_preprocessor=attachment_preprocessor,
         ),
         compaction=compaction,
         retrieval=retrieval,
@@ -374,6 +416,7 @@ def build_durable_assistant(
             media_bulkhead,
             sticker_bulkhead,
         ),
+        runtime_process_lifecycle=RuntimeProcessLifecycle(runtime_process),
     )
 
 

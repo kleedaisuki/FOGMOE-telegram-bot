@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import cast
@@ -29,8 +28,6 @@ class ExternalReadSettings:
     """@brief 外部读取配置 / External-read settings."""
 
     serpapi_key: str
-    judge0_url: str
-    judge0_key: str
     timeout_seconds: int = 10
 
 
@@ -110,8 +107,6 @@ class RequestsExternalReadTools:
             return self._search(request.arguments)
         if request.tool_name == "fetch_url":
             return self._fetch_url(request.arguments)
-        if request.tool_name == "execute_python_code":
-            return self._execute_python(request.arguments)
         return {"error": f"Unsupported external read tool: {request.tool_name}"}
 
     def _search(self, arguments: JsonObject) -> JsonValue:
@@ -205,71 +200,6 @@ class RequestsExternalReadTools:
             "content": text,
         }
 
-    def _execute_python(self, arguments: JsonObject) -> JsonValue:
-        """@brief 调用 Judge0 / Call Judge0.
-
-        @param arguments 已校验参数 / Validated arguments.
-        @return JSON 结果 / JSON result.
-        """
-
-        base_url = self._settings.judge0_url.strip()
-        if not base_url:
-            return {"error": "Judge0 API URL is not configured"}
-        source = str(arguments["source_code"])
-        payload: JsonObject = {
-            "language_id": 71,
-            "source_code": base64.b64encode(source.encode()).decode(),
-        }
-        stdin = arguments.get("stdin")
-        if isinstance(stdin, str):
-            payload["stdin"] = base64.b64encode(stdin.encode()).decode()
-        headers = {"Content-Type": "application/json"}
-        if self._settings.judge0_key:
-            headers["X-Auth-Token"] = self._settings.judge0_key
-        with create_requests_session() as session:
-            try:
-                response = session.post(
-                    f"{base_url.rstrip('/')}/submissions?base64_encoded=true&wait=true",
-                    json=payload,
-                    headers=headers,
-                    timeout=self._settings.timeout_seconds,
-                )
-                response.raise_for_status()
-                result = response.json()
-            except (requests.RequestException, ValueError) as error:
-                return {"error": f"Judge0 request failed: {error}"}
-        if not isinstance(result, dict):
-            return {"error": "Judge0 returned an invalid response"}
-        raw_status = result.get("status")
-        status: dict[object, object] = (
-            raw_status if isinstance(raw_status, dict) else {}
-        )
-        return {
-            "status_id": cast(JsonValue, status.get("id")),
-            "status_description": cast(JsonValue, status.get("description")),
-            "stdout": _decode_base64(result.get("stdout")),
-            "stderr": _decode_base64(result.get("stderr")),
-            "compile_output": _decode_base64(result.get("compile_output")),
-            "time": cast(JsonValue, result.get("time")),
-            "memory": cast(JsonValue, result.get("memory")),
-        }
-
-
-def _decode_base64(value: object) -> str:
-    """@brief 解码 Judge0 字段 / Decode a Judge0 field.
-
-    @param value base64 值 / Base64 value.
-    @return 文本 / Text.
-    """
-
-    if not isinstance(value, str) or not value:
-        return ""
-    try:
-        return base64.b64decode(value).decode(errors="replace")
-    except ValueError:
-        return value
-
-
 def _dependency_name(tool_name: str) -> str:
     """@brief 映射工具到稳定依赖名称 / Map a tool to a stable dependency name.
 
@@ -280,5 +210,4 @@ def _dependency_name(tool_name: str) -> str:
     return {
         "google_search": "serpapi",
         "fetch_url": "jina_reader",
-        "execute_python_code": "judge0",
     }.get(tool_name, "unknown")

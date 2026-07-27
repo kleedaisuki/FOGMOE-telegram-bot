@@ -1037,24 +1037,49 @@ def test_alembic_versions_are_backend_agnostic_sql_wrappers():
 def test_blocking_offloads_have_explicit_admission_control() -> None:
     """@brief 默认线程池前必须有显式准入边界 / Default-pool offloads require explicit admission control."""
 
-    allowed = {
-        Path("infrastructure/blocking.py"),
-        Path("infrastructure/admin/log_reader.py"),
+    admission_contracts = {
+        Path("infrastructure/blocking.py"): (
+            "class AsyncBlockingBulkhead",
+            "asyncio.BoundedSemaphore(capacity)",
+            "asyncio.to_thread(operation)",
+        ),
+        Path("infrastructure/admin/log_reader.py"): (
+            "asyncio.Semaphore(max_concurrency)",
+            "async with self._admission:",
+        ),
+        Path("infrastructure/workspace/wspctl.py"): (
+            "class _NativeClientLifecycleOffloadGate",
+            "asyncio.BoundedSemaphore(capacity)",
+            "await self._client_lifecycle_offloads.call(",
+            "lease = await self._execution_admission.acquire(key)",
+        ),
     }
-    offenders = []
+    offenders: list[Path] = []
     for path in SRC_ROOT.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         if "asyncio.to_thread(" not in text:
             continue
         relative = path.relative_to(SRC_ROOT)
-        if relative not in allowed:
+        required_contract = admission_contracts.get(relative)
+        if required_contract is None:
             offenders.append(relative)
+            continue
+        assert all(fragment in text for fragment in required_contract)
 
     assert offenders == []
     log_source = (SRC_ROOT / "infrastructure" / "admin" / "log_reader.py").read_text(
         encoding="utf-8"
     )
     assert "asyncio.Semaphore(max_concurrency)" in log_source
+    workspace_source = (
+        SRC_ROOT / "infrastructure" / "workspace" / "wspctl.py"
+    ).read_text(encoding="utf-8")
+    assert "process = await asyncio.to_thread" not in workspace_source
+    assert "await asyncio.to_thread(entry.process.close)" not in workspace_source
+    assert "await asyncio.to_thread(process.close)" not in workspace_source
+    assert workspace_source.count(
+        "lease = await self._execution_admission.acquire(key)"
+    ) == 2
 
 
 def test_media_picture_and_music_have_explicit_feature_ownership() -> None:

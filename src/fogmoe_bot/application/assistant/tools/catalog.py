@@ -16,11 +16,23 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Annotated, Literal, NewType
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from fogmoe_bot.application.chat.group_messages import (
     DEFAULT_GROUP_CONTEXT_MESSAGES,
     MAX_GROUP_CONTEXT_MESSAGES,
+)
+from fogmoe_bot.application.workspace.models import (
+    MAX_BASH_COMMAND_BYTES,
+    MAX_BASH_COMMAND_CHARACTERS,
+    MAX_BASH_STDIN_BYTES,
 )
 from fogmoe_bot.domain.memory.models import MAX_WORKING_MEMORY_MESSAGES
 
@@ -146,15 +158,102 @@ class FetchGroupContextArgs(ToolArguments):
     )
 
 
-class ExecutePythonCodeArgs(ToolArguments):
-    """@brief Python 代码执行参数 / Python-code execution arguments."""
+class RunBashArgs(ToolArguments):
+    """@brief 隔离 Workspace 中 Bash 命令的参数 / Arguments for a Bash command in an isolated Workspace.
 
-    source_code: str = Field(
-        min_length=1, max_length=20000, description="Python source"
+    @note ``command`` 有意保留 Bash 语义；调用方不能选择宿主机路径、挂载、网络、
+        namespace 或 seccomp 策略。/ ``command`` intentionally retains Bash semantics; callers
+        cannot choose host paths, mounts, networking, namespaces, or seccomp policy.
+    """
+
+    command: str = Field(
+        min_length=1,
+        max_length=MAX_BASH_COMMAND_CHARACTERS,
+        description=(
+            "Bash program executed only inside the authenticated persistent workspace"
+        ),
     )
     stdin: str | None = Field(
-        default=None, max_length=10000, description="Standard input"
+        default=None,
+        max_length=MAX_BASH_STDIN_BYTES,
+        description="Optional UTF-8 standard input supplied to the isolated command",
     )
+    working_directory: str = Field(
+        default=".",
+        min_length=1,
+        max_length=256,
+        pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$|^\.$",
+        description=(
+            "Relative directory below /workspace; absolute paths, parent traversal, and "
+            "empty components are forbidden"
+        ),
+    )
+    timeout_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=300,
+        description="Wall-clock timeout in seconds; the supervisor kills the task subtree",
+    )
+
+    @field_validator("command")
+    @classmethod
+    def _validate_command_transport_budget(cls, value: str) -> str:
+        """@brief 在 catalog 边界校验 Bash argv 的 UTF-8 与 NUL 约束 / Validate Bash argv UTF-8 and NUL constraints at the catalog boundary.
+
+        @param value Bash 程序文本 / Bash program text.
+        @return 原始程序文本 / Original program text.
+        @raise ValueError 程序为空白、含 NUL、不能 UTF-8 编码或超过 native argv 上限时抛出 /
+            Raised when the program is blank, contains NUL, cannot encode as UTF-8, or exceeds
+            the native argv ceiling.
+        @note 这是参数 schema 的职责，而不是 operation adapter 的延迟失败；否则一个永远
+            无法送入 native 协议的 payload 会错误占用 durable receipt 的重试路径。/
+            This belongs to the argument schema rather than a delayed operation-adapter failure;
+            otherwise a payload that can never enter the native protocol would incorrectly occupy
+            a durable receipt retry path.
+        """
+
+        if not value.strip():
+            raise ValueError("command must not be blank")
+        if "\x00" in value:
+            raise ValueError("command must not contain NUL")
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError("command must be valid UTF-8") from error
+        if len(encoded) > MAX_BASH_COMMAND_BYTES:
+            raise ValueError(
+                f"command must not exceed {MAX_BASH_COMMAND_BYTES} UTF-8 bytes"
+            )
+        return value
+
+    @field_validator("stdin")
+    @classmethod
+    def _validate_stdin_utf8_budget(cls, value: str | None) -> str | None:
+        """@brief 在 catalog 边界校验 stdin 的 UTF-8 字节预算 / Validate stdin's UTF-8 byte budget at the catalog boundary.
+
+        @param value 可选标准输入 / Optional standard input.
+        @return 原始标准输入或 None / Original standard input, or None.
+        @raise ValueError 不能 UTF-8 编码或超过 native 单帧预算时抛出 /
+            Raised when input cannot be UTF-8 encoded or exceeds the native single-frame budget.
+        @note Pydantic 的 ``max_length`` 按 Unicode code point 计数；native protocol 的
+            64 KiB 限制按字节计数，所以这条校验必须在 schema owner 中存在。/
+            Pydantic's ``max_length`` counts Unicode code points while the native protocol's
+            64 KiB limit counts bytes, so this check must live in the schema owner.
+        """
+
+        if value is None:
+            return None
+        if "\x00" in value:
+            raise ValueError("stdin must not contain NUL")
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError("stdin must be valid UTF-8") from error
+        if len(encoded) > MAX_BASH_STDIN_BYTES:
+            raise ValueError(
+                f"stdin must not exceed {MAX_BASH_STDIN_BYTES} UTF-8 bytes"
+            )
+        return value
 
 
 class GenerateImageArgs(ToolArguments):
@@ -875,9 +974,15 @@ DEFAULT_TOOL_CATALOG = ToolCatalog(
             result_cacheable=False,
         ),
         define_tool(
-            name="execute_python_code",
-            description="Execute Python in a bounded remote service",
-            arguments_model=ExecutePythonCodeArgs,
+            name="run_bash",
+            description=(
+                "Run a bounded Bash command in the authenticated persistent workspace. "
+                "The workspace is isolated per private user or whole group, has no host "
+                "mount access, and retains only its approved workspace layer"
+            ),
+            arguments_model=RunBashArgs,
+            mutation_classifier=_always("workspace.exec"),
+            result_residency=ToolResultResidency.AGENT_TURN,
         ),
         define_tool(
             name="generate_image",
@@ -942,7 +1047,6 @@ __all__ = [
     "DiaryAction",
     "DuplicateToolNameError",
     "EffectKind",
-    "ExecutePythonCodeArgs",
     "FetchGroupContextArgs",
     "FetchUrlArgs",
     "FrozenSchemaObject",
@@ -965,6 +1069,7 @@ __all__ = [
     "SearchMemoryArgs",
     "SearchMemoryByTimeArgs",
     "SendStickerArgs",
+    "RunBashArgs",
     "ToolArguments",
     "ToolCatalog",
     "ToolDefinition",

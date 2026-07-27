@@ -12,17 +12,20 @@ the transactional outbox.
 from __future__ import annotations
 
 import base64
+import math
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import Protocol, cast
 
 from fogmoe_bot.application.context_window.projection import (
     CompactionPending,
+    ContextWindowInvariantError,
     ContextWindowReady,
     ContextWindowRequest,
     ContextWindowResult,
     ContextWindowTooLarge,
     checkpoint_summary_message,
+    project_conversation_message,
 )
 from fogmoe_bot.application.conversation.inference_worker import (
     InferenceDependencyPending,
@@ -36,6 +39,11 @@ from fogmoe_bot.application.conversation.inference_worker import (
     RetryableInferenceError,
 )
 from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
+from fogmoe_bot.application.workspace.errors import (
+    WorkspaceInvocationOutcomeUnknownError,
+    WorkspaceRuntimeProtocolError,
+    WorkspaceRuntimeUnavailableError,
+)
 from fogmoe_bot.domain.assistant.messages import (
     CanonicalMessage,
     CanonicalMessageError,
@@ -48,8 +56,10 @@ from fogmoe_bot.domain.assistant.request_metadata import RequestMeta
 from fogmoe_bot.domain.context import (
     ContextState,
     ConversationScope,
+    RuntimeMessageReplacement,
     UserState,
     build_context_state,
+    create_runtime_replacement,
 )
 from fogmoe_bot.domain.context_window.budget import TokenCount
 from fogmoe_bot.domain.conversation.identity import DeliveryStreamId
@@ -66,6 +76,14 @@ from fogmoe_bot.domain.user_profile.models import (
 )
 
 from .agent_loop import AgentResponse
+from .current_turn_upload import (
+    CurrentTurnUploadDownloadError,
+    CurrentTurnUploadError,
+    CurrentTurnUploadIntegrityError,
+    CurrentTurnUploadTooLargeError,
+    CurrentTurnUploadTransportError,
+    CurrentTurnUploadUnavailableError,
+)
 from .errors import (
     AssistantInferenceUnavailableError,
     PartialAgentResponseError,
@@ -80,6 +98,10 @@ from .inference_command import (
 )
 from .reply_filter import normalize_ai_reply_text
 from .tool_runtime import ToolExecutionContext
+from .workspace_attachment_preprocessor import (
+    CurrentTurnWorkspaceAttachmentPreprocessor,
+    ImportedCurrentTurnAttachment,
+)
 
 _MAX_TELEGRAM_TEXT_LENGTH = 4096
 """@brief Telegram 单条文本上限 / Telegram single-message text limit."""
@@ -148,6 +170,7 @@ class DurableAssistantInferenceAdapter:
         inference: AssistantInference,
         translation_inference: AssistantInference | None = None,
         translation_system_prompt: str = TRANSLATION_SYSTEM_PROMPT,
+        attachment_preprocessor: CurrentTurnWorkspaceAttachmentPreprocessor | None = None,
         clock: UtcClock | None = None,
     ) -> None:
         """@brief 创建 durable Assistant adapter / Create the durable Assistant adapter.
@@ -159,6 +182,9 @@ class DurableAssistantInferenceAdapter:
         @param inference 可替换 Assistant service / Replaceable Assistant service.
         @param translation_inference 可选 task-specific 翻译 service / Optional task-specific translation service.
         @param translation_system_prompt 专用翻译策略 / Dedicated translation policy.
+        @param attachment_preprocessor 当前 Turn 附件的 Agent 前 Workspace 导入用例；None
+            仅允许没有附件的历史兼容 activity / Pre-Agent Workspace import use case for a
+            current-Turn attachment; None permits only legacy activities without an attachment.
         @param clock UTC clock / UTC clock.
         @raise ValueError prompt 非法时抛出 / Raised for an invalid prompt.
         """
@@ -172,12 +198,21 @@ class DurableAssistantInferenceAdapter:
         self._inference = inference
         self._translation_inference = translation_inference or inference
         self._translation_system_prompt = translation_system_prompt.strip()
+        self._attachment_preprocessor = attachment_preprocessor
+        """@brief Agent 前附件预处理用例 / Pre-Agent attachment preprocessing use case."""
         self._clock = clock or SystemUtcClock()
 
-    async def infer(self, request: JsonObject) -> InferenceResult:
+    async def infer(
+        self,
+        request: JsonObject,
+        *,
+        execution_deadline_monotonic: float | None = None,
+    ) -> InferenceResult:
         """@brief 严格解析 request、读取历史并执行无副作用推理 / Strictly parse a request, read history, and run side-effect-free inference.
 
         @param request durable activity JSON request / Durable activity JSON request.
+        @param execution_deadline_monotonic worker 建立的 attempt 单调截止点；直接调用时可为 None /
+            Attempt monotonic deadline established by the worker; may be None for direct calls.
         @return Assistant content 与 Telegram outbox intent / Assistant content and Telegram outbox intent.
         @raise PermanentInferenceError request、历史或输出永久非法 / Permanently invalid request, history, or output.
         @raise RetryableInferenceError 数据库或 provider 暂时不可用 / Temporarily unavailable database or provider.
@@ -186,6 +221,7 @@ class DurableAssistantInferenceAdapter:
         and outbox ports.
         """
 
+        _validate_execution_deadline(execution_deadline_monotonic)
         command = self._parse_request(request)
         base_context = self._base_context(command)
         try:
@@ -219,10 +255,20 @@ class DurableAssistantInferenceAdapter:
                 category=InferenceErrorCategory.CONTEXT_WINDOW,
             )
 
+        # Validate the durable anchor before the attachment importer performs its first
+        # Workspace mutation.  A malformed replayed activity must never gain an imported file
+        # merely because it happened to carry a Telegram document reference.
+        self._validate_anchor(command, projection)
+        attachment = await self._preprocess_current_turn_attachment(command)
+        replacement = self._attachment_runtime_replacement(
+            projection,
+            attachment=attachment,
+        )
         context_state = self._build_context(
             command,
             projection,
             base_context=base_context,
+            runtime_replacement=replacement,
         )
         committed_count = len(context_state.messages)
         is_translation = command.task_kind == "translation"
@@ -251,6 +297,7 @@ class DurableAssistantInferenceAdapter:
                             if command.allowed_tools is None
                             else frozenset(command.allowed_tools)
                         ),
+                        execution_deadline_monotonic=execution_deadline_monotonic,
                     )
                 ),
             )
@@ -364,26 +411,173 @@ class DurableAssistantInferenceAdapter:
         projection: ContextWindowReady,
         *,
         base_context: ContextState,
+        runtime_replacement: RuntimeMessageReplacement | None = None,
     ) -> ContextState:
         """@brief 校验 anchor 并将 summary+tail 加入基础上下文 / Validate the anchor and add summary plus tail to the base context.
 
         @param command 已校验命令 / Validated command.
         @param projection token-aware durable projection / Token-aware durable projection.
         @param base_context 不含普通历史的上下文 / Context without ordinary history.
+        @param runtime_replacement 可选当前 Turn 模型消息替换 / Optional current-Turn model-message replacement.
         @return 本次尝试独占上下文 / Attempt-local context.
         @raise PermanentInferenceError anchor Turn 损坏 / The anchor Turn is corrupt.
         """
 
         self._validate_anchor(command, projection)
-        base_context.current_user_text = _anchor_user_text(projection)
+        current_user_text = _anchor_user_text(projection)
         if command.task_kind == "translation":
+            base_context.current_user_text = current_user_text
             return base_context
         history: list[CanonicalMessage] = []
         if projection.checkpoint_summary is not None:
             history.append(checkpoint_summary_message(projection.checkpoint_summary))
         history.extend(projection.messages)
-        base_context.messages.extend(history)
-        return base_context
+        context_state = build_context_state(
+            context_id=command.typed_turn_id.value,
+            system_prompt=self._system_prompt,
+            history_messages=history,
+            scope=base_context.scope,
+            user_state=base_context.user_state,
+            runtime_replacements=(
+                () if runtime_replacement is None else (runtime_replacement,)
+            ),
+        )
+        # 附件 Turn 不得将持久化 caption/原始文本作为 Working Memory 查询：检索结果会随后
+        # 渲染进模型提示。durable ingress 已持久化同一占位符；这个赋值也保证早期尚未写入
+        # 占位符的 activity 在首次执行时不泄漏。/ An attachment Turn must not use its
+        # persisted caption/raw text as a Working-Memory query: retrieval is subsequently rendered
+        # into the model prompt. Durable ingress already persists the same placeholder; this also
+        # keeps an early pre-placeholder activity non-leaky on its first execution.
+        if runtime_replacement is not None:
+            current_user_text = runtime_replacement.runtime_message.text
+        context_state.current_user_text = current_user_text
+        if (
+            runtime_replacement is not None
+            and runtime_replacement.runtime_message not in context_state.messages
+        ):
+            raise PermanentInferenceError(
+                "Current-turn attachment placeholder was not applied to model context",
+                category=InferenceErrorCategory.INTERNAL,
+            )
+        return context_state
+
+    async def _preprocess_current_turn_attachment(
+        self,
+        command: DurableAssistantInferenceCommand,
+    ) -> ImportedCurrentTurnAttachment | None:
+        """@brief 在 Agent 调用前导入当前 Turn 附件 / Import the current-Turn attachment before calling the Agent.
+
+        @param command 已恢复的严格 durable command / Restored strict durable command.
+        @return 没有附件时为 None；否则为模型安全导入投影 / None without an attachment; otherwise a model-safe import projection.
+        @raise PermanentInferenceError 附件引用、native receipt 或结果语义不安全时抛出 /
+            Raised when the attachment reference, native receipt, or result semantics are unsafe.
+        @raise RetryableInferenceError 下载或 runtime 暂时不可用时抛出 / Raised when the download or runtime is temporarily unavailable.
+        @note 不存在附件时绝不实例化 runtime 或调用 Telegram 下载端口。/ When no attachment
+            exists, this method never activates a runtime or calls the Telegram download port.
+        """
+
+        if command.current_turn_upload is None:
+            return None
+        preprocessor = self._attachment_preprocessor
+        if preprocessor is None:
+            raise PermanentInferenceError(
+                "Current-turn attachment import is not configured",
+                category=InferenceErrorCategory.CONFIGURATION,
+            )
+        try:
+            return await preprocessor.preprocess(command)
+        except WorkspaceInvocationOutcomeUnknownError as error:
+            raise PermanentInferenceError(
+                "Current-turn attachment import outcome is unknown",
+                category=InferenceErrorCategory.PARTIAL_EFFECT,
+            ) from error
+        except WorkspaceRuntimeProtocolError as error:
+            raise PermanentInferenceError(
+                "Current-turn attachment import returned an invalid runtime receipt",
+                category=InferenceErrorCategory.INTERNAL,
+            ) from error
+        except CurrentTurnUploadTransportError as error:
+            raise RetryableInferenceError(
+                "Current-turn attachment download is temporarily unavailable",
+                category=InferenceErrorCategory.NETWORK,
+            ) from error
+        except CurrentTurnUploadTooLargeError as error:
+            raise PermanentInferenceError(
+                "Current-turn attachment exceeds the supported size",
+                category=InferenceErrorCategory.INVALID_REQUEST,
+            ) from error
+        except (CurrentTurnUploadIntegrityError, CurrentTurnUploadDownloadError) as error:
+            raise PermanentInferenceError(
+                "Telegram attachment provider violated its download contract",
+                category=InferenceErrorCategory.PROVIDER,
+            ) from error
+        except CurrentTurnUploadUnavailableError as error:
+            raise PermanentInferenceError(
+                "Current-turn attachment authorization is unavailable",
+                category=InferenceErrorCategory.INTERNAL,
+            ) from error
+        except CurrentTurnUploadError as error:
+            raise PermanentInferenceError(
+                "Current-turn attachment import violated its contract",
+                category=InferenceErrorCategory.INTERNAL,
+            ) from error
+        except WorkspaceRuntimeUnavailableError as error:
+            raise RetryableInferenceError(
+                "Current-turn Workspace is temporarily unavailable",
+                category=InferenceErrorCategory.NETWORK,
+            ) from error
+        except (TypeError, ValueError) as error:
+            raise PermanentInferenceError(
+                "Current-turn attachment import violated its application contract",
+                category=InferenceErrorCategory.INTERNAL,
+            ) from error
+        except Exception as error:
+            raise PermanentInferenceError(
+                "Current-turn attachment import failed unexpectedly",
+                category=InferenceErrorCategory.INTERNAL,
+            ) from error
+
+    @staticmethod
+    def _attachment_runtime_replacement(
+        projection: ContextWindowReady,
+        *,
+        attachment: ImportedCurrentTurnAttachment | None,
+    ) -> RuntimeMessageReplacement | None:
+        """@brief 将当前附件投影为唯一的模型消息替换 / Project a current attachment into the sole model-message replacement.
+
+        @param projection 已完成且仍指向当前 Turn 的历史投影 / Completed history projection still anchored to the current Turn.
+        @param attachment 已导入的模型安全附件投影；没有附件时为 None /
+            Imported model-safe attachment projection, or None without an attachment.
+        @return 用于 ContextState 的运行时替换；无附件时为 None / Runtime replacement for ContextState, or None without an attachment.
+        @raise PermanentInferenceError anchor 不能精确投影为一条 user canonical message 时抛出 /
+            Raised when the anchor cannot be projected to exactly one user canonical message.
+        """
+
+        if attachment is None:
+            return None
+        persisted_messages: list[CanonicalMessage] = []
+        try:
+            for row in projection.anchor_messages:
+                if row.draft.role is not MessageRole.USER:
+                    continue
+                persisted_messages.extend(project_conversation_message(row))
+        except ContextWindowInvariantError as error:
+            raise PermanentInferenceError(
+                "Current-turn attachment anchor cannot be projected",
+                category=InferenceErrorCategory.INTERNAL,
+            ) from error
+        if len(persisted_messages) != 1:
+            raise PermanentInferenceError(
+                "Current-turn attachment requires exactly one persisted user message",
+                category=InferenceErrorCategory.INVALID_REQUEST,
+            )
+        replacement = create_runtime_replacement(
+            persisted_message=persisted_messages[0],
+            runtime_message=attachment.model_placeholder(),
+        )
+        if replacement is None:
+            raise AssertionError("Non-null attachment replacement cannot be None")
+        return replacement
 
     @staticmethod
     def _validate_anchor(
@@ -790,6 +984,26 @@ def _json_object(value: Mapping[str, object]) -> JsonObject:
     """
 
     return {str(key): _json_value(item) for key, item in value.items()}
+
+
+def _validate_execution_deadline(value: float | None) -> None:
+    """@brief 验证 worker 传递的易失 monotonic deadline / Validate the ephemeral monotonic deadline supplied by the worker.
+
+    @param value 可选单调时间点 / Optional monotonic time point.
+    @return None / None.
+    @raise TypeError 值既不是 float 也不是 None 时抛出 / Raised when the value is neither a float nor None.
+    @raise ValueError 值不是有限正数时抛出 / Raised when the value is not finite and positive.
+    @note 这不是 durable request validation；它只防止错误的 process-local budget 穿过
+        application boundary。/ This is not durable-request validation; it only prevents an
+        invalid process-local budget from crossing the application boundary.
+    """
+
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, float):
+        raise TypeError("execution_deadline_monotonic must be a float or None")
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError("execution_deadline_monotonic must be finite and positive")
 
 
 def _classify_provider_failure(error: ProviderFailure) -> InferenceError:

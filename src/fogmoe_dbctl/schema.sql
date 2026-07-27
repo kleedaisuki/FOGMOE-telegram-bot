@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0068_canonical_assistant_messages
--- Alembic head: 0068_canonical_assistant_messages
+-- Source migrations: 0001_initial through 0070_workspace_attachment_model_boundary
+-- Alembic head: 0070_workspace_attachment_model_boundary
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and retired user-plan backfill) and the
@@ -27,6 +27,7 @@ CREATE SCHEMA IF NOT EXISTS town;
 CREATE SCHEMA IF NOT EXISTS chance;
 CREATE SCHEMA IF NOT EXISTS personal_rpg;
 CREATE SCHEMA IF NOT EXISTS scheduling;
+CREATE SCHEMA IF NOT EXISTS workspace;
 
 -- pgvector precedes migration 0039, so its extension routines retain PostgreSQL's
 -- extension-defined execution privileges before FogMoe adopts an explicit routine allow-list.
@@ -1565,6 +1566,42 @@ CREATE INDEX tool_effect_receipts_recovery_idx
 CREATE INDEX tool_effect_receipts_kind_created_idx
   ON assistant.tool_effect_receipts (effect_kind, created_at, turn_id);
 
+-- A Workspace runtime is host-owned state, not an Assistant receipt.  PostgreSQL retains only
+-- the immutable personal-or-whole-group identity needed for host-side recovery.
+CREATE TABLE workspace.runtimes (
+  runtime_key UUID PRIMARY KEY,
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('personal', 'group')),
+  scope_id BIGINT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT workspace_runtimes_scope_uq UNIQUE (scope_kind, scope_id),
+  CONSTRAINT workspace_runtimes_scope_ck CHECK (
+    (scope_kind = 'personal' AND scope_id > 0)
+    OR (scope_kind = 'group' AND scope_id <> 0)
+  )
+);
+
+COMMENT ON TABLE workspace.runtimes IS
+  'Immutable personal-or-whole-group to opaque host runtime identity mapping; host process state remains in wspctld.';
+COMMENT ON COLUMN workspace.runtimes.runtime_key IS
+  'Random opaque UUID used only to recover the corresponding host workspace runtime.';
+COMMENT ON COLUMN workspace.runtimes.scope_kind IS
+  'personal for one user; group for one whole Telegram group, never a topic.';
+
+CREATE FUNCTION workspace.forbid_runtime_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION
+    'workspace.runtimes is immutable; create an explicit future runtime generation instead'
+    USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER workspace_runtimes_immutable_tr
+BEFORE UPDATE OR DELETE ON workspace.runtimes
+FOR EACH ROW EXECUTE FUNCTION workspace.forbid_runtime_mutation();
+
 CREATE TABLE economy.user_lottery (
   user_id BIGINT NOT NULL PRIMARY KEY,
   last_lottery_date TIMESTAMP DEFAULT NULL
@@ -3042,7 +3079,7 @@ BEGIN
     'infra', 'identity', 'conversation', 'context_window', 'retrieval',
     'user_profile', 'assistant', 'scheduling', 'economy', 'moderation',
     'crypto', 'game', 'media', 'admin', 'observability', 'bank', 'billing',
-    'town', 'chance', 'personal_rpg'
+    'town', 'chance', 'personal_rpg', 'workspace'
   ]
   LOOP
     EXECUTE format(

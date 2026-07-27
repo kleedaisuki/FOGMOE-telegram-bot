@@ -112,7 +112,7 @@ def looks_like_assistant_candidate(payload: JsonObject) -> bool:
     values = [payload.get("message"), payload.get("edited_message")]
     messages = [value for value in values if isinstance(value, dict)]
     return any(
-        any(key in message for key in ("text", "photo", "sticker"))
+        any(key in message for key in ("text", "photo", "sticker", "document"))
         and not _has_service_event(message)
         for message in messages
     )
@@ -140,16 +140,18 @@ def _message_object(payload: JsonObject) -> tuple[JsonObject, bool]:
 def _parse_content(
     message: JsonObject,
 ) -> tuple[TelegramAssistantContentKind, str, TelegramMediaReference | None]:
-    """@brief 解析唯一 text/photo/sticker 内容 / Parse exactly one text, photo, or sticker content.
+    """@brief 解析唯一 text/photo/sticker/document 内容 / Parse exactly one text, photo, sticker, or document content.
 
     @param message 消息对象 / Message object.
     @return 内容种类、文本与媒体 / Content kind, text, and media.
     """
 
-    present = tuple(key for key in ("text", "photo", "sticker") if key in message)
+    present = tuple(
+        key for key in ("text", "photo", "sticker", "document") if key in message
+    )
     if len(present) != 1:
         raise _malformed(
-            "Assistant message requires exactly one text, photo, or sticker"
+            "Assistant message requires exactly one text, photo, sticker, or document"
         )
     key = present[0]
     if key == "text":
@@ -162,6 +164,9 @@ def _parse_content(
     if key == "photo":
         media = _parse_photo(message["photo"])
         return TelegramAssistantContentKind.PHOTO, caption or "[photo]", media
+    if key == "document":
+        media = _parse_document(message["document"])
+        return TelegramAssistantContentKind.DOCUMENT, caption or "[document]", media
     media = _parse_sticker(message["sticker"])
     return TelegramAssistantContentKind.STICKER, caption or "[sticker]", media
 
@@ -215,21 +220,52 @@ def _parse_sticker(value: JsonValue) -> TelegramMediaReference:
     )
 
 
+def _parse_document(value: JsonValue) -> TelegramMediaReference:
+    """@brief 解析未下载的 Telegram Document 引用 / Parse an undownloaded Telegram Document reference.
+
+    @param value PTB durable JSON 中的 ``document`` object / ``document`` object from PTB durable JSON.
+    @return 仅含可重放下载身份与显示元数据的引用 / Reference containing only replayable download identity and display metadata.
+    @raises MalformedTelegramAssistantUpdate Document 形状或元数据类型非法时抛出 /
+        Raised when the Document shape or metadata types are invalid.
+    @note 本函数不下载、打开或写入文件；bytes 只能由后续受限 downloader 使用 ``file_id``
+        取得。 This function never downloads, opens, or writes a file; bytes can be fetched only
+        later by a constrained downloader using ``file_id``.
+    """
+
+    if not isinstance(value, dict):
+        raise _malformed("Telegram document must be an object")
+    return TelegramMediaReference(
+        kind=TelegramAssistantContentKind.DOCUMENT,
+        file_id=_required_string(value, "file_id"),
+        file_unique_id=_required_string(value, "file_unique_id"),
+        file_size=_optional_int(value, "file_size", minimum=1),
+        width=None,
+        height=None,
+        mime_type=_optional_string(value, "mime_type"),
+        file_name=_optional_string(value, "file_name"),
+    )
+
+
 def _parse_command(
     message: JsonObject,
     text: str,
     content_kind: TelegramAssistantContentKind,
 ) -> tuple[str | None, str | None]:
-    """@brief 解析首个 BOT_COMMAND entity / Parse the leading BOT_COMMAND entity.
+    """@brief 解析 text 或 caption 的首个 BOT_COMMAND entity / Parse the leading BOT_COMMAND entity from text or caption.
 
     @param message 消息对象 / Message object.
-    @param text 消息文本 / Message text.
+    @param text 消息文本或媒体 caption / Message text or media caption.
     @param content_kind 内容种类 / Content kind.
     @return command 名与可选目标 username / Command name and optional target username.
     """
 
-    entities = message.get("entities")
-    if entities is None or content_kind is not TelegramAssistantContentKind.TEXT:
+    entity_key = (
+        "entities"
+        if content_kind is TelegramAssistantContentKind.TEXT
+        else "caption_entities"
+    )
+    entities = message.get(entity_key)
+    if entities is None:
         return None, None
     if not isinstance(entities, list):
         raise _malformed("Telegram entities must be an array")

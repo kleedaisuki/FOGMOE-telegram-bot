@@ -134,6 +134,7 @@ def migrate_config_file(
         Raised when the input is not a supported v1 shape or validation/writing fails.
     """
 
+    _require_regular_config_file(path)
     source = _read_source(path)
     document = _load_document(path)
     _require_legacy_schema(document)
@@ -175,6 +176,29 @@ def _read_source(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
         raise ConfigMigrationError(f"cannot read configuration file {path}") from error
+
+
+def _require_regular_config_file(path: Path) -> None:
+    """@brief 拒绝符号链接、目录与硬链接配置 / Reject symlink, directory, and hard-linked configuration inputs.
+
+    @param path 操作者指定的配置路径 / Operator-supplied configuration path.
+    @return None / None.
+    @raise ConfigMigrationError 输入不是单一普通文件时抛出 / Raised when the input is not one regular file.
+
+    @note 迁移以同目录原子替换完成；跟随符号链接或替换硬链接的一端都会让操作者误判
+        实际被修改的对象。/ Migration finishes with a same-directory atomic replacement;
+        following a symlink or replacing one side of a hard link would make the operator
+        misidentify the object that changed.
+    """
+
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise ConfigMigrationError(f"cannot stat configuration file {path}") from error
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise ConfigMigrationError(
+            "configuration file must be one non-symlink, non-hard-linked regular file"
+        )
 
 
 def _load_document(path: Path) -> JsonObject:
@@ -836,6 +860,7 @@ def _atomic_write(path: Path, source: str, mode: int) -> None:
             os.fsync(temporary_file.fileno())
         os.replace(temporary_path, path)
         temporary_path = None
+        _fsync_parent_directory(path)
     except OSError as error:
         raise ConfigMigrationError(f"cannot atomically write configuration file {path}") from error
     finally:
@@ -846,6 +871,25 @@ def _atomic_write(path: Path, source: str, mode: int) -> None:
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    """@brief 将原子替换的目录项同步到磁盘 / Persist the directory entry of an atomic replacement.
+
+    @param path 刚被替换的文件路径 / Path that was just replaced.
+    @return None / None.
+    @raise OSError 目录无法打开或同步时抛出 / Raised when the directory cannot be opened or synced.
+
+    @note ``fsync`` 临时文件只能保证内容，不能保证 ``rename`` 目录项已持久化；二者都需要。
+        / ``fsync`` on the temporary file persists its content but not the directory entry
+        created by ``rename``; both are required.
+    """
+
+    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 if __name__ == "__main__":

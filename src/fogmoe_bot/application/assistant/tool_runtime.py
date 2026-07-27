@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from typing import Literal, NotRequired, Protocol, TypedDict, cast
 
@@ -104,6 +105,12 @@ class ToolExecutionContext:
     @param message_thread_id 可选 Telegram 话题 ID / Optional Telegram topic identifier.
     @param allowed_tools 可选 Turn 级工具 allowlist；None 表示完整目录 /
         Optional turn-level tool allowlist; None means the complete catalog.
+    @param execution_deadline_monotonic 本次推理 attempt 的易失单调时钟截止点；None 表示
+        调用方没有提供整体预算 / Ephemeral monotonic-clock deadline for this inference
+        attempt; ``None`` means the caller did not provide an overall budget.
+    @note 截止点是 attempt-local 控制信息，不是用户授权或持久化请求语义；它绝不能进入
+        receipt/request hash。/ The deadline is attempt-local control information, not user
+        authorization or persistent request semantics; it must never enter a receipt/request hash.
     """
 
     turn_id: TurnId
@@ -116,6 +123,23 @@ class ToolExecutionContext:
     message_id: int | None
     message_thread_id: int | None = None
     allowed_tools: frozenset[str] | None = None
+    execution_deadline_monotonic: float | None = None
+
+    def __post_init__(self) -> None:
+        """@brief 校验可选 attempt 单调截止点 / Validate the optional attempt monotonic deadline.
+
+        @return None / None.
+        @raise TypeError 截止点不是 float 或 None 时抛出 / Raised when the deadline is neither a float nor None.
+        @raise ValueError 截止点不是有限正数时抛出 / Raised when the deadline is not finite and positive.
+        """
+
+        deadline = self.execution_deadline_monotonic
+        if deadline is None:
+            return
+        if isinstance(deadline, bool) or not isinstance(deadline, float):
+            raise TypeError("execution_deadline_monotonic must be a float or None")
+        if not math.isfinite(deadline) or deadline <= 0.0:
+            raise ValueError("execution_deadline_monotonic must be finite and positive")
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,0 +1,72 @@
+# @brief wspctld 的 host systemd 服务单元模板 / Host systemd service unit template for wspctld.
+#
+# 该单元只能安装在 Linux host；普通 Bot 容器绝不可运行它。/ This unit may only be
+# installed on the Linux host; the ordinary Bot container must never run it.
+#
+# CMake 将 @WSPCTL_HOST_WORKDIR@ 固定为绝对路径；不要直接安装此 .in 模板。若这是用户
+# 可写 checkout 下的 .wspctl，只有显式 development opt-in 才会传给 native broker。
+# CMake fixes @WSPCTL_HOST_WORKDIR@ as an absolute path; do not install this .in template directly.
+# If it is .wspctl below a user-writable checkout, only an explicit development opt-in reaches
+# the native broker.
+
+[Unit]
+Description=FogMoe recoverable isolated Workspace broker (wspctld)
+After=local-fs.target
+Before=fogmoe-telegram-bot.service
+# ``state`` is an existing dedicated XFS mount, not a directory this unit is allowed to create
+# on an arbitrary parent filesystem.  The native preflight repeats the filesystem/type/enforcement
+# checks; this ordering only makes a missing mount fail before any broker process is started.
+RequiresMountsFor=@WSPCTL_HOST_STATE_ROOT@
+ConditionPathIsMountPoint=@WSPCTL_HOST_STATE_ROOT@
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+EnvironmentFile=@WSPCTL_HOST_ENVIRONMENT_PATH@
+Delegate=cpu memory pids io
+TasksMax=infinity
+KillMode=control-group
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=30s
+NoNewPrivileges=no
+PrivateMounts=yes
+PrivateTmp=yes
+# Start from a read-only host filesystem view.  ``ReadWritePaths=`` below is the
+# deliberately small write allow-list for broker state and delegated cgroups;
+# without this setting it would not meaningfully constrain ordinary host paths.
+ProtectSystem=strict
+# Keep every home-directory view read-only, then reopen only the CMake-fixed work root below.
+# This is required when a local checkout lives under /home; do not replace it with a variable
+# in ReadWritePaths because systemd does not expand EnvironmentFile values there.
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=no
+RestrictNamespaces=no
+LockPersonality=yes
+SystemCallArchitectures=native
+# wspctld only needs its local AF_UNIX control and fork-server sockets.  Runtime network
+# isolation is separately established in each child namespace.
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL CAP_MKNOD
+ReadWritePaths=@WSPCTL_HOST_WORKDIR@ /sys/fs/cgroup
+# The root-owned socket parent is intentionally prepared before wspctld starts.  Do not relax
+# the native broker's root-owned/non-writable parent validation for convenience.
+ExecStartPre=/usr/bin/install --directory --owner=root --group=root --mode=0711 @WSPCTL_HOST_WORKDIR@
+ExecStartPre=/usr/bin/install --directory --owner=root --group=root --mode=0711 @WSPCTL_HOST_SOCKET_DIRECTORY@
+# Do not create state root here: it must already be the dedicated XFS mount selected below.
+ExecStartPre=/usr/bin/test -d ${WSPCTL_XFS_QUOTA_MOUNT}
+ExecStartPre=/usr/bin/test -d ${WSPCTL_STATE_ROOT}
+ExecStartPre=/usr/bin/install --directory --owner=root --group=root --mode=0700 @WSPCTL_HOST_IMAGES_ROOT@
+# The native broker, not systemd's global accounting, must prove and assign a per-runtime
+# hard filesystem quota before it creates a persistent OverlayFS upperdir; otherwise it fails closed.
+# `validate_image_root` requires statvfs(base_root).ST_RDONLY.  A root-owned chmod is
+# insufficient: deployment must publish the selected generation through a real readonly mount.
+ExecStartPre=/usr/bin/test -d ${WSPCTL_BASE_ROOT}
+ExecStartPre=/bin/sh -ec '/usr/bin/findmnt --noheadings --output OPTIONS --target "$WSPCTL_BASE_ROOT" | /usr/bin/grep --extended-regexp --quiet "(^|,)ro(,|$)"'
+ExecStart=/usr/local/bin/wspctld --socket ${WSPCTL_SOCKET} --state-root ${WSPCTL_STATE_ROOT} --base-root ${WSPCTL_BASE_ROOT} --images-root ${WSPCTL_IMAGES_ROOT} --client-uid ${WSPCTL_CLIENT_UID} --cgroup-root ${WSPCTL_CGROUP_ROOT} --supervisor ${WSPCTL_SUPERVISOR} --sandbox-uid ${WSPCTL_SANDBOX_UID} --sandbox-gid ${WSPCTL_SANDBOX_GID} --memory-max ${WSPCTL_MEMORY_MAX} --memory-high ${WSPCTL_MEMORY_HIGH} --memory-swap-max ${WSPCTL_MEMORY_SWAP_MAX} --cpu-max-us ${WSPCTL_CPU_MAX_US} --cpu-period-us ${WSPCTL_CPU_PERIOD_US} --pids-max ${WSPCTL_PIDS_MAX} --io-weight ${WSPCTL_IO_WEIGHT} --idle-minutes ${WSPCTL_IDLE_MINUTES} --quota-backend ${WSPCTL_QUOTA_BACKEND} --xfs-quota-mount ${WSPCTL_XFS_QUOTA_MOUNT} --xfs-project-id-min ${WSPCTL_XFS_PROJECT_ID_MIN} --xfs-project-id-max ${WSPCTL_XFS_PROJECT_ID_MAX} --runtime-control-hard-bytes ${WSPCTL_RUNTIME_CONTROL_HARD_BYTES} --runtime-control-hard-inodes ${WSPCTL_RUNTIME_CONTROL_HARD_INODES} --runtime-workspace-hard-bytes ${WSPCTL_RUNTIME_WORKSPACE_HARD_BYTES} --runtime-workspace-hard-inodes ${WSPCTL_RUNTIME_WORKSPACE_HARD_INODES} --xfs-global-admission-bytes ${WSPCTL_XFS_GLOBAL_ADMISSION_BYTES} --xfs-global-admission-inodes ${WSPCTL_XFS_GLOBAL_ADMISSION_INODES} --xfs-system-reserve-bytes ${WSPCTL_XFS_SYSTEM_RESERVE_BYTES} --xfs-system-reserve-inodes ${WSPCTL_XFS_SYSTEM_RESERVE_INODES} @WSPCTL_INSECURE_DEVELOPMENT_ROOT_ARGUMENT@
+
+[Install]
+WantedBy=multi-user.target

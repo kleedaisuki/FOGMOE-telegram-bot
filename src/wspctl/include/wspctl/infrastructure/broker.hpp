@@ -1,0 +1,206 @@
+#pragma once
+
+#include "wspctl/infrastructure/common.hpp"
+#include "wspctl/infrastructure/journal.hpp"
+#include "wspctl/infrastructure/runtime_gate.hpp"
+#include "wspctl/infrastructure/sandbox.hpp"
+
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <sys/types.h>
+#include <string>
+#include <unordered_map>
+
+namespace wspctl {
+
+/**
+ * @brief wspctld broker 配置 / wspctld broker configuration.
+ */
+struct BrokerConfig final {
+    /** @brief 仅本机可访问的 UNIX SOCK_SEQPACKET 路径 / Local-only UNIX SOCK_SEQPACKET path. */
+    std::filesystem::path socket_path;
+    /** @brief 允许的 Bot UNIX UID / Permitted Bot UNIX UID. */
+    uid_t client_uid{};
+    /** @brief sandbox 配置 / Sandbox configuration. */
+    SandboxConfig sandbox;
+    /** @brief wsp-systemd 的受信任绝对路径 / Trusted absolute path to wsp-systemd. */
+    std::filesystem::path supervisor_path;
+    /** @brief 空闲 activation 缓存时长 / Idle activation cache duration. */
+    std::chrono::minutes idle_ttl{15};
+    /** @brief 显式承认 checkout 祖先不安全的本机开发模式 / Explicit local-development opt-in for unsafe checkout ancestors. */
+    bool allow_insecure_dev_root{false};
+};
+
+/**
+ * @brief 特权 host broker / Privileged host broker.
+ *
+ * Python 只连接 socket；所有 namespace/mount/cgroup 操作均留在该进程。
+ * Python only connects a socket; all namespace/mount/cgroup operations remain in this process.
+ */
+class Broker final {
+public:
+    /**
+     * @brief 构造并执行 fail-closed 验证 / Construct and run fail-closed validation.
+     * @param config broker 配置 / Broker configuration.
+     * @return 已就绪 broker 或错误 / Ready broker or error.
+     */
+    [[nodiscard]] static Result<Broker> create(BrokerConfig config);
+
+    /** @brief 禁止复制，避免多个 owner 解绑同一路径 / Copying is forbidden to avoid two owners unlinking one path. */
+    Broker(const Broker&) = delete;
+    /** @brief 禁止复制赋值 / Copy assignment is forbidden. */
+    Broker& operator=(const Broker&) = delete;
+    /** @brief 支持移动 / Moving is supported. */
+    Broker(Broker&&) noexcept;
+    /** @brief 支持移动赋值 / Move assignment is supported. */
+    Broker& operator=(Broker&&) noexcept;
+    /** @brief 关闭监听 socket 并回收 supervisor / Close listener and reap supervisors. */
+    ~Broker();
+
+    /**
+     * @brief 监听并处理控制请求 / Listen and process control requests.
+     * @return 直到不可恢复错误 / Runs until an unrecoverable error.
+     */
+    [[nodiscard]] Result<void> serve_forever();
+
+private:
+    /**
+     * @brief 以已验证配置构造 broker / Construct a broker from validated configuration.
+     * @param config broker 配置 / Broker configuration.
+     */
+    explicit Broker(BrokerConfig config);
+    /** @brief 活跃 runtime supervisor 句柄 / Handle to an active runtime supervisor. */
+    struct RuntimeSession;
+    /** @brief 持有 runtime session mutex 与 reaper 借用的执行租约 / Execution lease holding a session mutex and reaper reference. */
+    struct SessionLease;
+    /** @brief 多 worker 共享的 runtime session 状态 / Runtime-session state shared by multiple workers. */
+    struct SharedState;
+    /** @brief fork-server 返回的启动句柄 / Launch handle returned by the fork server. */
+    struct LauncherReply;
+    /** @brief broker 配置 / Broker configuration. */
+    BrokerConfig config_;
+    /** @brief runtime storage 的 XFS-only project-quota 服务 / XFS-only project-quota service for runtime storage. */
+    XfsProjectQuota quota_;
+    /** @brief journal / Journal. */
+    Journal journal_;
+    /** @brief 防止同 runtime 并发 workspace 写入 / Prevent concurrent writes to one runtime workspace. */
+    RuntimeExecutionGate execution_gate_;
+    /** @brief 监听 FD / Listening FD. */
+    int listen_fd_{-1};
+    /** @brief 本 broker 绑定的 socket 设备号 / Device number of the socket bound by this broker. */
+    dev_t socket_device_{};
+    /** @brief 本 broker 绑定的 socket inode / Inode of the socket bound by this broker. */
+    ino_t socket_inode_{};
+    /** @brief 是否确实拥有 socket pathname / Whether this broker truly owns the socket pathname. */
+    bool owns_socket_path_{false};
+    /** @brief 按 runtime key 维护的可同步惰性 activation / Synchronized lazy activations keyed by runtime. */
+    std::unique_ptr<SharedState> state_;
+
+    /**
+     * @brief 绑定监听 socket / Bind the listening socket.
+     * @return 成功或 I/O 错误 / Success or I/O error.
+     */
+    [[nodiscard]] Result<void> bind_listener();
+
+    /**
+     * @brief 服务一个经认证 client / Serve one authenticated client.
+     * @param client_fd 已 accept 的 FD / Accepted FD.
+     * @return 成功或连接错误 / Success or connection error.
+     */
+    [[nodiscard]] Result<void> serve_client(int client_fd);
+
+    /**
+     * @brief 转发给对应 supervisor / Forward to the corresponding supervisor.
+     * @param request 已验证请求 / Validated request.
+     * @return 命令结果 / Command result.
+     */
+    [[nodiscard]] Result<ExecutionResult> dispatch(const ExecuteRequest& request);
+
+    /**
+     * @brief 在必要时惰性激活并独占取得一个 runtime session / Lazily activate and exclusively acquire one runtime session.
+     * @param runtime_key 已校验的持久 runtime 标识 / Validated persistent runtime identifier.
+     * @param activation_id 已校验的 RuntimeProcess activation 标识 / Validated RuntimeProcess activation identifier.
+     * @return 持有 session mutex 的租约或错误 / A mutex-owning lease or an error.
+     * @note 租约在 map lookup 与 mutex 获取之间持有 reaper reference；其生命周期覆盖整次流式
+     *       文件传输，避免断连时 PID 1 的临时文件与 session 生命周期脱节。/ The lease holds a
+     *       reaper reference between map lookup and mutex acquisition and spans the whole streamed
+     *       file transfer, preventing PID1 temporary-file cleanup from drifting from session lifetime.
+     */
+    [[nodiscard]] Result<std::unique_ptr<SessionLease>> acquire_session(
+        const std::string& runtime_key,
+        const std::string& activation_id);
+
+    /**
+     * @brief 在已认证 client 上完成一次流式文件写入 / Complete one streamed file ingress on an authenticated client.
+     * @param client_fd 已认证 client 的 SOCK_SEQPACKET FD / Authenticated client SOCK_SEQPACKET FD.
+     * @param request 已验证的文件开始请求 / Validated file-begin request.
+     * @return 成功、客户端断连或精确错误 / Success, client disconnect, or a precise error.
+     */
+    [[nodiscard]] Result<void> dispatch_payload_stream(
+        int client_fd,
+        const PayloadBeginRequest& request);
+
+    /**
+     * @brief 在 worker 启动前创建单线程 fork-server / Create the single-threaded fork server before workers start.
+     * @return 成功或 fail-closed 错误 / Success or a fail-closed error.
+     */
+    [[nodiscard]] Result<void> start_launcher_server();
+
+    /**
+     * @brief 经 fork-server 启动 namespace PID 1 / Start namespace PID 1 through the fork server.
+     * @param layer 已准备 OverlayFS 层 / Prepared OverlayFS layer.
+     * @param cgroup 传给 PID 1 的 cgroup 控制 FD / Cgroup control FDs passed to PID 1.
+     * @param control_fd supervisor control socket 的 PID 1 一端 / PID 1 end of the supervisor control socket.
+     * @return launcher PID、pidfd、PID 1 与 release FD / Launcher PID, pidfd, PID 1, and release FD.
+     */
+    [[nodiscard]] Result<LauncherReply> launch_runtime(
+        const TaskLayer& layer,
+        const TaskCgroupControl& cgroup,
+        int control_fd);
+
+    /**
+     * @brief 确认已将 PID 1 放入 cgroup 并释放 / Commit that PID 1 was placed in cgroup and released.
+     * @param launch_id fork-server launch ID / Fork-server launch ID.
+     * @return helper terminal acknowledgement or error / Helper terminal acknowledgement or error.
+     */
+    [[nodiscard]] Result<void> commit_launch(std::uint64_t launch_id);
+
+    /**
+     * @brief 取消未确认的启动并等待 helper terminal/reap ACK / Cancel an uncommitted launch and await helper terminal/reap ACK.
+     * @param launch_id fork-server launch ID / Fork-server launch ID.
+     * @return helper terminal acknowledgement or error / Helper terminal acknowledgement or error.
+     */
+    [[nodiscard]] Result<void> cancel_launch(std::uint64_t launch_id);
+
+    /**
+     * @brief 确认 broker 已实际写入 release pipe / Confirm broker actually wrote the release pipe.
+     * @param launch_id fork-server launch ID / Fork-server launch ID.
+     * @return helper terminal acknowledgement or error / Helper terminal acknowledgement or error.
+     */
+    [[nodiscard]] Result<void> release_launch(std::uint64_t launch_id);
+
+    /**
+     * @brief 终止一个 session 并在 launcher 已退出后条件移除 / Retire a session and conditionally erase it after launcher exit.
+     * @param runtime_key runtime 标识 / Runtime key.
+     * @param session 已由调用方持有 mutex 的 session / Session whose mutex is held by the caller.
+     * @return cgroup 与 launcher 均确认终止，或保留 poisoned tracking 的错误 / Confirmed cgroup and launcher termination, or an error retaining poisoned tracking.
+     */
+    [[nodiscard]] Result<void> retire_session(
+        const std::string& runtime_key,
+        const std::shared_ptr<RuntimeSession>& session);
+
+    /** @brief 停止并回收 fork-server / Stop and reap the fork server. */
+    void stop_launcher_server() noexcept;
+
+    /** @brief 在已持有 launcher RPC mutex 时隔离并杀死失步 helper / Isolate and kill a desynchronized helper while launcher RPC mutex is held. */
+    void poison_launcher_server_locked() noexcept;
+
+    /**
+     * @brief 回收超时缓存与死亡 child / Reap expired cache entries and dead children.
+     */
+    void reap_expired_sessions() noexcept;
+};
+
+}  // namespace wspctl

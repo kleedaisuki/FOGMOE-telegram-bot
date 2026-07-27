@@ -14,8 +14,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -121,6 +121,8 @@ __pypackages__/
 celerybeat-schedule
 celerybeat.pid
 .runtime/
+# wspctl 的本机开发态 socket、镜像发布点、Overlay upperdir 与 journal；绝不提交。
+.wspctl/
 
 # SageMath parsed files
 *.sage.py

@@ -59,7 +59,7 @@
 
 - **Python**: 3.14
 - **PostgreSQL**: 15 或更高版本
-- **操作系统**: Linux / macOS / Windows
+- **操作系统**: Linux；`wspctl` 需要 Linux namespace、OverlayFS、cgroup v2 与 seccomp
 
 ### 安装依赖
 
@@ -140,6 +140,17 @@ uv run python tools/migrate_config_v1_to_v2.py ./config.json
 验证，并创建被 Git 忽略的本地 v1 回滚副本。它不会回显密钥；若有任一活动路由不是
 OpenRouter，会 fail closed，要求先手工完成该 provider 的显式协议配置。
 
+已经是 `schema_version: 2`、但仍含旧 `integrations.code_execution`（Judge0）成员的部署，
+需要在升级到 `run_bash` 前运行另一条显式迁移：
+
+```bash
+uv run python tools/migrate_config_v2_to_wspctl.py ./config.json --dry-run
+uv run python tools/migrate_config_v2_to_wspctl.py ./config.json
+```
+
+该迁移会先经当前配置 reader 验证、原子替换前创建不可覆盖的本地 v2 回滚副本；完整的
+权限、回滚与 Docker 部署约束见 [wspctl 部署说明](docs/wspctl-deployment.md)。
+
 ### 数据库设置
 
 ```bash
@@ -158,6 +169,16 @@ CLI 的分层结构和子命令扩展约定见 [`docs/dbctl.md`](docs/dbctl.md)�
 `0068_canonical_assistant_messages` 是不可逆的数据迁移：执行前先备份数据库并停止 bot/worker，
 确认 inference activity、tool effect 与 context-window compaction 均已进入终态。迁移会对这三类
 未排空的工作 fail closed，避免旧 JSON 在新运行时重新投放；完成后再启动新版本。
+
+### 隔离 Workspace Runtime
+
+Assistant 的 `run_bash` 不再调用 Judge0。它只经无特权 Python client 连接宿主机的
+`wspctld`，由后者创建每位私聊用户或每个完整群聊独立的 Linux Workspace；Bot 容器或 Bot
+进程本身不应获得 `CAP_SYS_ADMIN`、`privileged: true` 或任意宿主目录挂载。部署前必须先准备
+版本化、只读的 Python base generation，并以 systemd cgroup delegation 启动 broker；如果
+broker、socket ACL、OverlayFS 或 cgroup 委派未满足，工具会 fail closed，不会回退为宿主
+`subprocess`。完整的信任边界见 [wspctl 文档](docs/wspctl.md)，host broker 与 Docker client 的
+安装、socket UID 契约和升级顺序见 [wspctl 部署说明](docs/wspctl-deployment.md)。
 
 ### 可观测性
 
@@ -302,14 +323,19 @@ source .venv/bin/activate
 更多管理员操作见 [部署管理员使用说明](docs/admin-commands.md)，运行时边界见 [架构说明](docs/runtime-architecture.md)。
 
 
-## 🐳 Docker 部署（仅 Python，外部 PostgreSQL）
+## 🐳 Docker 部署（Bot client、外部 PostgreSQL 与 host broker）
 
-无需在容器内运行 PostgreSQL，只容器化机器人。
+无需在容器内运行 PostgreSQL，Compose 也**绝不**运行 `wspctld`；它只容器化无特权 Bot
+client。先按 [wspctl 部署说明](docs/wspctl-deployment.md) 在 Linux host 安装并验证 root-owned
+`wspctld.service`、只读 base generation 与开发态仓库 `.wspctl/run/wspctld.sock`（生产环境则为
+root-owned host socket 的 container-visible 映射），再启动 Compose。checkout 内 `.wspctl` 仅可在显式
+development opt-in 下使用；它不是 production 的特权 host root。
 
-1. 复制 `example.config.json` 为 `config.json`，填好 Telegram、AI 与 PostgreSQL 配置。Docker
-   会把它以只读方式挂载到 `/app/config.json`；将 `database.endpoint.host` 设为容器可访问的
-   外部数据库地址（Docker Desktop 上的宿主机 PostgreSQL 可使用 `host.docker.internal`；Linux
-   Docker Engine 则使用可路由的宿主机 IP 或网关地址）。
+1. 复制 `example.config.json` 为 `config.json`，填好 Telegram、AI 与 PostgreSQL 配置，并让固定
+   Bot UID `65532` 可读取它（通常为 `chown 65532:65532 config.json && chmod 600 config.json`）。
+   Docker 会只读挂载它到 `/app/config.json`；将 `database.endpoint.host` 设为容器可访问的外部
+   数据库地址（Docker Desktop 上的宿主机 PostgreSQL 可使用 `host.docker.internal`；Linux Docker
+   Engine 则使用可路由的宿主机 IP 或网关地址）。
 2. 构建镜像：
    ```bash
    docker compose build bot
@@ -318,7 +344,10 @@ source .venv/bin/activate
    ```bash
    docker compose up -d bot
    ```
-4. 查看日志：`docker compose logs -f bot`。Compose 默认用 `fogmoe-runtime` named volume 持久化
+4. 查看日志：`docker compose logs -f bot`。Compose 会将 host socket 目录以只读方式挂载，而 Bot
+   以 UID/GID `65532`、只读 root filesystem、零 capability 与 `no-new-privileges` 运行；不要把
+   socket 改成 world/group writable，也不要为它添加 `privileged`。Compose 默认用 `fogmoe-runtime`
+   named volume 持久化
    文件日志、待投递媒体 artifact 与跨进程限流状态；如需直接查看宿主机文件，可把该挂载改成
    `./logs:/app/logs`。Compose 在运行时默认 180 秒分阶段排空截止之后，于第 200 秒升级为
    `SIGKILL`；中间窗口供取消与外围资源关闭尽力收敛，不构成所有第三方 I/O 的完成保证。
@@ -334,7 +363,9 @@ source .venv/bin/activate
 
    如果服务器上的 Docker 需要 root 权限，把 `docker` 改成 `sudo docker` 即可。
 
-> 默认镜像基于 `python:3.14-slim`，入口命令为 `fogmoe-bot`，仅依赖外部 PostgreSQL。
+> 默认镜像基于 `python:3.14-slim-bookworm`，在 builder stage 编译 scikit-build/pybind11 client
+> wheel，并显式关闭 `WSPCTL_INSTALL_HOST_TOOLS`；最终 Bot image 不含 `wspctld`、`wsp-systemd`
+> 或 `wspctl-image` host executable，入口为 `fogmoe-bot --config /app/config.json`。
 
 
 ### 使用的主要技术

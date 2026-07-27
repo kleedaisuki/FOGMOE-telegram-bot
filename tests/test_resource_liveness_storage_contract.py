@@ -87,7 +87,7 @@ def test_0063_snapshot_exposes_one_typed_heartbeat_contract() -> None:
 
     snapshot = _SNAPSHOT_PATH.read_text(encoding="utf-8")
 
-    assert "-- Alembic head: 0068_canonical_assistant_messages" in snapshot
+    assert "-- Alembic head: 0070_workspace_attachment_model_boundary" in snapshot
     assert snapshot.count("last_seen_at TIMESTAMPTZ NOT NULL") == 1
     assert snapshot.count("observability_resources_liveness_ck") == 1
     assert "last_seen_at >= started_at" in snapshot

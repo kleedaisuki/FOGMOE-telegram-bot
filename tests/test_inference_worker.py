@@ -186,14 +186,22 @@ class _Inference:
         self.started = 0
         self.release: asyncio.Event | None = None
 
-    async def infer(self, request: dict[str, object]) -> InferenceResult:
+    async def infer(
+        self,
+        request: dict[str, object],
+        *,
+        execution_deadline_monotonic: float | None = None,
+    ) -> InferenceResult:
         """@brief 返回、抛错或等待 / Return, raise, or wait.
 
         @param request 结构请求 / Structured request.
+        @param execution_deadline_monotonic worker 建立的 attempt 单调截止点 /
+            Attempt monotonic deadline established by the worker.
         @return 固定结果 / Fixed result.
         """
 
         assert request == {"prompt": "hello"}
+        assert execution_deadline_monotonic is None or execution_deadline_monotonic > 0.0
         self.started += 1
         if self.release is not None:
             await self.release.wait()

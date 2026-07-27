@@ -106,6 +106,7 @@ def test_composition_has_one_listener_and_complete_phased_runtime(
         "verification",
         "admin-announcements",
         "btc-monitor",
+        "workspace-runtime",
         "assistant-blocking-calls",
         "llm-http-client",
         "embedding-http-client",

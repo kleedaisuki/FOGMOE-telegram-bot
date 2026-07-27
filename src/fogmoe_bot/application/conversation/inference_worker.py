@@ -189,13 +189,24 @@ class InferenceResult:
 class InferencePort(Protocol):
     """@brief 单次 provider-neutral 推理端口 / Port for one provider-neutral inference attempt."""
 
-    async def infer(self, request: JsonObject) -> InferenceResult:
+    async def infer(
+        self,
+        request: JsonObject,
+        *,
+        execution_deadline_monotonic: float | None = None,
+    ) -> InferenceResult:
         """@brief 执行一次外部推理尝试 / Perform one external inference attempt.
 
         @param request durable provider-neutral 请求 / Durable provider-neutral request.
+        @param execution_deadline_monotonic worker 建立的 attempt 单调截止点；直接调用时可为 None /
+            Attempt monotonic deadline established by the worker; may be None for direct calls.
         @return 类型化推理结果 / Typed inference result.
         @note 实现不得吞掉 CancelledError，也不得自行写 conversation 表。/
         Implementations must not swallow CancelledError or write conversation tables themselves.
+            截止点仅用于在发送不可逆 external effect 前做 budget admission，绝不能成为
+            持久化 request 的一部分。/ The deadline is used only for budget admission before
+            an irreversible external effect is sent; it must never become part of the persisted
+            request.
         """
 
         ...
@@ -595,8 +606,15 @@ class InferenceWorker:
             },
         ) as span:
             try:
-                async with asyncio.timeout(self._attempt_timeout.total_seconds()):
-                    result = await self._inference.infer(dict(activity.request))
+                loop = asyncio.get_running_loop()
+                execution_deadline_monotonic = (
+                    loop.time() + self._attempt_timeout.total_seconds()
+                )
+                async with asyncio.timeout_at(execution_deadline_monotonic):
+                    result = await self._inference.infer(
+                        dict(activity.request),
+                        execution_deadline_monotonic=execution_deadline_monotonic,
+                    )
             except TimeoutError:
                 error = InferenceAttemptTimeout(
                     f"inference attempt exceeded {self._attempt_timeout.total_seconds():g}s"

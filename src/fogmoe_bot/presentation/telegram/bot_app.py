@@ -132,6 +132,9 @@ from fogmoe_bot.infrastructure.scheduling.postgres import (
 from fogmoe_bot.infrastructure.telegram.group_authorization import (
     TelegramGroupAdministratorSource,
 )
+from fogmoe_bot.infrastructure.telegram.current_turn_upload import (
+    TelegramCurrentTurnUploadSource,
+)
 from fogmoe_bot.infrastructure.telegram.monitor_notification import (
     TelegramMonitorNotificationSink,
 )
@@ -511,6 +514,10 @@ def _compose_services(
         settings=settings,
         resources=resources,
         telemetry=observability.telemetry,
+        current_turn_upload_source=TelegramCurrentTurnUploadSource(
+            bot=application.bot,
+            http=settings.telegram.http,
+        ),
     )
     inference = InferenceWorker(
         repository=primitives.inference,
@@ -596,6 +603,11 @@ def _compose_services(
             shutdown_phase=20,
         ),
         ServiceBinding("btc-monitor", btc_monitor, shutdown_phase=20),
+        ServiceBinding(
+            "workspace-runtime",
+            assistant.runtime_process_lifecycle,
+            shutdown_phase=25,
+        ),
         ServiceBinding(
             "assistant-blocking-calls",
             blocking,

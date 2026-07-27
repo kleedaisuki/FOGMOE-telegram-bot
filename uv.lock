@@ -349,6 +349,12 @@ dev = [
     { name = "ruff" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pybind11" },
+    { name = "scikit-build-core" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "aiohttp" },
@@ -373,6 +379,12 @@ requires-dist = [
     { name = "tzdata", specifier = ">=2026.1" },
 ]
 provides-extras = ["dashboard-gui", "dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pybind11", specifier = ">=3,<4" },
+    { name = "scikit-build-core", specifier = ">=0.11" },
+]
 
 [[package]]
 name = "fonttools"
@@ -952,6 +964,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pybind11"
+version = "3.0.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cc/f0/35145a3c3baffeef55d4b8324caa33abaa8fa56ab345ecd4b2211d09163e/pybind11-3.0.4.tar.gz", hash = "sha256:3286b59c8a774b9ee650169302dd5a4eedc30a8617905a0560dd8ee44775130c", size = 589533, upload-time = "2026-04-19T03:08:15.925Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b3/06/c3a23c9a0263b136c519f033a58d4641e73065fefc7754e9667ec206d992/pybind11-3.0.4-py3-none-any.whl", hash = "sha256:961720ee652da51d531b7b2451a6bd2bc042b0106e6d9baa48ecb7d58034ce63", size = 314166, upload-time = "2026-04-19T03:08:14.091Z" },
+]
+
+[[package]]
 name = "pycryptodome"
 version = "3.23.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1281,6 +1302,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4d/76/3f72d8fc38c1cb77b38c56a70da9d0c17700cc1cc50f9649c9d3c8f5ba71/ruff-0.15.22-py3-none-win32.whl", hash = "sha256:e5ba0e4a13fd14abbed2a77b517a3911290c6c6c59ef67784328d1668fab76cf", size = 10789165, upload-time = "2026-07-16T15:14:04.16Z" },
     { url = "https://files.pythonhosted.org/packages/cb/46/4965251734c2b6fcdca1b1b187d20bcac3af0ee5b083b89c910bb961ce3a/ruff-0.15.22-py3-none-win_amd64.whl", hash = "sha256:9be63ba1eb936acd2d1342fb8337c356353706fce233b2a15a09a97037e6acde", size = 11938297, upload-time = "2026-07-16T15:14:07.316Z" },
     { url = "https://files.pythonhosted.org/packages/57/c9/e69b1ff4c8b69093ef08b8919ab767af0569666865b39c30a8795d88d3c6/ruff-0.15.22-py3-none-win_arm64.whl", hash = "sha256:e1168075b72158510839f250027659cdd78476f40507dd517892304c41318661", size = 11298172, upload-time = "2026-07-16T15:14:10.51Z" },
+]
+
+[[package]]
+name = "scikit-build-core"
+version = "1.0.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pathspec" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8d/7c/0f69b0c7150ce4bcee78c199fe3b7e03a6e01578451bd5d5d1a58beb32f9/scikit_build_core-1.0.3.tar.gz", hash = "sha256:a4d7a05978ee37975c37743510c8991e2debce7ef83afb0a07c0c576fd4f16e8", size = 477539, upload-time = "2026-07-12T05:08:30.298Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b7/b0/7ad8fa9aebb0835b2e20afebf1483cbe175d1612fe01e85042ce9ced8755/scikit_build_core-1.0.3-py3-none-any.whl", hash = "sha256:ae95427b7d3c14a6cf8bbfd4d901f6138ab64c99e20cbe8ea7d75cd26093f085", size = 278294, upload-time = "2026-07-12T05:08:28.725Z" },
 ]
 
 [[package]]

@@ -135,6 +135,7 @@ DEFAULT_ACCESS_POLICY = DatabaseAccessPolicy(
         "retrieval",
         "user_profile",
         "assistant",
+        "workspace",
         "scheduling",
         "economy",
         "moderation",
