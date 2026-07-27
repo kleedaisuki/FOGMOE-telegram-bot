@@ -66,6 +66,16 @@ fingerprint 判定是否需要重启，因此普通的重复调用只检查健�
 `WSPCTL_GENERATION=<new-name>` 显式发布新的开发 generation；已有 generation 从不覆盖。
 要在首次创建时调整容量，传 `WSPCTL_LOOP_SIZE=48G`；已有 image 不自动扩容或重建。
 
+开发态的只读观测入口在仓库根目录：
+
+```bash
+./statusWspctl.sh
+```
+
+它输出 `wspctld.service` 状态与资源、socket UID/mode、loop image/关联 device、XFS mount options、block/
+inode 容量、XFS project-quota accounting/enforcement，以及不泄露 runtime identity 的 runtime、registry、journal
+聚合计数；最后以 `WSPCTL_STATUS=healthy` 或 `WSPCTL_STATUS=degraded` 及对应 exit code 供人和脚本消费。
+
 若要移除本 checkout 的开发 broker，运行仓库根目录的：
 
 ```bash

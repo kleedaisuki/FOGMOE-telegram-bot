@@ -12,6 +12,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 START_SCRIPT = REPOSITORY_ROOT / "scripts" / "start-wspctld.sh"
 #: @brief 仓库根目录的卸载脚本 / Repository-root uninstaller script.
 UNINSTALL_SCRIPT = REPOSITORY_ROOT / "uninstallWspctl.sh"
+#: @brief 仓库根目录的只读观测脚本 / Repository-root readonly observability script.
+STATUS_SCRIPT = REPOSITORY_ROOT / "statusWspctl.sh"
 
 
 def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> None:
@@ -80,6 +82,33 @@ def test_root_uninstaller_is_syntax_valid_and_requires_explicit_purge() -> None:
     assert "保留 ./.wspctl" in script
 
 
+def test_root_status_script_is_readonly_and_reports_operational_boundaries() -> None:
+    """@brief 状态脚本应报告运行边界且不得触发任务或变更 state / The status script must report operational boundaries without task execution or state mutation.
+
+    @return None / None.
+    """
+
+    checked = subprocess.run(
+        ["bash", "-n", str(STATUS_SCRIPT)],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    if checked.returncode != 0:
+        raise AssertionError(f"invalid bash:\n{checked.stderr}")
+    script = STATUS_SCRIPT.read_text(encoding="utf-8")
+    assert "systemctl show" in script
+    assert "xfs_quota -x -c 'state -p'" in script
+    assert "WSPCTL_STATUS=healthy" in script
+    assert "WSPCTL_STATUS=degraded" in script
+    assert "persistent runtime aggregates" in script
+    assert "run_bash" not in script
+    assert " add_file" not in script
+    assert "rm -" not in script
+
+
 def test_runbot_delegates_broker_readiness_to_the_independent_script() -> None:
     """@brief runBot 启动前必须委托 broker readiness / runBot must delegate broker readiness before Bot launch.
 
@@ -97,4 +126,5 @@ def test_runbot_delegates_broker_readiness_to_the_independent_script() -> None:
 if __name__ == "__main__":
     test_start_script_is_bash_syntax_valid_and_declares_critical_contracts()
     test_root_uninstaller_is_syntax_valid_and_requires_explicit_purge()
+    test_root_status_script_is_readonly_and_reports_operational_boundaries()
     test_runbot_delegates_broker_readiness_to_the_independent_script()
