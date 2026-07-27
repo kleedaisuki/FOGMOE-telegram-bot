@@ -376,6 +376,42 @@ class ImageBuilderContractTests(unittest.TestCase):
             )
             self.assertNotIn(host_path, copied_bytes)
 
+    def test_regular_copy_defers_fsync_until_atomic_staging_commit(self) -> None:
+        """@brief 单文件复制不应双重 fsync，durability 只在发布前的全树提交完成 / A regular copy must not fsync twice; durability is committed once for the full staging tree before publish."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input"
+            source.write_bytes(b"immutable-image-input")
+            rootfs = root / "rootfs"
+            rootfs.mkdir()
+            layout = _BUILDER.PythonRuntimeLayout(
+                venv=root / "venv",
+                base_prefix=root / "cpython",
+                interpreter=source,
+                standard_library=root / "cpython",
+                library_directory=root / "cpython",
+                version="3.14",
+            )
+            assembler = _BUILDER.RootfsAssembler(
+                rootfs=rootfs,
+                layout=layout,
+                python_sources=(),
+                readelf=Path("/usr/bin/readelf"),
+                ldconfig=Path("/sbin/ldconfig"),
+            )
+            with (
+                patch.object(_BUILDER.os, "chown", return_value=None),
+                patch.object(_BUILDER.os, "fchown", return_value=None),
+                patch.object(_BUILDER.os, "fsync") as synchronize,
+            ):
+                assembler._copy_regular_file(source, PurePosixPath("/opt/input"))
+
+            self.assertEqual(
+                (rootfs / "opt" / "input").read_bytes(), b"immutable-image-input"
+            )
+            synchronize.assert_not_called()
+
     def test_path_only_pth_requires_explicit_python_source(self) -> None:
         """@brief path-only ``.pth`` 只能引用显式 --python-source / A path-only ``.pth`` may reference only explicit --python-source roots."""
 

@@ -1441,7 +1441,13 @@ class RootfsAssembler:
                     _sanitized_mode(source_metadata.st_mode, directory=False),
                 )
                 os.fchown(destination_fd, 0, 0)
-                os.fsync(destination_fd)
+                # staging 中的每个 inode 都会在 publish 前由 _fsync_tree 统一落盘。
+                # 此处逐文件 fsync 既不能使未 rename 的 generation 可见，也不能增强
+                # crash consistency，只会把大 venv 的构建 I/O 放大为两次同步。
+                # Every staging inode is durably synchronized as a single commit by
+                # _fsync_tree immediately before publication. Per-file fsync here
+                # cannot make an unrenamed generation visible or improve crash
+                # consistency; it only doubles synchronous I/O for large venvs.
             finally:
                 os.close(destination_fd)
         finally:
