@@ -41,6 +41,8 @@ GENERATION="${WSPCTL_GENERATION:-dev-$(git -C "$REPOSITORY_ROOT" rev-parse --ver
 LOCK_FILE="$REPOSITORY_ROOT/.runtime/wspctld-control.lock"
 # @brief 最近一次已应用 broker 配置的 fingerprint / Fingerprint of the most recently applied broker configuration.
 FINGERPRINT_FILE="$REPOSITORY_ROOT/.runtime/wspctld-fingerprint"
+# @brief 由本 checkout 安装的 host artifacts 清单 / Manifest of host artifacts installed by this checkout.
+INSTALL_MANIFEST_FILE="$WORK_ROOT/install-manifest"
 # @brief daemon socket path / Daemon socket path.
 SOCKET_PATH="$WORK_ROOT/run/wspctld.sock"
 # @brief 本次启动是否必须重启 service / Whether this invocation must restart the service.
@@ -113,7 +115,8 @@ ensure_host_artifacts() {
         -DPython_EXECUTABLE="$PYTHON_EXECUTABLE" \
         -DWSPCTL_INSTALL_HOST_TOOLS=ON \
         -DWSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT=ON \
-        -DWSPCTL_HOST_WORKDIR="$WORK_ROOT"
+        -DWSPCTL_HOST_WORKDIR="$WORK_ROOT" \
+        -DCMAKE_INSTALL_PREFIX=/usr/local
     cmake --build "$BUILD_DIRECTORY" --parallel
     sudo cmake --install "$BUILD_DIRECTORY"
 
@@ -123,6 +126,35 @@ ensure_host_artifacts() {
         || die "CMake 没有产生 wsp-systemd"
     [[ -x "$BUILD_DIRECTORY/src/wspctl/wspctl-image" ]] \
         || die "CMake 没有产生 wspctl-image"
+    write_install_manifest
+}
+
+# @brief 写入本 checkout 实际安装的 host artifact manifest / Write the manifest of host artifacts actually installed by this checkout.
+#
+# 卸载器仅删除 checksum 与本 manifest 匹配的路径，绝不根据全局文件名盲删。/
+# The uninstaller deletes only paths whose checksum matches this manifest; it never blindly
+# deletes based on a global filename.
+write_install_manifest() {
+    local temporary_file="$REPOSITORY_ROOT/.runtime/wspctl-install-manifest.$$.tmp"
+    local artifact_path
+    local artifact_checksum
+    local artifact_paths=(
+        /usr/local/bin/wspctld
+        /usr/local/bin/wspctl-image
+        /usr/local/libexec/wspctl/wsp-systemd
+        /usr/local/share/fogmoe-wspctl/systemd/wspctld.service
+        /usr/local/share/fogmoe-wspctl/systemd/wspctld.env.example
+    )
+
+    : > "$temporary_file"
+    for artifact_path in "${artifact_paths[@]}"; do
+        [[ -f "$artifact_path" || -x "$artifact_path" ]] \
+            || die "CMake install 未产生预期 host artifact: $artifact_path"
+        artifact_checksum="$(sha256sum "$artifact_path" | awk '{print $1}')"
+        printf 'artifact %s %s\n' "$artifact_path" "$artifact_checksum" >> "$temporary_file"
+    done
+    sudo install -o root -g root -m 0600 "$temporary_file" "$INSTALL_MANIFEST_FILE"
+    rm -f -- "$temporary_file"
 }
 
 # @brief 在首次开发启动时创建并挂载 loopback XFS / Create and mount the loopback XFS on the first development start.

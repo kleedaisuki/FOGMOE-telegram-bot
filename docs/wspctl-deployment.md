@@ -66,6 +66,17 @@ fingerprint 判定是否需要重启，因此普通的重复调用只检查健�
 `WSPCTL_GENERATION=<new-name>` 显式发布新的开发 generation；已有 generation 从不覆盖。
 要在首次创建时调整容量，传 `WSPCTL_LOOP_SIZE=48G`；已有 image 不自动扩容或重建。
 
+若要移除本 checkout 的开发 broker，运行仓库根目录的：
+
+```bash
+./uninstallWspctl.sh
+```
+
+它只停止/删除绑定当前 checkout 的 unit、卸载 generation 与 loop device，并只删除记录在安装 manifest
+且 checksum 未变化的 `/usr/local` host tools；`./.wspctl` 会保留，未来重新启动仍可恢复 workspace。确认不要
+保留任何 workspace 后才执行 `./uninstallWspctl.sh --purge`，后者会不可恢复地删除 loop image、journal、upper
+layers 和 generations。
+
 生产构建不允许隐式选择该目录，必须给出绝对 host root：
 
 ```bash
