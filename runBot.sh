@@ -12,6 +12,7 @@ VENV_DIR="$BOT_DIR/.venv"
 PYPROJECT_FILE="$BOT_DIR/pyproject.toml"
 CONFIG_FILE="$BOT_DIR/config.json"
 EXAMPLE_CONFIG_FILE="$BOT_DIR/example.config.json"
+WSPCTLD_START_SCRIPT="$BOT_DIR/scripts/start-wspctld.sh"
 # 外层进程管理器必须晚于应用的排空截止时间才可升级为 SIGKILL。
 STOP_TIMEOUT_SECONDS="${BOT_STOP_TIMEOUT_SECONDS:-200}"
 
@@ -310,6 +311,16 @@ start_bot() {
 
     runtime_grace_seconds="$(read_runtime_shutdown_grace)" || exit 1
     validate_stop_timeout "$runtime_grace_seconds" || exit 1
+
+    # Bot 只能连接既有 Unix socket；host control plane 的构建、rootfs 发布与 systemd
+    # 生命周期统一由独立脚本处理。/ The Bot may only connect to an existing Unix socket;
+    # the host control plane's build, rootfs publication, and systemd lifecycle are handled by
+    # one independent script.
+    if [ ! -x "$WSPCTLD_START_SCRIPT" ]; then
+        echo -e "${RED}错误: wspctld 启动脚本不存在或不可执行: $WSPCTLD_START_SCRIPT${NC}"
+        exit 1
+    fi
+    "$WSPCTLD_START_SCRIPT" start
 
     # 切换到项目根目录，使用 src layout 启动入口
     cd "$BOT_DIR"

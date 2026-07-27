@@ -40,8 +40,29 @@ cmake -S . -B build/wspctl-dev \
 ```
 
 此模式会向 native broker 传入 `--allow-insecure-dev-root`。socket 的所有权与 mode 不会放宽：broker
-仍要求 socket parent 为 `root:root` 且不可 group/other 写，socket 仍为 UID `65532` 的 `0600`。该模式
+仍要求 socket parent 为 `root:root` 且不可 group/other 写，socket 始终是配置 client UID 的 `0600` 文件
+（Compose 默认 UID 为 `65532`）。该模式
 只是明确把 local developer 纳入 trusted control plane，不能用于多用户 host 或 production。
+
+### 本机开发的单一启动入口
+
+开发机不需要手工拼接 CMake、image builder、unit 与 socket 检查。先由操作者准备好
+`./.wspctl/state` 这个**独立**的 XFS `prjquota`/`pquota` mount（不能是 checkout 的普通目录），随后执行：
+
+```bash
+./scripts/start-wspctld.sh
+```
+
+脚本会在产物缺失时创建项目 `.venv`、执行 `pip install --editable .` 并实际导入
+`wspctl._native`，接着构建/安装 `wspctld`、`wsp-systemd` 与 `wspctl-image`；只有 generation 缺失时才构建
+rootfs，并将它以真实的 readonly bind mount 发布。它用 unit、environment、host executable 与 generation 的
+fingerprint 判定是否需要重启，因此普通的重复调用只检查健康 socket，不会冲掉 15 分钟 activation cache。
+它绝不 `mkfs`、自动选盘或以普通 filesystem 替代 XFS quota。
+
+`./runBot.sh start` 在启动 Bot 前自动调用该脚本；sudo 只发生在交互式开发者终端，Bot 进程从不持有 sudo。
+直接在 host 上运行 `runBot.sh` 时，脚本默认允许当前 UID 连接 socket；若 Bot 由 Compose 的固定 UID
+`65532` 运行，改为 `WSPCTL_CLIENT_UID=65532 ./scripts/start-wspctld.sh`。可用
+`WSPCTL_GENERATION=<new-name>` 显式发布新的开发 generation；已有 generation 从不覆盖。
 
 生产构建不允许隐式选择该目录，必须给出绝对 host root：
 
