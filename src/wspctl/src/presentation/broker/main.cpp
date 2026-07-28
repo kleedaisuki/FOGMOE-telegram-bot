@@ -34,12 +34,11 @@ int main(const int argc, char *argv[])
     bool have_socket = false;
     bool have_operator_socket = false;
     bool have_state = false;
-    bool have_base = false;
-    bool have_images = false;
+    bool have_image_store = false;
+    bool have_image_digest = false;
     bool have_client_uid = false;
     bool have_operator_uid = false;
     bool have_cgroup = false;
-    bool have_supervisor = false;
     bool have_sandbox_uid = false;
     bool have_sandbox_gid = false;
     bool have_memory = false;
@@ -89,15 +88,21 @@ int main(const int argc, char *argv[])
             config.sandbox.state_root = value;
             have_state = true;
         }
-        else if (option == "--base-root")
-        {
-            config.sandbox.base_root = value;
-            have_base = true;
-        }
-        else if (option == "--images-root")
+        else if (option == "--image-store")
         {
             config.sandbox.images_root = value;
-            have_images = true;
+            have_image_store = true;
+        }
+        else if (option == "--image-digest")
+        {
+            const auto digest = wspctl::OciImageDigest::parse(value);
+            if (!digest)
+            {
+                std::fputs("wspctld: invalid --image-digest\n", stderr);
+                return 64;
+            }
+            config.sandbox.image_digest = *digest;
+            have_image_digest = true;
         }
         else if (option == "--client-uid")
         {
@@ -111,11 +116,6 @@ int main(const int argc, char *argv[])
         {
             config.sandbox.cgroup_root = value;
             have_cgroup = true;
-        }
-        else if (option == "--supervisor")
-        {
-            config.supervisor_path = value;
-            have_supervisor = true;
         }
         else if (option == "--sandbox-uid")
         {
@@ -235,9 +235,10 @@ int main(const int argc, char *argv[])
         }
         index += 2;
     }
-    if (!have_socket || !have_operator_socket || !have_state || !have_base || !have_images || !have_client_uid ||
+    if (!have_socket || !have_operator_socket || !have_state || !have_image_store ||
+        !have_image_digest || !have_client_uid ||
         !have_operator_uid || !have_cgroup ||
-        !have_supervisor || !have_sandbox_uid || !have_sandbox_gid || !have_memory || !have_cpu_quota || !have_cpu_period ||
+        !have_sandbox_uid || !have_sandbox_gid || !have_memory || !have_cpu_quota || !have_cpu_period ||
         !have_pids || !have_idle || !have_quota_backend || !have_quota_mount || !have_project_id_min || !have_project_id_max ||
         !have_control_hard_bytes || !have_control_hard_inodes || !have_workspace_hard_bytes || !have_workspace_hard_inodes ||
         !have_admission_bytes || !have_admission_inodes || !have_system_reserve_bytes || !have_system_reserve_inodes)

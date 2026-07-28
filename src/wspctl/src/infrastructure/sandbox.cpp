@@ -323,6 +323,16 @@ Result<void> validate_secure_directory_ancestry(
     }
 }
 
+Result<std::filesystem::path> image_root(const SandboxConfig& config) {
+    if (!config.image_digest.has_value() || !config.images_root.is_absolute()) {
+        return std::unexpected(make_error(
+            ErrorCode::invalid_argument,
+            "sandbox requires an absolute image store and typed OCI image digest"));
+    }
+    return config.images_root / "sha256" /
+           std::string{config.image_digest->hex()} / "rootfs";
+}
+
 Result<void> preflight_sandbox(const SandboxConfig& config) {
     if (geteuid() != 0) {
         return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "wspctld must run as root; no unprivileged fallback exists"));
@@ -338,7 +348,11 @@ Result<void> preflight_sandbox(const SandboxConfig& config) {
         config.pids_max == 0U || config.io_weight == 0U || config.io_weight > 10'000U) {
         return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "sandbox identity or cgroup resource policy is invalid"));
     }
-    const auto image = validate_image_root(config.base_root, config.images_root);
+    const auto base_root = image_root(config);
+    if (!base_root) {
+        return std::unexpected(base_root.error());
+    }
+    const auto image = validate_image_root(*base_root, config.images_root);
     if (!image) {
         return std::unexpected(image.error());
     }
@@ -358,8 +372,8 @@ Result<void> preflight_sandbox(const SandboxConfig& config) {
         access((*cgroup_root / "io.weight").c_str(), W_OK) != 0) {
         return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "cgroup v2 Delegate=yes subtree is unavailable"));
     }
-    if (!config.state_root.is_absolute() || config.state_root == config.base_root ||
-        !is_safe_overlay_path(config.base_root) || !is_safe_overlay_path(config.state_root)) {
+    if (!config.state_root.is_absolute() || config.state_root == *base_root ||
+        !is_safe_overlay_path(*base_root) || !is_safe_overlay_path(config.state_root)) {
         return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "unsafe state/base root configuration"));
     }
     const auto state_root = canonical_existing(config.state_root);
@@ -461,16 +475,20 @@ Result<void> reclaim_dead_task_layers(
 }
 
 Result<void> setup_runtime_mounts(const SandboxConfig& config, const TaskLayer& layer) {
+    const auto base_root = image_root(config);
+    if (!base_root) {
+        return std::unexpected(base_root.error());
+    }
     if (mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0) {
         return std::unexpected(errno_error(ErrorCode::sandbox_preflight_failed, "make mount propagation private"));
     }
-    if (mount(config.base_root.c_str(), layer.root_dir.c_str(), nullptr, MS_BIND, nullptr) != 0) {
+    if (mount(base_root->c_str(), layer.root_dir.c_str(), nullptr, MS_BIND, nullptr) != 0) {
         return std::unexpected(errno_error(ErrorCode::sandbox_preflight_failed, "bind immutable base root"));
     }
     if (mount(nullptr, layer.root_dir.c_str(), nullptr, MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV, nullptr) != 0) {
         return std::unexpected(errno_error(ErrorCode::sandbox_preflight_failed, "remount immutable base root readonly"));
     }
-    const std::filesystem::path base_workspace = config.base_root / "workspace";
+    const std::filesystem::path base_workspace = *base_root / "workspace";
     struct stat workspace_metadata {};
     if (stat(base_workspace.c_str(), &workspace_metadata) != 0 || !S_ISDIR(workspace_metadata.st_mode)) {
         return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "immutable image must contain /workspace directory"));

@@ -31,8 +31,6 @@ struct BrokerConfig final {
     uid_t operator_uid{};
     /** @brief sandbox 配置 / Sandbox configuration. */
     SandboxConfig sandbox;
-    /** @brief wsp-systemd 的受信任绝对路径 / Trusted absolute path to wsp-systemd. */
-    std::filesystem::path supervisor_path;
     /** @brief 空闲 activation 缓存时长 / Idle activation cache duration. */
     std::chrono::minutes idle_ttl{15};
     /** @brief 显式承认 checkout 祖先不安全的本机开发模式 / Explicit local-development opt-in for unsafe checkout ancestors. */

@@ -1,9 +1,11 @@
 #include "wspctl/infrastructure/journal.hpp"
+#include "wspctl/infrastructure/image.hpp"
 #include "wspctl/infrastructure/detail/launcher_transport.hpp"
 #include "wspctl/infrastructure/detail/payload_replay.hpp"
 #include "wspctl/infrastructure/detail/pidfd_control.hpp"
 #include "wspctl/infrastructure/protocol.hpp"
 #include "wspctl/infrastructure/runtime_gate.hpp"
+#include "wspctl/infrastructure/sandbox.hpp"
 #include "wspctl/infrastructure/supervisor.hpp"
 #include "wspctl/infrastructure/xfs_project_quota.hpp"
 
@@ -93,6 +95,30 @@ void expect(const bool condition, const std::string& message) {
         ++g_failures;
         std::cerr << "FAIL: " << message << '\n';
     }
+}
+
+/** @brief 验证 OCI identity 的类型与路径派生 / Verify OCI identity typing and path derivation. */
+void test_oci_image_identity() {
+    const std::string digest_text = "sha256-" + std::string(64U, 'a');
+    expect(
+        !wspctl::OciImageDigest::parse(digest_text).has_value(),
+        "reject path-like image generations instead of accepting them as OCI digests");
+    const auto digest =
+        wspctl::OciImageDigest::parse("sha256:" + std::string(64U, 'a'));
+    expect(digest.has_value(), "accept one canonical OCI sha256 digest");
+    if (!digest) {
+        return;
+    }
+    wspctl::SandboxConfig config;
+    config.images_root = "/srv/fogmoe/images";
+    config.image_digest = *digest;
+    const auto root = wspctl::image_root(config);
+    expect(
+        root.has_value() &&
+            *root ==
+                std::filesystem::path{"/srv/fogmoe/images/sha256"} /
+                    std::string(64U, 'a') / "rootfs",
+        "derive the sole image path from the typed digest");
 }
 
 /** @brief 构造有效请求 / Construct a valid request. */
@@ -1039,6 +1065,7 @@ void test_supervisor() {
  * @return 成功为 0 / Zero on success.
  */
 int main() {
+    test_oci_image_identity();
     test_protocol();
     test_launcher_scm_rights_contract();
     test_pidfd_terminal_signal_consumes_owned_fd();

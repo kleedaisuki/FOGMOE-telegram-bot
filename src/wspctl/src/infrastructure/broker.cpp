@@ -1063,19 +1063,6 @@ void close_range_from(const unsigned int first) noexcept {
     return {};
 }
 
-/** @brief 验证 runtime 内 supervisor executable 位于已验证 image 内 / Validate runtime supervisor executable within verified image. */
-[[nodiscard]] Result<void> validate_supervisor_path(const BrokerConfig& config) {
-    if (!config.supervisor_path.is_absolute()) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "supervisor path must be absolute inside image"));
-    }
-    const std::filesystem::path candidate = config.sandbox.base_root / config.supervisor_path.relative_path();
-    struct stat metadata {};
-    if (lstat(candidate.c_str(), &metadata) != 0 || !S_ISREG(metadata.st_mode) || (metadata.st_mode & S_IXUSR) == 0) {
-        return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "image does not contain executable wsp-systemd"));
-    }
-    return {};
-}
-
 /**
  * @brief 在 namespace 中启动 PID 1 / Launch PID 1 in a new namespace.
  * @param config broker 配置 / Broker configuration.
@@ -1140,9 +1127,11 @@ void close_range_from(const unsigned int first) noexcept {
     const std::string events = std::to_string(static_cast<int>(LaunchFd::task_cgroup_events));
     const std::string uid = std::to_string(config.sandbox.sandbox_uid);
     const std::string gid = std::to_string(config.sandbox.sandbox_gid);
+    constexpr const char* kSupervisorPath =
+        "/usr/local/libexec/wspctl/wsp-systemd";
     execl(
-        config.supervisor_path.c_str(),
-        config.supervisor_path.c_str(),
+        kSupervisorPath,
+        kSupervisorPath,
         "--control-fd",
         control.c_str(),
         "--task-cgroup-procs-fd",
@@ -2426,16 +2415,17 @@ Result<Broker> Broker::create(BrokerConfig config) {
     if (const auto preflight = preflight_sandbox(config.sandbox); !preflight) {
         return std::unexpected(preflight.error());
     }
+    const auto base_root = image_root(config.sandbox);
+    if (!base_root) {
+        return std::unexpected(base_root.error());
+    }
     for (const std::filesystem::path* root : std::array<const std::filesystem::path*, 3>{
              &config.sandbox.state_root,
              &config.sandbox.images_root,
-             &config.sandbox.base_root}) {
+             &*base_root}) {
         if (const auto secure = validate_secure_directory_ancestry(*root, config.allow_insecure_dev_root); !secure) {
             return std::unexpected(secure.error());
         }
-    }
-    if (const auto supervisor = validate_supervisor_path(config); !supervisor) {
-        return std::unexpected(supervisor.error());
     }
     const auto socket_parent = validate_socket_parent(config.socket_path, config.allow_insecure_dev_root);
     if (!socket_parent) {

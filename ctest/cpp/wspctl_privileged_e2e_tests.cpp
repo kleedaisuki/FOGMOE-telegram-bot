@@ -70,8 +70,6 @@ constexpr std::string_view kCgroupParentEnvironment{"WSPCTL_PRIVILEGED_E2E_CGROU
 constexpr std::string_view kImagesRootEnvironment{"WSPCTL_PRIVILEGED_E2E_IMAGES_ROOT"};
 /** @brief 只读 sealed rootfs 的环境变量 / Environment variable for the readonly sealed rootfs. */
 constexpr std::string_view kBaseRootEnvironment{"WSPCTL_PRIVILEGED_E2E_BASE_ROOT"};
-/** @brief image-internal wsp-systemd 路径的可选环境变量 / Optional environment variable for the image-internal wsp-systemd path. */
-constexpr std::string_view kSupervisorEnvironment{"WSPCTL_PRIVILEGED_E2E_SUPERVISOR"};
 /** @brief 为本测试专属保留的 XFS project-ID 首值 / First XFS project ID reserved exclusively for this test. */
 constexpr std::string_view kProjectIdMinEnvironment{"WSPCTL_PRIVILEGED_E2E_XFS_PROJECT_ID_MIN"};
 /** @brief 为本测试专属保留的 XFS project-ID 末值 / Last XFS project ID reserved exclusively for this test. */
@@ -135,8 +133,6 @@ struct E2eEnvironment final {
     std::filesystem::path images_root;
     /** @brief readonly sealed rootfs / 只读且 sealed 的 rootfs。 */
     std::filesystem::path base_root;
-    /** @brief rootfs 内 wsp-systemd 的绝对路径 / Absolute in-rootfs path to wsp-systemd. */
-    std::string supervisor_path;
     /** @brief 测试独占 XFS range 的最小 project ID / Minimum project ID in the test-exclusive XFS range. */
     std::uint32_t project_id_min{};
     /** @brief 测试独占 XFS range 的最大 project ID / Maximum project ID in the test-exclusive XFS range. */
@@ -506,12 +502,6 @@ private:
         reason = "privileged E2E XFS project-ID range must be a nonzero even-to-odd complete pair";
         return std::nullopt;
     }
-    /** @brief 可选 in-image supervisor 路径 / Optional in-image supervisor path. */
-    const std::string supervisor = environment_text(kSupervisorEnvironment).value_or("/libexec/wspctl/wsp-systemd");
-    if (supervisor.empty() || supervisor.front() != '/' || supervisor.find('\0') != std::string::npos) {
-        reason = "WSPCTL_PRIVILEGED_E2E_SUPERVISOR must be an absolute in-image path";
-        return std::nullopt;
-    }
     return E2eEnvironment{
         .xfs_mount = paths[0],
         .state_parent = paths[1],
@@ -519,7 +509,6 @@ private:
         .cgroup_parent = paths[3],
         .images_root = paths[4],
         .base_root = paths[5],
-        .supervisor_path = supervisor,
         .project_id_min = *project_min,
         .project_id_max = *project_max,
     };
@@ -954,18 +943,24 @@ private:
  * @return 成功 fork 时为真 / True when fork succeeds.
  */
 [[nodiscard]] bool launch_broker(E2eFixture& fixture, const BrokerLaunch& launch) {
+    const auto image = wspctl::validate_image_root(
+        fixture.environment.base_root, fixture.environment.images_root);
+    if (!image) {
+        std::cerr << "FAIL: cannot derive broker OCI identity: "
+                  << image.error().message << '\n';
+        return false;
+    }
     /** @brief 传给 broker 的完整 argv 文本 / Complete argv text passed to broker. */
     std::vector<std::string> arguments{
         launch.executable.string(),
         "--socket", launch.bot_socket_path.string(),
         "--operator-socket", launch.operator_socket_path.string(),
         "--state-root", fixture.state_root.string(),
-        "--base-root", fixture.environment.base_root.string(),
-        "--images-root", fixture.environment.images_root.string(),
+        "--image-store", fixture.environment.images_root.string(),
+        "--image-digest", image->source_oci_manifest_digest,
         "--client-uid", std::to_string(kClientUid),
         "--operator-uid", "0",
         "--cgroup-root", fixture.cgroup_root.string(),
-        "--supervisor", fixture.environment.supervisor_path,
         "--sandbox-uid", std::to_string(kClientUid),
         "--sandbox-gid", std::to_string(kClientGid),
         "--memory-max", "268435456",

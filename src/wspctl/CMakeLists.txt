@@ -4,31 +4,34 @@
 # Prefer the project virtual environment so a host CMake invocation does not arbitrarily
 # discover a version-compatible Python without pybind11. Wheel builds explicitly provide
 # their isolated interpreter, so this fallback only applies to source-tree local/host builds.
-set(WSPCTL_PROJECT_VENV_PYTHON "${CMAKE_SOURCE_DIR}/.venv/bin/python")
-if((NOT DEFINED Python_EXECUTABLE OR Python_EXECUTABLE STREQUAL "") AND EXISTS "${WSPCTL_PROJECT_VENV_PYTHON}")
-    set(
-        Python_EXECUTABLE
-        "${WSPCTL_PROJECT_VENV_PYTHON}"
-        CACHE FILEPATH
-        "Python interpreter selected from the project .venv for wspctl"
-    )
-    message(STATUS "wspctl: using project virtual-environment Python: ${Python_EXECUTABLE}")
-endif()
+option(WSPCTL_BUILD_PYTHON_BINDINGS "构建 pybind11 client / Build the pybind11 client" ON)
 
-find_package(Python 3.14 REQUIRED COMPONENTS Interpreter Development.Module)
-find_package(pybind11 CONFIG QUIET)
-if(NOT pybind11_FOUND)
-    execute_process(
-        COMMAND "${Python_EXECUTABLE}" -m pybind11 --cmakedir
-        OUTPUT_VARIABLE WSPCTL_PYBIND11_CMAKE_DIR
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE WSPCTL_PYBIND11_RESULT
-    )
-    if(NOT WSPCTL_PYBIND11_RESULT EQUAL 0 OR WSPCTL_PYBIND11_CMAKE_DIR STREQUAL "")
-        message(FATAL_ERROR "pybind11 CMake package was not found for ${Python_EXECUTABLE}")
+if(WSPCTL_BUILD_PYTHON_BINDINGS)
+    set(WSPCTL_PROJECT_VENV_PYTHON "${CMAKE_SOURCE_DIR}/.venv/bin/python")
+    if((NOT DEFINED Python_EXECUTABLE OR Python_EXECUTABLE STREQUAL "") AND EXISTS "${WSPCTL_PROJECT_VENV_PYTHON}")
+        set(
+            Python_EXECUTABLE
+            "${WSPCTL_PROJECT_VENV_PYTHON}"
+            CACHE FILEPATH
+            "Python interpreter selected from the project .venv for wspctl"
+        )
+        message(STATUS "wspctl: using project virtual-environment Python: ${Python_EXECUTABLE}")
     endif()
-    list(PREPEND CMAKE_PREFIX_PATH "${WSPCTL_PYBIND11_CMAKE_DIR}")
-    find_package(pybind11 CONFIG REQUIRED)
+    find_package(Python 3.14 REQUIRED COMPONENTS Interpreter Development.Module)
+    find_package(pybind11 CONFIG QUIET)
+    if(NOT pybind11_FOUND)
+        execute_process(
+            COMMAND "${Python_EXECUTABLE}" -m pybind11 --cmakedir
+            OUTPUT_VARIABLE WSPCTL_PYBIND11_CMAKE_DIR
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE WSPCTL_PYBIND11_RESULT
+        )
+        if(NOT WSPCTL_PYBIND11_RESULT EQUAL 0 OR WSPCTL_PYBIND11_CMAKE_DIR STREQUAL "")
+            message(FATAL_ERROR "pybind11 CMake package was not found for ${Python_EXECUTABLE}")
+        endif()
+        list(PREPEND CMAKE_PREFIX_PATH "${WSPCTL_PYBIND11_CMAKE_DIR}")
+        find_package(pybind11 CONFIG REQUIRED)
+    endif()
 endif()
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(Threads REQUIRED)
@@ -140,44 +143,43 @@ target_link_libraries(wsp-systemd PRIVATE wspctl_presentation)
 wspctl_enable_warnings(wsp-systemd)
 
 add_executable(wspctl-image src/presentation/image/main.cpp)
-target_link_libraries(wspctl-image PRIVATE wspctl_presentation)
+target_link_libraries(wspctl-image PRIVATE wspctl_infrastructure)
 wspctl_enable_warnings(wspctl-image)
 
 add_executable(wspctl src/presentation/operator/main.cpp)
 target_link_libraries(wspctl PRIVATE wspctl_presentation)
 wspctl_enable_warnings(wspctl)
 
-pybind11_add_module(_native MODULE src/presentation/python/bindings.cpp)
-target_link_libraries(_native PRIVATE wspctl_presentation)
-target_compile_options(_native PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2 -Werror=return-type)
+if(WSPCTL_BUILD_PYTHON_BINDINGS)
+    pybind11_add_module(_native MODULE src/presentation/python/bindings.cpp)
+    target_link_libraries(_native PRIVATE wspctl_presentation)
+    target_compile_options(_native PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2 -Werror=return-type)
 
-set(WSPCTL_PYTHON_PACKAGE_DIR "${CMAKE_BINARY_DIR}/python/wspctl")
-file(MAKE_DIRECTORY "${WSPCTL_PYTHON_PACKAGE_DIR}")
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/__init__.py"
-    "${WSPCTL_PYTHON_PACKAGE_DIR}/__init__.py"
-    COPYONLY
-)
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/_native.pyi"
-    "${WSPCTL_PYTHON_PACKAGE_DIR}/_native.pyi"
-    COPYONLY
-)
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/py.typed"
-    "${WSPCTL_PYTHON_PACKAGE_DIR}/py.typed"
-    COPYONLY
-)
-set_target_properties(_native PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${WSPCTL_PYTHON_PACKAGE_DIR}"
-)
+    set(WSPCTL_PYTHON_PACKAGE_DIR "${CMAKE_BINARY_DIR}/python/wspctl")
+    file(MAKE_DIRECTORY "${WSPCTL_PYTHON_PACKAGE_DIR}")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/__init__.py"
+        "${WSPCTL_PYTHON_PACKAGE_DIR}/__init__.py"
+        COPYONLY
+    )
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/_native.pyi"
+        "${WSPCTL_PYTHON_PACKAGE_DIR}/_native.pyi"
+        COPYONLY
+    )
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/py.typed"
+        "${WSPCTL_PYTHON_PACKAGE_DIR}/py.typed"
+        COPYONLY
+    )
+    set_target_properties(_native PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${WSPCTL_PYTHON_PACKAGE_DIR}"
+    )
 
-install(TARGETS _native LIBRARY DESTINATION wspctl)
-install(FILES __init__.py _native.pyi py.typed DESTINATION wspctl)
+    install(TARGETS _native LIBRARY DESTINATION wspctl)
+    install(FILES __init__.py _native.pyi py.typed DESTINATION wspctl)
+endif()
 
 if(WSPCTL_INSTALL_HOST_TOOLS)
-    # wsp-systemd is copied by the immutable-image build into the same logical in-image
-    # path. wspctld never executes a host path after pivot_root.
     install(TARGETS wspctld wspctl-image wspctl RUNTIME DESTINATION bin)
-    install(TARGETS wsp-systemd RUNTIME DESTINATION libexec/wspctl)
 endif()

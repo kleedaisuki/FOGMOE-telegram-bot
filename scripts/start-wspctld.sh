@@ -2,12 +2,12 @@
 
 # @brief 启动本 checkout 的 wspctld 开发服务 / Start the checkout-local wspctld development service.
 #
-# 这个脚本是开发机 control plane 的唯一入口：它在缺少时构建 pybind11 editable
-# client 与 host binaries，发布缺少的只读 generation，并只通过 systemd 管理 daemon。
+# 这个脚本只构建 host control-plane 程序并启动 daemon；workspace OCI image 必须由
+# build/publish 脚本提前显式发布。它不会构建、导入或猜测 runtime rootfs。
 # Bot 本身从不获得 sudo，也不直接执行此脚本。/ This is the sole development-machine
-# control-plane entrypoint: it builds missing pybind11 editable-client and host binaries,
-# publishes a missing readonly generation, and manages the daemon exclusively through
-# systemd. The Bot never receives sudo and never invokes this script directly.
+# control-plane entrypoint: it builds host programs and manages the daemon, while the workspace
+# OCI image must have been explicitly built and published beforehand. It never builds, imports,
+# or infers a runtime rootfs. The Bot never receives sudo and never invokes this script directly.
 
 set -euo pipefail
 
@@ -25,10 +25,8 @@ STATE_ROOT="$WORK_ROOT/state"
 LOOP_IMAGE="$WORK_ROOT/state.xfs.img"
 # @brief 首次创建 loopback image 的容量 / Capacity used when initially creating the loopback image.
 LOOP_SIZE="${WSPCTL_LOOP_SIZE:-32G}"
-# @brief readonly generation publication root / Readonly generation publication root.
+# @brief readonly OCI image publication root / Readonly OCI image publication root.
 IMAGES_ROOT="$WORK_ROOT/images"
-# @brief root-owned source generation store / Root-owned source generation store.
-ARTIFACT_ROOT="$WORK_ROOT/artifacts"
 # @brief CMake build directory for host tools / CMake build directory for host tools.
 BUILD_DIRECTORY="$REPOSITORY_ROOT/build/wspctld-dev"
 # @brief host service unit name / Host service-unit name.
@@ -37,8 +35,14 @@ SERVICE_NAME="wspctld.service"
 CLIENT_UID="${WSPCTL_CLIENT_UID:-$(id -u)}"
 # @brief 独立 operator UID；默认 root，绝不能与 Bot UID 相同 / Independent operator UID; defaults to root and must never equal the Bot UID.
 OPERATOR_UID="${WSPCTL_OPERATOR_UID:-0}"
-# @brief 可选的 operator 指定 generation 名 / Optional operator-specified generation name.
-GENERATION="${WSPCTL_GENERATION:-}"
+# @brief 当前发布的 OCI image digest 记录 / Record of the currently published OCI image digest.
+CURRENT_IMAGE_FILE="$WORK_ROOT/current-image-digest"
+# @brief 可选的 operator 固定 OCI image digest / Optional operator-pinned OCI image digest.
+IMAGE_DIGEST="${WSPCTL_IMAGE_DIGEST:-}"
+# @brief 当前 image 的 path-safe digest / Path-safe digest of the current image.
+IMAGE_DIGEST_HEX=""
+# @brief 当前已发布 readonly rootfs / Currently published readonly rootfs.
+BASE_ROOT=""
 # @brief checkout-local lifecycle lock / Checkout-local lifecycle lock.
 LOCK_FILE="$REPOSITORY_ROOT/.runtime/wspctld-control.lock"
 # @brief 最近一次已应用 broker 配置的 fingerprint / Fingerprint of the most recently applied broker configuration.
@@ -76,13 +80,6 @@ require_uid() {
     [[ "$1" =~ ^[0-9]+$ ]] || die "$2 必须是十进制 UID"
 }
 
-# @brief 检验 generation 仅能作为单一路径成员 / Validate that generation can only be one path component.
-# @param $1 generation 名称 / Generation name.
-require_generation() {
-    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
-        || die "WSPCTL_GENERATION 只能包含字母、数字、点、下划线和连字符，且不能以点开头"
-}
-
 # @brief 校验首次创建 loopback image 的容量拼写 / Validate the capacity spelling for initial loopback-image creation.
 # @param $1 容量文本 / Capacity text.
 require_loop_size() {
@@ -93,7 +90,7 @@ require_loop_size() {
 # @brief 验证开发机的基础命令 / Verify development-machine prerequisite commands.
 require_commands() {
     local command_name
-    for command_name in cmake sudo systemctl findmnt mountpoint mount install readelf ldconfig bash sha256sum flock grep tr stat awk fallocate losetup mkfs.xfs blkid find sort xargs; do
+    for command_name in cmake sudo systemctl findmnt mountpoint mount install bash sha256sum flock grep tr stat awk fallocate losetup mkfs.xfs blkid find sort xargs; do
         command -v "$command_name" >/dev/null 2>&1 \
             || die "缺少必需命令: $command_name"
     done
@@ -146,7 +143,7 @@ ensure_editable_client() {
 
 # @brief 配置、编译并安装 host broker 工件 / Configure, build, and install host-broker artifacts.
 ensure_host_artifacts() {
-    note "配置并构建 wspctld / wsp-systemd / wspctl-image / wspctl operator shell"
+    note "配置并构建 host wspctld / wspctl-image / wspctl operator shell"
     cmake -S "$REPOSITORY_ROOT" -B "$BUILD_DIRECTORY" \
         -DPython_EXECUTABLE="$PYTHON_EXECUTABLE" \
         -DWSPCTL_INSTALL_HOST_TOOLS=ON \
@@ -158,8 +155,6 @@ ensure_host_artifacts() {
 
     [[ -x "$BUILD_DIRECTORY/src/wspctl/wspctld" ]] \
         || die "CMake 没有产生 wspctld"
-    [[ -x "$BUILD_DIRECTORY/src/wspctl/wsp-systemd" ]] \
-        || die "CMake 没有产生 wsp-systemd"
     [[ -x "$BUILD_DIRECTORY/src/wspctl/wspctl-image" ]] \
         || die "CMake 没有产生 wspctl-image"
     [[ -x "$BUILD_DIRECTORY/src/wspctl/wspctl" ]] \
@@ -180,7 +175,6 @@ write_install_manifest() {
         /usr/local/bin/wspctld
         /usr/local/bin/wspctl
         /usr/local/bin/wspctl-image
-        /usr/local/libexec/wspctl/wsp-systemd
         /usr/local/share/fogmoe-wspctl/systemd/wspctld.service
         /usr/local/share/fogmoe-wspctl/systemd/wspctld.env.example
     )
@@ -194,35 +188,6 @@ write_install_manifest() {
     done
     sudo install -o root -g root -m 0600 "$temporary_file" "$INSTALL_MANIFEST_FILE"
     rm -f -- "$temporary_file"
-}
-
-# @brief 计算默认 immutable generation 的 rootfs 输入 fingerprint / Compute the rootfs-input fingerprint for the default immutable generation.
-#
-# 不以整个 Git commit 命名：文档、脚本或无关业务提交不应触发昂贵的 rootfs rebuild。/
-# This deliberately does not use the complete Git commit as its name: documentation, scripts,
-# or unrelated application commits must not trigger an expensive rootfs rebuild.
-# @return 短 generation 名 / Short generation name.
-default_generation_name() {
-    local rootfs_fingerprint
-
-    rootfs_fingerprint="$(
-        {
-            printf 'rootfs-input-v1\n'
-            sha256sum "$REPOSITORY_ROOT/pyproject.toml" "$REPOSITORY_ROOT/tools/build_wspctl_image.py"
-            find "$REPOSITORY_ROOT/src" -type f ! -name '*.pyc' -print0 | sort -z | xargs -0 sha256sum
-            "$PYTHON_EXECUTABLE" -m pip freeze --all | sort
-            sha256sum "$BUILD_DIRECTORY/src/wspctl/wsp-systemd" "$BUILD_DIRECTORY/src/wspctl/wspctl-image"
-        } | sha256sum | awk '{print $1}'
-    )"
-    printf 'dev-%s\n' "${rootfs_fingerprint:0:12}"
-}
-
-# @brief 在 build 完成后选择 operator generation 或输入寻址 generation / Select the operator generation or an input-addressed generation after the build completes.
-select_generation() {
-    if [[ -z "$GENERATION" ]]; then
-        GENERATION="$(default_generation_name)"
-    fi
-    require_generation "$GENERATION"
 }
 
 # @brief 在首次开发启动时创建并挂载 loopback XFS / Create and mount the loopback XFS on the first development start.
@@ -293,55 +258,38 @@ prepare_control_plane_directories() {
     # Bot may traverse only this view; the operator endpoint stays below the root-only sibling.
     sudo install -d -o root -g root -m 0711 "$WORK_ROOT/run" "$WORK_ROOT/run/bot"
     sudo install -d -o root -g root -m 0700 "$WORK_ROOT/run/operator"
-    sudo install -d -o root -g root -m 0700 "$IMAGES_ROOT" "$ARTIFACT_ROOT"
+    sudo install -d -o root -g root -m 0700 "$IMAGES_ROOT"
 }
 
-# @brief 解析必须显式许可的 GNU command 路径 / Resolve an explicitly allow-listed GNU-command path.
-# @param $1 命令名 / Command name.
-# @return 绝对命令路径 / Absolute command path.
-gnu_command_path() {
-    local command_path
-    command_path="$(command -v "$1")" || die "rootfs 缺少 GNU command: $1"
-    [[ "$command_path" = /* ]] || die "GNU command 不是绝对路径: $1"
-    printf '%s\n' "$command_path"
-}
-
-# @brief 只在 generation 缺失时构建不可变 rootfs / Build an immutable rootfs only when its generation is absent.
-ensure_generation() {
-    local source_root="$ARTIFACT_ROOT/$GENERATION/rootfs"
-    local publish_root="$IMAGES_ROOT/$GENERATION/rootfs"
-    local command_name
-    local gnu_arguments=()
-
-    if ! sudo test -d "$source_root"; then
-        note "构建缺失的 immutable generation: $GENERATION"
-        for command_name in env cat chmod cp find grep ls mkdir rm sed tail tee touch wc; do
-            gnu_arguments+=(--gnu-command "$(gnu_command_path "$command_name")")
-        done
-        sudo "$PYTHON_EXECUTABLE" "$REPOSITORY_ROOT/tools/build_wspctl_image.py" \
-            --generation "$GENERATION" \
-            --output-root "$ARTIFACT_ROOT" \
-            --venv "$VENV_DIR" \
-            --python-source "$REPOSITORY_ROOT/src" \
-            --bash "$(command -v bash)" \
-            "${gnu_arguments[@]}" \
-            --wsp-systemd "$BUILD_DIRECTORY/src/wspctl/wsp-systemd" \
-            --sealer "$BUILD_DIRECTORY/src/wspctl/wspctl-image" \
-            --readelf "$(command -v readelf)" \
-            --ldconfig "$(command -v ldconfig)" \
-            --allow-insecure-development-output
+# @brief 选择并验证已经显式发布的 OCI image / Select and verify an explicitly published OCI image.
+#
+# @return None / None.
+# @note 此函数只读，不构建、不导入、不挂载 image。/
+#       This function is read-only: it never builds, imports, or mounts an image.
+select_published_image() {
+    if [[ -z "$IMAGE_DIGEST" ]]; then
+        sudo test -r "$CURRENT_IMAGE_FILE" \
+            || die "尚未选择 workspace image；先运行 scripts/build-wspctl-rootfs.sh 和 scripts/publish-wspctl-rootfs.sh"
+        IMAGE_DIGEST="$(sudo cat "$CURRENT_IMAGE_FILE")"
     fi
-
-    sudo test -d "$source_root" || die "rootfs builder 未产生: $source_root"
-    sudo install -d -o root -g root -m 0700 "$publish_root"
-    if ! sudo mountpoint -q "$publish_root"; then
-        note "发布 readonly generation: $GENERATION"
-        sudo mount --bind "$source_root" "$publish_root"
-        sudo mount -o remount,bind,ro "$publish_root"
-    fi
-    sudo findmnt --noheadings --output OPTIONS --target "$publish_root" \
+    [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || die "WSPCTL_IMAGE_DIGEST 必须是 sha256:<64 lowercase hex>"
+    IMAGE_DIGEST_HEX="${IMAGE_DIGEST#sha256:}"
+    BASE_ROOT="$IMAGES_ROOT/sha256/$IMAGE_DIGEST_HEX/rootfs"
+    sudo test -d "$BASE_ROOT" \
+        || die "指定 OCI image 尚未发布: $IMAGE_DIGEST；运行 scripts/publish-wspctl-rootfs.sh"
+    sudo mountpoint -q "$BASE_ROOT" \
+        || die "指定 OCI image 不是独立 readonly mount: $BASE_ROOT"
+    sudo findmnt --noheadings --output OPTIONS --target "$BASE_ROOT" \
         | grep --extended-regexp --quiet '(^|,)ro(,|$)' \
-        || die "发布 generation 必须是实际 readonly bind mount: $publish_root"
+        || die "指定 OCI image 必须是 readonly mount: $BASE_ROOT"
+    sudo "$BUILD_DIRECTORY/src/wspctl/wspctl-image" \
+        --verify true \
+        --base-root "$BASE_ROOT" \
+        --images-root "$IMAGES_ROOT" \
+        | grep --fixed-strings --quiet "source_oci_manifest_digest=$IMAGE_DIGEST" \
+        || die "指定 OCI image 未通过 native contract/digest 验证: $IMAGE_DIGEST"
+    note "使用已发布 OCI image: $IMAGE_DIGEST"
 }
 
 # @brief 安装生成的 unit 与受控 environment file / Install generated unit and the controlled environment file.
@@ -349,7 +297,6 @@ install_service_configuration() {
     local unit_source="$BUILD_DIRECTORY/deploy/wspctl/systemd/wspctld.service"
     local environment_template="$BUILD_DIRECTORY/deploy/wspctl/systemd/wspctld.env.example"
     local environment_file="$WORK_ROOT/wspctld.env"
-    local base_root="$IMAGES_ROOT/$GENERATION/rootfs"
     local filesystem_bytes
     local filesystem_inodes
     local reserve_bytes
@@ -373,8 +320,16 @@ install_service_configuration() {
         "s|^WSPCTL_OPERATOR_UID=.*$|WSPCTL_OPERATOR_UID=$OPERATOR_UID|" \
         "$environment_file"
     sudo sed --in-place --regexp-extended \
-        "s|^WSPCTL_BASE_ROOT=.*$|WSPCTL_BASE_ROOT=$base_root|" \
+        '/^WSPCTL_BASE_ROOT=/d;/^WSPCTL_SUPERVISOR=/d' \
         "$environment_file"
+    if sudo grep --quiet '^WSPCTL_IMAGE_DIGEST=' "$environment_file"; then
+        sudo sed --in-place --regexp-extended \
+            "s|^WSPCTL_IMAGE_DIGEST=.*$|WSPCTL_IMAGE_DIGEST=$IMAGE_DIGEST|" \
+            "$environment_file"
+    else
+        printf 'WSPCTL_IMAGE_DIGEST=%s\n' "$IMAGE_DIGEST" \
+            | sudo tee --append "$environment_file" >/dev/null
+    fi
     # Loopback image 的容量是显式上限，不能沿用生产模板的 50 GiB admission budget。
     # The loopback image is an explicit capacity ceiling and must not inherit the production
     # template's 50 GiB admission budget.
@@ -411,8 +366,8 @@ broker_fingerprint() {
     local environment_file="$WORK_ROOT/wspctld.env"
 
     {
-        printf 'generation=%s\nclient_uid=%s\noperator_uid=%s\noperator_socket=%s\n' \
-            "$GENERATION" "$CLIENT_UID" "$OPERATOR_UID" "$OPERATOR_SOCKET_PATH"
+        printf 'source_oci_manifest_digest=%s\nclient_uid=%s\noperator_uid=%s\noperator_socket=%s\n' \
+            "$IMAGE_DIGEST" "$CLIENT_UID" "$OPERATOR_UID" "$OPERATOR_SOCKET_PATH"
         sha256sum "$BUILD_DIRECTORY/src/wspctl/wspctld" "$unit_source"
         sudo sha256sum "$environment_file"
     } | sha256sum | awk '{print $1}'
@@ -462,7 +417,7 @@ start_service() {
             record_applied_fingerprint
             return 0
         fi
-        note "检测到 broker artifact/config/generation 变更，重启 $SERVICE_NAME"
+        note "检测到 broker artifact/config/image digest 变更，重启 $SERVICE_NAME"
         sudo systemctl restart "$SERVICE_NAME"
     else
         note "启动或恢复 $SERVICE_NAME"
@@ -502,8 +457,7 @@ start() {
     require_state_mount
     ensure_editable_client
     ensure_host_artifacts
-    select_generation
-    ensure_generation
+    select_published_image
     install_service_configuration
     prepare_restart_decision
     start_service
@@ -515,13 +469,16 @@ show_help() {
 用法: scripts/start-wspctld.sh [start|status|stop|help]
 
 start（默认）会在 ./.wspctl/state.xfs.img 首次创建预分配的 loopback XFS（32G），
-以 prjquota 挂载到 ./.wspctl/state，构建缺失的 editable client、host binaries 与
-immutable generation，再确保 systemd 的 wspctld.service 和 socket 可用。
+以 prjquota 挂载到 ./.wspctl/state，构建 host control-plane 程序，验证已显式发布且
+按 OCI manifest digest 固定的 workspace image，再确保 systemd service/socket 可用。
+它绝不会构建或导入 workspace image；首次使用前必须依次运行：
+  scripts/build-wspctl-rootfs.sh
+  scripts/publish-wspctl-rootfs.sh
 
 环境变量：
   WSPCTL_CLIENT_UID   broker 接受的 Bot UID；默认当前运行 runBot.sh 的 UID。
   WSPCTL_OPERATOR_UID 独立 operator UID；默认 root。使用 sudo wspctl 查询，且不得等于 Bot UID。
-  WSPCTL_GENERATION   可选 immutable generation 名；默认 rootfs 输入指纹的 dev-<hash>。
+  WSPCTL_IMAGE_DIGEST 可选 sha256:<64hex> OCI manifest digest；默认读取已发布 current-image-digest。
   WSPCTL_LOOP_SIZE    首次创建 image 的容量；默认 32G，已有 image 不会自动 resize。
 EOF
 }

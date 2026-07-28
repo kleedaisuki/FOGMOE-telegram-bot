@@ -14,7 +14,7 @@ payload** 的隔离，而不把“可信 host 控制面已被攻破”伪装成 
 生成并交给 `run_bash` 的 command、stdin、工作目录和参数。模型输出可能受 prompt injection
 影响，所以“Bot 生成”不等于可信。
 
-Bot 的业务代码、`wspctl._native`、`wspctld`、`wsp-systemd`、base generation 和宿主内核是
+Bot 的业务代码、`wspctl._native`、`wspctld`、OCI image 内的 `wsp-systemd` 和宿主内核是
 本问题预设的 trusted computing base（TCB，可信计算基）。我们仍对它们的输入做严格校验，
 但不把“这些已被攻击者修改”纳入本版本的本质复杂度。
 
@@ -62,14 +62,14 @@ Bot Python（无 CAP_SYS_ADMIN）
   └─ wspctl._native 的 RuntimeProcess（C++ pybind11 client）
        └─ Unix SOCK_SEQPACKET，SO_PEERCRED + 0600/0660 ACL
             └─ wspctld（host privilege broker）
-                 ├─ RuntimeRecord、base manifest、activation cache、cgroup
+                 ├─ RuntimeRecord、OCI manifest digest、activation cache、cgroup
                  └─ wsp-systemd（每个 Runtime 的 PID 1）
                       └─ task cgroup：bash / python / approved argv
 ```
 
 - Bot 与 pybind extension 永远不持有 `CAP_SYS_ADMIN`，也不获得任意 mount、namespace、
   cgroup 或 base-root 参数。
-- `wspctld` 是唯一特权主体。它从 root-owned 配置读取 socket、client UID、base generation、
+- `wspctld` 是唯一特权主体。它从 root-owned 配置读取 socket、client UID、OCI manifest digest、
   state root 与 systemd delegated cgroup 根；这些绝不能由 Telegram 参数或 `config.json`
   传入。
 - `wsp-systemd` 是新 PID namespace 的真正 PID 1：回收僵尸（zombie）、接收控制帧、转发
@@ -351,29 +351,33 @@ audit（追加式审计）原文，却把该
 统一投影为 `<group_attachment />`（非可执行、非路径标记），而不是 `<workspace_file>`；`fetch_group_context`
 只能返回这个标记。当前直接调用 Bot 的附件才拥有上述真实 workspace 路径。
 
-## 文件系统与 base generation
+## 文件系统与 OCI image identity
 
-直接 bind 项目的 `.venv` 是错误模型：venv 通常含绝对解释器 symlink，仍依赖 CPython
-distribution、动态加载器、glibc、标准库和 native extension 的共享库。部署阶段应从项目
-`.venv` 生成版本化、不可变的 base generation，并为其写入 root-owned manifest（generation
-ID、ABI closure digest、允许的 mount view）。运行中的 base generation 永不原地升级。
+项目 `.venv`、宿主 Python 和宿主 `/usr` 都不是 workspace runtime。唯一构建定义是
+[`deploy/wspctl/image/Containerfile`](../deploy/wspctl/image/Containerfile)：它以 digest 固定
+Python 3.14 base 和 Debian snapshot，在相同 ABI 的 builder stage 编译 `wsp-systemd`，并在
+runtime stage 由 Debian package manager 安装 Bash、GNU 工具和全部动态库。最终产物是标准
+OCI image layout（OCI 镜像布局），不是临时复制出的 Python 目录。
+
+OCI image manifest digest 是唯一 identity。tag、短 hash、任意 generation 名和启动时计算的
+fingerprint 都不会进入 broker。物化后的 rootfs 只保留第二个本地 seal，用来发现解包结果或磁盘内容
+被修改；它不是另一套版本号。标准路径为
+`<images-root>/sha256/<manifest-hex>/rootfs`。
 
 runtime mount namespace 的顺序如下：
 
 1. 立即把 `/` 设为递归 `MS_PRIVATE`，防止默认 shared mount 向 host 传播；
 2. 用 `pivot_root` 建立只含授权对象的 rootfs；不把 `chroot` 当安全边界；
-3. 将 Python、GNU 基础件及其 ABI closure bind 到显式目标，并 remount 为
-   `ro,exec,nosuid,nodev`；不暴露 host `/`、`/home`、`/proc`、`/sys`、`/run`、Docker socket
-   或宿主设备；
+3. 将完整 OCI rootfs bind 并 remount 为 `ro,nosuid,nodev`；不暴露 host `/`、`/home`、
+   `/proc`、`/sys`、`/run`、container socket 或宿主设备；
 4. 新挂最小 `/proc`、受限 `/dev`、`/tmp`/`/run` tmpfs；默认无网络；
 5. 只将 `/workspace` 设为可持久化 OverlayFS 上层，Python/GNU base 始终由只读 bind 覆盖。
 
-base generation 是一个可执行的 rootfs contract，而不是“把 `.venv` 目录复制进去”。它至少包含
-`/bin/bash`、项目 `.venv` 经重定位后的 Python、两者的 ELF interpreter/共享库 closure、
-`/usr/local/libexec/wspctl/wsp-systemd`、以及空的 `/workspace`、`/proc`、`/dev`、`/tmp` 目录。
-`wsp-systemd` 的这个路径是**runtime 内路径**：broker 在 `pivot_root` 后才执行它；host 安装路径
-可以不同。构建器必须把 venv 的绝对 interpreter symlink 改为 rootfs 内相对 symlink，并对全部
-ELF 依赖做 closure 检查；验证器允许不逃出 rootfs 的相对 symlink，但拒绝绝对/越界 symlink。
+runtime contract 至少包含 `/bin/bash`、`/usr/local/bin/python`、
+`/usr/local/libexec/wspctl/wsp-systemd` 和 `/workspace`、`/proc`、`/dev`、`/tmp`、`/run`。
+native sealer 同时验证平台、固定入口、root ownership、危险 mode、file capability、特殊 inode、
+symlink 的容器根语义和 `site-packages` 为空。标准镜像中的绝对 symlink 按 pivot 后的容器根解释；
+只有词法上逃出 rootfs 的链接才拒绝，不能用宿主 `Path.resolve()` 错解。
 
 当前 `wspctl-image --verify` 只验证由受控发布流程生成的 manifest 和 rootfs digest，故意不接受
 Bot 传入的目录来“现场制镜像”。用户上传文件也不在本 API 中以 host bind 的形式进入 runtime：

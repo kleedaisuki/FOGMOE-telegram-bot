@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <sys/types.h>
 
@@ -15,10 +16,10 @@ namespace wspctl {
  * @brief 特权 broker 的 sandbox 配置 / Sandbox configuration for the privileged broker.
  */
 struct SandboxConfig final {
-    /** @brief 受校验的 immutable rootfs / Validated immutable rootfs. */
-    std::filesystem::path base_root;
-    /** @brief 仅 broker 管理的 images 根 / Images root managed only by broker operations. */
+    /** @brief 仅 broker 管理的 content-addressed image store / Content-addressed image store managed only by broker operations. */
     std::filesystem::path images_root;
+    /** @brief 唯一选中的 OCI image identity / Sole selected OCI image identity. */
+    std::optional<OciImageDigest> image_digest;
     /** @brief journal、upperdir 与 runtime 元数据根 / Root for journal, upperdirs, and runtime metadata. */
     std::filesystem::path state_root;
     /** @brief 唯一允许的 XFS project-quota 容量边界 / Sole permitted XFS project-quota capacity boundary. */
@@ -44,6 +45,14 @@ struct SandboxConfig final {
     /** @brief runtime 内任务 GID / Task GID inside runtime. */
     gid_t sandbox_gid{};
 };
+
+/**
+ * @brief 从强类型 identity 派生唯一 rootfs 路径 / Derive the sole rootfs path from a typed identity.
+ * @param config sandbox 配置 / Sandbox configuration.
+ * @return ``<images>/sha256/<hex>/rootfs`` 或缺失 identity 错误 /
+ *         ``<images>/sha256/<hex>/rootfs`` or a missing-identity error.
+ */
+[[nodiscard]] Result<std::filesystem::path> image_root(const SandboxConfig& config);
 
 /**
  * @brief 单个 activation 的持久 OverlayFS 层 / Persistent OverlayFS layer for one activation.

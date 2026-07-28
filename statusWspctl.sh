@@ -18,8 +18,10 @@ WORK_ROOT="$REPOSITORY_ROOT/.wspctl"
 STATE_ROOT="$WORK_ROOT/state"
 # @brief loopback XFS image / Loopback XFS image.
 LOOP_IMAGE="$WORK_ROOT/state.xfs.img"
-# @brief readonly generation publication root / Readonly generation publication root.
+# @brief readonly OCI image publication root / Readonly OCI image publication root.
 IMAGES_ROOT="$WORK_ROOT/images"
+# @brief 当前发布的 OCI manifest digest 记录 / Record of the currently published OCI manifest digest.
+CURRENT_IMAGE_FILE="$WORK_ROOT/current-image-digest"
 # @brief Bot 专属 daemon socket 路径 / Bot-exclusive daemon socket path.
 SOCKET_PATH="$WORK_ROOT/run/bot/wspctld.sock"
 # @brief root/operator 专属 daemon socket 路径 / Root/operator-exclusive daemon socket path.
@@ -118,6 +120,67 @@ configured_client_uid() {
     printf '%s\n' "$client_uid"
 }
 
+# @brief 从 root-owned 配置或 current 记录读取 OCI manifest digest / Read the OCI manifest digest from root-owned configuration or the current record.
+# @return 成功时输出规范 sha256 digest；缺失或非法时非零 / Prints a canonical sha256 digest on success; nonzero when missing or invalid.
+configured_image_digest() {
+    local image_digest=""
+
+    if sudo test -f "$ENVIRONMENT_FILE"; then
+        image_digest="$(sudo awk -F= '$1 == "WSPCTL_IMAGE_DIGEST" { value = $2 } END { print value }' "$ENVIRONMENT_FILE" 2>/dev/null)"
+    fi
+    if [[ -z "$image_digest" ]] && sudo test -f "$CURRENT_IMAGE_FILE"; then
+        image_digest="$(sudo cat "$CURRENT_IMAGE_FILE" 2>/dev/null)"
+    fi
+    [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    printf '%s\n' "$image_digest"
+}
+
+# @brief 报告 broker 选择的显式 OCI image 及其 native contract / Report the explicit OCI image selected by the broker and its native contract.
+report_image() {
+    local image_digest
+    local digest_hex
+    local rootfs
+    local mount_options
+    local verifier="/usr/local/bin/wspctl-image"
+    local verification
+
+    heading "workspace OCI image"
+    if ! image_digest="$(configured_image_digest)"; then
+        warning "未配置有效 WSPCTL_IMAGE_DIGEST，也没有 current-image-digest"
+        return 0
+    fi
+    digest_hex="${image_digest#sha256:}"
+    rootfs="$IMAGES_ROOT/sha256/$digest_hex/rootfs"
+    info "source_oci_manifest_digest=$image_digest"
+    if ! sudo test -d "$rootfs"; then
+        warning "published rootfs missing: $rootfs"
+        return 0
+    fi
+    if ! sudo mountpoint -q "$rootfs"; then
+        warning "rootfs 不是独立 mountpoint: $rootfs"
+        return 0
+    fi
+    mount_options="$(sudo findmnt --noheadings --output OPTIONS --target "$rootfs" 2>/dev/null || true)"
+    if [[ ",$mount_options," != *,ro,* ]]; then
+        warning "rootfs mount 不是 readonly: $rootfs ($mount_options)"
+        return 0
+    fi
+    if ! sudo test -x "$verifier"; then
+        warning "native image verifier missing: $verifier"
+        return 0
+    fi
+    verification="$(sudo "$verifier" --verify true --base-root "$rootfs" --images-root "$IMAGES_ROOT" 2>&1)" || {
+        warning "native image contract verification failed: $verification"
+        return 0
+    }
+    if [[ "$verification" != *"source_oci_manifest_digest=$image_digest"* ]]; then
+        warning "native manifest identity 与配置 digest 不一致"
+        return 0
+    fi
+    ok "$rootfs (readonly; native contract verified)"
+    printf '%s\n' "$verification"
+}
+
 # @brief 同时报告 Bot 与 operator socket 的独立 ACL 边界 / Report the independent ACL boundaries of Bot and operator sockets.
 report_sockets() {
     local client_uid
@@ -183,6 +246,7 @@ report_runtime_aggregates() {
 
 report_service
 report_sockets
+report_image
 report_storage
 report_runtime_aggregates
 

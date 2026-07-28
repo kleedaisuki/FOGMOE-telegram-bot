@@ -16,7 +16,7 @@ WORK_ROOT="$REPOSITORY_ROOT/.wspctl"
 STATE_ROOT="$WORK_ROOT/state"
 # @brief loopback XFS image path / Loopback XFS image path.
 LOOP_IMAGE="$WORK_ROOT/state.xfs.img"
-# @brief immutable-generation publication root / Immutable-generation publication root.
+# @brief immutable OCI image publication root / Immutable OCI image publication root.
 IMAGES_ROOT="$WORK_ROOT/images"
 # @brief systemd service managed by the development launcher / Systemd service managed by the development launcher.
 SERVICE_NAME="wspctld.service"
@@ -72,8 +72,8 @@ remove_checkout_unit() {
     sudo systemctl daemon-reload
 }
 
-# @brief 卸载只读 generation bind mounts，先处理最深路径 / Unmount readonly generation bind mounts, deepest paths first.
-unmount_published_generations() {
+# @brief 卸载只读 OCI image bind mounts，先处理最深路径 / Unmount readonly OCI image bind mounts, deepest paths first.
+unmount_published_images() {
     local mount_target
     local mount_targets=()
 
@@ -85,8 +85,8 @@ unmount_published_generations() {
     done < <(sudo findmnt --list --raw --noheadings --output TARGET | awk '{print length($0), $0}' | sort --numeric-sort --reverse | cut --delimiter=' ' --fields=2-)
     for mount_target in "${mount_targets[@]}"; do
         if sudo mountpoint -q "$mount_target"; then
-            note "卸载 readonly generation: $mount_target"
-            sudo umount "$mount_target" || die "无法卸载 generation: $mount_target"
+            note "卸载 readonly OCI image: $mount_target"
+            sudo umount "$mount_target" || die "无法卸载 OCI image: $mount_target"
         fi
     done
 }
@@ -152,12 +152,12 @@ show_help() {
     cat <<'EOF'
 用法: ./uninstallWspctl.sh [--purge]
 
-默认：停止并删除本 checkout 的 wspctld systemd unit、卸载 readonly generation 与 loopback XFS、
+默认：停止并删除本 checkout 的 wspctld systemd unit、卸载 readonly OCI image 与 loopback XFS、
 detach loop device，并且仅删除 checksum 与 install manifest 匹配的 /usr/local host artifacts。
 它保留 ./.wspctl，以便下次安装恢复 persistent workspace。
 
 --purge：在完成上述步骤后不可恢复地删除 ./.wspctl（包括 32 GiB loop image、workspace upper layers、
-journal 和 immutable generations）。
+journal 和 content-addressed OCI images）。
 EOF
 }
 
@@ -178,7 +178,7 @@ esac
 
 require_commands
 remove_checkout_unit
-unmount_published_generations
+unmount_published_images
 unmount_loopback_state
 remove_manifest_owned_artifacts
 sudo rm -f -- "$ENVIRONMENT_FILE" "$INSTALL_MANIFEST_FILE"

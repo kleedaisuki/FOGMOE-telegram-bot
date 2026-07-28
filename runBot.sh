@@ -251,6 +251,8 @@ init_environment() {
 # 启动bot
 start_bot() {
     local runtime_grace_seconds
+    local start_timestamp
+    local wspctld_log_file
 
     echo "=== 雾萌娘 Telegram Bot 启动脚本 ==="
     echo "Bot 目录: $BOT_DIR"
@@ -320,16 +322,22 @@ start_bot() {
         echo -e "${RED}错误: wspctld 启动脚本不存在或不可执行: $WSPCTLD_START_SCRIPT${NC}"
         exit 1
     fi
-    "$WSPCTLD_START_SCRIPT" start
+    mkdir -p "$LOG_DIR"
+    start_timestamp="$(date '+%Y%m%dT%H%M%S')"
+    wspctld_log_file="$LOG_DIR/wspctld_${start_timestamp}.log"
+    echo "wspctld 启动日志: $wspctld_log_file"
+    if ! "$WSPCTLD_START_SCRIPT" start > >(tee "$wspctld_log_file") 2>&1; then
+        echo -e "${RED}错误: wspctld 控制面启动失败；Bot 未启动${NC}"
+        echo "完整错误日志: $wspctld_log_file"
+        exit 1
+    fi
 
     # 切换到项目根目录，使用 src layout 启动入口
     cd "$BOT_DIR"
 
     # 启动bot并记录日志
     echo "正在启动bot..."
-    mkdir -p "$LOG_DIR"
-    START_TIMESTAMP=$(date '+%Y%m%dT%H%M%S')
-    STDOUT_LOG_FILE="$LOG_DIR/stdout_${START_TIMESTAMP}.log"
+    STDOUT_LOG_FILE="$LOG_DIR/stdout_${start_timestamp}.log"
     echo "标准输出日志: $STDOUT_LOG_FILE"
     PYTHONPATH="$SRC_DIR${PYTHONPATH:+:$PYTHONPATH}" \
         nohup "$VENV_DIR/bin/fogmoe-bot" \

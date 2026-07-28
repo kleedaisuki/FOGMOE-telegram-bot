@@ -18,6 +18,10 @@ ROOT_CMAKE_PATH = REPOSITORY_ROOT / "CMakeLists.txt"
 PYPROJECT_PATH = REPOSITORY_ROOT / "pyproject.toml"
 #: @brief Compose 定义路径 / Compose definition path.
 COMPOSE_PATH = REPOSITORY_ROOT / "docker-compose.yml"
+#: @brief workspace runtime OCI 构建定义 / Workspace-runtime OCI build definition.
+WSPCTL_CONTAINERFILE_PATH = (
+    REPOSITORY_ROOT / "deploy" / "wspctl" / "image" / "Containerfile"
+)
 #: @brief wspctl-scoped host deployment CMake 路径 / wspctl-scoped host-deployment CMake path.
 DEPLOYMENT_CMAKE_PATH = REPOSITORY_ROOT / "deploy" / "wspctl" / "CMakeLists.txt"
 #: @brief host broker systemd unit 模板路径 / Host-broker systemd unit template path.
@@ -73,13 +77,7 @@ def test_bot_image_builds_native_client_but_excludes_host_broker_programs() -> N
         )
         is not None
     )
-    assert (
-        re.search(
-            r"install\(TARGETS\s+wsp-systemd\s+RUNTIME DESTINATION libexec/wspctl\)",
-            cmake,
-        )
-        is not None
-    )
+    assert "install(TARGETS wsp-systemd" not in cmake
     assert "USER 65532:65532" in dockerfile
     assert 'CMD ["fogmoe-bot", "--config", "/app/config.json"]' in dockerfile
 
@@ -109,8 +107,33 @@ def test_compose_exposes_only_a_nonprivileged_bot_client_to_the_socket() -> None
     assert "create_host_path: false" in compose
 
 
-def test_host_unit_requires_exact_socket_uid_and_readonly_generation_mount() -> None:
-    """@brief host unit 必须固定 peer UID、工作根并在启动前验证只读 generation / Host unit fixes peer UID, work root, and verifies readonly generation before start.
+def test_workspace_runtime_is_a_digest_pinned_explicit_oci_build() -> None:
+    """@brief workspace runtime 必须由独立、固定输入的 OCI 配方构建 / Workspace runtime must be built by a separate OCI recipe with pinned inputs.
+
+    @return None / None.
+    """
+
+    containerfile = WSPCTL_CONTAINERFILE_PATH.read_text(encoding="utf-8")
+    assert re.search(r"python:3\.14-slim-bookworm@sha256:[0-9a-f]{64}", containerfile)
+    assert "AS supervisor-builder" in containerfile
+    assert "AS wspctl-runtime" in containerfile
+    assert "DEBIAN_SNAPSHOT=" in containerfile
+    assert "snapshot.debian.org" in containerfile
+    assert "-DWSPCTL_BUILD_PYTHON_BINDINGS=OFF" in containerfile
+    assert "cmake --build /build --target wsp-systemd" in containerfile
+    assert "libcap2" in containerfile
+    assert "libseccomp2" in containerfile
+    assert "libssl3" in containerfile
+    assert "site-packages" in containerfile
+    assert 'ENTRYPOINT ["/usr/local/libexec/wspctl/wsp-systemd"]' in containerfile
+    assert "COPY --from=supervisor-builder" in containerfile
+    assert "COPY .venv" not in containerfile
+    assert "readelf" not in containerfile
+    assert "ldconfig" not in containerfile
+
+
+def test_host_unit_requires_exact_socket_uid_and_readonly_image_mount() -> None:
+    """@brief host unit 必须固定 peer UID、工作根并在启动前验证只读 image / Host unit fixes peer UID, work root, and verifies the readonly image before start.
 
     @return None / None.
     """
@@ -137,9 +160,9 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_generation_mount() -> 
     assert "@WSPCTL_HOST_SOCKET_ROOT_DIRECTORY@" in unit
     assert "@WSPCTL_HOST_SOCKET_DIRECTORY@" in unit
     assert "@WSPCTL_HOST_OPERATOR_SOCKET_DIRECTORY@" in unit
-    assert "ExecStartPre=/usr/bin/test -d ${WSPCTL_BASE_ROOT}" in unit
-    assert "findmnt --noheadings --output OPTIONS --target" in unit
-    assert "grep --extended-regexp --quiet" in unit
+    assert "WSPCTL_BASE_ROOT" not in unit
+    assert "--image-store ${WSPCTL_IMAGES_ROOT}" in unit
+    assert "--image-digest ${WSPCTL_IMAGE_DIGEST}" in unit
     assert "--client-uid ${WSPCTL_CLIENT_UID}" in unit
     assert "--operator-socket ${WSPCTL_OPERATOR_SOCKET}" in unit
     assert "--operator-uid ${WSPCTL_OPERATOR_UID}" in unit
@@ -174,13 +197,15 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_generation_mount() -> 
     assert "WSPCTL_XFS_SYSTEM_RESERVE_INODES=262144" in environment
     assert "WSPCTL_CLIENT_UID=65532" in environment
     assert "WSPCTL_OPERATOR_UID=0" in environment
-    assert "WSPCTL_SUPERVISOR=/usr/local/libexec/wspctl/wsp-systemd" in environment
+    assert "WSPCTL_BASE_ROOT" not in environment
+    assert "WSPCTL_SUPERVISOR" not in environment
+    assert "WSPCTL_IMAGE_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX" in environment
     assert "WSPCTL_CPU_MAX_US=50000" in environment
     assert "WSPCTL_CPU_PERIOD_US=100000" in environment
     assert "WSPCTL_MEMORY_HIGH=536870912" in environment
     assert "WSPCTL_MEMORY_SWAP_MAX=0" in environment
     assert "WSPCTL_IO_WEIGHT=100" in environment
-    assert "must be a mount with the `ro` VFS option" in environment
+    assert "Authoritative identity" in environment
     assert "per-runtime" in unit
     assert "XFS project quota" in deployment_guide
     assert "wspctl-xfs-project-quota.md" in deployment_guide
@@ -222,7 +247,8 @@ def _run_contract_tests() -> None:
 
     test_bot_image_builds_native_client_but_excludes_host_broker_programs()
     test_compose_exposes_only_a_nonprivileged_bot_client_to_the_socket()
-    test_host_unit_requires_exact_socket_uid_and_readonly_generation_mount()
+    test_workspace_runtime_is_a_digest_pinned_explicit_oci_build()
+    test_host_unit_requires_exact_socket_uid_and_readonly_image_mount()
 
 
 if __name__ == "__main__":

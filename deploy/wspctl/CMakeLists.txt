@@ -93,7 +93,7 @@ target_compile_definitions(
 set(WSPCTL_HOST_ENVIRONMENT_PATH "${WSPCTL_HOST_WORKDIR}/wspctld.env")
 #: @brief 持久 Overlay/journal 状态根 / Persistent Overlay/journal state root.
 set(WSPCTL_HOST_STATE_ROOT "${WSPCTL_HOST_WORKDIR}/state")
-#: @brief 只读 generation 发布根 / Read-only generation publication root.
+#: @brief 只读 OCI image 发布根 / Read-only OCI image publication root.
 set(WSPCTL_HOST_IMAGES_ROOT "${WSPCTL_HOST_WORKDIR}/images")
 #: @brief native broker 的本地开发显式授权参数 / Explicit local-development authorization argument for the native broker.
 set(WSPCTL_INSECURE_DEVELOPMENT_ROOT_ARGUMENT "")
