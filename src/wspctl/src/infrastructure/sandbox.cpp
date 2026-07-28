@@ -72,13 +72,32 @@ namespace {
 
 /** @brief 读取一个小文本文件 / Read a small text file. */
 [[nodiscard]] Result<std::string> read_small_file(const std::filesystem::path& path) {
+    constexpr std::size_t kMaximumSize = 64U * 1024U;
     std::ifstream input(path);
     if (!input.is_open()) {
         return std::unexpected(errno_error(ErrorCode::sandbox_preflight_failed, "open " + path.string()));
     }
-    std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-    if (contents.size() > 64U * 1024U || !input.eof()) {
-        return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "cannot read bounded cgroup metadata"));
+
+    std::string contents;
+    std::array<char, 4096U> buffer{};
+    while (input) {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize count = input.gcount();
+        if (count <= 0) {
+            continue;
+        }
+        const auto byte_count = static_cast<std::size_t>(count);
+        if (byte_count > kMaximumSize - contents.size()) {
+            return std::unexpected(make_error(
+                ErrorCode::sandbox_preflight_failed,
+                "cgroup metadata exceeds 64 KiB: " + path.string()));
+        }
+        contents.append(buffer.data(), byte_count);
+    }
+    if (input.bad() || (input.fail() && !input.eof())) {
+        return std::unexpected(make_error(
+            ErrorCode::sandbox_preflight_failed,
+            "read cgroup metadata: " + path.string()));
     }
     return contents;
 }
@@ -179,17 +198,29 @@ namespace {
     return {};
 }
 
-/** @brief 启用 delegated cgroup 所需 controllers / Enable controllers required in delegated cgroup. */
-[[nodiscard]] Result<void> enable_runtime_controllers(const std::filesystem::path& cgroup_root) {
+/**
+ * @brief 启用 delegated cgroup 所需 controllers / Enable controllers required in a delegated cgroup.
+ * @param cgroup_root delegated cgroup 根 / Delegated cgroup root.
+ * @param enable_io host 支持且配置了相对 I/O 权重 / Host supports and configures relative I/O weighting.
+ * @return 成功或精确 cgroup 写入错误 / Success or a precise cgroup-write error.
+ */
+[[nodiscard]] Result<void> enable_runtime_controllers(
+    const std::filesystem::path& cgroup_root,
+    const bool enable_io) {
     const auto enabled = read_small_file(cgroup_root / "cgroup.subtree_control");
     if (!enabled) {
         return std::unexpected(enabled.error());
     }
-    if (contains_token(*enabled, "cpu") && contains_token(*enabled, "memory") && contains_token(*enabled, "pids") &&
-        contains_token(*enabled, "io")) {
+    const bool core_enabled =
+        contains_token(*enabled, "cpu") &&
+        contains_token(*enabled, "memory") &&
+        contains_token(*enabled, "pids");
+    if (core_enabled && (!enable_io || contains_token(*enabled, "io"))) {
         return {};
     }
-    return write_cgroup_file(cgroup_root / "cgroup.subtree_control", "+cpu +memory +pids +io");
+    const std::string requested =
+        enable_io ? "+cpu +memory +pids +io" : "+cpu +memory +pids";
+    return write_cgroup_file(cgroup_root / "cgroup.subtree_control", requested);
 }
 
 /** @brief 判断 cgroup.events 是否明确报告 populated 0 / Check whether cgroup.events explicitly reports populated 0. */
@@ -345,7 +376,7 @@ Result<void> preflight_sandbox(const SandboxConfig& config) {
     if (config.sandbox_uid == 0U || config.sandbox_gid == 0U || config.memory_max_bytes == 0U ||
         effective_memory_high == 0U || effective_memory_high > config.memory_max_bytes ||
         config.cpu_max_quota_us == 0U || config.cpu_max_period_us < 1'000U || config.cpu_max_period_us > 1'000'000U ||
-        config.pids_max == 0U || config.io_weight == 0U || config.io_weight > 10'000U) {
+        config.pids_max == 0U || config.io_weight > 10'000U) {
         return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "sandbox identity or cgroup resource policy is invalid"));
     }
     const auto base_root = image_root(config);
@@ -361,16 +392,40 @@ Result<void> preflight_sandbox(const SandboxConfig& config) {
         return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "cgroup_root must be a delegated cgroup v2 subtree"));
     }
     const auto controllers = read_small_file(*cgroup_root / "cgroup.controllers");
-    if (!controllers || !contains_token(*controllers, "cpu") || !contains_token(*controllers, "pids") || !contains_token(*controllers, "memory") ||
-        !contains_token(*controllers, "io") ||
-        access((*cgroup_root / "cgroup.procs").c_str(), W_OK) != 0 ||
+    if (!controllers) {
+        return std::unexpected(controllers.error());
+    }
+    std::string missing_controllers;
+    for (const std::string_view required : {"cpu", "memory", "pids"}) {
+        if (contains_token(*controllers, required)) {
+            continue;
+        }
+        if (!missing_controllers.empty()) {
+            missing_controllers += '/';
+        }
+        missing_controllers += required;
+    }
+    if (!missing_controllers.empty()) {
+        return std::unexpected(make_error(
+            ErrorCode::sandbox_preflight_failed,
+            "cgroup v2 delegated subtree lacks required controllers: " + missing_controllers));
+    }
+    if (access((*cgroup_root / "cgroup.procs").c_str(), W_OK) != 0 ||
         access((*cgroup_root / "cgroup.subtree_control").c_str(), W_OK) != 0 ||
         access((*cgroup_root / "cgroup.kill").c_str(), W_OK) != 0 ||
         access((*cgroup_root / "memory.high").c_str(), W_OK) != 0 ||
         access((*cgroup_root / "memory.swap.max").c_str(), W_OK) != 0 ||
-        access((*cgroup_root / "memory.oom.group").c_str(), W_OK) != 0 ||
-        access((*cgroup_root / "io.weight").c_str(), W_OK) != 0) {
-        return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "cgroup v2 Delegate=yes subtree is unavailable"));
+        access((*cgroup_root / "memory.oom.group").c_str(), W_OK) != 0) {
+        return std::unexpected(make_error(
+            ErrorCode::sandbox_preflight_failed,
+            "cgroup v2 Delegate=yes subtree lacks required writable controls"));
+    }
+    if (config.io_weight != 0U &&
+        (!contains_token(*controllers, "io") ||
+         access((*cgroup_root / "io.weight").c_str(), W_OK) != 0)) {
+        return std::unexpected(make_error(
+            ErrorCode::sandbox_preflight_failed,
+            "configured cgroup io.weight is unavailable; set io weight to 0 on this host"));
     }
     if (!config.state_root.is_absolute() || config.state_root == *base_root ||
         !is_safe_overlay_path(*base_root) || !is_safe_overlay_path(config.state_root)) {
@@ -403,7 +458,7 @@ Result<void> prepare_broker_cgroup(const SandboxConfig& config) {
     if (const auto moved = write_cgroup_file(manager_leaf / "cgroup.procs", std::to_string(getpid())); !moved) {
         return std::unexpected(moved.error());
     }
-    return enable_runtime_controllers(*cgroup_root);
+    return enable_runtime_controllers(*cgroup_root, config.io_weight != 0U);
 }
 
 Result<TaskLayer> prepare_task_layer(
@@ -548,13 +603,17 @@ Result<TaskCgroupControl> prepare_runtime_cgroup(
     if (const auto wspctl = create_cgroup_directory(wspctl_cgroup); !wspctl) {
         return std::unexpected(wspctl.error());
     }
-    if (const auto controllers = enable_runtime_controllers(wspctl_cgroup); !controllers) {
+    if (const auto controllers =
+            enable_runtime_controllers(wspctl_cgroup, config.io_weight != 0U);
+        !controllers) {
         return std::unexpected(controllers.error());
     }
     if (const auto runtime = create_cgroup_directory(runtime_cgroup); !runtime) {
         return std::unexpected(runtime.error());
     }
-    if (const auto controllers = enable_runtime_controllers(runtime_cgroup); !controllers) {
+    if (const auto controllers =
+            enable_runtime_controllers(runtime_cgroup, config.io_weight != 0U);
+        !controllers) {
         return std::unexpected(controllers.error());
     }
     if (const auto supervisor = create_cgroup_directory(supervisor_leaf); !supervisor) {
@@ -585,8 +644,13 @@ Result<TaskCgroupControl> prepare_runtime_cgroup(
     if (const auto pids = write_cgroup_file(runtime_cgroup / "pids.max", std::to_string(config.pids_max)); !pids) {
         return std::unexpected(pids.error());
     }
-    if (const auto io = write_cgroup_file(runtime_cgroup / "io.weight", std::to_string(config.io_weight)); !io) {
-        return std::unexpected(io.error());
+    if (config.io_weight != 0U) {
+        if (const auto io = write_cgroup_file(
+                runtime_cgroup / "io.weight",
+                std::to_string(config.io_weight));
+            !io) {
+            return std::unexpected(io.error());
+        }
     }
     const int supervisor_procs_fd = open((supervisor_leaf / "cgroup.procs").c_str(), O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
     if (supervisor_procs_fd < 0) {

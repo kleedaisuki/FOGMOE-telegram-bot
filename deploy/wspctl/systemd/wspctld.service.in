@@ -29,6 +29,10 @@ Delegate=cpu memory pids io
 TasksMax=infinity
 KillMode=control-group
 Restart=on-failure
+# EX_CONFIG(78) 表示确定性 preflight/configuration 拒绝；重启不会改变输入，只会制造日志风暴。/
+# EX_CONFIG(78) is a deterministic preflight/configuration rejection; restarting cannot change
+# its inputs and would only create a log storm.
+RestartPreventExitStatus=78
 RestartSec=2s
 TimeoutStopSec=30s
 NoNewPrivileges=no

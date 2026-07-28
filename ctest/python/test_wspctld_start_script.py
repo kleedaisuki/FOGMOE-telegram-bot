@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -18,6 +19,8 @@ PUBLISH_IMAGE_SCRIPT = REPOSITORY_ROOT / "scripts" / "publish-wspctl-rootfs.sh"
 UNINSTALL_SCRIPT = REPOSITORY_ROOT / "uninstallWspctl.sh"
 #: @brief 仓库根目录的只读观测脚本 / Repository-root readonly observability script.
 STATUS_SCRIPT = REPOSITORY_ROOT / "statusWspctl.sh"
+#: @brief 仓库根目录的完整安装入口 / Repository-root complete installation entrypoint.
+INSTALL_SCRIPT = REPOSITORY_ROOT / "installWspctl.sh"
 
 
 def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> None:
@@ -44,11 +47,23 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
     assert "-DWSPCTL_INSTALL_HOST_TOOLS=ON" in script
     assert "-DWSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT=ON" in script
     assert "WSPCTL_LOOP_SIZE" in script
+    assert "WSPCTL_IO_WEIGHT" in script
+    assert "resolve_io_weight" in script
+    assert 'CGROUP_PARENT="/sys/fs/cgroup/system.slice"' in script
+    assert "host cgroup v2 不提供 io.weight" in script
+    assert "WSPCTL_IO_WEIGHT=$IO_WEIGHT" in script
     assert 'LOOP_SIZE="${WSPCTL_LOOP_SIZE:-32G}"' in script
     assert "fallocate --length" in script
-    assert "losetup --find --show" in script
+    assert "losetup --find --show --nooverlap" in script
+    assert "udevadm settle" in script
     assert "mkfs.xfs" in script
-    assert "已有 loopback image 不是 XFS；拒绝重新格式化" in script
+    assert "--probe" in script
+    assert "--cache-file /dev/null" in script
+    assert "--match-tag TYPE" in script
+    assert "无法探测已有 loopback image 的 filesystem；未做格式化" in script
+    assert "不是 XFS；拒绝重新格式化" in script
+    assert "detach_new_loop_after_failure" in script
+    assert 'losetup --detach "$loop_device"' in script
     assert 'mountpoint -q "$STATE_ROOT"' in script
     assert "prjquota" in script
     assert "pqnoenforce" in script
@@ -57,8 +72,7 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
     assert "select_published_image" in script
     assert "WSPCTL_IMAGE_DIGEST" in script
     assert '"$IMAGES_ROOT/sha256/$IMAGE_DIGEST_HEX/rootfs"' in script
-    assert "scripts/build-wspctl-rootfs.sh" in script
-    assert "scripts/publish-wspctl-rootfs.sh" in script
+    assert "installWspctl.sh" in script
     for forbidden in (
         "default_generation_name",
         "build_wspctl_image.py",
@@ -72,6 +86,7 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
     ):
         assert forbidden not in script
     assert "systemctl start" in script
+    assert 'systemctl enable "$SERVICE_NAME"' in script
     assert "WSPCTL_CLIENT_UID" in script
     assert 'OPERATOR_UID="${WSPCTL_OPERATOR_UID:-0}"' in script
     assert 'SOCKET_PATH="$WORK_ROOT/run/bot/wspctld.sock"' in script
@@ -87,6 +102,196 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
     assert "install-manifest" in script
     assert "remove_retired_host_artifacts" in script
     assert 'retired_supervisor="/usr/local/libexec/wspctl/wsp-systemd"' in script
+
+
+def test_io_weight_auto_detection_supports_wsl_and_explicit_override(
+    tmp_path: Path,
+) -> None:
+    """@brief io.weight capability 探测必须支持 WSL 缺失文件与显式覆盖 / I/O-weight detection must support WSL absence and explicit overrides.
+
+    @param tmp_path pytest 临时目录 / Pytest temporary directory.
+    @return None / None.
+    """
+
+    cgroup_parent = tmp_path / "system.slice"
+    cgroup_parent.mkdir()
+    script = f"""
+source {START_SCRIPT!s}
+CGROUP_PARENT={cgroup_parent!s}
+REQUESTED_IO_WEIGHT=auto
+resolve_io_weight
+[[ "$IO_WEIGHT" == 0 ]]
+touch "$CGROUP_PARENT/io.weight"
+resolve_io_weight
+[[ "$IO_WEIGHT" == 100 ]]
+rm "$CGROUP_PARENT/io.weight"
+REQUESTED_IO_WEIGHT=777
+resolve_io_weight
+[[ "$IO_WEIGHT" == 777 ]]
+"""
+    checked = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    assert checked.returncode == 0, checked.stderr
+    assert "禁用相对 I/O 权重" in checked.stdout
+
+
+def test_broker_health_wait_covers_type_simple_socket_publication_race() -> None:
+    """@brief 健康检查必须等待 Type=simple 服务异步发布 socket / Health checks must wait for a Type=simple service to publish sockets asynchronously.
+
+    @return None / None.
+    """
+
+    script = f"""
+set -euo pipefail
+source {START_SCRIPT!s}
+attempts=0
+broker_is_healthy() {{
+    ((attempts += 1))
+    ((attempts >= 3))
+}}
+sleep() {{ :; }}
+wait_for_broker_healthy
+[[ "$attempts" == 3 ]]
+
+attempts=0
+broker_is_healthy() {{
+    ((attempts += 1))
+    return 1
+}}
+if wait_for_broker_healthy; then
+    exit 1
+fi
+[[ "$attempts" == 100 ]]
+"""
+    checked = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    assert checked.returncode == 0, checked.stderr
+
+
+def test_loopback_probe_waits_for_udev_and_mounts_xfs(tmp_path: Path) -> None:
+    """@brief loop 重绑后必须等待 udev 并以无缓存 probe 验证 XFS / Reattached loops must wait for udev and use an uncached XFS probe.
+
+    @param tmp_path pytest 临时目录 / Pytest temporary directory.
+    @return None / None.
+    """
+
+    work_root = tmp_path / "work"
+    loop_image = work_root / "state.xfs.img"
+    state_root = work_root / "state"
+    ready_marker = tmp_path / "udev-ready"
+    mount_marker = tmp_path / "mounted"
+    work_root.mkdir()
+    loop_image.touch()
+    script = f"""
+set -euo pipefail
+source {START_SCRIPT!s}
+WORK_ROOT={work_root!s}
+LOOP_IMAGE={loop_image!s}
+STATE_ROOT={state_root!s}
+READY_MARKER={ready_marker!s}
+MOUNT_MARKER={mount_marker!s}
+sudo() {{ "$@"; }}
+mountpoint() {{ return 1; }}
+losetup() {{
+    if [[ "$1" == "--associated" ]]; then
+        return 0
+    fi
+    if [[ "$1 ${{2:-}} ${{3:-}}" == "--find --show --nooverlap" ]]; then
+        printf '/dev/loop-test\\n'
+        return 0
+    fi
+    return 1
+}}
+udevadm() {{
+    [[ "$1" == "settle" ]]
+    : > "$READY_MARKER"
+}}
+blkid() {{
+    [[ -f "$READY_MARKER" ]]
+    [[ "$*" == *"--probe"* ]]
+    [[ "$*" == *"--cache-file /dev/null"* ]]
+    printf 'xfs\\n'
+}}
+install() {{ mkdir -p "${{@: -1}}"; }}
+mount() {{ : > "$MOUNT_MARKER"; }}
+ensure_loopback_state_mount
+[[ -f "$MOUNT_MARKER" ]]
+"""
+    checked = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    assert checked.returncode == 0, checked.stderr
+
+
+def test_failed_loopback_probe_detaches_new_association(tmp_path: Path) -> None:
+    """@brief 探测失败必须保留镜像并释放本轮 loop association / Probe failure must preserve the image and release the new loop association.
+
+    @param tmp_path pytest 临时目录 / Pytest temporary directory.
+    @return None / None.
+    """
+
+    work_root = tmp_path / "work"
+    loop_image = work_root / "state.xfs.img"
+    state_root = work_root / "state"
+    detach_marker = tmp_path / "detached"
+    work_root.mkdir()
+    loop_image.write_bytes(b"persistent-data")
+    script = f"""
+set -euo pipefail
+source {START_SCRIPT!s}
+WORK_ROOT={work_root!s}
+LOOP_IMAGE={loop_image!s}
+STATE_ROOT={state_root!s}
+DETACH_MARKER={detach_marker!s}
+sudo() {{ "$@"; }}
+mountpoint() {{ return 1; }}
+losetup() {{
+    if [[ "$1" == "--associated" ]]; then
+        return 0
+    fi
+    if [[ "$1 ${{2:-}} ${{3:-}}" == "--find --show --nooverlap" ]]; then
+        printf '/dev/loop-test\\n'
+        return 0
+    fi
+    if [[ "$1" == "--detach" && "$2" == "/dev/loop-test" ]]; then
+        : > "$DETACH_MARKER"
+        return 0
+    fi
+    return 1
+}}
+udevadm() {{ [[ "$1" == "settle" ]]; }}
+blkid() {{ return 2; }}
+ensure_loopback_state_mount
+"""
+    checked = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    assert checked.returncode != 0
+    assert "无法探测已有 loopback image" in checked.stderr
+    assert detach_marker.is_file()
+    assert loop_image.read_bytes() == b"persistent-data"
 
 
 def test_image_build_and_publication_are_explicit_separate_commands() -> None:
@@ -108,6 +313,7 @@ def test_image_build_and_publication_are_explicit_separate_commands() -> None:
         )
         assert checked.returncode == 0, checked.stderr
     assert "buildah build" in build_script
+    assert "--http-proxy=true" in build_script
     assert "--format oci" in build_script
     assert "buildah push" in build_script
     assert 'OUTPUT_ROOT="${1:-$REPOSITORY_ROOT/.runtime/wspctl-rootfs}"' in build_script
@@ -139,7 +345,10 @@ def test_image_build_and_publication_are_explicit_separate_commands() -> None:
     assert "--current-image-file" in publish_script
     assert "--systemd-escape" in publish_script
     assert "/usr/local/libexec/wspctl/publish_wspctl_image.py" in publish_script
-    assert "sudo /usr/bin/flock --exclusive" in publish_script
+    assert "/usr/bin/flock --exclusive" in publish_script
+    assert '--preserve-env="$SUDO_PROXY_ENVIRONMENT"' in publish_script
+    assert "HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY" in publish_script
+    assert "sudo -E" not in publish_script
     assert "mount --bind" not in publish_script
     assert "systemctl start" not in build_script
     assert "systemctl start" not in publish_script
@@ -167,6 +376,7 @@ def test_root_uninstaller_is_syntax_valid_and_requires_explicit_purge() -> None:
     assert "is_checkout_unit" in script
     assert "install manifest" in script
     assert "losetup --detach" in script
+    assert 'systemctl disable --now "$SERVICE_NAME"' in script
     assert "findmnt --raw --noheadings --output TARGET" in script
     assert "findmnt --list --raw" not in script
     assert "systemd-escape --path --suffix=mount" in script
@@ -192,6 +402,8 @@ def test_root_status_script_is_readonly_and_reports_operational_boundaries() -> 
         raise AssertionError(f"invalid bash:\n{checked.stderr}")
     script = STATUS_SCRIPT.read_text(encoding="utf-8")
     assert "systemctl show" in script
+    assert "NRestarts" in script
+    assert "RestartPreventExitStatus" in script
     assert "xfs_quota -x -c 'state -p'" in script
     assert "WSPCTL_STATUS=healthy" in script
     assert "WSPCTL_STATUS=degraded" in script
@@ -200,6 +412,10 @@ def test_root_status_script_is_readonly_and_reports_operational_boundaries() -> 
     assert "source_oci_manifest_digest" in script
     assert "current-image-digest" in script
     assert "--verify true" in script
+    assert "report_install_log" in script
+    assert "wspctl_install_*.log" in script
+    assert "tail -n 100" in script
+    assert '"${BASH_SOURCE[0]}" == "$0"' in script
     assert 'report_socket "operator control"' in script
     assert "OPERATOR_SOCKET_PATH" in script
     assert "run_bash" not in script
@@ -207,21 +423,156 @@ def test_root_status_script_is_readonly_and_reports_operational_boundaries() -> 
     assert "rm -" not in script
 
 
-def test_runbot_delegates_broker_readiness_to_the_independent_script() -> None:
-    """@brief runBot 启动前必须委托 broker readiness / runBot must delegate broker readiness before Bot launch.
+def test_status_reports_the_newest_install_log(tmp_path: Path) -> None:
+    """@brief 只读状态入口必须发现最新安装日志 / The readonly status entrypoint must discover the newest installation log.
+
+    @param tmp_path pytest 临时目录 / Pytest temporary directory.
+    @return None / None.
+    """
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    older_log = log_dir / "wspctl_install_older.log"
+    newer_log = log_dir / "wspctl_install_newer.log"
+    older_log.write_text("older", encoding="utf-8")
+    newer_log.write_text("newer", encoding="utf-8")
+    older_timestamp = older_log.stat().st_mtime - 10
+    newer_timestamp = newer_log.stat().st_mtime + 10
+    os.utime(older_log, (older_timestamp, older_timestamp))
+    os.utime(newer_log, (newer_timestamp, newer_timestamp))
+    script = f"""
+source {STATUS_SCRIPT!s}
+LOG_DIR={log_dir!s}
+report_install_log
+"""
+    checked = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    assert checked.returncode == 0, checked.stderr
+    assert f"latest={newer_log}" in checked.stdout
+    assert str(older_log) not in checked.stdout
+    assert "tail -n 100" in checked.stdout
+
+
+def test_install_entrypoint_owns_complete_control_plane_deployment() -> None:
+    """@brief installWspctl 必须独占完整 control-plane 部署 / installWspctl must own the complete control-plane deployment.
+
+    @return None / None.
+    """
+
+    checked = subprocess.run(
+        ["bash", "-n", str(INSTALL_SCRIPT)],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    assert checked.returncode == 0, checked.stderr
+    script = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    build_call = '"$BUILD_IMAGE_SCRIPT"'
+    publish_call = '"$PUBLISH_IMAGE_SCRIPT"'
+    broker_call = '"$INSTALL_BROKER_SCRIPT" start'
+    assert "sudo -v" in script
+    assert "sudo buildah skopeo umoci cmake" in script
+    assert "缺少 host 安装工具" in script
+    assert 'scripts/build-wspctl-rootfs.sh"' in script
+    assert 'scripts/publish-wspctl-rootfs.sh"' in script
+    assert 'scripts/start-wspctld.sh"' in script
+    assert build_call in script
+    assert publish_call in script
+    assert broker_call in script
+    assert script.index(build_call) < script.index(publish_call) < script.index(broker_call)
+    assert "initialize_install_log" in script
+    assert "run_logged_install" in script
+    assert "wspctl_install_" in script
+    assert '2>&1 | tee -a "$LOG_FILE"' in script
+    assert 'pipeline_status=("${PIPESTATUS[@]}")' in script
+    assert '完整日志: %s\\n' in script
+    assert '"${BASH_SOURCE[0]}" == "$0"' in script
+    assert "runBot.sh" in script
+
+
+def test_install_log_captures_failure_and_preserves_exit_status(
+    tmp_path: Path,
+) -> None:
+    """@brief 安装日志必须捕获完整失败输出并保留原始退出码 / Installation logging must capture failure output and preserve its status.
+
+    @param tmp_path pytest 临时目录 / Pytest temporary directory.
+    @return None / None.
+    """
+
+    log_dir = tmp_path / "logs"
+    script = f"""
+source {INSTALL_SCRIPT!s}
+LOG_DIR={log_dir!s}
+require_install_prerequisites() {{ printf 'synthetic-prerequisite-ok\\n'; }}
+install_wspctl() {{
+    printf 'synthetic-build-output\\n'
+    printf 'synthetic-publish-error\\n' >&2
+    return 23
+}}
+initialize_install_log
+run_logged_install
+"""
+    checked = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    assert checked.returncode == 23
+    logs = list(log_dir.glob("wspctl_install_*.log"))
+    assert len(logs) == 1
+    log_content = logs[0].read_text(encoding="utf-8")
+    assert "synthetic-prerequisite-ok" in log_content
+    assert "synthetic-build-output" in log_content
+    assert "synthetic-publish-error" in log_content
+    assert "安装失败（exit=23）" in log_content
+    assert logs[0].stat().st_mode & 0o777 == 0o600
+    assert str(logs[0]) in checked.stdout
+
+
+def test_runbot_only_checks_installed_broker_readiness() -> None:
+    """@brief runBot 只能只读检查已安装 broker / runBot may only check an installed broker read-only.
 
     @return None / None.
     """
 
     script = (REPOSITORY_ROOT / "runBot.sh").read_text(encoding="utf-8")
-    assert 'WSPCTLD_START_SCRIPT="$BOT_DIR/scripts/start-wspctld.sh"' in script
-    assert '"$WSPCTLD_START_SCRIPT" start' in script
-    assert 'if ! "$WSPCTLD_START_SCRIPT" start' in script
-    assert "wspctld 控制面启动失败；Bot 未启动" in script
-    assert 'wspctld_log_file="$LOG_DIR/wspctld_${start_timestamp}.log"' in script
-    assert script.index('"$WSPCTLD_START_SCRIPT" start') < script.index(
+    assert 'WSPCTLD_SERVICE_NAME="wspctld.service"' in script
+    assert "read_workspace_broker_socket" in script
+    assert "require_wspctld_ready" in script
+    assert "print_latest_wspctl_install_log" in script
+    assert "wspctl_install_*.log" in script
+    assert "最近一次 wspctl 安装日志" in script
+    assert 'systemctl is-active --quiet "$WSPCTLD_SERVICE_NAME"' in script
+    assert '[ ! -S "$socket_path" ]' in script
+    assert "runBot.sh 不会安装或启动它" in script
+    assert script.index('require_wspctld_ready "$wspctld_socket_path"') < script.index(
         'nohup "$VENV_DIR/bin/fogmoe-bot"'
     )
+    for forbidden in (
+        "WSPCTLD_START_SCRIPT",
+        "start-wspctld.sh",
+        "build-wspctl-rootfs.sh",
+        "publish-wspctl-rootfs.sh",
+        "wspctld_log_file",
+    ):
+        assert forbidden not in script
+    assert all(
+        not line.lstrip().startswith("sudo ") for line in script.splitlines()
+    )
+    assert "init|setup|install)" not in script
+    assert "安装与 Bot 运行已分离" in script
+    assert '1. $WSPCTL_INSTALL_SCRIPT' in script
 
 
 if __name__ == "__main__":
@@ -229,4 +580,5 @@ if __name__ == "__main__":
     test_image_build_and_publication_are_explicit_separate_commands()
     test_root_uninstaller_is_syntax_valid_and_requires_explicit_purge()
     test_root_status_script_is_readonly_and_reports_operational_boundaries()
-    test_runbot_delegates_broker_readiness_to_the_independent_script()
+    test_install_entrypoint_owns_complete_control_plane_deployment()
+    test_runbot_only_checks_installed_broker_readiness()

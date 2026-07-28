@@ -97,6 +97,52 @@ void expect(const bool condition, const std::string& message) {
     }
 }
 
+/**
+ * @brief 验证有界 cgroup 元数据读取不会依赖 eofbit / Verify bounded cgroup metadata reads do not depend on eofbit.
+ * @note ``istreambuf_iterator`` 消耗全部内容后不保证设置 ``eofbit``；此回归测试通过公开的
+ *       cgroup drain API 覆盖真实读取路径。/ ``istreambuf_iterator`` does not guarantee
+ *       setting ``eofbit`` after consuming all content; this regression test covers the real read
+ *       path through the public cgroup-drain API.
+ */
+void test_cgroup_metadata_read() {
+    /** @brief mkdtemp 输入与结果缓冲区 / Input and result buffer for mkdtemp. */
+    char template_path[] = "/tmp/wspctl-cgroup-read-XXXXXX";
+    /** @brief 本测试独占的临时根目录 / Temporary root owned exclusively by this test. */
+    char* const directory = mkdtemp(template_path);
+    expect(directory != nullptr, "create cgroup metadata test root");
+    if (directory == nullptr) {
+        return;
+    }
+
+    /** @brief 测试 runtime 标识 / Test runtime identifier. */
+    constexpr std::string_view kRuntimeKey = "cgroup-metadata-read";
+    /** @brief 模拟的 runtime cgroup 目录 / Simulated runtime cgroup directory. */
+    const std::filesystem::path runtime_cgroup =
+        std::filesystem::path{directory} / "wspctl" / sha256_hex(kRuntimeKey);
+    std::error_code error;
+    std::filesystem::create_directories(runtime_cgroup, error);
+    expect(!error, "create simulated runtime cgroup");
+    if (error) {
+        std::filesystem::remove_all(directory);
+        return;
+    }
+
+    {
+        /** @brief 模拟的 kernel cgroup.events 文件 / Simulated kernel cgroup.events file. */
+        std::ofstream events(runtime_cgroup / "cgroup.events");
+        events << "populated 0\n";
+        expect(events.good(), "write simulated cgroup.events");
+    }
+
+    /** @brief 仅需 cgroup_root 的最小 sandbox 配置 / Minimal sandbox configuration requiring only cgroup_root. */
+    wspctl::SandboxConfig config;
+    config.cgroup_root = directory;
+    const auto drained =
+        wspctl::wait_runtime_cgroup_empty(config, std::string{kRuntimeKey});
+    expect(drained.has_value(), "read a complete cgroup.events file without requiring eofbit");
+    std::filesystem::remove_all(directory);
+}
+
 /** @brief 验证 OCI identity 的类型与路径派生 / Verify OCI identity typing and path derivation. */
 void test_oci_image_identity() {
     const std::string digest_text = "sha256-" + std::string(64U, 'a');
@@ -1065,6 +1111,7 @@ void test_supervisor() {
  * @return 成功为 0 / Zero on success.
  */
 int main() {
+    test_cgroup_metadata_read();
     test_oci_image_identity();
     test_protocol();
     test_launcher_scm_rights_contract();

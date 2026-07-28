@@ -20,7 +20,7 @@ LOOP_IMAGE="$WORK_ROOT/state.xfs.img"
 IMAGES_ROOT="$WORK_ROOT/images"
 # @brief sealed OCI artifact store / Sealed OCI artifact store.
 ARTIFACT_STORE="$WORK_ROOT/artifacts"
-# @brief systemd service managed by the development launcher / Systemd service managed by the development launcher.
+# @brief systemd service managed by the development installer / Systemd service managed by the development installer.
 SERVICE_NAME="wspctld.service"
 # @brief active systemd unit path / Active systemd unit path.
 UNIT_PATH="/etc/systemd/system/$SERVICE_NAME"
@@ -68,8 +68,8 @@ remove_checkout_unit() {
     fi
     is_checkout_unit \
         || die "$UNIT_PATH 不属于 $WORK_ROOT；拒绝停止或删除其他 wspctld 安装"
-    note "停止 $SERVICE_NAME"
-    sudo systemctl stop "$SERVICE_NAME" || true
+    note "禁用并停止 $SERVICE_NAME"
+    sudo systemctl disable --now "$SERVICE_NAME" || true
     sudo rm -f -- "$UNIT_PATH"
     sudo systemctl daemon-reload
 }

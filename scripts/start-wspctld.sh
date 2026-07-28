@@ -2,12 +2,11 @@
 
 # @brief 启动本 checkout 的 wspctld 开发服务 / Start the checkout-local wspctld development service.
 #
-# 这个脚本只构建 host control-plane 程序并启动 daemon；workspace OCI image 必须由
-# build/publish 脚本提前显式发布。它不会构建、导入或猜测 runtime rootfs。
-# Bot 本身从不获得 sudo，也不直接执行此脚本。/ This is the sole development-machine
-# control-plane entrypoint: it builds host programs and manages the daemon, while the workspace
-# OCI image must have been explicitly built and published beforehand. It never builds, imports,
-# or infers a runtime rootfs. The Bot never receives sudo and never invokes this script directly.
+# 这是 installWspctl.sh 调用的 host-broker 内部阶段：只构建 host control-plane 程序并
+# 管理 daemon。workspace OCI image 必须由前序安装阶段显式发布；Bot 从不直接执行本脚本。/
+# This is the internal host-broker stage invoked by installWspctl.sh: it only builds host
+# control-plane programs and manages the daemon. The preceding installation stage must explicitly
+# publish the workspace OCI image; the Bot never invokes this script directly.
 
 set -euo pipefail
 
@@ -27,6 +26,8 @@ LOOP_IMAGE="$WORK_ROOT/state.xfs.img"
 LOOP_SIZE="${WSPCTL_LOOP_SIZE:-32G}"
 # @brief readonly OCI image publication root / Readonly OCI image publication root.
 IMAGES_ROOT="$WORK_ROOT/images"
+# @brief systemd service 所在 cgroup v2 parent / Cgroup v2 parent containing the systemd service.
+CGROUP_PARENT="/sys/fs/cgroup/system.slice"
 # @brief CMake build directory for host tools / CMake build directory for host tools.
 BUILD_DIRECTORY="$REPOSITORY_ROOT/build/wspctld-dev"
 # @brief host service unit name / Host service-unit name.
@@ -43,6 +44,10 @@ IMAGE_DIGEST="${WSPCTL_IMAGE_DIGEST:-}"
 IMAGE_DIGEST_HEX=""
 # @brief 当前已发布 readonly rootfs / Currently published readonly rootfs.
 BASE_ROOT=""
+# @brief operator 请求的 I/O 权重或 host capability 自动探测 / Operator-requested I/O weight or host-capability auto detection.
+REQUESTED_IO_WEIGHT="${WSPCTL_IO_WEIGHT:-auto}"
+# @brief 最终写入 broker 环境的 I/O 权重；0 表示禁用 / Effective I/O weight written to the broker environment; zero disables it.
+IO_WEIGHT=""
 # @brief checkout-local lifecycle lock / Checkout-local lifecycle lock.
 LOCK_FILE="$REPOSITORY_ROOT/.runtime/wspctld-control.lock"
 # @brief 最近一次已应用 broker 配置的 fingerprint / Fingerprint of the most recently applied broker configuration.
@@ -87,10 +92,29 @@ require_loop_size() {
         || die "WSPCTL_LOOP_SIZE 必须是类似 20G 的正整数 IEC 容量"
 }
 
+# @brief 解析 host 支持的相对 I/O 权重策略 / Resolve relative I/O weighting supported by the host.
+# @return 成功时返回零 / Zero on success.
+resolve_io_weight() {
+    if [[ "$REQUESTED_IO_WEIGHT" != "auto" ]]; then
+        [[ "$REQUESTED_IO_WEIGHT" =~ ^[0-9]+$ ]] \
+            || die "WSPCTL_IO_WEIGHT 必须是 auto 或 0..10000"
+        (( 10#$REQUESTED_IO_WEIGHT <= 10000 )) \
+            || die "WSPCTL_IO_WEIGHT 必须是 auto 或 0..10000"
+        IO_WEIGHT="$REQUESTED_IO_WEIGHT"
+        return 0
+    fi
+    if [[ -e "$CGROUP_PARENT/io.weight" ]]; then
+        IO_WEIGHT=100
+        return 0
+    fi
+    IO_WEIGHT=0
+    note "host cgroup v2 不提供 io.weight；禁用相对 I/O 权重（memory/CPU/PIDs/XFS quota 仍强制）"
+}
+
 # @brief 验证开发机的基础命令 / Verify development-machine prerequisite commands.
 require_commands() {
     local command_name
-    for command_name in cmake sudo systemctl journalctl findmnt mountpoint mount install bash sha256sum flock grep tr stat awk fallocate losetup mkfs.xfs blkid find sort xargs; do
+    for command_name in cmake sudo systemctl journalctl udevadm findmnt mountpoint mount install bash sha256sum flock grep tr stat awk fallocate losetup mkfs.xfs blkid find sort xargs; do
         command -v "$command_name" >/dev/null 2>&1 \
             || die "缺少必需命令: $command_name"
     done
@@ -219,6 +243,23 @@ write_install_manifest() {
     rm -f -- "$temporary_file"
 }
 
+# @brief 仅释放本轮启动新建且尚未挂载的 loop association / Release only an unmounted loop association created by this start attempt.
+# @param $1 loop device 路径 / Loop-device path.
+# @param $2 true 表示 association 由本轮创建 / True when this attempt created the association.
+# @return 总是返回成功，保留原始失败原因 / Always succeeds to preserve the original failure.
+detach_new_loop_after_failure() {
+    local loop_device="$1"
+    local attached_loop="$2"
+
+    [[ "$attached_loop" == true ]] || return 0
+    if ! sudo losetup --detach "$loop_device"; then
+        note "警告: 失败后无法释放本轮 loop association: $loop_device"
+        return 0
+    fi
+    sudo udevadm settle \
+        || note "警告: loop association 已释放，但等待 udev 完成失败: $loop_device"
+}
+
 # @brief 在首次开发启动时创建并挂载 loopback XFS / Create and mount the loopback XFS on the first development start.
 #
 # 镜像放在 state mountpoint 的同级目录，因而不会被自身挂载遮蔽。已存在的镜像绝不重新
@@ -226,10 +267,18 @@ write_install_manifest() {
 # The image lives beside the state mountpoint and is therefore never hidden by its own mount.
 # An existing image is never reformatted: if it is not XFS, fail rather than guessing whether
 # the user agrees to lose data.
+#
+# @note 新建 loop association 后必须等待 udev，再以无缓存 low-level probe 检查超级块；
+#       否则一次暂时的空探测会被误报成非 XFS。/
+#       After a new loop association, wait for udev and inspect the superblock with an
+#       uncached low-level probe; otherwise a transient empty probe can be misreported as non-XFS.
+# @return 成功时返回零 / Zero on success.
 ensure_loopback_state_mount() {
     local loop_device=""
     local filesystem_type=""
+    local probe_output=""
     local created_image=false
+    local attached_loop=false
 
     if sudo mountpoint -q "$STATE_ROOT"; then
         return 0
@@ -244,22 +293,46 @@ ensure_loopback_state_mount() {
 
     loop_device="$(sudo losetup --associated "$LOOP_IMAGE" | awk -F: 'NR == 1 {print $1}')"
     if [[ -z "$loop_device" ]]; then
-        loop_device="$(sudo losetup --find --show "$LOOP_IMAGE")"
+        loop_device="$(sudo losetup --find --show --nooverlap "$LOOP_IMAGE")"
+        attached_loop=true
     fi
     [[ "$loop_device" = /dev/loop* ]] \
         || die "无法为 loopback image 获得 loop device: $LOOP_IMAGE"
+    if ! sudo udevadm settle; then
+        detach_new_loop_after_failure "$loop_device" "$attached_loop"
+        die "等待 loop device 的 udev 事件完成失败: $loop_device"
+    fi
 
     if [[ "$created_image" == true ]]; then
-        sudo mkfs.xfs "$loop_device"
+        if ! sudo mkfs.xfs "$loop_device"; then
+            detach_new_loop_after_failure "$loop_device" "$attached_loop"
+            die "无法格式化新建的 loopback XFS image: $LOOP_IMAGE"
+        fi
     else
-        filesystem_type="$(sudo blkid --output value --tag TYPE "$loop_device" 2>/dev/null || true)"
-        [[ "$filesystem_type" == "xfs" ]] \
-            || die "已有 loopback image 不是 XFS；拒绝重新格式化: $LOOP_IMAGE"
+        if ! probe_output="$(
+            sudo blkid \
+                --probe \
+                --cache-file /dev/null \
+                --output value \
+                --match-tag TYPE \
+                "$loop_device" 2>&1
+        )"; then
+            detach_new_loop_after_failure "$loop_device" "$attached_loop"
+            die "无法探测已有 loopback image 的 filesystem；未做格式化: $LOOP_IMAGE（blkid: ${probe_output:-无输出}）"
+        fi
+        filesystem_type="$probe_output"
+        if [[ "$filesystem_type" != "xfs" ]]; then
+            detach_new_loop_after_failure "$loop_device" "$attached_loop"
+            die "已有 loopback image 的 filesystem 为 ${filesystem_type:-未知}，不是 XFS；拒绝重新格式化: $LOOP_IMAGE"
+        fi
     fi
 
     sudo install -d -o root -g root -m 0700 "$STATE_ROOT"
     note "挂载 loopback XFS project-quota state: $loop_device -> $STATE_ROOT"
-    sudo mount -t xfs -o rw,prjquota "$loop_device" "$STATE_ROOT"
+    if ! sudo mount -t xfs -o rw,prjquota "$loop_device" "$STATE_ROOT"; then
+        detach_new_loop_after_failure "$loop_device" "$attached_loop"
+        die "无法挂载 loopback XFS project-quota state: $loop_device -> $STATE_ROOT"
+    fi
 }
 
 # @brief 确认 state root 是已经准备好的强制 XFS project-quota mount / Confirm state root is a provisioned enforcing XFS project-quota mount.
@@ -298,7 +371,7 @@ prepare_control_plane_directories() {
 select_published_image() {
     if [[ -z "$IMAGE_DIGEST" ]]; then
         sudo test -r "$CURRENT_IMAGE_FILE" \
-            || die "尚未选择 workspace image；先运行 scripts/build-wspctl-rootfs.sh 和 scripts/publish-wspctl-rootfs.sh"
+            || die "尚未安装 workspace image；请运行 ./installWspctl.sh"
         IMAGE_DIGEST="$(sudo cat "$CURRENT_IMAGE_FILE")"
     fi
     [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
@@ -383,6 +456,9 @@ install_service_configuration() {
     sudo sed --in-place --regexp-extended \
         "s|^WSPCTL_XFS_SYSTEM_RESERVE_INODES=.*$|WSPCTL_XFS_SYSTEM_RESERVE_INODES=$reserve_inodes|" \
         "$environment_file"
+    sudo sed --in-place --regexp-extended \
+        "s|^WSPCTL_IO_WEIGHT=.*$|WSPCTL_IO_WEIGHT=$IO_WEIGHT|" \
+        "$environment_file"
     sudo chown root:root "$environment_file"
     sudo chmod 0600 "$environment_file"
     sudo systemctl daemon-reload
@@ -438,8 +514,28 @@ broker_is_healthy() {
         && [[ "$(sudo stat --format='%u:%a' "$OPERATOR_SOCKET_PATH")" == "$OPERATOR_UID:600" ]]
 }
 
+# @brief 等待异步启动的 broker 完成 socket 发布 / Wait for an asynchronously starting broker to publish its sockets.
+# @return 十秒内健康为 0，否则非零 / Zero when healthy within ten seconds, nonzero otherwise.
+# @note ``Type=simple`` 的 systemd unit 在 ``execve`` 成功后即可进入 active；native preflight
+#       与两个 socket 的 bind 会稍后完成，不能用一次即时探测判定启动失败。/
+#       A ``Type=simple`` systemd unit becomes active after successful ``execve``; native preflight
+#       and binding both sockets complete later, so one immediate probe cannot determine failure.
+wait_for_broker_healthy() {
+    # @brief 100 次 100ms 探测提供十秒有界启动窗口 / One hundred 100ms probes provide a bounded ten-second startup window.
+    local attempt
+
+    for ((attempt = 0; attempt < 100; ++attempt)); do
+        if broker_is_healthy; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
 # @brief 启动或恢复 systemd broker / Start or recover the systemd broker.
 start_service() {
+    sudo systemctl enable "$SERVICE_NAME"
     if broker_is_healthy; then
         if [[ "$BROKER_RESTART_REQUIRED" == false ]]; then
             note "已就绪: $SERVICE_NAME ($SOCKET_PATH)"
@@ -452,7 +548,7 @@ start_service() {
         note "启动或恢复 $SERVICE_NAME"
         sudo systemctl start "$SERVICE_NAME"
     fi
-    broker_is_healthy \
+    wait_for_broker_healthy \
         || {
             sudo systemctl --no-pager --full status "$SERVICE_NAME" || true
             sudo journalctl --unit "$SERVICE_NAME" --lines 100 --no-pager \
@@ -479,6 +575,7 @@ start() {
     [[ "$CLIENT_UID" != "$OPERATOR_UID" ]] \
         || die "WSPCTL_OPERATOR_UID 必须与 WSPCTL_CLIENT_UID 不同；不要给 Bot operator 权限"
     require_loop_size "$LOOP_SIZE"
+    resolve_io_weight
     require_commands
     mkdir -p "$REPOSITORY_ROOT/.runtime"
     exec 9>"$LOCK_FILE"
@@ -499,35 +596,44 @@ show_help() {
     cat <<'EOF'
 用法: scripts/start-wspctld.sh [start|status|stop|help]
 
-start（默认）会在 ./.wspctl/state.xfs.img 首次创建预分配的 loopback XFS（32G），
+本脚本是 ./installWspctl.sh 的内部 host-broker 阶段。start（默认）会在
+./.wspctl/state.xfs.img 首次创建预分配的 loopback XFS（32G），
 以 prjquota 挂载到 ./.wspctl/state，构建 host control-plane 程序，验证已显式发布且
-按 OCI manifest digest 固定的 workspace image，再确保 systemd service/socket 可用。
-它绝不会构建或导入 workspace image；首次使用前必须依次运行：
-  scripts/build-wspctl-rootfs.sh
-  scripts/publish-wspctl-rootfs.sh
+按 OCI manifest digest 固定的 workspace image，再 enable/start systemd service。
+正常安装请运行 ./installWspctl.sh；日常 Bot 启动不会调用本脚本。
 
 环境变量：
   WSPCTL_CLIENT_UID   broker 接受的 Bot UID；默认当前运行 runBot.sh 的 UID。
   WSPCTL_OPERATOR_UID 独立 operator UID；默认 root。使用 sudo wspctl 查询，且不得等于 Bot UID。
   WSPCTL_IMAGE_DIGEST 可选 sha256:<64hex> OCI manifest digest；默认读取已发布 current-image-digest。
   WSPCTL_LOOP_SIZE    首次创建 image 的容量；默认 32G，已有 image 不会自动 resize。
+  WSPCTL_IO_WEIGHT    auto（默认）按 host cgroup v2 capability 选择 100 或 0；也可显式设为 0..10000。
 EOF
 }
 
-case "${1:-start}" in
-    start)
-        start
-        ;;
-    status)
-        show_status
-        ;;
-    stop)
-        stop_service
-        ;;
-    help|--help|-h)
-        show_help
-        ;;
-    *)
-        die "未知命令: $1（可用 start、status、stop、help）"
-        ;;
-esac
+# @brief 分派命令行入口 / Dispatch the command-line entrypoint.
+# @param $@ 命令行参数 / Command-line arguments.
+# @return 命令退出状态 / Command exit status.
+main() {
+    case "${1:-start}" in
+        start)
+            start
+            ;;
+        status)
+            show_status
+            ;;
+        stop)
+            stop_service
+            ;;
+        help|--help|-h)
+            show_help
+            ;;
+        *)
+            die "未知命令: $1（可用 start、status、stop、help）"
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

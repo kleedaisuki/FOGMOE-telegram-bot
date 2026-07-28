@@ -250,6 +250,20 @@ Python 异步 API、全部视图参数和生产安全边界见 [Dashboard 文档
 
 ### 启动机器人
 
+首次部署或更新 workspace host control plane：
+
+```bash
+./installWspctl.sh
+```
+
+该命令显式构建并发布 workspace OCI image、安装并启用 `wspctld.service`。日常
+`runBot.sh` 只检查已安装 broker 的 service/socket readiness，绝不执行 sudo、构建或安装。
+完整安装输出会同时实时显示并写入 owner-only 的
+`logs/wspctl_install_<timestamp>_<pid>.log`；`./statusWspctl.sh` 会指出最近一次日志。
+需要代理时，安装器直接读取当前环境已有的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 与
+`NO_PROXY`，不会假定 Linux 或 WSL 的代理地址；只有这些变量会被 allowlist 到 root
+publisher，不会透传完整用户环境。
+
 ```bash
 # 方式一：直接运行命令行入口
 fogmoe-bot

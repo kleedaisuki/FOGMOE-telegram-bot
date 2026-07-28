@@ -59,10 +59,38 @@ _RENAME_NOREPLACE: Final = 1
 _AT_FDCWD: Final = -100
 #: @brief systemd 全局 unit 目录 / Global systemd unit directory.
 _SYSTEMD_UNIT_ROOT: Final = Path("/etc/systemd/system")
+#: @brief 可传递给受控子进程的标准代理变量 / Standard proxy variables forwarded to controlled subprocesses.
+_PROXY_ENVIRONMENT_VARIABLES: Final = (
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+)
 
 
 class ImagePublishError(RuntimeError):
     """@brief OCI image 发布失败 / OCI image publication failure."""
+
+
+def _subprocess_environment() -> dict[str, str]:
+    """@brief 构造最小子进程环境并仅转发标准代理变量 / Build a minimal subprocess environment forwarding only standard proxy variables.
+
+    @return 包含固定 locale、空 PATH 与显式代理 allowlist 的环境 /
+        Environment containing a fixed locale, empty PATH, and the explicit proxy allowlist.
+    @note 不复制完整 root 调用环境，避免凭据和 agent socket 越过 privilege boundary。/
+        The complete root invocation environment is not copied, preventing credentials and agent
+        sockets from crossing the privilege boundary.
+    """
+
+    environment = {"LC_ALL": "C", "PATH": ""}
+    for variable_name in _PROXY_ENVIRONMENT_VARIABLES:
+        if variable_name in os.environ:
+            environment[variable_name] = os.environ[variable_name]
+    return environment
 
 
 @dataclass(frozen=True, slots=True)
@@ -624,7 +652,7 @@ class ImagePublisher:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env={"LC_ALL": "C", "PATH": ""},
+                env=_subprocess_environment(),
                 timeout=600,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -953,7 +981,7 @@ class ImageActivator:
                 env={"LC_ALL": "C", "PATH": ""},
                 timeout=30,
             )
-        except OSError, subprocess.TimeoutExpired:
+        except (OSError, subprocess.TimeoutExpired):
             return False
         return completed.returncode == 0
 
@@ -975,7 +1003,7 @@ class ImageActivator:
                 env={"LC_ALL": "C", "PATH": ""},
                 timeout=60,
             )
-        except OSError, subprocess.TimeoutExpired:
+        except (OSError, subprocess.TimeoutExpired):
             pass
 
 

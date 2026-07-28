@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -39,6 +40,58 @@ def _load_publisher() -> ModuleType:
 
 #: @brief 被测 publisher / Publisher under test.
 _PUBLISHER = _load_publisher()
+
+
+def test_standalone_publisher_parses_with_the_distro_python() -> None:
+    """@brief root publisher 必须能由声明支持的 distro Python 解析 / The root publisher must parse with the supported distro Python.
+
+    @return None / None.
+    @note 发布入口刻意不执行用户可写的项目 venv；这个测试覆盖实际的 ``/usr/bin/python3`` 边界。/
+        Publication deliberately avoids the user-writable project venv; this test covers the real
+        ``/usr/bin/python3`` boundary.
+    """
+
+    checked = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-c",
+            "import pathlib,sys; source=pathlib.Path(sys.argv[1]).read_bytes(); "
+            "compile(source, sys.argv[1], 'exec')",
+            str(PUBLISHER_PATH),
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    assert checked.returncode == 0, checked.stderr
+
+
+def test_subprocess_environment_forwards_only_standard_proxy_variables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief publisher 子进程只继承代理 allowlist / Publisher subprocesses inherit only the proxy allowlist.
+
+    @param monkeypatch pytest 环境隔离工具 / Pytest environment-isolation helper.
+    @return None / None.
+    """
+
+    for variable_name in _PUBLISHER._PROXY_ENVIRONMENT_VARIABLES:
+        monkeypatch.delenv(variable_name, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://172.29.64.1:10809")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/run/user/1000/ssh-agent")
+    monkeypatch.setenv("EXAMPLE_API_TOKEN", "must-not-cross-boundary")
+
+    environment = _PUBLISHER._subprocess_environment()
+
+    assert environment == {
+        "LC_ALL": "C",
+        "PATH": "",
+        "HTTPS_PROXY": "http://172.29.64.1:10809",
+        "no_proxy": "127.0.0.1,localhost",
+    }
 
 
 def _write_blob(layout: Path, content: bytes) -> tuple[str, int]:

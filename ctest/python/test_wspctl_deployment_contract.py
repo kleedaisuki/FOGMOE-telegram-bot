@@ -165,6 +165,7 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_image_mount() -> None:
     quota_guide = XFS_QUOTA_GUIDE_PATH.read_text(encoding="utf-8")
     assert not (REPOSITORY_ROOT / "systemd").exists()
     assert "Delegate=cpu memory pids io" in unit
+    assert "RestartPreventExitStatus=78" in unit
     assert "CAP_MKNOD" in unit
     assert "ProtectSystem=strict" in unit
     assert "ProtectHome=read-only" in unit

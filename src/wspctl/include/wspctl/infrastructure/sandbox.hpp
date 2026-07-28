@@ -38,7 +38,7 @@ struct SandboxConfig final {
     std::uint32_t cpu_max_period_us{};
     /** @brief runtime cgroup 的 pids.max / runtime cgroup pids.max. */
     std::uint32_t pids_max{128U};
-    /** @brief runtime cgroup 的 io.weight / runtime cgroup io.weight. */
+    /** @brief runtime cgroup 的 io.weight；0 表示 host 不支持时禁用 / Runtime cgroup io.weight; zero disables it when unsupported by the host. */
     std::uint16_t io_weight{100U};
     /** @brief runtime 内任务 UID / Task UID inside runtime. */
     uid_t sandbox_uid{};

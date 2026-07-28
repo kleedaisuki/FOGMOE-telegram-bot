@@ -30,6 +30,8 @@ OPERATOR_SOCKET_PATH="$WORK_ROOT/run/operator/wspctld.sock"
 ENVIRONMENT_FILE="$WORK_ROOT/wspctld.env"
 # @brief broker service name / Broker service name.
 SERVICE_NAME="wspctld.service"
+# @brief checkout-local 生命周期日志目录 / Checkout-local lifecycle log directory.
+LOG_DIR="$REPOSITORY_ROOT/logs"
 # @brief 整体健康状态 / Aggregate health status.
 HEALTHY=true
 
@@ -58,6 +60,33 @@ info() {
     printf 'INFO %s\n' "$*"
 }
 
+# @brief 返回最新一轮完整 wspctl 安装日志 / Return the newest complete wspctl installation log.
+# @return 成功时输出日志绝对路径；没有日志时非零 / Prints the absolute log path on success; nonzero when absent.
+latest_install_log() {
+    find "$LOG_DIR" -maxdepth 1 -type f -name 'wspctl_install_*.log' \
+        -printf '%T@ %p\n' 2>/dev/null \
+        | sort -nr \
+        | head -n 1 \
+        | cut -d' ' -f2-
+}
+
+# @brief 报告最近一次 build→publish→broker 安装日志 / Report the latest build-to-publish-to-broker installation log.
+# @return 总是成功；日志缺失只作为信息 / Always succeeds; a missing log is informational.
+report_install_log() {
+    local install_log
+    local log_metadata
+
+    heading "installation log"
+    if ! install_log="$(latest_install_log)" || [[ -z "$install_log" ]]; then
+        info "尚无 wspctl_install 日志；下一次 ./installWspctl.sh 会完整记录三个安装阶段"
+        return 0
+    fi
+    log_metadata="$(stat --format='owner=%U mode=%a size=%s modified=%y' "$install_log" 2>/dev/null || true)"
+    info "latest=$install_log"
+    [[ -n "$log_metadata" ]] && info "$log_metadata"
+    info "查看末尾: tail -n 100 '$install_log'"
+}
+
 # @brief 报告 systemd service 及其主进程资源 / Report the systemd service and main-process resources.
 report_service() {
     local service_properties
@@ -70,7 +99,8 @@ report_service() {
     fi
     service_properties="$(sudo systemctl show "$SERVICE_NAME" \
         --property=MainPID --property=ActiveState --property=SubState \
-        --property=MemoryCurrent --property=TasksCurrent --property=ExecMainStatus 2>/dev/null || true)"
+        --property=MemoryCurrent --property=TasksCurrent --property=ExecMainStatus \
+        --property=NRestarts --property=RestartPreventExitStatus 2>/dev/null || true)"
     if [[ -n "$service_properties" ]]; then
         printf '%s\n' "$service_properties"
     else
@@ -202,7 +232,11 @@ report_storage() {
     if sudo test -f "$LOOP_IMAGE"; then
         ok "image $(sudo du --block-size=1 "$LOOP_IMAGE" | awk '{print $1 " bytes allocated"}')"
         loop_devices="$(sudo losetup --associated "$LOOP_IMAGE" 2>/dev/null || true)"
-        [[ -n "$loop_devices" ]] && printf '%s\n' "$loop_devices" || warning "image has no attached loop device"
+        if [[ -n "$loop_devices" ]]; then
+            printf '%s\n' "$loop_devices"
+        else
+            warning "image has no attached loop device"
+        fi
     else
         warning "loop image missing: $LOOP_IMAGE"
     fi
@@ -211,7 +245,11 @@ report_storage() {
         return 0
     fi
     mount_description="$(sudo findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS --target "$STATE_ROOT" 2>/dev/null || true)"
-    [[ -n "$mount_description" ]] && ok "mount $mount_description" || warning "无法读取 state mount"
+    if [[ -n "$mount_description" ]]; then
+        ok "mount $mount_description"
+    else
+        warning "无法读取 state mount"
+    fi
     if [[ "$mount_description" != *xfs* || ( "$mount_description" != *prjquota* && "$mount_description" != *pquota* ) || "$mount_description" == *pqnoenforce* ]]; then
         warning "state mount 不满足强制 XFS project-quota contract"
     fi
@@ -244,15 +282,24 @@ report_runtime_aggregates() {
     fi
 }
 
-report_service
-report_sockets
-report_image
-report_storage
-report_runtime_aggregates
+# @brief 状态汇总主入口 / Status-summary main entrypoint.
+# @return 全部边界健康时为零，否则非零 / Zero when every boundary is healthy; nonzero otherwise.
+main() {
+    report_install_log
+    report_service
+    report_sockets
+    report_image
+    report_storage
+    report_runtime_aggregates
 
-if [[ "$HEALTHY" == true ]]; then
-    printf '\nWSPCTL_STATUS=healthy\n'
-    exit 0
+    if [[ "$HEALTHY" == true ]]; then
+        printf '\nWSPCTL_STATUS=healthy\n'
+        return 0
+    fi
+    printf '\nWSPCTL_STATUS=degraded\n'
+    return 1
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
-printf '\nWSPCTL_STATUS=degraded\n'
-exit 1

@@ -123,6 +123,7 @@ printf 'wspctl rootfs: 构建显式 linux/amd64 OCI image\n'
 buildah build \
     --file "$CONTAINERFILE" \
     --format oci \
+    --http-proxy=true \
     --layers \
     --build-context "wspctl-build-tools=$BUILD_TOOLS_ROOT" \
     --platform "$IMAGE_PLATFORM" \

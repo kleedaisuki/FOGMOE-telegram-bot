@@ -782,7 +782,12 @@ struct ActivationStagingParent final {
         return std::unexpected(errno_error(ErrorCode::sandbox_preflight_failed, "open XFS quota mount FD"));
     }
 #ifdef SYS_quotactl_fd
-    if (syscall(SYS_quotactl_fd, mount_fd.get(), Q_XGETQSTATV, 0, &status) != 0) {
+    if (syscall(
+            SYS_quotactl_fd,
+            mount_fd.get(),
+            QCMD(Q_XGETQSTATV, PRJQUOTA),
+            0,
+            &status) != 0) {
         return std::unexpected(errno_error(ErrorCode::sandbox_preflight_failed, "Q_XGETQSTATV XFS project quota"));
     }
 #else
@@ -822,7 +827,12 @@ struct ActivationStagingParent final {
         return std::unexpected(errno_error(ErrorCode::io_failure, "open XFS quota mount FD"));
     }
 #ifdef SYS_quotactl_fd
-    if (syscall(SYS_quotactl_fd, mount_fd.get(), Q_XSETQLIM, static_cast<int>(project_id), &quota) != 0) {
+    if (syscall(
+            SYS_quotactl_fd,
+            mount_fd.get(),
+            QCMD(Q_XSETQLIM, PRJQUOTA),
+            static_cast<int>(project_id),
+            &quota) != 0) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "Q_XSETQLIM XFS project hard limits"));
     }
 #else
@@ -855,7 +865,12 @@ struct ActivationStagingParent final {
         return std::unexpected(errno_error(ErrorCode::io_failure, "open XFS quota mount FD"));
     }
 #ifdef SYS_quotactl_fd
-    if (syscall(SYS_quotactl_fd, mount_fd.get(), Q_XGETQUOTA, static_cast<int>(project_id), &quota) != 0) {
+    if (syscall(
+            SYS_quotactl_fd,
+            mount_fd.get(),
+            QCMD(Q_XGETQUOTA, PRJQUOTA),
+            static_cast<int>(project_id),
+            &quota) != 0) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "Q_XGETQUOTA XFS project hard limits"));
     }
 #else
@@ -888,7 +903,12 @@ struct ActivationStagingParent final {
         return std::unexpected(errno_error(ErrorCode::io_failure, "open XFS quota mount FD for operator usage"));
     }
 #ifdef SYS_quotactl_fd
-    if (syscall(SYS_quotactl_fd, mount_fd.get(), Q_XGETQUOTA, static_cast<int>(project_id), &quota) != 0) {
+    if (syscall(
+            SYS_quotactl_fd,
+            mount_fd.get(),
+            QCMD(Q_XGETQUOTA, PRJQUOTA),
+            static_cast<int>(project_id),
+            &quota) != 0) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "Q_XGETQUOTA XFS workspace usage"));
     }
 #else

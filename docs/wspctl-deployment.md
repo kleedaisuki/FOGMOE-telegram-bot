@@ -32,6 +32,22 @@ OCI manifest digest 是唯一 image identity。tag 只允许作为构建输出�
 systemd environment 和 store path 都不接受 tag、短 hash、任意 generation 名或启动时 fingerprint。
 本地 `rootfs_digest` 只用于检测物化结果被修改，不是第二套版本号。
 
+## 安装与运行边界
+
+开发 checkout 的完整 host control-plane 安装只有一个入口：
+
+```bash
+./installWspctl.sh
+```
+
+该安装器依次执行 OCI build、root-owned publication、host artifact/systemd unit 安装，并
+enable/start `wspctld.service`。这是显式、可能要求 sudo 的部署操作。
+
+`./runBot.sh start` 属于纯运行阶段：它只读取 Bot 配置中的 socket 路径，检查已经安装的
+`wspctld.service` 与 Unix socket，然后启动无特权 Bot。它绝不构建 image、安装 host binary、
+创建或挂载 XFS、修改 systemd，亦不会调用 sudo。缺少 broker 时应先运行安装器，而不是让
+应用启动过程隐式改变 host。
+
 ## 构建 workspace OCI image
 
 先安装明确的系统工具：
@@ -122,33 +138,46 @@ import、mount、native verify 和 selection 由 root-owned `publish.lock` 串�
 └── current-image-digest
 ```
 
-## 启动开发 broker
+## 安装开发 broker
 
-首次顺序：
-
-```bash
-./scripts/build-wspctl-rootfs.sh
-./scripts/publish-wspctl-rootfs.sh
-./scripts/start-wspctld.sh
-```
-
-`start-wspctld.sh` 可以构建 host `wspctld`、`wspctl-image`、`wspctl` 和 Python client，但不会调用
-Buildah、Skopeo、umoci、uv、readelf、ldconfig 或任何 rootfs builder。缺少已发布 image 时，它会在
-任何 `systemctl start/restart` 前失败，并打印唯一的 build/publish 命令。
-
-直接 host Bot 默认使用当前 UID：
+正常安装只运行聚合入口：
 
 ```bash
-./scripts/start-wspctld.sh
+./installWspctl.sh
 ```
 
-Compose Bot 使用固定 UID：
+聚合入口内部固定执行 `build-wspctl-rootfs.sh` → `publish-wspctl-rootfs.sh` →
+`start-wspctld.sh`。最后一个脚本只负责 host broker/state/service 阶段，并会 enable unit；
+它不会反向调用 image builder。
+
+每次聚合安装都会把三个阶段的 stdout/stderr 实时显示并完整写入
+`logs/wspctl_install_<timestamp>_<pid>.log`。日志以 `0600` 创建，失败时保留底层阶段的原始
+退出码；若 broker 健康检查失败，同一文件还包含 `systemctl status` 与最近 100 行 journal。
+`./statusWspctl.sh` 会报告最近一次安装日志的绝对路径和 metadata。
+
+安装器不推断 Linux、WSL 或容器环境，也不构造、改写或默认任何代理地址。需要代理访问 base
+image、Debian snapshot 或 Python wheel 时，它直接读取调用环境中已经存在的大小写两组
+`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY`。因此 WSL 应沿用 shell 中实际配置的
+Windows host 地址，不假定 guest 的 `127.0.0.1`。
+
+非特权 `curl` 直接继承当前环境；Buildah 显式启用 `--http-proxy=true`，读取同一组变量并传入
+Containerfile 构建。跨 sudo 边界只 allowlist 这八个变量，值保持原样；root publisher 再以
+同一 allowlist 构造 Skopeo/umoci 子进程环境。不要改成裸 `sudo -E`，否则无关凭据、agent
+socket 和应用配置也可能进入 root 进程。
+
+直接 host Bot 默认安装为当前 UID：
 
 ```bash
-WSPCTL_CLIENT_UID=65532 ./scripts/start-wspctld.sh
+./installWspctl.sh
 ```
 
-选择已发布的另一个 image：
+Compose Bot 安装使用固定 UID：
+
+```bash
+WSPCTL_CLIENT_UID=65532 ./installWspctl.sh
+```
+
+高级 operator 仍可用内部阶段选择已经发布的另一个 image：
 
 ```bash
 WSPCTL_IMAGE_DIGEST=sha256:<64hex> ./scripts/start-wspctld.sh
@@ -158,9 +187,15 @@ WSPCTL_IMAGE_DIGEST=sha256:<64hex> ./scripts/start-wspctld.sh
 `./.wspctl/state`。可在首次创建前设置 `WSPCTL_LOOP_SIZE=48G`；既有 image 不自动 resize，
 非 XFS image 不会被重新格式化。
 
-`./runBot.sh start` 会先调用启动脚本，日志写入 `logs/wspctld_<timestamp>.log`。控制面失败时 Bot
-不会启动，终端同时显示完整日志路径；若 systemd broker preflight 失败，启动脚本还会附上最近
-100 行 journal，native broker 会输出具体拒绝原因而不是只有泛化状态。
+开发安装器会检查 `/sys/fs/cgroup/system.slice/io.weight`。普通 Linux host 提供该控制文件时
+默认使用 `WSPCTL_IO_WEIGHT=100`；部分 WSL2 kernel 只暴露 `io.max/io.latency` 而没有
+`io.weight`，此时安装器明确记录 capability 降级并写入 `WSPCTL_IO_WEIGHT=0`。这只关闭相对
+I/O QoS，不放松 memory、CPU、PIDs、namespace、seccomp 或 XFS project quota。operator 可用
+`WSPCTL_IO_WEIGHT=0..10000 ./installWspctl.sh` 显式覆盖自动选择；在不支持 `io.weight` 的 host
+上强制非零值仍会 fail closed。
+
+`./runBot.sh start` 不再调用任何安装脚本。readiness 失败时它只提示
+`./installWspctl.sh` 与 `./statusWspctl.sh`，不会在应用运行路径中提权修复 host。
 
 ## 生产 host control plane
 
@@ -250,6 +285,8 @@ ctest --test-dir build/wspctl-prod \
 
 ```bash
 ./statusWspctl.sh
+tail -n 100 "$(find logs -maxdepth 1 -name 'wspctl_install_*.log' -printf '%T@ %p\n' \
+  | sort -nr | head -n 1 | cut -d' ' -f2-)"
 sudo wspctl status <runtime>
 sudo wspctl workspace ls <runtime> /workspace
 ```

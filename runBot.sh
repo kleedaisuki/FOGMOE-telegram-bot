@@ -12,7 +12,8 @@ VENV_DIR="$BOT_DIR/.venv"
 PYPROJECT_FILE="$BOT_DIR/pyproject.toml"
 CONFIG_FILE="$BOT_DIR/config.json"
 EXAMPLE_CONFIG_FILE="$BOT_DIR/example.config.json"
-WSPCTLD_START_SCRIPT="$BOT_DIR/scripts/start-wspctld.sh"
+WSPCTLD_SERVICE_NAME="wspctld.service"
+WSPCTL_INSTALL_SCRIPT="$BOT_DIR/installWspctl.sh"
 # 外层进程管理器必须晚于应用的排空截止时间才可升级为 SIGKILL。
 STOP_TIMEOUT_SECONDS="${BOT_STOP_TIMEOUT_SECONDS:-200}"
 
@@ -139,6 +140,63 @@ print(read_bot_settings(Path(sys.argv[1])).runtime.mailbox.shutdown_grace_second
 PY
 }
 
+# 读取 Bot 配置中实际可见的 wspctld socket，避免复制配置默认值。
+read_workspace_broker_socket() {
+    if [ ! -x "$VENV_DIR/bin/python" ] || [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${RED}错误: 无法读取 workspace broker socket 配置${NC}" >&2
+        return 1
+    fi
+    PYTHONPATH="$SRC_DIR" "$VENV_DIR/bin/python" - "$CONFIG_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+from fogmoe_bot.config import read_bot_settings
+
+print(read_bot_settings(Path(sys.argv[1])).runtime.workspace.broker_socket_path)
+PY
+}
+
+# @brief 输出最近一次完整 wspctl 安装日志路径 / Print the newest complete wspctl installation log path.
+# @return 总是成功；没有日志时不输出 / Always succeeds; prints nothing when no log exists.
+print_latest_wspctl_install_log() {
+    local install_log
+
+    install_log="$(
+        find "$LOG_DIR" -maxdepth 1 -type f -name 'wspctl_install_*.log' \
+            -printf '%T@ %p\n' 2>/dev/null \
+            | sort -nr \
+            | head -n 1 \
+            | cut -d' ' -f2-
+    )"
+    if [ -n "$install_log" ]; then
+        echo "最近一次 wspctl 安装日志: $install_log"
+        echo "查看日志: tail -n 100 '$install_log'"
+    fi
+    return 0
+}
+
+# 运行阶段只读检查已经安装的 broker；绝不尝试安装、挂载或提权修复。
+require_wspctld_ready() {
+    local socket_path="$1"
+
+    if ! command -v systemctl >/dev/null 2>&1 \
+        || ! systemctl is-active --quiet "$WSPCTLD_SERVICE_NAME"; then
+        echo -e "${RED}错误: $WSPCTLD_SERVICE_NAME 未运行；Bot 未启动${NC}"
+        echo "wspctl 是独立 host service，runBot.sh 不会安装或启动它。"
+        echo "首次安装或升级请运行: $WSPCTL_INSTALL_SCRIPT"
+        echo "诊断请运行: $BOT_DIR/statusWspctl.sh"
+        print_latest_wspctl_install_log
+        return 1
+    fi
+    if [ ! -S "$socket_path" ]; then
+        echo -e "${RED}错误: wspctld Bot socket 不可用: $socket_path${NC}"
+        echo "服务已运行但 client endpoint 缺失；拒绝在 runBot.sh 中执行特权修复。"
+        echo "诊断请运行: $BOT_DIR/statusWspctl.sh"
+        print_latest_wspctl_install_log
+        return 1
+    fi
+}
+
 # 外层强杀期限必须是正整数，且严格晚于进程启动时的运行时 grace period。
 validate_stop_timeout() {
     local runtime_grace_seconds="$1"
@@ -252,7 +310,7 @@ init_environment() {
 start_bot() {
     local runtime_grace_seconds
     local start_timestamp
-    local wspctld_log_file
+    local wspctld_socket_path
 
     echo "=== 雾萌娘 Telegram Bot 启动脚本 ==="
     echo "Bot 目录: $BOT_DIR"
@@ -313,24 +371,11 @@ start_bot() {
 
     runtime_grace_seconds="$(read_runtime_shutdown_grace)" || exit 1
     validate_stop_timeout "$runtime_grace_seconds" || exit 1
+    wspctld_socket_path="$(read_workspace_broker_socket)" || exit 1
+    require_wspctld_ready "$wspctld_socket_path" || exit 1
 
-    # Bot 只能连接既有 Unix socket；host control plane 的构建、rootfs 发布与 systemd
-    # 生命周期统一由独立脚本处理。/ The Bot may only connect to an existing Unix socket;
-    # the host control plane's build, rootfs publication, and systemd lifecycle are handled by
-    # one independent script.
-    if [ ! -x "$WSPCTLD_START_SCRIPT" ]; then
-        echo -e "${RED}错误: wspctld 启动脚本不存在或不可执行: $WSPCTLD_START_SCRIPT${NC}"
-        exit 1
-    fi
     mkdir -p "$LOG_DIR"
     start_timestamp="$(date '+%Y%m%dT%H%M%S')"
-    wspctld_log_file="$LOG_DIR/wspctld_${start_timestamp}.log"
-    echo "wspctld 启动日志: $wspctld_log_file"
-    if ! "$WSPCTLD_START_SCRIPT" start > >(tee "$wspctld_log_file") 2>&1; then
-        echo -e "${RED}错误: wspctld 控制面启动失败；Bot 未启动${NC}"
-        echo "完整错误日志: $wspctld_log_file"
-        exit 1
-    fi
 
     # 切换到项目根目录，使用 src layout 启动入口
     cd "$BOT_DIR"
@@ -525,17 +570,24 @@ show_help() {
     echo "  $0 update    # 更新依赖"
     echo ""
     echo "首次使用流程:"
-    echo "  1. $0 init                           # 初始化环境"
-    echo "  2. 编辑 config.json 配置必要参数       # nano config.json"
-    echo "  3. 运行数据库迁移                     # $VENV_DIR/bin/fogmoe-dbctl migrate"
-    echo "  4. $0 start                          # 启动bot"
+    echo "  1. $WSPCTL_INSTALL_SCRIPT            # 安装并启动 host control plane"
+    echo "  2. $0 init                           # 初始化 Bot Python 环境"
+    echo "  3. 编辑 config.json 配置必要参数       # nano config.json"
+    echo "  4. 运行数据库迁移                     # $VENV_DIR/bin/fogmoe-dbctl migrate"
+    echo "  5. $0 start                          # 只启动 Bot"
 }
 
 # 主逻辑
 case "${1:-start}" in
-    init|setup|install)
+    init|setup)
         acquire_control_lock
         init_environment
+        ;;
+    install)
+        echo -e "${RED}错误: 安装与 Bot 运行已分离${NC}"
+        echo "安装或升级 wspctl host control plane: $WSPCTL_INSTALL_SCRIPT"
+        echo "初始化 Bot Python 环境: $0 init"
+        exit 2
         ;;
     start)
         acquire_control_lock

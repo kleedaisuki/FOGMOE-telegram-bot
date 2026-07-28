@@ -39,6 +39,9 @@ SKOPEO="/usr/bin/skopeo"
 UMOCI="/usr/bin/umoci"
 # @brief root-owned publication serialization lock / Root-owned publication serialization lock.
 PUBLISH_LOCK="$WORK_ROOT/publish.lock"
+# @brief 允许跨 sudo 边界传入 root publisher 的标准代理变量 /
+# Standard proxy variables allowed across the sudo boundary into the root publisher.
+SUDO_PROXY_ENVIRONMENT="http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY"
 
 # @brief 输出错误并退出 / Print an error and exit.
 # @param $* 错误文本 / Error text.
@@ -113,7 +116,8 @@ sudo touch "$PUBLISH_LOCK"
 sudo chown root:root "$PUBLISH_LOCK"
 sudo chmod 0600 "$PUBLISH_LOCK"
 
-sudo /usr/bin/flock --exclusive "$PUBLISH_LOCK" \
+sudo --preserve-env="$SUDO_PROXY_ENVIRONMENT" \
+    /usr/bin/flock --exclusive "$PUBLISH_LOCK" \
     "$PYTHON_EXECUTABLE" "$PUBLISHER" \
     --source-layout "$SOURCE_LAYOUT" \
     --source-reference "$SOURCE_REFERENCE" \
