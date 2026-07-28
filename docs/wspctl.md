@@ -375,7 +375,7 @@ runtime mount namespace 的顺序如下：
 
 runtime contract 至少包含 `/bin/bash`、`/usr/local/bin/python`、
 `/usr/local/libexec/wspctl/wsp-systemd` 和 `/workspace`、`/proc`、`/dev`、`/tmp`、`/run`。
-native sealer 同时验证平台、固定入口、root ownership、危险 mode、file capability、特殊 inode、
+native sealer 同时验证平台、固定入口、root ownership、regular file 的 set-id bit、file capability、特殊 inode、
 symlink 的容器根语义和 `site-packages` 为空。标准镜像中的绝对 symlink 按 pivot 后的容器根解释；
 只有词法上逃出 rootfs 的链接才拒绝，不能用宿主 `Path.resolve()` 错解。
 

@@ -18,6 +18,8 @@ STATE_ROOT="$WORK_ROOT/state"
 LOOP_IMAGE="$WORK_ROOT/state.xfs.img"
 # @brief immutable OCI image publication root / Immutable OCI image publication root.
 IMAGES_ROOT="$WORK_ROOT/images"
+# @brief sealed OCI artifact store / Sealed OCI artifact store.
+ARTIFACT_STORE="$WORK_ROOT/artifacts"
 # @brief systemd service managed by the development launcher / Systemd service managed by the development launcher.
 SERVICE_NAME="wspctld.service"
 # @brief active systemd unit path / Active systemd unit path.
@@ -46,7 +48,7 @@ note() {
 require_commands() {
     local command_name
 
-    for command_name in sudo systemctl grep findmnt mountpoint umount losetup sha256sum awk sort cut cat rm rmdir; do
+    for command_name in sudo systemctl systemd-escape grep findmnt mountpoint umount losetup sha256sum awk sort cut cat rm rmdir; do
         command -v "$command_name" >/dev/null 2>&1 \
             || die "缺少必需命令: $command_name"
     done
@@ -75,20 +77,40 @@ remove_checkout_unit() {
 # @brief 卸载只读 OCI image bind mounts，先处理最深路径 / Unmount readonly OCI image bind mounts, deepest paths first.
 unmount_published_images() {
     local mount_target
+    local mount_listing
+    local mount_unit
+    local mount_unit_path
     local mount_targets=()
 
     if ! sudo test -d "$IMAGES_ROOT"; then
         return 0
     fi
+    mount_listing="$(sudo findmnt --raw --noheadings --output TARGET)" \
+        || die "findmnt 无法枚举 image mounts"
     while IFS= read -r mount_target; do
         [[ "$mount_target" == "$IMAGES_ROOT"/* ]] && mount_targets+=("$mount_target")
-    done < <(sudo findmnt --list --raw --noheadings --output TARGET | awk '{print length($0), $0}' | sort --numeric-sort --reverse | cut --delimiter=' ' --fields=2-)
+    done < <(printf '%s\n' "$mount_listing" | awk '{print length($0), $0}' | sort --numeric-sort --reverse | cut --delimiter=' ' --fields=2-)
     for mount_target in "${mount_targets[@]}"; do
+        mount_unit="$(systemd-escape --path --suffix=mount "$mount_target")"
+        mount_unit_path="/etc/systemd/system/$mount_unit"
+        if sudo test -f "$mount_unit_path"; then
+            sudo grep --fixed-strings --quiet "Where=$mount_target" "$mount_unit_path" \
+                || die "拒绝删除 Where 不匹配的 mount unit: $mount_unit_path"
+            sudo grep --extended-regexp --quiet \
+                "^What=$ARTIFACT_STORE/sha256/[0-9a-f]{64}/rootfs$" \
+                "$mount_unit_path" \
+                || die "拒绝删除 What 不属于本 checkout artifact store 的 mount unit: $mount_unit_path"
+            note "禁用持久 OCI image mount: $mount_unit"
+            sudo systemctl disable --now "$mount_unit" \
+                || die "无法禁用 OCI image mount unit: $mount_unit"
+            sudo rm -f -- "$mount_unit_path"
+        fi
         if sudo mountpoint -q "$mount_target"; then
             note "卸载 readonly OCI image: $mount_target"
             sudo umount "$mount_target" || die "无法卸载 OCI image: $mount_target"
         fi
     done
+    sudo systemctl daemon-reload
 }
 
 # @brief 卸载 state 并 detach 与本 image 关联的 loop devices / Unmount state and detach loop devices associated with this image.

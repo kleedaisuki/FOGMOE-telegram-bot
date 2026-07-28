@@ -5,31 +5,37 @@
 # Builder 与 runtime 固定到同一个 OCI manifest digest，避免把 host ABI 带入镜像。
 # The builder and runtime are pinned to the same OCI manifest digest so no host ABI enters
 # the image. Debian package resolution is separately fixed to a snapshot timestamp.
-ARG PYTHON_BASE=python:3.14-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30
+ARG PYTHON_BASE=docker.io/library/python:3.14-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30
 ARG DEBIAN_SNAPSHOT=20260728T000000Z
 
 FROM ${PYTHON_BASE} AS supervisor-builder
 
 ARG DEBIAN_SNAPSHOT
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
 RUN printf '%s\n' \
       "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} bookworm main" \
       "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT} bookworm-security main" \
       > /etc/apt/sources.list \
     && rm -f /etc/apt/sources.list.d/debian.sources \
-    && apt-get update \
-    && apt-get install --yes --no-install-recommends \
+    && apt-get -o Acquire::Retries=10 -o Acquire::https::Timeout=60 update \
+    && apt-get -o Acquire::Retries=10 -o Acquire::https::Timeout=60 \
+      install --yes --no-install-recommends \
       build-essential \
       libcap-dev \
       libseccomp-dev \
       libssl-dev \
       pkg-config \
-    && python -m pip install \
-      "cmake==4.1.2" \
-      "ninja==1.13.0"
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/log/*
+
+COPY --from=wspctl-build-tools / /build-tools
+
+RUN python -m pip install \
+      --no-index \
+      --no-deps \
+      /build-tools/cmake-4.3.2-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl \
+      /build-tools/ninja-1.13.0-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl \
+    && rm -rf /build-tools
 
 WORKDIR /source
 COPY CMakeLists.txt ./
@@ -74,8 +80,9 @@ RUN printf '%s\n' \
       "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT} bookworm-security main" \
       > /etc/apt/sources.list \
     && rm -f /etc/apt/sources.list.d/debian.sources \
-    && apt-get update \
-    && apt-get install --yes --no-install-recommends \
+    && apt-get -o Acquire::Retries=10 -o Acquire::https::Timeout=60 update \
+    && apt-get -o Acquire::Retries=10 -o Acquire::https::Timeout=60 \
+      install --yes --no-install-recommends \
       bash \
       coreutils \
       findutils \
@@ -84,12 +91,13 @@ RUN printf '%s\n' \
       libseccomp2 \
       libssl3 \
       sed \
-    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/log/* \
-    && find /usr/local/lib/python3.14/site-packages \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/log/*
+
+RUN find /usr/local/lib/python3.14/site-packages \
       -mindepth 1 \
       -delete \
     && install --directory --owner=root --group=root --mode=0755 \
-      /dev /proc /run /usr/local/libexec/wspctl \
+      /run /usr/local/libexec/wspctl \
     && install --directory --owner=root --group=root --mode=1777 \
       /tmp /workspace \
     && rm -rf /var/tmp \
@@ -101,12 +109,13 @@ COPY --from=supervisor-builder \
 
 RUN chown --no-dereference --recursive root:root \
       /bin /etc /lib /opt /run /sbin /usr /var /workspace \
-    && find /bin /sbin /usr -xdev -perm /6000 -exec chmod a-s '{}' + \
+    && find / -xdev -type f -perm /6000 -exec chmod a-s '{}' + \
     && chmod 1777 /tmp /workspace \
     && python -I -S -c \
       "import ctypes, json, sqlite3, ssl; assert __import__('sys').version_info[:2] == (3, 14)" \
     && test -x /bin/bash \
     && test -x /usr/local/libexec/wspctl/wsp-systemd \
+    && ! ldd /usr/local/bin/python | grep 'not found' \
     && ! ldd /usr/local/libexec/wspctl/wsp-systemd | grep 'not found'
 
 ENTRYPOINT ["/usr/local/libexec/wspctl/wsp-systemd"]

@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+build/
+.runtime/
+.wspctl/
 
 # Git & logs
 .git/

@@ -175,7 +175,7 @@ CLI 的分层结构和子命令扩展约定见 [`docs/dbctl.md`](docs/dbctl.md)�
 Assistant 的 `run_bash` 不再调用 Judge0。它只经无特权 Python client 连接宿主机的
 `wspctld`，由后者创建每位私聊用户或每个完整群聊独立的 Linux Workspace；Bot 容器或 Bot
 进程本身不应获得 `CAP_SYS_ADMIN`、`privileged: true` 或任意宿主目录挂载。部署前必须先准备
-版本化、只读的 Python base generation，并以 systemd cgroup delegation 启动 broker；如果
+按 OCI manifest digest 固定且可重启恢复的只读 runtime image，并以 systemd cgroup delegation 启动 broker；如果
 broker、socket ACL、OverlayFS 或 cgroup 委派未满足，工具会 fail closed，不会回退为宿主
 `subprocess`。完整的信任边界见 [wspctl 文档](docs/wspctl.md)，host broker 与 Docker client 的
 安装、socket UID 契约和升级顺序见 [wspctl 部署说明](docs/wspctl-deployment.md)。
@@ -327,7 +327,7 @@ source .venv/bin/activate
 
 无需在容器内运行 PostgreSQL，Compose 也**绝不**运行 `wspctld`；它只容器化无特权 Bot
 client。先按 [wspctl 部署说明](docs/wspctl-deployment.md) 在 Linux host 安装并验证 root-owned
-`wspctld.service`、只读 base generation 与开发态仓库 `.wspctl/run/bot/wspctld.sock`（生产环境则为
+`wspctld.service`、只读 OCI runtime image 与开发态仓库 `.wspctl/run/bot/wspctld.sock`（生产环境则为
 root-owned host socket 的 container-visible 映射），再启动 Compose。checkout 内 `.wspctl` 仅可在显式
 development opt-in 下使用；它不是 production 的特权 host root。
 

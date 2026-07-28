@@ -85,7 +85,8 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
     assert "source_oci_manifest_digest" in script
     assert "write_install_manifest" in script
     assert "install-manifest" in script
-    assert "/usr/local/libexec/wspctl/wsp-systemd" not in script
+    assert "remove_retired_host_artifacts" in script
+    assert 'retired_supervisor="/usr/local/libexec/wspctl/wsp-systemd"' in script
 
 
 def test_image_build_and_publication_are_explicit_separate_commands() -> None:
@@ -109,10 +110,37 @@ def test_image_build_and_publication_are_explicit_separate_commands() -> None:
     assert "buildah build" in build_script
     assert "--format oci" in build_script
     assert "buildah push" in build_script
+    assert 'OUTPUT_ROOT="${1:-$REPOSITORY_ROOT/.runtime/wspctl-rootfs}"' in build_script
+    assert 'DESTINATION="$OUTPUT_ROOT/sha256/$DIGEST_HEX"' in build_script
+    assert 'CURRENT_BUILD_FILE="$OUTPUT_ROOT/current-image-digest"' in build_script
+    assert "--timestamp" in build_script
+    assert "--layers" in build_script
+    assert "--build-context" in build_script
+    assert "build-tools.lock" in build_script
+    assert "sha256sum" in build_script
+    assert "--continue-at" in build_script
+    assert "--source-date-epoch" not in build_script
+    assert "--rewrite-timestamp" not in build_script
     assert "skopeo" in publish_script
     assert "umoci" in publish_script
     assert "publish_wspctl_image.py" in publish_script
-    assert "mount -o remount,bind,ro,nosuid,nodev" in publish_script
+    assert "WSPCTL_BUILD_PYTHON_BINDINGS=OFF" in publish_script
+    assert "cmake --build" in publish_script
+    assert "wspctl-image --parallel" in publish_script
+    assert (
+        'BUILD_OUTPUT_ROOT="$REPOSITORY_ROOT/.runtime/wspctl-rootfs"' in publish_script
+    )
+    assert (
+        'REQUESTED_WORK_ROOT="${WSPCTL_WORK_ROOT:-$REPOSITORY_ROOT/.wspctl}"'
+        in publish_script
+    )
+    assert 'WORK_ROOT="$(realpath --canonicalize-missing' in publish_script
+    assert "--images-root" in publish_script
+    assert "--current-image-file" in publish_script
+    assert "--systemd-escape" in publish_script
+    assert "/usr/local/libexec/wspctl/publish_wspctl_image.py" in publish_script
+    assert "sudo /usr/bin/flock --exclusive" in publish_script
+    assert "mount --bind" not in publish_script
     assert "systemctl start" not in build_script
     assert "systemctl start" not in publish_script
 
@@ -139,6 +167,10 @@ def test_root_uninstaller_is_syntax_valid_and_requires_explicit_purge() -> None:
     assert "is_checkout_unit" in script
     assert "install manifest" in script
     assert "losetup --detach" in script
+    assert "findmnt --raw --noheadings --output TARGET" in script
+    assert "findmnt --list --raw" not in script
+    assert "systemd-escape --path --suffix=mount" in script
+    assert "systemctl disable --now" in script
     assert "保留 ./.wspctl" in script
 
 

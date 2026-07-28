@@ -57,6 +57,8 @@ _SUPERVISOR: Final = "/usr/local/libexec/wspctl/wsp-systemd"
 _RENAME_NOREPLACE: Final = 1
 #: @brief AT_FDCWD / AT_FDCWD.
 _AT_FDCWD: Final = -100
+#: @brief systemd 全局 unit 目录 / Global systemd unit directory.
+_SYSTEMD_UNIT_ROOT: Final = Path("/etc/systemd/system")
 
 
 class ImagePublishError(RuntimeError):
@@ -176,7 +178,9 @@ class OciDescriptor:
         try:
             parsed_digest = Sha256Digest(digest)
         except ValueError as error:
-            raise ImagePublishError(f"{context} descriptor has invalid digest") from error
+            raise ImagePublishError(
+                f"{context} descriptor has invalid digest"
+            ) from error
         return cls(media_type=media_type, digest=parsed_digest, size=size)
 
 
@@ -248,9 +252,7 @@ class OciLayout:
                 isinstance(annotations, Mapping)
                 and annotations.get(_REFERENCE_ANNOTATION) == reference
             ):
-                selected.append(
-                    OciDescriptor.parse(raw_descriptor, context="manifest")
-                )
+                selected.append(OciDescriptor.parse(raw_descriptor, context="manifest"))
         if len(selected) != 1:
             raise ImagePublishError(
                 "OCI reference must resolve to exactly one manifest descriptor"
@@ -279,7 +281,9 @@ class OciLayout:
             OciDescriptor.parse(layer, context="layer") for layer in raw_layers
         )
         if any(layer.media_type not in _OCI_LAYER_MEDIA_TYPES for layer in layers):
-            raise ImagePublishError("OCI manifest contains an unsupported layer media type")
+            raise ImagePublishError(
+                "OCI manifest contains an unsupported layer media type"
+            )
         for layer in layers:
             self._verify_blob(layer)
         config = self._read_descriptor_json(config_descriptor, "config")
@@ -307,14 +311,10 @@ class OciLayout:
 
         operating_system = config.get("os")
         architecture = config.get("architecture")
-        if not isinstance(operating_system, str) or not isinstance(
-            architecture, str
-        ):
+        if not isinstance(operating_system, str) or not isinstance(architecture, str):
             raise ImagePublishError("OCI config is missing os/architecture")
         try:
-            platform = OciPlatform(
-                os=operating_system, architecture=architecture
-            )
+            platform = OciPlatform(os=operating_system, architecture=architecture)
         except ValueError as error:
             raise ImagePublishError("OCI config platform is unsupported") from error
         rootfs = config.get("rootfs")
@@ -332,14 +332,20 @@ class OciLayout:
             tuple(Sha256Digest(value) for value in diff_ids if isinstance(value, str))
         except ValueError as error:
             raise ImagePublishError("OCI config contains an invalid DiffID") from error
-        if len([value for value in diff_ids if isinstance(value, str)]) != len(diff_ids):
+        if len([value for value in diff_ids if isinstance(value, str)]) != len(
+            diff_ids
+        ):
             raise ImagePublishError("OCI config contains a non-string DiffID")
         entrypoint = runtime_config.get("Entrypoint")
         labels = runtime_config.get("Labels")
         if entrypoint != [_SUPERVISOR]:
-            raise ImagePublishError("OCI config has an unexpected supervisor entrypoint")
+            raise ImagePublishError(
+                "OCI config has an unexpected supervisor entrypoint"
+            )
         if not isinstance(labels, Mapping) or labels.get(_CONTRACT_LABEL) != "2":
-            raise ImagePublishError("OCI config is missing wspctl runtime contract label")
+            raise ImagePublishError(
+                "OCI config is missing wspctl runtime contract label"
+            )
         return platform
 
     def _read_descriptor_json(
@@ -402,7 +408,10 @@ class OciLayout:
 
         try:
             metadata = os.lstat(path)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16 * 1024 * 1024:
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size > 16 * 1024 * 1024
+            ):
                 raise ImagePublishError(f"{context} must be a bounded regular file")
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -436,6 +445,30 @@ class PublishSpec:
     umoci: Path
 
 
+@dataclass(frozen=True, slots=True)
+class ActivationSpec:
+    """@brief 已物化 image 的持久只读发布输入 / Persistent readonly activation inputs for a materialized image.
+
+    @param images_root root-owned readonly publication namespace / Root-owned readonly publication namespace.
+    @param current_image_file 原子 selection 文件 / Atomic selection file.
+    @param sealer native image verifier / Native image verifier.
+    @param systemctl systemctl executable / Systemctl executable.
+    @param systemd_escape systemd-escape executable / Systemd-escape executable.
+    @param findmnt findmnt executable / Findmnt executable.
+    @param mountpoint mountpoint executable / Mountpoint executable.
+    @param unit_root systemd unit directory / Systemd unit directory.
+    """
+
+    images_root: Path
+    current_image_file: Path
+    sealer: Path
+    systemctl: Path
+    systemd_escape: Path
+    findmnt: Path
+    mountpoint: Path
+    unit_root: Path = _SYSTEMD_UNIT_ROOT
+
+
 class ImagePublisher:
     """@brief OCI image 的验证式 importer/publisher / Verifying importer/publisher for OCI images."""
 
@@ -463,9 +496,7 @@ class ImagePublisher:
         if destination.exists():
             self._verify_existing(destination)
             return destination
-        staging = Path(
-            tempfile.mkdtemp(prefix=".import-staging-", dir=algorithm_root)
-        )
+        staging = Path(tempfile.mkdtemp(prefix=".import-staging-", dir=algorithm_root))
         os.chown(staging, 0, 0)
         os.chmod(staging, 0o700)
         published = False
@@ -569,14 +600,14 @@ class ImagePublisher:
             ],
             "existing content-addressed image failed verification",
         )
-        expected = (
-            f"source_oci_manifest_digest={self._spec.manifest_digest.value}"
-        )
+        expected = f"source_oci_manifest_digest={self._spec.manifest_digest.value}"
         if expected not in completed.stdout.splitlines():
             raise ImagePublishError("existing image identity does not match request")
 
     @staticmethod
-    def _run(arguments: Sequence[str], message: str) -> subprocess.CompletedProcess[str]:
+    def _run(
+        arguments: Sequence[str], message: str
+    ) -> subprocess.CompletedProcess[str]:
         """@brief 运行一个无 shell 的有界发布命令 / Run one bounded publication command without a shell.
 
         @param arguments argv / argv.
@@ -602,6 +633,350 @@ class ImagePublisher:
             detail = completed.stderr.strip()[-4096:]
             raise ImagePublishError(f"{message}: {detail or 'no diagnostic'}")
         return completed
+
+
+class ImageActivator:
+    """@brief 将 sealed CAS object 激活为可重启恢复的只读 mount / Activate a sealed CAS object as a reboot-restorable readonly mount."""
+
+    def __init__(self, spec: ActivationSpec, manifest_digest: Sha256Digest) -> None:
+        """@brief 创建 image activator / Create an image activator.
+
+        @param spec 持久激活输入 / Persistent activation inputs.
+        @param manifest_digest 被选择的 OCI manifest digest / Selected OCI manifest digest.
+        @return None / None.
+        """
+
+        self._spec = spec
+        self._manifest_digest = manifest_digest
+
+    def activate(self, artifact: Path) -> Path:
+        """@brief 用 systemd mount unit 持久发布 image 并原子选择 / Persistently publish and atomically select the image.
+
+        @param artifact 已 seal 的 content-addressed artifact / Sealed content-addressed artifact.
+        @return readonly publication root / Readonly publication root.
+        @raise ImagePublishError mount、验证或 selection 失败时抛出 /
+            Raised when mounting, verification, or selection fails.
+        @note 新 unit 的失败会回滚；既有健康 unit 永不因另一次失败发布而被移除。/
+            A newly created unit is rolled back on failure; an existing healthy unit is never
+            removed by a failed publication attempt.
+        """
+
+        source_root = artifact / "rootfs"
+        publish_root = (
+            self._spec.images_root / "sha256" / self._manifest_digest.hex / "rootfs"
+        )
+        self._require_root_owned_directory(source_root, "materialized rootfs")
+        algorithm_root = self._spec.images_root / "sha256"
+        algorithm_root.mkdir(mode=0o700, exist_ok=True)
+        os.chown(algorithm_root, 0, 0)
+        os.chmod(algorithm_root, 0o700)
+        already_mounted = self._command_succeeds(
+            [str(self._spec.mountpoint), "--quiet", str(publish_root)]
+        )
+        if not already_mounted:
+            publish_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chown(publish_root.parent, 0, 0)
+            os.chmod(publish_root.parent, 0o700)
+            os.chown(publish_root, 0, 0)
+            os.chmod(publish_root, 0o700)
+
+        unit_name = self._mount_unit_name(publish_root)
+        unit_path = self._spec.unit_root / unit_name
+        unit_content = self._mount_unit(source_root, publish_root)
+        unit_created = self._install_unit(unit_path, unit_content)
+        was_active = self._command_succeeds(
+            [str(self._spec.systemctl), "is-active", "--quiet", unit_name]
+        )
+        started_here = not was_active
+        try:
+            self._run(
+                [str(self._spec.systemctl), "daemon-reload"],
+                "systemd failed to reload the image mount unit",
+            )
+            self._run(
+                [
+                    str(self._spec.systemctl),
+                    "enable",
+                    "--now",
+                    unit_name,
+                ],
+                "systemd failed to enable the persistent image mount",
+            )
+            self._verify_mount(publish_root)
+            completed = self._run(
+                [
+                    str(self._spec.sealer),
+                    "--verify",
+                    "true",
+                    "--base-root",
+                    str(publish_root),
+                    "--images-root",
+                    str(self._spec.images_root),
+                ],
+                "readonly publication failed native image verification",
+            )
+            expected = f"source_oci_manifest_digest={self._manifest_digest.value}"
+            if expected not in completed.stdout.splitlines():
+                raise ImagePublishError(
+                    "readonly publication returned an unexpected image identity"
+                )
+            self._write_current_digest()
+            return publish_root
+        except BaseException:
+            if started_here:
+                self._run_best_effort(
+                    [
+                        str(self._spec.systemctl),
+                        "disable",
+                        "--now",
+                        unit_name,
+                    ]
+                )
+            if unit_created:
+                unit_path.unlink(missing_ok=True)
+                self._run_best_effort([str(self._spec.systemctl), "daemon-reload"])
+            raise
+
+    def _mount_unit_name(self, publish_root: Path) -> str:
+        """@brief 从 mount path 导出规范 systemd unit 名 / Derive the canonical systemd unit name from a mount path.
+
+        @param publish_root mount target / Mount target.
+        @return ``*.mount`` unit name / ``*.mount`` unit name.
+        """
+
+        completed = self._run(
+            [
+                str(self._spec.systemd_escape),
+                "--path",
+                "--suffix=mount",
+                str(publish_root),
+            ],
+            "systemd-escape failed to name the image mount unit",
+        )
+        unit_name = completed.stdout.strip()
+        if not unit_name.endswith(".mount") or "/" in unit_name or "\n" in unit_name:
+            raise ImagePublishError(
+                "systemd-escape returned an invalid mount unit name"
+            )
+        return unit_name
+
+    def _mount_unit(self, source_root: Path, publish_root: Path) -> str:
+        """@brief 生成持久 bind mount unit / Render the persistent bind-mount unit.
+
+        @param source_root sealed CAS rootfs / Sealed CAS rootfs.
+        @param publish_root readonly publication target / Readonly publication target.
+        @return 完整 unit 文本 / Complete unit text.
+        """
+
+        for path in (source_root, publish_root):
+            if re.fullmatch(r"/[A-Za-z0-9._/-]+", str(path)) is None:
+                raise ImagePublishError(
+                    "image publication paths contain unsafe systemd unit characters"
+                )
+        return (
+            "[Unit]\n"
+            f"Description=FogMoe wspctl OCI image {self._manifest_digest.value}\n"
+            "Before=wspctld.service\n"
+            "\n"
+            "[Mount]\n"
+            f"What={source_root}\n"
+            f"Where={publish_root}\n"
+            "Type=none\n"
+            "Options=bind,ro,nosuid,nodev\n"
+            "TimeoutSec=60s\n"
+            "\n"
+            "[Install]\n"
+            "WantedBy=multi-user.target\n"
+        )
+
+    def _install_unit(self, unit_path: Path, content: str) -> bool:
+        """@brief 原子安装 unit，拒绝覆盖不同定义 / Atomically install the unit and reject a different existing definition.
+
+        @param unit_path unit destination / Unit destination.
+        @param content 规范 unit 文本 / Canonical unit text.
+        @return 创建新 unit 时为 true / True when a new unit was created.
+        """
+
+        if unit_path.exists():
+            try:
+                existing = unit_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as error:
+                raise ImagePublishError(
+                    "cannot read existing image mount unit"
+                ) from error
+            if existing != content:
+                raise ImagePublishError(
+                    f"existing mount unit has a different definition: {unit_path}"
+                )
+            return False
+        temporary_file: Path | None = None
+        try:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{unit_path.name}.",
+                suffix=".tmp",
+                dir=unit_path.parent,
+            )
+            temporary_file = Path(temporary_name)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chown(temporary_file, 0, 0)
+            os.chmod(temporary_file, 0o644)
+            try:
+                os.link(temporary_file, unit_path)
+            except FileExistsError:
+                existing = unit_path.read_text(encoding="utf-8")
+                if existing != content:
+                    raise ImagePublishError(
+                        f"concurrent mount unit has a different definition: {unit_path}"
+                    )
+                return False
+            return True
+        except OSError as error:
+            raise ImagePublishError(
+                "cannot atomically install image mount unit"
+            ) from error
+        finally:
+            if temporary_file is not None:
+                temporary_file.unlink(missing_ok=True)
+
+    def _verify_mount(self, publish_root: Path) -> None:
+        """@brief 验证 target 是 exact readonly,nosuid,nodev mount / Verify the target is an exact readonly,nosuid,nodev mount.
+
+        @param publish_root publication target / Publication target.
+        @return None / None.
+        """
+
+        self._run(
+            [str(self._spec.mountpoint), "--quiet", str(publish_root)],
+            "published image root is not a mountpoint",
+        )
+        completed = self._run(
+            [
+                str(self._spec.findmnt),
+                "--noheadings",
+                "--output",
+                "OPTIONS",
+                "--target",
+                str(publish_root),
+            ],
+            "findmnt failed to inspect the published image",
+        )
+        options = {option for option in completed.stdout.strip().split(",") if option}
+        missing = {"ro", "nosuid", "nodev"} - options
+        if missing:
+            raise ImagePublishError(
+                "published image mount is missing options: " + ",".join(sorted(missing))
+            )
+
+    def _write_current_digest(self) -> None:
+        """@brief 原子提交当前 image selection / Atomically commit the current image selection.
+
+        @return None / None.
+        """
+
+        current = self._spec.current_image_file
+        current.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{current.name}.",
+            suffix=".tmp",
+            dir=current.parent,
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+                stream.write(f"{self._manifest_digest.value}\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chown(temporary, 0, 0)
+            os.chmod(temporary, 0o644)
+            os.replace(temporary, current)
+        except OSError as error:
+            raise ImagePublishError(
+                "cannot atomically select the published image"
+            ) from error
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _require_root_owned_directory(path: Path, label: str) -> None:
+        """@brief 验证 root-owned directory / Verify a root-owned directory.
+
+        @param path directory path / Directory path.
+        @param label diagnostic label / Diagnostic label.
+        @return None / None.
+        """
+
+        try:
+            metadata = os.stat(path)
+        except OSError as error:
+            raise ImagePublishError(f"{label} is missing") from error
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise ImagePublishError(
+                f"{label} must be a root-owned non-group/world-writable directory"
+            )
+
+    @staticmethod
+    def _run(
+        arguments: Sequence[str], message: str
+    ) -> subprocess.CompletedProcess[str]:
+        """@brief 运行一个有界 lifecycle 命令 / Run one bounded lifecycle command.
+
+        @param arguments argv / Argv.
+        @param message failure message / Failure message.
+        @return completed process / Completed process.
+        """
+
+        return ImagePublisher._run(arguments, message)
+
+    @staticmethod
+    def _command_succeeds(arguments: Sequence[str]) -> bool:
+        """@brief 探测命令退出状态 / Probe a command exit status.
+
+        @param arguments argv / Argv.
+        @return 成功为 true / True on success.
+        """
+
+        try:
+            completed = subprocess.run(
+                arguments,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env={"LC_ALL": "C", "PATH": ""},
+                timeout=30,
+            )
+        except OSError, subprocess.TimeoutExpired:
+            return False
+        return completed.returncode == 0
+
+    @staticmethod
+    def _run_best_effort(arguments: Sequence[str]) -> None:
+        """@brief 执行 rollback 命令并保留原始异常 / Run rollback without masking the original exception.
+
+        @param arguments argv / Argv.
+        @return None / None.
+        """
+
+        try:
+            subprocess.run(
+                arguments,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env={"LC_ALL": "C", "PATH": ""},
+                timeout=60,
+            )
+        except OSError, subprocess.TimeoutExpired:
+            pass
 
 
 def _rename_noreplace(source: Path, destination: Path) -> None:
@@ -646,7 +1021,7 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
 
 
 def _validated_executable(value: str, label: str) -> Path:
-    """@brief 校验一个绝对 regular executable / Validate an absolute regular executable.
+    """@brief 校验一个可信 root-owned executable / Validate a trusted root-owned executable.
 
     @param value CLI path / CLI path.
     @param label 错误标签 / Error label.
@@ -659,8 +1034,16 @@ def _validated_executable(value: str, label: str) -> Path:
         raise ImagePublishError(f"{label} must be an absolute path")
     resolved = path.resolve(strict=True)
     metadata = os.stat(resolved)
-    if not stat.S_ISREG(metadata.st_mode) or not os.access(resolved, os.X_OK):
-        raise ImagePublishError(f"{label} must be an executable regular file")
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or not os.access(resolved, os.X_OK)
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    ):
+        raise ImagePublishError(
+            f"{label} must be a root-owned non-group/world-writable executable"
+        )
     return resolved
 
 
@@ -713,6 +1096,39 @@ def _build_spec(arguments: argparse.Namespace) -> PublishSpec:
     )
 
 
+def _build_activation_spec(arguments: argparse.Namespace) -> ActivationSpec:
+    """@brief 将 CLI 输入转成持久 mount 激活 spec / Convert CLI input into a persistent-mount activation spec.
+
+    @param arguments argparse namespace / Argparse namespace.
+    @return activation spec / Activation spec.
+    @raise ImagePublishError path 或 tool 无效时抛出 / Raised for invalid paths or tools.
+    """
+
+    images_root = Path(arguments.images_root)
+    current_image_file = Path(arguments.current_image_file)
+    if not images_root.is_absolute() or not current_image_file.is_absolute():
+        raise ImagePublishError("images root and current image file must be absolute")
+    if current_image_file.parent != images_root.parent:
+        raise ImagePublishError(
+            "current image file must be a sibling of the images root"
+        )
+    unit_root = Path(arguments.systemd_unit_root)
+    if unit_root != _SYSTEMD_UNIT_ROOT:
+        raise ImagePublishError("systemd unit root must be /etc/systemd/system")
+    return ActivationSpec(
+        images_root=images_root,
+        current_image_file=current_image_file,
+        sealer=_validated_executable(arguments.sealer, "sealer"),
+        systemctl=_validated_executable(arguments.systemctl, "systemctl"),
+        systemd_escape=_validated_executable(
+            arguments.systemd_escape, "systemd-escape"
+        ),
+        findmnt=_validated_executable(arguments.findmnt, "findmnt"),
+        mountpoint=_validated_executable(arguments.mountpoint, "mountpoint"),
+        unit_root=unit_root,
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     """@brief 创建严格 CLI parser / Create the strict CLI parser.
 
@@ -727,9 +1143,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest-digest", required=True)
     parser.add_argument("--platform", required=True)
     parser.add_argument("--artifact-store", required=True)
+    parser.add_argument("--images-root", required=True)
+    parser.add_argument("--current-image-file", required=True)
     parser.add_argument("--sealer", required=True)
     parser.add_argument("--skopeo", required=True)
     parser.add_argument("--umoci", required=True)
+    parser.add_argument("--systemctl", required=True)
+    parser.add_argument("--systemd-escape", required=True)
+    parser.add_argument("--findmnt", required=True)
+    parser.add_argument("--mountpoint", required=True)
+    parser.add_argument(
+        "--systemd-unit-root",
+        default=str(_SYSTEMD_UNIT_ROOT),
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -741,13 +1168,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
 
     try:
-        spec = _build_spec(_parser().parse_args(argv))
+        arguments = _parser().parse_args(argv)
+        spec = _build_spec(arguments)
+        activation_spec = _build_activation_spec(arguments)
         destination = ImagePublisher(spec).publish()
+        published_root = ImageActivator(activation_spec, spec.manifest_digest).activate(
+            destination
+        )
     except ImagePublishError as error:
         print(f"publish_wspctl_image: {error}", file=os.sys.stderr)
         return 78
     print(f"source_oci_manifest_digest={spec.manifest_digest.value}")
-    print(f"image={destination}")
+    print(f"artifact={destination}")
+    print(f"rootfs={published_root}")
     return 0
 
 

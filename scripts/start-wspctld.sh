@@ -90,7 +90,7 @@ require_loop_size() {
 # @brief 验证开发机的基础命令 / Verify development-machine prerequisite commands.
 require_commands() {
     local command_name
-    for command_name in cmake sudo systemctl findmnt mountpoint mount install bash sha256sum flock grep tr stat awk fallocate losetup mkfs.xfs blkid find sort xargs; do
+    for command_name in cmake sudo systemctl journalctl findmnt mountpoint mount install bash sha256sum flock grep tr stat awk fallocate losetup mkfs.xfs blkid find sort xargs; do
         command -v "$command_name" >/dev/null 2>&1 \
             || die "缺少必需命令: $command_name"
     done
@@ -144,6 +144,7 @@ ensure_editable_client() {
 # @brief 配置、编译并安装 host broker 工件 / Configure, build, and install host-broker artifacts.
 ensure_host_artifacts() {
     note "配置并构建 host wspctld / wspctl-image / wspctl operator shell"
+    remove_retired_host_artifacts
     cmake -S "$REPOSITORY_ROOT" -B "$BUILD_DIRECTORY" \
         -DPython_EXECUTABLE="$PYTHON_EXECUTABLE" \
         -DWSPCTL_INSTALL_HOST_TOOLS=ON \
@@ -162,6 +163,33 @@ ensure_host_artifacts() {
     write_install_manifest
 }
 
+# @brief 按旧 install manifest 安全移除已退役的 host artifact / Safely remove retired host artifacts proven by the prior install manifest.
+#
+# 这是一条升级迁移，不是 runtime 兼容路径：仅当旧 manifest 的 checksum 仍与文件相同才删除。/
+# This is an upgrade migration, not a runtime compatibility path: deletion occurs only when
+# the previous install manifest still proves the file checksum.
+remove_retired_host_artifacts() {
+    local record_type
+    local artifact_path
+    local expected_checksum
+    local actual_checksum
+    local retired_supervisor="/usr/local/libexec/wspctl/wsp-systemd"
+
+    sudo test -f "$INSTALL_MANIFEST_FILE" || return 0
+    while read -r record_type artifact_path expected_checksum; do
+        [[ "$record_type" == "artifact" && "$artifact_path" == "$retired_supervisor" ]] \
+            || continue
+        sudo test -f "$artifact_path" || continue
+        actual_checksum="$(sudo sha256sum "$artifact_path" | awk '{print $1}')"
+        if [[ "$actual_checksum" != "$expected_checksum" ]]; then
+            note "保留已被外部修改的 retired artifact: $artifact_path"
+            continue
+        fi
+        note "迁移并删除已退役 host supervisor: $artifact_path"
+        sudo rm -f -- "$artifact_path"
+    done < <(sudo cat "$INSTALL_MANIFEST_FILE")
+}
+
 # @brief 写入本 checkout 实际安装的 host artifact manifest / Write the manifest of host artifacts actually installed by this checkout.
 #
 # 卸载器仅删除 checksum 与本 manifest 匹配的路径，绝不根据全局文件名盲删。/
@@ -175,6 +203,7 @@ write_install_manifest() {
         /usr/local/bin/wspctld
         /usr/local/bin/wspctl
         /usr/local/bin/wspctl-image
+        /usr/local/libexec/wspctl/publish_wspctl_image.py
         /usr/local/share/fogmoe-wspctl/systemd/wspctld.service
         /usr/local/share/fogmoe-wspctl/systemd/wspctld.env.example
     )
@@ -426,6 +455,8 @@ start_service() {
     broker_is_healthy \
         || {
             sudo systemctl --no-pager --full status "$SERVICE_NAME" || true
+            sudo journalctl --unit "$SERVICE_NAME" --lines 100 --no-pager \
+                --output short-precise || true
             die "broker 没有通过 service/socket 健康检查"
         }
     record_applied_fingerprint

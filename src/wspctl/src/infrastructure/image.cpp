@@ -444,18 +444,11 @@ Result<std::string> calculate_rootfs_digest(const std::filesystem::path& base_ro
                 ErrorCode::sandbox_preflight_failed,
                 "image tree contains non-root metadata: /" + relative));
         }
-        const bool intentional_sticky_directory =
-            (relative == "tmp" || relative == "workspace") &&
-            S_ISDIR(metadata.st_mode) &&
-            (metadata.st_mode & 07777U) == 01777U;
-        const mode_t unsafe_mode =
-            metadata.st_mode &
-            (S_ISUID | S_ISGID | S_IWGRP | S_IWOTH);
-        if (!S_ISLNK(metadata.st_mode) && unsafe_mode != 0U &&
-            !intentional_sticky_directory) {
+        if (S_ISREG(metadata.st_mode) &&
+            (metadata.st_mode & (S_ISUID | S_ISGID)) != 0U) {
             return std::unexpected(make_error(
                 ErrorCode::sandbox_preflight_failed,
-                "image tree contains unsafe mode: /" + relative));
+                "image tree contains a set-id regular file: /" + relative));
         }
         errno = 0;
         if (lgetxattr(

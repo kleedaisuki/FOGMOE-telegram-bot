@@ -22,6 +22,10 @@ COMPOSE_PATH = REPOSITORY_ROOT / "docker-compose.yml"
 WSPCTL_CONTAINERFILE_PATH = (
     REPOSITORY_ROOT / "deploy" / "wspctl" / "image" / "Containerfile"
 )
+#: @brief workspace runtime builder-tool lock / Workspace-runtime builder-tool lock.
+WSPCTL_BUILD_TOOLS_LOCK_PATH = (
+    REPOSITORY_ROOT / "deploy" / "wspctl" / "image" / "build-tools.lock"
+)
 #: @brief wspctl-scoped host deployment CMake 路径 / wspctl-scoped host-deployment CMake path.
 DEPLOYMENT_CMAKE_PATH = REPOSITORY_ROOT / "deploy" / "wspctl" / "CMakeLists.txt"
 #: @brief host broker systemd unit 模板路径 / Host-broker systemd unit template path.
@@ -70,14 +74,20 @@ def test_bot_image_builds_native_client_but_excludes_host_broker_programs() -> N
         "    add_subdirectory(deploy/wspctl)\n"
         "endif()" in root_cmake
     )
-    assert (
-        re.search(
-            r"install\(TARGETS\s+wspctld\s+wspctl-image\s+wspctl\s+RUNTIME DESTINATION bin\)",
-            cmake,
-        )
-        is not None
+    assert re.search(
+        r"install\(\s+TARGETS wspctld wspctl\s+RUNTIME DESTINATION bin\s+COMPONENT WspctlHost",
+        cmake,
+    )
+    assert re.search(
+        r"install\(\s+TARGETS wspctl-image\s+RUNTIME DESTINATION bin\s+COMPONENT WspctlPublisher",
+        cmake,
     )
     assert "install(TARGETS wsp-systemd" not in cmake
+    assert "add_library(wspctl_image_infrastructure STATIC" in cmake
+    assert (
+        "target_link_libraries(wspctl-image PRIVATE wspctl_image_infrastructure)"
+        in cmake
+    )
     assert "USER 65532:65532" in dockerfile
     assert 'CMD ["fogmoe-bot", "--config", "/app/config.json"]' in dockerfile
 
@@ -114,11 +124,20 @@ def test_workspace_runtime_is_a_digest_pinned_explicit_oci_build() -> None:
     """
 
     containerfile = WSPCTL_CONTAINERFILE_PATH.read_text(encoding="utf-8")
-    assert re.search(r"python:3\.14-slim-bookworm@sha256:[0-9a-f]{64}", containerfile)
+    build_tools_lock = WSPCTL_BUILD_TOOLS_LOCK_PATH.read_text(encoding="utf-8")
+    assert re.search(
+        r"docker\.io/library/python:3\.14-slim-bookworm@sha256:[0-9a-f]{64}",
+        containerfile,
+    )
     assert "AS supervisor-builder" in containerfile
     assert "AS wspctl-runtime" in containerfile
     assert "DEBIAN_SNAPSHOT=" in containerfile
     assert "snapshot.debian.org" in containerfile
+    assert "COPY --from=wspctl-build-tools" in containerfile
+    assert "--no-index" in containerfile
+    assert "--no-deps" in containerfile
+    assert re.search(r"(?m)^[0-9a-f]{64}  cmake-", build_tools_lock)
+    assert re.search(r"(?m)^[0-9a-f]{64}  ninja-", build_tools_lock)
     assert "-DWSPCTL_BUILD_PYTHON_BINDINGS=OFF" in containerfile
     assert "cmake --build /build --target wsp-systemd" in containerfile
     assert "libcap2" in containerfile
@@ -127,6 +146,7 @@ def test_workspace_runtime_is_a_digest_pinned_explicit_oci_build() -> None:
     assert "site-packages" in containerfile
     assert 'ENTRYPOINT ["/usr/local/libexec/wspctl/wsp-systemd"]' in containerfile
     assert "COPY --from=supervisor-builder" in containerfile
+    assert "find / -xdev -type f -perm /6000" in containerfile
     assert "COPY .venv" not in containerfile
     assert "readelf" not in containerfile
     assert "ldconfig" not in containerfile
@@ -227,6 +247,8 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_image_mount() -> None:
         'DESTINATION "${CMAKE_INSTALL_DATADIR}/fogmoe-wspctl/systemd"'
         in deployment_cmake
     )
+    assert "tools/publish_wspctl_image.py" in deployment_cmake
+    assert 'DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/wspctl"' in deployment_cmake
     assert "local developer 纳入 trusted control plane" in deployment_guide
     assert "WSPCTL_OPERATOR_SOCKET" in deployment_guide
     assert "workspace ls" in deployment_guide
@@ -235,8 +257,14 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_image_mount() -> None:
     assert "run/operator" in deployment_guide
     assert "target_compile_definitions(\n    wspctl" in deployment_cmake
     assert "WSPCTL_DEFAULT_OPERATOR_SOCKET" in deployment_cmake
-    assert 'set(WSPCTL_HOST_SOCKET_DIRECTORY "${WSPCTL_HOST_SOCKET_ROOT_DIRECTORY}/bot")' in deployment_cmake
-    assert 'set(WSPCTL_HOST_OPERATOR_SOCKET_DIRECTORY "${WSPCTL_HOST_SOCKET_ROOT_DIRECTORY}/operator")' in deployment_cmake
+    assert (
+        'set(WSPCTL_HOST_SOCKET_DIRECTORY "${WSPCTL_HOST_SOCKET_ROOT_DIRECTORY}/bot")'
+        in deployment_cmake
+    )
+    assert (
+        'set(WSPCTL_HOST_OPERATOR_SOCKET_DIRECTORY "${WSPCTL_HOST_SOCKET_ROOT_DIRECTORY}/operator")'
+        in deployment_cmake
+    )
 
 
 def _run_contract_tests() -> None:

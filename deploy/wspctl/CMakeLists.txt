@@ -135,4 +135,13 @@ install(
         "${WSPCTL_SYSTEMD_OUTPUT_DIRECTORY}/wspctld.service"
         "${WSPCTL_SYSTEMD_OUTPUT_DIRECTORY}/wspctld.env.example"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/fogmoe-wspctl/systemd"
+    COMPONENT WspctlHost
+)
+
+# The privileged publisher is installed as a root-owned host tool.  Production must never
+# execute the mutable checkout copy through sudo.
+install(
+    PROGRAMS "${CMAKE_SOURCE_DIR}/tools/publish_wspctl_image.py"
+    DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/wspctl"
+    COMPONENT WspctlPublisher
 )

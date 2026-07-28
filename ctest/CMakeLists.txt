@@ -89,6 +89,15 @@ foreach(WSPCTL_PYTHON_TEST IN LISTS WSPCTL_PYTHON_TESTS)
         # contract needs to exercise exactly the freshly built package and no source/site fallback.
         set(WSPCTL_PYTHONPATH "${CMAKE_BINARY_DIR}/python")
         set(WSPCTL_PYTHON_COMMAND "${Python_EXECUTABLE}" "-S" "${WSPCTL_PYTHON_TEST}")
+    elseif(WSPCTL_PYTHON_TEST_NAME STREQUAL "test_wspctl_oci_publisher")
+        # 此 suite 使用 pytest fixtures 驱动 fake OCI toolchain；必须通过 pytest collection
+        # 执行全部 publication 状态机测试，不能依赖手写 __main__ 列表。/
+        # This suite uses pytest fixtures to drive a fake OCI toolchain. Run its complete
+        # publication state machine through pytest collection, never a hand-maintained __main__ list.
+        set(
+            WSPCTL_PYTHON_COMMAND
+            "${Python_EXECUTABLE}" "-m" "pytest" "-q" "${WSPCTL_PYTHON_TEST}"
+        )
     endif()
     add_test(
         NAME "wspctl.python.${WSPCTL_PYTHON_TEST_NAME}"

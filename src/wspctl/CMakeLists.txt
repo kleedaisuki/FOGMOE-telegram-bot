@@ -84,9 +84,24 @@ target_link_libraries(wspctl_application
 )
 wspctl_enable_warnings(wspctl_application)
 
+# Image publication is an independent infrastructure capability.  Keeping it in its own target
+# prevents the privileged publisher from linking broker, quota, journal, and sandbox machinery.
+add_library(wspctl_image_infrastructure STATIC
+    src/infrastructure/image.cpp
+)
+set_target_properties(wspctl_image_infrastructure PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(wspctl_image_infrastructure
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+target_link_libraries(wspctl_image_infrastructure
+    PUBLIC
+        OpenSSL::Crypto
+)
+wspctl_enable_warnings(wspctl_image_infrastructure)
+
 add_library(wspctl_infrastructure STATIC
     src/infrastructure/broker.cpp
-    src/infrastructure/image.cpp
     src/infrastructure/journal.cpp
     src/infrastructure/operator_endpoint.cpp
     src/infrastructure/operator_protocol.cpp
@@ -107,10 +122,10 @@ target_include_directories(wspctl_infrastructure
 target_link_libraries(wspctl_infrastructure
     PUBLIC
         wspctl_domain
+        wspctl_image_infrastructure
     PRIVATE
         wspctl_application
     PUBLIC
-        OpenSSL::Crypto
         Threads::Threads
         PkgConfig::SECCOMP
         PkgConfig::LIBCAP
@@ -143,7 +158,7 @@ target_link_libraries(wsp-systemd PRIVATE wspctl_presentation)
 wspctl_enable_warnings(wsp-systemd)
 
 add_executable(wspctl-image src/presentation/image/main.cpp)
-target_link_libraries(wspctl-image PRIVATE wspctl_infrastructure)
+target_link_libraries(wspctl-image PRIVATE wspctl_image_infrastructure)
 wspctl_enable_warnings(wspctl-image)
 
 add_executable(wspctl src/presentation/operator/main.cpp)
@@ -181,5 +196,14 @@ if(WSPCTL_BUILD_PYTHON_BINDINGS)
 endif()
 
 if(WSPCTL_INSTALL_HOST_TOOLS)
-    install(TARGETS wspctld wspctl-image wspctl RUNTIME DESTINATION bin)
+    install(
+        TARGETS wspctld wspctl
+        RUNTIME DESTINATION bin
+        COMPONENT WspctlHost
+    )
+    install(
+        TARGETS wspctl-image
+        RUNTIME DESTINATION bin
+        COMPONENT WspctlPublisher
+    )
 endif()

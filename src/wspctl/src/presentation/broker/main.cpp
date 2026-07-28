@@ -249,13 +249,19 @@ int main(const int argc, char *argv[])
     auto broker = wspctl::Broker::create(std::move(config));
     if (!broker)
     {
-        std::fputs("wspctld: fail-closed preflight rejected configuration\n", stderr);
+        std::fprintf(
+            stderr,
+            "wspctld: fail-closed preflight rejected configuration: %s\n",
+            broker.error().message.c_str());
         return 78;
     }
     const auto served = broker->serve_forever();
     if (!served)
     {
-        std::fputs("wspctld: listener failure\n", stderr);
+        std::fprintf(
+            stderr,
+            "wspctld: listener failure: %s\n",
+            served.error().message.c_str());
         return 70;
     }
     return 0;

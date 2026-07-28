@@ -20,6 +20,7 @@ materialized rootfs
         │  native runtime contract + local rootfs seal
         ▼
 artifacts/sha256/<hex>/rootfs
+        │  digest-specific systemd mount unit
         │  readonly bind,nosuid,nodev
         ▼
 images/sha256/<hex>/rootfs
@@ -51,7 +52,8 @@ systemd environment 和 store path 都不接受 tag、短 hash、任意 generati
 唯一 recipe 是 [`deploy/wspctl/image/Containerfile`](../deploy/wspctl/image/Containerfile)：
 
 - builder/runtime 使用同一个 digest-pinned `python:3.14-slim-bookworm`；
-- APT 输入固定到 Debian snapshot；
+- runtime/build APT 输入固定到 Debian snapshot；CMake/Ninja wheel 的 immutable URL 与 SHA-256
+  固定在 `build-tools.lock`，构建时禁用 package index 与 dependency resolver；
 - `wsp-systemd` 在同发行版/ABI 的 builder stage 编译；
 - runtime stage 显式安装 Bash、coreutils、findutils、grep、sed、libcap、libseccomp 和 OpenSSL runtime；
 - `site-packages` 清空，不复制项目 package、dashboard GUI、`.venv` 或 `src/`；
@@ -68,6 +70,14 @@ systemd environment 和 store path 都不接受 tag、短 hash、任意 generati
 
 ```bash
 ./scripts/publish-wspctl-rootfs.sh
+```
+
+本地 build artifact 也按 digest 保存：
+
+```text
+.runtime/wspctl-rootfs/
+├── sha256/<manifest-hex>/oci-layout/
+└── current-image-digest
 ```
 
 也可显式指定：
@@ -87,13 +97,17 @@ WSPCTL_IMAGE_REFERENCE=wspctl-runtime \
 4. image config 必须为唯一 `linux/amd64`、layer/DiffID 数量一致、entrypoint 是固定
    `/usr/local/libexec/wspctl/wsp-systemd`，contract label 为 `2`；
 5. umoci rootful 只读取这个 root-owned snapshot，正确应用 layers/whiteouts；
-6. native sealer 验证 runtime contract、root ownership、mode、xattr/file capability、special inode、
+6. native sealer 验证 runtime contract、root ownership、regular-file set-id、xattr/file capability、special inode、
    symlink、固定入口和空 `site-packages`；
 7. `renameat2(RENAME_NOREPLACE)` 原子发布，已有 digest 永不覆盖；
-8. rootfs 以真实 `ro,nosuid,nodev` bind mount 发布，`wspctl-image --verify` 再验证一次；
-9. 成功后才原子更新 `.wspctl/current-image-digest`。
+8. publisher 为 digest 写入 path-named systemd `.mount` unit，以真实 `ro,nosuid,nodev` bind mount
+   发布；unit 被 enable，重启后会从 sealed CAS 自动恢复；
+9. `wspctl-image --verify` 再验证一次；
+10. 成功后才原子更新 `<work-root>/current-image-digest`。
 
-失败只删除未发布 staging；既有 image、current selection 和正在运行的 broker 不改变。
+import、mount、native verify 和 selection 由 root-owned `publish.lock` 串行化。新 mount/unit 任一步失败
+都会回滚；既有 image、current selection 和正在运行的 broker 不改变。重复发布同一 digest 只验证
+既有 CAS object 和 mount，不修改 readonly rootfs inode。
 
 标准路径：
 
@@ -145,7 +159,8 @@ WSPCTL_IMAGE_DIGEST=sha256:<64hex> ./scripts/start-wspctld.sh
 非 XFS image 不会被重新格式化。
 
 `./runBot.sh start` 会先调用启动脚本，日志写入 `logs/wspctld_<timestamp>.log`。控制面失败时 Bot
-不会启动，终端同时显示完整日志路径。
+不会启动，终端同时显示完整日志路径；若 systemd broker preflight 失败，启动脚本还会附上最近
+100 行 journal，native broker 会输出具体拒绝原因而不是只有泛化状态。
 
 ## 生产 host control plane
 
@@ -160,6 +175,19 @@ cmake -S . -B build/wspctl-prod \
 cmake --build build/wspctl-prod --parallel
 sudo cmake --install build/wspctl-prod
 ```
+
+生产发布使用同一个显式入口，但必须把 work root 指向上述 CMake 固定路径：
+
+```bash
+WSPCTL_WORK_ROOT=/srv/fogmoe-wspctl \
+./scripts/publish-wspctl-rootfs.sh /absolute/path/to/oci-layout
+```
+
+该入口先把 publisher 与 native verifier 安装到 root-owned `/usr/local`，随后只允许
+`/usr/bin/python3`、`/usr/bin/skopeo`、`/usr/bin/umoci`、systemd/util-linux 工具和
+`/usr/local` 中 root-owned、group/world 不可写的已安装程序进入特权可信计算基（trusted
+computing base, TCB）。它不会通过 `sudo` 执行 checkout `.venv`、checkout Python module、
+checkout build artifact 或调用者 `PATH` 选出的工具。
 
 checkout-local 模式必须显式设置 `WSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT=ON`；它仅表示把
 local developer 纳入 trusted control plane（TCB），不能用于多用户 production host。
