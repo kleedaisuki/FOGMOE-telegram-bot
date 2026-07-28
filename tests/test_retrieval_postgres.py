@@ -196,6 +196,8 @@ def test_episodic_source_materializes_projection_exclusion_once(
         "retrieval.source_projections AS projection WHERE projection.corpus_id = %s "
         "AND projection.source_kind = %s AND projection.format_version = %s)" in sql
     )
+    assert sql.count("(") == sql.count(")")
+    assert sql.count("workspace_attachment,state}' = 'imported') IS NOT TRUE))") == 3
     assert "projection.source_id = activity.turn_id" not in sql
     assert captured["params"] == ("conversation.episodic", "conversation.turn", 7, 16)
 

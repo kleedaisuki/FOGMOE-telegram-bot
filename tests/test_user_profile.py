@@ -238,6 +238,10 @@ def test_evidence_discovery_accepts_only_real_telegram_turns(
         assert len(calls) == 1
         sql, params = calls[0]
         assert "turn.source_kind = %s" in sql
+        assert sql.count("(") == sql.count(")")
+        assert (
+            sql.count("workspace_attachment,state}' = 'imported') IS NOT TRUE))") == 3
+        )
         assert params == ("telegram.update", 8)
 
     asyncio.run(scenario())
