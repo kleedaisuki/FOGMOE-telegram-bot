@@ -297,7 +297,7 @@ def test_task_resolves_cwd_as_agent_from_the_pinned_workspace_fd() -> None:
     assert (
         "RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | "
         "RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV"
-    ) in supervisor
+    ) in " ".join(supervisor.split())
     assert "chdir(std::string(effective_cwd)" not in supervisor
 
 
