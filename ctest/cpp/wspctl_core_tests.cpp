@@ -143,6 +143,63 @@ void test_cgroup_metadata_read() {
     std::filesystem::remove_all(directory);
 }
 
+/**
+ * @brief 验证首次 runtime 激活把缺失 cgroup 当作创建条件 / Verify first runtime activation treats a missing cgroup as a creation condition.
+ * @note 普通文件系统只模拟创建状态机；真实 cgroup 控制文件语义由 privileged E2E 覆盖。/
+ *       A regular filesystem only simulates the creation state machine; privileged E2E covers real cgroup control-file semantics.
+ */
+void test_missing_runtime_cgroup_is_created() {
+    /** @brief mkdtemp 输入与结果缓冲区 / Input and result buffer for mkdtemp. */
+    char template_path[] = "/tmp/wspctl-cgroup-create-XXXXXX";
+    /** @brief 本测试独占的临时 cgroup 根 / Temporary cgroup root owned exclusively by this test. */
+    char* const directory = mkdtemp(template_path);
+    expect(directory != nullptr, "create missing-runtime cgroup test root");
+    if (directory == nullptr) {
+        return;
+    }
+
+    /** @brief 测试 runtime 标识 / Test runtime identifier. */
+    constexpr std::string_view kRuntimeKey = "missing-runtime-cgroup";
+    /** @brief 模拟的 wspctl cgroup 父节点 / Simulated wspctl cgroup parent. */
+    const std::filesystem::path wspctl_cgroup =
+        std::filesystem::path{directory} / "wspctl";
+    /** @brief 模拟的首次 runtime cgroup 路径 / Simulated first-runtime cgroup path. */
+    const std::filesystem::path runtime_cgroup =
+        wspctl_cgroup / sha256_hex(kRuntimeKey);
+    /** @brief 文件系统准备错误 / Filesystem preparation error. */
+    std::error_code error;
+    std::filesystem::create_directories(wspctl_cgroup, error);
+    expect(!error, "create simulated wspctl cgroup parent");
+    if (error) {
+        std::filesystem::remove_all(directory);
+        return;
+    }
+    {
+        /** @brief 模拟已启用 controller 的父控制文件 / Parent control file simulating enabled controllers. */
+        std::ofstream controllers(wspctl_cgroup / "cgroup.subtree_control");
+        controllers << "cpu memory pids\n";
+        expect(controllers.good(), "write simulated parent cgroup controllers");
+    }
+
+    /** @brief 仅需 cgroup_root 的最小 sandbox 配置 / Minimal sandbox configuration requiring only cgroup_root. */
+    wspctl::SandboxConfig config;
+    config.cgroup_root = directory;
+    config.io_weight = 0U;
+    /** @brief 首次 runtime cgroup 准备结果 / First-runtime cgroup preparation result. */
+    const auto prepared =
+        wspctl::prepare_runtime_cgroup(config, std::string{kRuntimeKey});
+    expect(!prepared.has_value(), "regular filesystem cannot emulate kernel-created cgroup control files");
+    expect(
+        std::filesystem::is_directory(runtime_cgroup),
+        "missing runtime cgroup advances through the normal creation path");
+    if (!prepared) {
+        expect(
+            !prepared.error().message.starts_with("inspect existing runtime cgroup"),
+            "missing runtime cgroup is not reported as an inspection failure");
+    }
+    std::filesystem::remove_all(directory);
+}
+
 /** @brief 验证 OCI identity 的类型与路径派生 / Verify OCI identity typing and path derivation. */
 void test_oci_image_identity() {
     const std::string digest_text = "sha256-" + std::string(64U, 'a');
@@ -1112,6 +1169,7 @@ void test_supervisor() {
  */
 int main() {
     test_cgroup_metadata_read();
+    test_missing_runtime_cgroup_is_created();
     test_oci_image_identity();
     test_protocol();
     test_launcher_scm_rights_contract();

@@ -701,7 +701,9 @@ Result<TaskCgroupControl> prepare_runtime_cgroup(
     const std::filesystem::path task_leaf = runtime_cgroup / "task";
     std::error_code existing_error;
     const std::filesystem::file_status existing = std::filesystem::symlink_status(runtime_cgroup, existing_error);
-    if (existing_error) {
+    // ``symlink_status(path, ec)`` may report a missing path both as ``file_type::not_found``
+    // and ENOENT.  A fresh runtime is the normal creation path, not a failed inspection.
+    if (existing_error && existing_error != std::errc::no_such_file_or_directory) {
         return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "inspect existing runtime cgroup: " + existing_error.message()));
     }
     if (std::filesystem::exists(existing)) {
