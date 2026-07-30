@@ -268,14 +268,32 @@ struct TreeEntry final {
     for (const auto& [directory, mode] :
          std::array<std::pair<std::string_view, mode_t>, 2U>{{
              {"tmp", 01777U},
-             {"workspace", 01777U},
+             {"workspace", 0755U},
          }}) {
         if (const auto result = require_directory(directory, mode); !result) {
             return result;
         }
     }
     for (const std::string_view executable :
-         {"bin/bash", "usr/local/bin/python",
+         {"bin/bash",
+          "usr/bin/convert",
+          "usr/bin/curl",
+          "usr/bin/ffmpeg",
+          "usr/bin/g++",
+          "usr/bin/gcc",
+          "usr/bin/git",
+          "usr/bin/htop",
+          "usr/bin/java",
+          "usr/bin/javac",
+          "usr/bin/jq",
+          "usr/bin/ls",
+          "usr/bin/neofetch",
+          "usr/bin/sqlite3",
+          "usr/bin/tree",
+          "usr/bin/wget",
+          "usr/local/bin/node",
+          "usr/local/bin/pnpm",
+          "usr/local/bin/python3",
           "usr/local/libexec/wspctl/wsp-systemd"}) {
         if (const auto result = require_executable(executable); !result) {
             return result;

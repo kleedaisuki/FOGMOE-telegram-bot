@@ -26,6 +26,25 @@ WSPCTL_CONTAINERFILE_PATH = (
 WSPCTL_BUILD_TOOLS_LOCK_PATH = (
     REPOSITORY_ROOT / "deploy" / "wspctl" / "image" / "build-tools.lock"
 )
+#: @brief workspace PID 1 入口 / Workspace PID 1 entry point.
+WSPCTL_SUPERVISOR_MAIN_PATH = (
+    REPOSITORY_ROOT
+    / "src"
+    / "wspctl"
+    / "src"
+    / "presentation"
+    / "systemd"
+    / "main.cpp"
+)
+#: @brief workspace supervisor 实现 / Workspace supervisor implementation.
+WSPCTL_SUPERVISOR_PATH = (
+    REPOSITORY_ROOT
+    / "src"
+    / "wspctl"
+    / "src"
+    / "infrastructure"
+    / "supervisor.cpp"
+)
 #: @brief wspctl-scoped host deployment CMake 路径 / wspctl-scoped host-deployment CMake path.
 DEPLOYMENT_CMAKE_PATH = REPOSITORY_ROOT / "deploy" / "wspctl" / "CMakeLists.txt"
 #: @brief host broker systemd unit 模板路径 / Host-broker systemd unit template path.
@@ -138,18 +157,92 @@ def test_workspace_runtime_is_a_digest_pinned_explicit_oci_build() -> None:
     assert "--no-deps" in containerfile
     assert re.search(r"(?m)^[0-9a-f]{64}  cmake-", build_tools_lock)
     assert re.search(r"(?m)^[0-9a-f]{64}  ninja-", build_tools_lock)
+    assert re.search(r"(?m)^[0-9a-f]{64}  node-v24\.", build_tools_lock)
+    assert re.search(r"(?m)^[0-9a-f]{64}  pnpm-11\.", build_tools_lock)
     assert "-DWSPCTL_BUILD_PYTHON_BINDINGS=OFF" in containerfile
     assert "cmake --build /build --target wsp-systemd" in containerfile
     assert "libcap2" in containerfile
     assert "libseccomp2" in containerfile
     assert "libssl3" in containerfile
     assert "site-packages" in containerfile
+    assert 'io.fogmoe.wspctl.contract="3"' in containerfile
+    assert "WSPCTL_AGENT_UID=65533" in containerfile
+    assert "WSPCTL_AGENT_GID=65533" in containerfile
+    for executable in (
+        "/usr/local/bin/python3",
+        "/usr/bin/curl",
+        "/usr/bin/wget",
+        "/usr/bin/git",
+        "/usr/bin/jq",
+        "/usr/bin/gcc",
+        "/usr/bin/g++",
+        "/usr/local/bin/node",
+        "/usr/local/bin/pnpm",
+        "/usr/bin/ffmpeg",
+        "/usr/bin/convert",
+        "/usr/bin/sqlite3",
+        "/usr/bin/htop",
+        "/usr/bin/tree",
+        "/usr/bin/neofetch",
+        "/usr/bin/java",
+        "/usr/bin/javac",
+    ):
+        assert f"test -x {executable}" in containerfile
     assert 'ENTRYPOINT ["/usr/local/libexec/wspctl/wsp-systemd"]' in containerfile
     assert "COPY --from=supervisor-builder" in containerfile
     assert "find / -xdev -type f -perm /6000" in containerfile
     assert "COPY .venv" not in containerfile
     assert "readelf" not in containerfile
     assert "ldconfig" not in containerfile
+
+
+def test_supervisor_pins_private_workspace_before_dropping_dac_override() -> None:
+    """@brief PID 1 必须在降权前固定打开 Agent 私有 workspace /
+    PID 1 must pin the Agent-private workspace before dropping DAC override.
+
+    @return None / None.
+    """
+
+    supervisor = WSPCTL_SUPERVISOR_MAIN_PATH.read_text(encoding="utf-8")
+    open_workspace = supervisor.index('config.workspace_fd = open(')
+    drop_privileges = supervisor.index("wspctl::harden_supervisor()")
+    assert open_workspace < drop_privileges
+    assert "O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW" in supervisor
+    hardening_failure = supervisor.index(
+        "wsp-systemd: cannot reduce supervisor privileges"
+    )
+    close_workspace = supervisor.index(
+        "close(config.workspace_fd)",
+        hardening_failure,
+    )
+    assert hardening_failure < close_workspace
+
+
+def test_task_resolves_cwd_as_agent_from_the_pinned_workspace_fd() -> None:
+    """@brief task 必须降权后通过固定 FD 安全解析 cwd /
+    Tasks must securely resolve cwd from the pinned FD after dropping identity.
+
+    @return None / None.
+    """
+
+    supervisor = WSPCTL_SUPERVISOR_PATH.read_text(encoding="utf-8")
+    drop_identity = supervisor.index(
+        "harden_task(config.sandbox_uid, config.sandbox_gid)"
+    )
+    resolve_cwd = supervisor.index(
+        "open_workspace_cwd_for_task(config, request.cwd)"
+    )
+    close_control_fds = supervisor.index(
+        "close_non_stdio_fds()",
+        resolve_cwd,
+    )
+    assert drop_identity < resolve_cwd < close_control_fds
+    assert "fchdir(*cwd_fd)" in supervisor
+    assert (
+        "RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | "
+        "RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV"
+    ) in supervisor
+    assert "chdir(std::string(effective_cwd)" not in supervisor
 
 
 def test_host_unit_requires_exact_socket_uid_and_readonly_image_mount() -> None:
@@ -238,6 +331,8 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_image_mount() -> None:
     assert "WSPCTL_XFS_GLOBAL_ADMISSION_BYTES=53687091200" in environment
     assert "WSPCTL_XFS_SYSTEM_RESERVE_INODES=262144" in environment
     assert "WSPCTL_CLIENT_UID=65532" in environment
+    assert "WSPCTL_SANDBOX_UID=65533" in environment
+    assert "WSPCTL_SANDBOX_GID=65533" in environment
     assert "WSPCTL_OPERATOR_UID=0" in environment
     assert "WSPCTL_BASE_ROOT" not in environment
     assert "WSPCTL_SUPERVISOR" not in environment

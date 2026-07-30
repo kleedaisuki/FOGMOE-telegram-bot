@@ -370,7 +370,7 @@ class OciLayout:
             raise ImagePublishError(
                 "OCI config has an unexpected supervisor entrypoint"
             )
-        if not isinstance(labels, Mapping) or labels.get(_CONTRACT_LABEL) != "2":
+        if not isinstance(labels, Mapping) or labels.get(_CONTRACT_LABEL) != "3":
             raise ImagePublishError(
                 "OCI config is missing wspctl runtime contract label"
             )

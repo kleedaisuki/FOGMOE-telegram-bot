@@ -32,7 +32,7 @@ ENVIRONMENT_FILE="$WORK_ROOT/wspctld.env"
 SERVICE_NAME="wspctld.service"
 # @brief checkout-local 生命周期日志目录 / Checkout-local lifecycle log directory.
 LOG_DIR="$REPOSITORY_ROOT/logs"
-# @brief 最近一次通过真实 runtime 执行验收的部署记录 / Deployment record for the last real runtime execution probe.
+# @brief 最近一次通过静态 readiness 验收的部署记录 / Deployment record for the last static readiness validation.
 FINGERPRINT_FILE="$REPOSITORY_ROOT/.runtime/wspctld-fingerprint"
 # @brief 整体健康状态 / Aggregate health status.
 HEALTHY=true
@@ -111,16 +111,16 @@ report_service() {
     fi
 }
 
-# @brief 只读核对当前 service generation 是否通过真实 runtime 执行验收 /
-# Read-only verification that the current service generation passed a real runtime execution probe.
+# @brief 只读核对当前 service generation 是否通过静态 readiness 验收 /
+# Read-only verification that the current service generation passed static readiness validation.
 # @return 总是零；缺失或过期 evidence 会标记 degraded / Always zero; missing or stale evidence marks degraded.
-report_execution_validation() {
+report_readiness_validation() {
     local current_invocation_id
     local validated_invocation_id=""
     local record_key
     local record_value
 
-    heading "runtime execution validation"
+    heading "static readiness validation"
     current_invocation_id="$(
         sudo systemctl show "$SERVICE_NAME" \
             --property=InvocationID \
@@ -138,10 +138,10 @@ report_execution_validation() {
         done < "$FINGERPRINT_FILE"
     fi
     if [[ "$validated_invocation_id" != "$current_invocation_id" ]]; then
-        warning "当前 invocation 尚无真实 runtime 执行验收 evidence；重新运行 ./installWspctl.sh"
+        warning "当前 invocation 尚无静态 readiness evidence；重新运行 ./installWspctl.sh"
         return 0
     fi
-    ok "InvocationID=$current_invocation_id passed /bin/true runtime canary"
+    ok "InvocationID=$current_invocation_id passed image/service/socket readiness validation"
 }
 
 # @brief 报告一个 Unix socket 权限 / Report one Unix-socket permission boundary.
@@ -323,7 +323,7 @@ report_runtime_aggregates() {
 main() {
     report_install_log
     report_service
-    report_execution_validation
+    report_readiness_validation
     report_sockets
     report_image
     report_storage

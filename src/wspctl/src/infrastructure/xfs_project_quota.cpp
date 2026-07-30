@@ -974,23 +974,18 @@ struct ActivationStagingParent final {
 }
 
 /**
- * @brief 以已打开 FD 校验目录持有预期 project ID 与 PROJINHERIT / Validate project ID and PROJINHERIT through an already-open FD.
+ * @brief 以已打开 FD 校验 project ID 与 PROJINHERIT / Validate project ID and PROJINHERIT through an already-open FD.
  * @param descriptor 已打开且不跟随 symlink 的目录 FD / Already-open no-follow directory FD.
  * @param project_id expected project ID / Expected project ID.
  * @param purpose 诊断语义 / Diagnostic purpose.
  * @return 成功或 ioctl/readback 错误 / Success or an ioctl/readback error.
  */
-[[nodiscard]] Result<void> verify_project_directory_fd(
+[[nodiscard]] Result<void> verify_project_attributes_fd(
     const int descriptor,
     const std::uint32_t project_id,
     const std::string_view purpose) {
     if (descriptor < 0) {
         return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid XFS project-directory FD"));
-    }
-    /** @brief directory metadata / Directory metadata. */
-    struct stat metadata {};
-    if (fstat(descriptor, &metadata) != 0 || !is_private_root_owned_directory(metadata)) {
-        return std::unexpected(make_error(ErrorCode::io_failure, std::string(purpose) + " is not a private root-owned directory during readback"));
     }
     /** @brief XFS inode attributes / XFS inode attributes. */
     fsxattr attributes{};
@@ -1001,6 +996,70 @@ struct ActivationStagingParent final {
         return std::unexpected(make_error(ErrorCode::io_failure, std::string(purpose) + " assignment no longer matches registry"));
     }
     return {};
+}
+
+/**
+ * @brief 以已打开 FD 校验 root-owned project 目录 / Validate a root-owned project directory through an open FD.
+ * @param descriptor 已打开且不跟随 symlink 的目录 FD / Already-open no-follow directory FD.
+ * @param project_id expected project ID / Expected project ID.
+ * @param purpose 诊断语义 / Diagnostic purpose.
+ * @return 成功或 metadata/ioctl 错误 / Success or a metadata/ioctl error.
+ */
+[[nodiscard]] Result<void> verify_project_directory_fd(
+    const int descriptor,
+    const std::uint32_t project_id,
+    const std::string_view purpose) {
+    /** @brief directory metadata / Directory metadata. */
+    struct stat metadata {};
+    if (fstat(descriptor, &metadata) != 0 || !is_private_root_owned_directory(metadata)) {
+        return std::unexpected(make_error(
+            ErrorCode::io_failure,
+            std::string(purpose) + " is not a private root-owned directory during readback"));
+    }
+    return verify_project_attributes_fd(descriptor, project_id, purpose);
+}
+
+/**
+ * @brief 校验 Agent-owned Overlay upper 根 / Validate the Agent-owned Overlay upper root.
+ * @param path persistent Overlay upper root / Persistent Overlay upper root.
+ * @param project_id expected workspace project ID / Expected workspace project ID.
+ * @param config quota and Agent identity contract / Quota and Agent identity contract.
+ * @return 成功或 fail-closed 错误 / Success or a fail-closed error.
+ * @note 首次 activation 前允许 root，升级迁移期间允许旧 ``nobody``；除此之外只接受当前
+ *       Agent。/ Root is accepted before first activation and legacy ``nobody`` during upgrade;
+ *       otherwise only the current Agent is accepted.
+ */
+[[nodiscard]] Result<void> verify_workspace_upper_directory(
+    const std::filesystem::path& path,
+    const std::uint32_t project_id,
+    const XfsProjectQuotaConfig& config) {
+    /** @brief no-follow upper-root descriptor / No-follow upper-root descriptor. */
+    FileDescriptor descriptor(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    if (descriptor.get() < 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "open Overlay upper root for readback"));
+    }
+    /** @brief upper-root metadata / Upper-root metadata. */
+    struct stat metadata {};
+    if (fstat(descriptor.get(), &metadata) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "stat Overlay upper root"));
+    }
+    constexpr uid_t kLegacyNobodyUid{65534U};
+    constexpr gid_t kLegacyNobodyGid{65534U};
+    const bool initial_owner = metadata.st_uid == 0U && metadata.st_gid == 0U;
+    const bool legacy_owner =
+        metadata.st_uid == kLegacyNobodyUid && metadata.st_gid == kLegacyNobodyGid;
+    const bool agent_owner =
+        metadata.st_uid == config.workspace_uid && metadata.st_gid == config.workspace_gid;
+    if (!S_ISDIR(metadata.st_mode) || (metadata.st_mode & 0777U) != 0700U ||
+        (!initial_owner && !legacy_owner && !agent_owner)) {
+        return std::unexpected(make_error(
+            ErrorCode::io_failure,
+            "Overlay upper root is not private or has an unexpected owner"));
+    }
+    return verify_project_attributes_fd(
+        descriptor.get(),
+        project_id,
+        "Overlay upper root");
 }
 
 /**
@@ -1466,12 +1525,18 @@ struct ActivationStagingParent final {
     for (const std::pair<std::filesystem::path, std::uint32_t>& directory : {
              std::pair{binding.control_dir / kJournalDirectoryName, binding.control_project_id},
              std::pair{binding.control_dir / kMountsDirectoryName, binding.control_project_id},
-             std::pair{binding.workspace_dir / kUpperDirectoryName, binding.workspace_project_id},
              std::pair{binding.workspace_dir / kWorkDirectoryName, binding.workspace_project_id},
          }) {
         if (const auto checked = verify_project_directory(directory.first, directory.second); !checked) {
             return std::unexpected(checked.error());
         }
+    }
+    if (const auto upper = verify_workspace_upper_directory(
+            binding.workspace_dir / kUpperDirectoryName,
+            binding.workspace_project_id,
+            config);
+        !upper) {
+        return std::unexpected(upper.error());
     }
     return {};
 }

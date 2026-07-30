@@ -356,8 +356,12 @@ audit（追加式审计）原文，却把该
 项目 `.venv`、宿主 Python 和宿主 `/usr` 都不是 workspace runtime。唯一构建定义是
 [`deploy/wspctl/image/Containerfile`](../deploy/wspctl/image/Containerfile)：它以 digest 固定
 Python 3.14 base 和 Debian snapshot，在相同 ABI 的 builder stage 编译 `wsp-systemd`，并在
-runtime stage 由 Debian package manager 安装 Bash、GNU 工具和全部动态库。最终产物是标准
-OCI image layout（OCI 镜像布局），不是临时复制出的 Python 目录。
+runtime stage 由 Debian package manager 安装 Bash、GNU 工具和全部动态库。contract v3 还提供
+`python3`、`curl`、`wget`、`git`、`jq`、`gcc`、`g++`、Node.js 24 LTS、pnpm 11、FFmpeg、
+ImageMagick、SQLite、`htop`、`tree`、`neofetch` 与 OpenJDK 17（含 `java`/`javac`）。
+Node.js/pnpm 与 builder wheel 一样先在 host 端按 SHA-256 验证，再作为本地 build context 输入；
+Debian 包仍由固定 snapshot 解析。最终产物是标准 OCI image layout（OCI 镜像布局），不是临时
+复制出的 Python 目录。
 
 OCI image manifest digest 是唯一 identity。tag、短 hash、任意 generation 名和启动时计算的
 fingerprint 都不会进入 broker。物化后的 rootfs 只保留第二个本地 seal，用来发现解包结果或磁盘内容
@@ -371,9 +375,21 @@ runtime mount namespace 的顺序如下：
 3. 将完整 OCI rootfs bind 并 remount 为 `ro,nosuid,nodev`；不暴露 host `/`、`/home`、
    `/proc`、`/sys`、`/run`、container socket 或宿主设备；
 4. 新挂最小 `/proc`、受限 `/dev`、`/tmp`/`/run` tmpfs；默认无网络；
-5. 只将 `/workspace` 设为可持久化 OverlayFS 上层，Python/GNU base 始终由只读 bind 覆盖。
+5. 只将 `/workspace` 设为可持久化 OverlayFS 上层，Python/GNU base 始终由只读 bind 覆盖；
+6. activation 在 `pivot_root` 前把 merged workspace 收敛为 `agent:agent 0700`。迁移器不跟随
+   symlink，接受新建的 `root:root`、旧版 `65534:65534` 与已迁移的 Agent inode，逐子树迁移且
+   最后提交根 inode，所以中断后可以安全重试；其他 owner 一律失败关闭。
 
-runtime contract 至少包含 `/bin/bash`、`/usr/local/bin/python`、
+payload 使用镜像内持久命名的低权限 `agent`（UID/GID 65533），`HOME=/workspace`；不再使用
+Linux 的特殊 overflow/nobody 身份 65534。identity 负责文件访问和稳定 ownership，cgroup 负责
+整个 Runtime task subtree 的 CPU、memory、PID 与 I/O 资源边界，两者职责不同。
+task child 先完成 Agent identity/capability/seccomp 收缩，再从 PID 1 固定的 workspace FD
+逐分量解析 cwd，并通过 `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS|
+RESOLVE_NO_XDEV)` 与 `fchdir` 进入目录。不存在的 cwd、symlink、mount crossing 或任何非
+`/workspace` 路径都以 126 失败，不会退回 workspace root，也不再依赖无 DAC override 的 root
+穿越 `agent:agent 0700`。
+
+runtime contract 至少包含上述工具、`/bin/bash`、
 `/usr/local/libexec/wspctl/wsp-systemd` 和 `/workspace`、`/proc`、`/dev`、`/tmp`、`/run`。
 native sealer 同时验证平台、固定入口、root ownership、regular file 的 set-id bit、file capability、特殊 inode、
 symlink 的容器根语义和 `site-packages` 为空。标准镜像中的绝对 symlink 按 pivot 后的容器根解释；
@@ -410,8 +426,11 @@ admission 前创建/读回 pair，并将 journal 放入 control project；没有
   `systemctl restart` 提前返回；
 - `NotifyAccess=main` 只接受 main PID 的 readiness，daemon 随即清除 `NOTIFY_SOCKET`，不把
   service-manager notification capability 传给 fork-server、supervisor 或 task；
-- 部署验收仍须额外走 Bot endpoint 执行 `/bin/true`：systemd readiness 证明 control plane
-  可以接单，runtime canary 则证明 namespace、quota、mount、降权和 seccomp 的完整 data plane。
+- 部署验收不创建 Runtime。发布期 native seal 与启动前 `wspctl-image --verify` 静态核对
+  contract-v3 的具名 Agent、`/workspace` lower、supervisor、动态库和全部基础工具；service
+  阶段只验收 `Type=notify`、两类 socket metadata 与稳定 `InvocationID`。namespace、quota、
+  OverlayFS、降权和 seccomp 属于真实请求路径，由 privileged E2E 与正常 Runtime 请求验证，
+  不再作为安装事务的瞬时前置条件。
 
 ```text
 wspctld.service
@@ -434,7 +453,8 @@ permitted/effective sets 丢掉 `CAP_SETPCAP`。因此 payload identity drop 仍
 及其后代不能从 UID 0、ambient capability、file capability 或较新的未知 capability 恢复权限。
 OCI sealer 对 file capability/set-id 的拒绝与 `PR_SET_NO_NEW_PRIVS` 是额外的独立防线。
 
-broker 在 task cgroup 上设定 `pids.max`、`memory.high`、`memory.max`、CPU/IO 限额。timeout
+broker 在每个 Runtime 的 task cgroup 上设定 `pids.max`、`memory.high`、`memory.max`、CPU/IO
+限额；该边界覆盖命令 fork/exec 出来的完整进程子树，不要求 Agent 再感知或实现一套重复限制。timeout
 先请求 task process group 正常退出；宽限后优先写 `cgroup.kill`，缺少该特性时以 pidfd 与
 进程组信号回退，并由 PID 1 最终 reaping。cgroup v2 的 delegation 与 `cgroup.kill` 语义见
 [Linux kernel cgroup v2 文档](https://docs.kernel.org/admin-guide/cgroup-v2.html) 和

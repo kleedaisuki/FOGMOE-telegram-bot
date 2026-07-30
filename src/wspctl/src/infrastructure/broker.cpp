@@ -2404,6 +2404,13 @@ Result<Broker> Broker::create(BrokerConfig config) {
             ErrorCode::invalid_argument,
             "broker Bot UID, independent operator endpoint, and idle TTL must be set"));
     }
+    // Quota 持有 host-side upper root，而 SandboxConfig 持有 payload identity；从同一个
+    // trusted value 派生两者，避免持久 upper 被重新绑定到 caller-selected UID/GID。/
+    // Quota owns the host-side upper root while SandboxConfig owns payload identity. Derive
+    // both views from one trusted value so a persisted upper can never be rebound to a
+    // caller-selected UID/GID.
+    config.sandbox.xfs_project_quota.workspace_uid = config.sandbox.sandbox_uid;
+    config.sandbox.xfs_project_quota.workspace_gid = config.sandbox.sandbox_gid;
     if (const auto separated = validate_operator_endpoint_separation(
             config.socket_path,
             config.client_uid,

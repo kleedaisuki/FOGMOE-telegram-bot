@@ -233,6 +233,58 @@ private:
 }
 
 /**
+ * @brief 以 Agent 身份从固定 workspace FD 解析 cwd / Resolve cwd from the pinned workspace FD as the Agent.
+ * @param config supervisor 配置 / Supervisor configuration.
+ * @param cwd 已通过协议规范化的 runtime cwd / Protocol-normalized runtime cwd.
+ * @return 不跨 mount 且不跟随 symlink 的 cwd FD / A cwd FD that crosses neither mounts nor symlinks.
+ * @note 调用方必须先完成 ``harden_task``，否则无 DAC override 的 root 无法穿越
+ *       ``agent:agent 0700`` workspace。/ The caller must complete ``harden_task`` first;
+ *       root without DAC override cannot traverse an ``agent:agent 0700`` workspace.
+ */
+[[nodiscard]] Result<int> open_workspace_cwd_for_task(
+    const SupervisorConfig& config,
+    const std::string_view cwd) {
+    constexpr std::string_view kWorkspaceRoot{"/workspace"};
+    constexpr std::string_view kWorkspacePrefix{"/workspace/"};
+    if (cwd != kWorkspaceRoot && !cwd.starts_with(kWorkspacePrefix)) {
+        return std::unexpected(make_error(
+            ErrorCode::invalid_argument,
+            "task cwd is outside the workspace"));
+    }
+    /** @brief 当前已验证目录 FD / Current validated directory FD. */
+    auto current = open_workspace_root_for_payload(config);
+    if (!current) {
+        return std::unexpected(current.error());
+    }
+    if (cwd == kWorkspaceRoot) {
+        return *current;
+    }
+    /** @brief workspace-relative cwd / Workspace-relative cwd. */
+    const std::string_view relative = cwd.substr(kWorkspacePrefix.size());
+    std::size_t begin = 0U;
+    while (begin < relative.size()) {
+        /** @brief 当前分量结束位置 / End offset of the current component. */
+        const std::size_t end = relative.find('/', begin);
+        /** @brief 当前已规范化路径分量 / Current normalized path component. */
+        const std::string_view component = relative.substr(
+            begin,
+            end == std::string_view::npos ? relative.size() - begin : end - begin);
+        auto child = open_directory_beneath(*current, component);
+        if (!child) {
+            static_cast<void>(close(*current));
+            return std::unexpected(child.error());
+        }
+        static_cast<void>(close(*current));
+        current = *child;
+        if (end == std::string_view::npos) {
+            break;
+        }
+        begin = end + 1U;
+    }
+    return *current;
+}
+
+/**
  * @brief 得到不可预测的临时文件 basename / Produce an unpredictable temporary-file basename.
  * @return 安全 basename 或随机源错误 / Safe basename or random-source failure.
  */
@@ -743,8 +795,6 @@ constexpr rlim_t kTaskNofileLimit{256U};
     if (start_read != 1 || start_byte != 'R') {
         _exit(126);
     }
-    // This closes broker control and cgroup control FDs before untrusted code executes.
-    close_non_stdio_fds();
     if (!install_task_rlimits()) {
         _exit(126);
     }
@@ -755,19 +805,48 @@ constexpr rlim_t kTaskNofileLimit{256U};
     if (sigaction(SIGPIPE, &default_pipe_action, nullptr) != 0) {
         _exit(126);
     }
-    const std::string_view effective_cwd =
-        config.test_workspace_root != "/workspace" && request.cwd == "/workspace" ? std::string_view(config.test_workspace_root) : std::string_view(request.cwd);
-    if (chdir(std::string(effective_cwd).c_str()) != 0) {
-        dprintf(STDERR_FILENO, "wsp-systemd: chdir failed\n");
-        _exit(126);
-    }
     const auto hardened = harden_task(config.sandbox_uid, config.sandbox_gid);
     if (!hardened) {
         dprintf(STDERR_FILENO, "wsp-systemd: sandbox hardening failed\n");
         _exit(126);
     }
-    clearenv();
-    static_cast<void>(setenv("PATH", "/usr/bin:/bin", 1));
+    auto cwd_fd = open_workspace_cwd_for_task(config, request.cwd);
+    if (!cwd_fd || fchdir(*cwd_fd) != 0) {
+        if (cwd_fd) {
+            static_cast<void>(close(*cwd_fd));
+        }
+        dprintf(STDERR_FILENO, "wsp-systemd: chdir failed\n");
+        _exit(126);
+    }
+    static_cast<void>(close(*cwd_fd));
+    // This closes broker control and cgroup control FDs after trusted cwd resolution but before
+    // untrusted code executes.
+    close_non_stdio_fds();
+    if (clearenv() != 0) {
+        _exit(126);
+    }
+    /**
+     * @brief 不继承 broker secret 的固定 Agent 环境 / Fixed Agent environment that inherits no broker secrets.
+     */
+    constexpr std::array<std::pair<std::string_view, std::string_view>, 9U> kAgentEnvironment{{
+        {"HOME", "/workspace"},
+        {"USER", "agent"},
+        {"LOGNAME", "agent"},
+        {"SHELL", "/bin/bash"},
+        {"PATH", "/usr/local/bin:/usr/bin:/bin"},
+        {"TMPDIR", "/tmp"},
+        {"LANG", "C.UTF-8"},
+        {"LC_ALL", "C.UTF-8"},
+        {"XDG_CACHE_HOME", "/workspace/.cache"},
+    }};
+    for (const auto& [name, value] : kAgentEnvironment) {
+        if (setenv(
+                std::string(name).c_str(),
+                std::string(value).c_str(),
+                1) != 0) {
+            _exit(126);
+        }
+    }
     std::vector<char*> arguments;
     arguments.reserve(request.argv.size() + 1U);
     for (const std::string& argument : request.argv) {

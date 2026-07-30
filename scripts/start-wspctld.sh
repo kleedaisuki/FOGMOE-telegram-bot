@@ -34,6 +34,10 @@ BUILD_DIRECTORY="$REPOSITORY_ROOT/build/wspctld-dev"
 SERVICE_NAME="wspctld.service"
 # @brief expected client UID; default is direct host runBot user / Expected client UID; default is the direct-host runBot user.
 CLIENT_UID="${WSPCTL_CLIENT_UID:-$(id -u)}"
+# @brief 镜像内具名 Agent 的固定 UID / Fixed UID of the named Agent inside the image.
+AGENT_UID=65533
+# @brief 镜像内具名 Agent 的固定 GID / Fixed GID of the named Agent inside the image.
+AGENT_GID=65533
 # @brief 独立 operator UID；默认 root，绝不能与 Bot UID 相同 / Independent operator UID; defaults to root and must never equal the Bot UID.
 OPERATOR_UID="${WSPCTL_OPERATOR_UID:-0}"
 # @brief 当前发布的 OCI image digest 记录 / Record of the currently published OCI image digest.
@@ -62,9 +66,9 @@ SOCKET_PATH="$WORK_ROOT/run/bot/wspctld.sock"
 OPERATOR_SOCKET_PATH="$WORK_ROOT/run/operator/wspctld.sock"
 # @brief 本次启动是否必须重启 service / Whether this invocation must restart the service.
 BROKER_RESTART_REQUIRED=false
-# @brief 等待健康检查成功后记录的配置 fingerprint / Configuration fingerprint recorded only after a healthy check.
+# @brief 等待静态 readiness 验收后记录的配置 fingerprint / Configuration fingerprint recorded only after static readiness validation.
 BROKER_FINGERPRINT=""
-# @brief 最近一次完成真实执行验收的 systemd invocation / Last systemd invocation that passed a real execution probe.
+# @brief 最近一次完成静态 readiness 验收的 systemd invocation / Last systemd invocation that passed static readiness validation.
 BROKER_VALIDATED_INVOCATION_ID=""
 
 # @brief 输出错误并终止 / Print an error and terminate.
@@ -424,6 +428,12 @@ install_service_configuration() {
         "s|^WSPCTL_OPERATOR_UID=.*$|WSPCTL_OPERATOR_UID=$OPERATOR_UID|" \
         "$environment_file"
     sudo sed --in-place --regexp-extended \
+        "s|^WSPCTL_SANDBOX_UID=.*$|WSPCTL_SANDBOX_UID=$AGENT_UID|" \
+        "$environment_file"
+    sudo sed --in-place --regexp-extended \
+        "s|^WSPCTL_SANDBOX_GID=.*$|WSPCTL_SANDBOX_GID=$AGENT_GID|" \
+        "$environment_file"
+    sudo sed --in-place --regexp-extended \
         '/^WSPCTL_BASE_ROOT=/d;/^WSPCTL_SUPERVISOR=/d' \
         "$environment_file"
     if sudo grep --quiet '^WSPCTL_IMAGE_DIGEST=' "$environment_file"; then
@@ -473,7 +483,7 @@ broker_fingerprint() {
     local environment_file="$WORK_ROOT/wspctld.env"
 
     {
-        printf 'health_contract=runtime-execute-v2-systemd-notify\n'
+        printf 'health_contract=static-ready-v1-image-service-sockets\n'
         printf 'source_oci_manifest_digest=%s\nclient_uid=%s\noperator_uid=%s\noperator_socket=%s\n' \
             "$IMAGE_DIGEST" "$CLIENT_UID" "$OPERATOR_UID" "$OPERATOR_SOCKET_PATH"
         sha256sum "$BUILD_DIRECTORY/src/wspctl/wspctld" "$unit_source"
@@ -500,7 +510,7 @@ prepare_restart_decision() {
                     previous_invocation_id="$record_value"
                     ;;
                 *)
-                    # Legacy one-line fingerprints intentionally force one new validated deployment.
+                    # Legacy one-line fingerprints intentionally force one new readiness-validated deployment.
                     if [[ -z "$record_value" && -z "$previous_fingerprint" ]]; then
                         previous_fingerprint="$record_key"
                     fi
@@ -543,81 +553,8 @@ try_current_broker_invocation_id() {
     printf '%s\n' "$invocation_id"
 }
 
-# @brief 通过 Bot 公共 endpoint 执行一次真实、无输出的 runtime canary /
-# Execute one real no-output runtime canary through the public Bot endpoint.
-# @param $1 当前 systemd invocation ID / Current systemd invocation ID.
-# @return supervisor 成功启动、降权并执行 / Supervisor successfully starts, hardens, and executes.
-# @note 固定保留一个专用 health runtime，避免每次安装消耗新的 XFS project ID；每个 systemd
-#       invocation 使用唯一 request ID，禁止 durable replay 把旧成功伪装成本轮健康。/
-#       One reserved health runtime avoids consuming a new XFS project ID per install; each systemd
-#       invocation uses a unique request ID so durable replay cannot masquerade as current health.
-probe_broker_execution() {
-    local invocation_id="$1"
-    local -a probe_command=(
-        env
-        "WSPCTL_HEALTH_SOCKET=$SOCKET_PATH"
-        "WSPCTL_HEALTH_INVOCATION=$invocation_id"
-        "$PYTHON_EXECUTABLE"
-        -
-    )
-
-    if [[ "$(id -u)" != "$CLIENT_UID" ]]; then
-        probe_command=(sudo -u "#$CLIENT_UID" -- "${probe_command[@]}")
-    fi
-    "${probe_command[@]}" <<'PY'
-"""@brief wspctld 部署期真实执行探针 / Deployment-time real execution probe for wspctld."""
-
-from __future__ import annotations
-
-import hashlib
-import os
-
-from wspctl import RuntimeProcess
-
-
-#: @brief 固定 health runtime UUID；正常 uuid4 不会产生该保留值 / Reserved health runtime UUID not produced by normal uuid4 generation.
-RUNTIME_KEY = "00000000-0000-0000-0000-000000000001"
-#: @brief 当前 broker endpoint / Current broker endpoint.
-SOCKET_PATH = os.environ["WSPCTL_HEALTH_SOCKET"]
-#: @brief 本轮 systemd invocation identity / Current systemd invocation identity.
-INVOCATION_ID = os.environ["WSPCTL_HEALTH_INVOCATION"].lower()
-#: @brief 本轮唯一 activation / Activation unique to this service invocation.
-ACTIVATION_ID = f"health:{INVOCATION_ID}"
-#: @brief 本轮唯一 durable request ID / Durable request ID unique to this service invocation.
-REQUEST_ID = f"health:{INVOCATION_ID}"
-#: @brief 固定命令语义摘要 / Digest of the fixed command semantics.
-REQUEST_HASH = hashlib.sha256(b"wspctl-health-v1:/bin/true").hexdigest()
-
-#: @brief 惰性 native runtime handle / Lazy native runtime handle.
-process = RuntimeProcess(SOCKET_PATH, RUNTIME_KEY, ACTIVATION_ID)
-try:
-    #: @brief 当前 invocation 的真实执行结果 / Real execution result for this invocation.
-    result = process.execute(
-        ["/bin/true"],
-        cwd="/workspace",
-        timeout_ms=5_000,
-        output_limit=4_096,
-        request_id=REQUEST_ID,
-        request_hash=REQUEST_HASH,
-    )
-finally:
-    process.close()
-
-if (
-    result.get("exit_code") != 0
-    or result.get("timed_out") is not False
-    or result.get("truncated") is not False
-    or result.get("replayed") is not False
-    or result.get("stdout") != ""
-    or result.get("stderr") != ""
-    or result.get("request_id") != REQUEST_ID
-):
-    raise SystemExit("wspctld runtime execution probe returned an invalid result")
-PY
-}
-
-# @brief 在 broker 已通过真实执行探针后原子记录 fingerprint 与 invocation /
-# Atomically record the fingerprint and invocation after a real execution probe succeeds.
+# @brief 在 broker 已通过静态 readiness 验收后原子记录 fingerprint 与 invocation /
+# Atomically record the fingerprint and invocation after static readiness validation succeeds.
 # @param $1 已验证的 systemd invocation ID / Validated systemd invocation ID.
 record_applied_fingerprint() {
     local invocation_id="$1"
@@ -661,33 +598,28 @@ wait_for_broker_healthy() {
     return 1
 }
 
-# @brief 验收一个在 canary 前后保持不变的 systemd generation /
-# Validate a systemd generation that remains unchanged across the canary.
+# @brief 验收一个在静态 readiness 检查前后保持不变的 systemd generation /
+# Validate a systemd generation that remains unchanged across static readiness checks.
 # @return 稳定 generation 通过并记录 evidence 时为零 / Zero after a stable generation passes and evidence is recorded.
-# @note 只在 InvocationID 改变时重试；同一 generation 的真实执行失败立即保留为失败。
-#       最多跟随三个 generation，避免 flapping service 让安装无限等待。/
-#       Retry only after InvocationID changes; a real-execution failure in the same generation
-#       remains a failure. Follow at most three generations so a flapping service cannot stall install forever.
-validate_current_broker_execution() {
+# @note 镜像内容在 ``select_published_image`` 中由 native verifier 静态验收；这里仅复核
+#       Type=notify readiness、socket metadata 与稳定 InvocationID，绝不创建 Runtime。/
+#       Image contents are statically validated by the native verifier in ``select_published_image``;
+#       this step only rechecks Type=notify readiness, socket metadata, and a stable InvocationID,
+#       and never creates a Runtime.
+validate_current_broker_readiness() {
     local attempt
     local before_invocation_id
     local after_invocation_id
-    local probe_succeeded
 
     for ((attempt = 1; attempt <= 3; ++attempt)); do
         wait_for_broker_healthy || return 1
         before_invocation_id="$(try_current_broker_invocation_id)" || return 1
-        probe_succeeded=false
-        if probe_broker_execution "$before_invocation_id"; then
-            probe_succeeded=true
-        fi
         wait_for_broker_healthy || return 1
         after_invocation_id="$(try_current_broker_invocation_id)" || return 1
         if [[ "$before_invocation_id" != "$after_invocation_id" ]]; then
-            note "runtime canary 期间 service generation 已变化；验收新 InvocationID=$after_invocation_id"
+            note "readiness 验收期间 service generation 已变化；验收新 InvocationID=$after_invocation_id"
             continue
         fi
-        [[ "$probe_succeeded" == true ]] || return 1
         record_applied_fingerprint "$before_invocation_id"
         BROKER_VALIDATED_INVOCATION_ID="$before_invocation_id"
         return 0
@@ -704,12 +636,12 @@ start_service() {
         if [[ "$BROKER_RESTART_REQUIRED" == false ]]; then
             invocation_id="$(current_broker_invocation_id)"
             if [[ "$invocation_id" == "$BROKER_VALIDATED_INVOCATION_ID" ]]; then
-                note "已就绪且本轮 invocation 已通过 runtime 执行验收: $SERVICE_NAME ($SOCKET_PATH)"
+                note "已就绪且本轮 invocation 已通过静态 readiness 验收: $SERVICE_NAME ($SOCKET_PATH)"
                 return 0
             fi
-            note "当前 invocation 尚未执行 runtime canary；开始验收"
-            validate_current_broker_execution \
-                || die "broker generation 未能稳定通过真实 runtime 执行探针"
+            note "当前 invocation 尚无静态 readiness evidence；开始验收"
+            validate_current_broker_readiness \
+                || die "broker generation 未能稳定通过静态 readiness 验收"
             return 0
         fi
         note "检测到 broker artifact/config/image digest 变更，重启 $SERVICE_NAME"
@@ -725,11 +657,11 @@ start_service() {
                 --output short-precise || true
             die "broker 没有通过 service/socket 健康检查"
         }
-    validate_current_broker_execution \
+    validate_current_broker_readiness \
         || {
             sudo journalctl --unit "$SERVICE_NAME" --lines 100 --no-pager \
                 --output short-precise || true
-            die "broker 已完成 systemd readiness，但 generation 未能稳定通过真实 runtime 执行探针"
+            die "broker generation 未能稳定通过静态 readiness 验收"
         }
 }
 

@@ -79,19 +79,26 @@ int main(const int argc, char* argv[]) {
         std::fputs("wsp-systemd: mandatory secure control configuration missing\n", stderr);
         return 64;
     }
-    // This executes after trusted argument/FD validation, but before PID 1 accepts any broker
-    // command or forks a task.  Keeping it after exec preserves exactly the three capabilities
-    // needed by the child-side identity drop and PID1 task-tree cleanup.
+    // The merged workspace is agent:agent 0700 before this exec. Open and pin its mount while
+    // PID 1 still has CAP_DAC_OVERRIDE; after hardening, reopening it would deterministically
+    // fail even though the immutable mount is valid. O_NOFOLLOW keeps the pinned object a
+    // directory rather than a replaceable symlink.
+    config.workspace_fd = open(
+        "/workspace",
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (config.workspace_fd < 0) {
+        std::fputs("wsp-systemd: cannot open immutable workspace mount\n", stderr);
+        return 70;
+    }
+    // This executes after trusted argument/FD and workspace-mount validation, but before PID 1
+    // accepts any broker command or forks a task. Keeping it after exec preserves exactly the
+    // three capabilities needed by the child-side identity drop and PID1 task-tree cleanup.
     if (const auto hardened = wspctl::harden_supervisor(); !hardened) {
         std::fprintf(
             stderr,
             "wsp-systemd: cannot reduce supervisor privileges: %s\n",
             hardened.error().message.c_str());
-        return 70;
-    }
-    config.workspace_fd = open("/workspace", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (config.workspace_fd < 0) {
-        std::fputs("wsp-systemd: cannot open immutable workspace mount\n", stderr);
+        static_cast<void>(close(config.workspace_fd));
         return 70;
     }
     wspctl::Supervisor supervisor(config);

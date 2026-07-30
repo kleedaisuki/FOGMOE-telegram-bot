@@ -57,7 +57,7 @@ WSPCTL_STATE_ROOT/                         # dedicated XFS mount
     │       ├── root/
     │       └── workspace-lower/
     └── workspace/                          # workspace_project_id, PROJINHERIT
-        ├── upper/                          # persistent OverlayFS upperdir
+        ├── upper/                          # persistent OverlayFS upperdir; activation 后 agent:agent 0700
         └── work/<activation>/              # fresh, empty OverlayFS workdir
 ```
 
@@ -75,6 +75,11 @@ broker、备份/归档旧 state、在新 dedicated XFS mount 上建立空的 roo
 创建新的 registry 和 Runtime trees。旧 workspace 内容若要恢复，必须由 root-owned 的后续迁移工具在
 离线状态下逐 inode 验证 project ID、`PROJINHERIT`、limit readback 与 journal receipt 一致性；在该工具
 存在之前，手工 copy 旧目录后直接启动是不可接受的，因为 registry 无法证明其 project identity。
+
+这里的“旧 layout/project pair 迁移”与 v2→v3 的 **owner migration** 不同：如果 Runtime 已经处于
+当前受验证的 XFS layout 和 project ID 下，activation 会在排他锁与空 task cgroup 内，把 upper 中
+`root:root`、旧 `65534:65534` 和部分已迁移的 inode 可重入地收敛到 `agent:agent`。它不会移动目录、
+改 project ID 或绕过 quota readback；发现第四种 owner 时失败关闭。
 
 一个 Runtime 的 ID pair 在 root-owned、fsync 的 registry 中保存为 `(runtime_key,
 control_project_id, workspace_project_id, state)`，而不是从 Telegram ID、路径或截断 hash 推导。建议从

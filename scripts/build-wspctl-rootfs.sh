@@ -70,7 +70,10 @@ prepare_build_tools() {
     while read -r expected_digest filename url extra; do
         [[ -z "$expected_digest" || "$expected_digest" == \#* ]] && continue
         [[ "$expected_digest" =~ ^[0-9a-f]{64}$ && "$filename" =~ ^[A-Za-z0-9._-]+$ \
-            && "$url" == https://files.pythonhosted.org/* && -z "$extra" ]] \
+            && ( "$url" == https://files.pythonhosted.org/* \
+                || "$url" == https://nodejs.org/dist/* \
+                || "$url" == https://registry.npmjs.org/pnpm/-/* ) \
+            && -z "$extra" ]] \
             || die "build-tools.lock 含非法记录"
         destination="$BUILD_TOOLS_ROOT/$filename"
         partial="$destination.partial"

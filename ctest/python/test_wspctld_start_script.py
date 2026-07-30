@@ -87,13 +87,14 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
         assert forbidden not in script
     assert "systemctl start" in script
     assert 'systemctl enable "$SERVICE_NAME"' in script
-    assert "probe_broker_execution" in script
+    assert "probe_broker_execution" not in script
+    assert "RuntimeProcess" not in script
     assert "InvocationID" in script
-    assert '["/bin/true"]' in script
-    assert 'result.get("replayed") is not False' in script
-    assert "runtime-execute-v2-systemd-notify" in script
+    assert "static-ready-v1-image-service-sockets" in script
+    assert "WSPCTL_SANDBOX_UID=$AGENT_UID" in script
+    assert "WSPCTL_SANDBOX_GID=$AGENT_GID" in script
     assert "BROKER_VALIDATED_INVOCATION_ID" in script
-    assert "validate_current_broker_execution" in script
+    assert "validate_current_broker_readiness" in script
     assert "WSPCTL_CLIENT_UID" in script
     assert 'OPERATOR_UID="${WSPCTL_OPERATOR_UID:-0}"' in script
     assert 'SOCKET_PATH="$WORK_ROOT/run/bot/wspctld.sock"' in script
@@ -187,9 +188,9 @@ fi
     assert checked.returncode == 0, checked.stderr
 
 
-def test_start_service_validates_each_new_systemd_invocation_once() -> None:
-    """@brief 每个新 systemd invocation 必须执行一次 canary，同一代不得重复 /
-    Every new systemd invocation must execute one canary without repeating it for the same generation.
+def test_start_service_records_each_new_ready_systemd_invocation_once() -> None:
+    """@brief 每个新 systemd invocation 必须记录一次静态 readiness，同一代不得重复 /
+    Every new systemd invocation must record static readiness once without repeating it for the same generation.
 
     @return None / None.
     """
@@ -200,29 +201,22 @@ source {START_SCRIPT!s}
 BROKER_RESTART_REQUIRED=false
 BROKER_VALIDATED_INVOCATION_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 CURRENT_INVOCATION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-probe_calls=0
 record_calls=0
 
 sudo() {{ :; }}
 broker_is_healthy() {{ return 0; }}
 current_broker_invocation_id() {{ printf '%s\\n' "$CURRENT_INVOCATION"; }}
 try_current_broker_invocation_id() {{ printf '%s\\n' "$CURRENT_INVOCATION"; }}
-probe_broker_execution() {{
-    [[ "$1" == "$CURRENT_INVOCATION" ]]
-    ((probe_calls += 1))
-}}
 record_applied_fingerprint() {{
     [[ "$1" == "$CURRENT_INVOCATION" ]]
     ((record_calls += 1))
 }}
 
 start_service
-[[ "$probe_calls" == 0 ]]
 [[ "$record_calls" == 0 ]]
 
 CURRENT_INVOCATION=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 start_service
-[[ "$probe_calls" == 1 ]]
 [[ "$record_calls" == 1 ]]
 """
     checked = subprocess.run(
@@ -236,49 +230,51 @@ start_service
     assert checked.returncode == 0, checked.stderr
 
 
-def test_runtime_canary_follows_generation_change_but_not_same_generation_failure() -> None:
-    """@brief canary 仅在 InvocationID 改变时重试，同代执行失败不得漂白 /
-    Retry a canary only when InvocationID changes; never bleach a same-generation execution failure.
+def test_static_readiness_follows_generation_change_and_stops_on_health_failure(
+    tmp_path: Path,
+) -> None:
+    """@brief 静态 readiness 仅在 InvocationID 改变时重试，健康失败不得记录 /
+    Retry static readiness only when InvocationID changes and never record failed health.
 
+    @param tmp_path pytest 临时目录 / Pytest temporary directory.
     @return None / None.
     """
 
+    invocation_reads = tmp_path / "invocation-reads"
     script = f"""
 set -euo pipefail
 source {START_SCRIPT!s}
-CURRENT_INVOCATION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-probe_calls=0
+INVOCATION_READS={invocation_reads!s}
+printf '0\\n' > "$INVOCATION_READS"
 record_calls=0
 
 wait_for_broker_healthy() {{ return 0; }}
-try_current_broker_invocation_id() {{ printf '%s\\n' "$CURRENT_INVOCATION"; }}
-probe_broker_execution() {{
-    ((probe_calls += 1))
-    if [[ "$probe_calls" == 1 ]]; then
-        CURRENT_INVOCATION=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+try_current_broker_invocation_id() {{
+    local reads
+    reads="$(<"$INVOCATION_READS")"
+    ((reads += 1))
+    printf '%s\\n' "$reads" > "$INVOCATION_READS"
+    if [[ "$reads" == 1 ]]; then
+        printf '%s\\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    else
+        printf '%s\\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
     fi
-    return 0
 }}
 record_applied_fingerprint() {{
     [[ "$1" == bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]]
     ((record_calls += 1))
 }}
 
-validate_current_broker_execution
-[[ "$probe_calls" == 2 ]]
+validate_current_broker_readiness
+[[ "$(<"$INVOCATION_READS")" == 4 ]]
 [[ "$record_calls" == 1 ]]
 [[ "$BROKER_VALIDATED_INVOCATION_ID" == bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]]
 
-probe_calls=0
 record_calls=0
-probe_broker_execution() {{
-    ((probe_calls += 1))
-    return 1
-}}
-if validate_current_broker_execution; then
+wait_for_broker_healthy() {{ return 1; }}
+if validate_current_broker_readiness; then
     exit 1
 fi
-[[ "$probe_calls" == 1 ]]
 [[ "$record_calls" == 0 ]]
 """
     checked = subprocess.run(
@@ -295,8 +291,8 @@ fi
 def test_broker_fingerprint_record_rejects_legacy_unvalidated_evidence(
     tmp_path: Path,
 ) -> None:
-    """@brief 旧单行 fingerprint 不得伪装成 execution-validated generation /
-    A legacy one-line fingerprint must not masquerade as an execution-validated generation.
+    """@brief 旧单行 fingerprint 不得伪装成 readiness-validated generation /
+    A legacy one-line fingerprint must not masquerade as a readiness-validated generation.
 
     @param tmp_path pytest 临时目录 / Pytest temporary directory.
     @return None / None.
@@ -554,8 +550,8 @@ def test_root_status_script_is_readonly_and_reports_operational_boundaries() -> 
     script = STATUS_SCRIPT.read_text(encoding="utf-8")
     assert "systemctl show" in script
     assert "InvocationID" in script
-    assert "runtime execution validation" in script
-    assert "passed /bin/true runtime canary" in script
+    assert "static readiness validation" in script
+    assert "passed image/service/socket readiness validation" in script
     assert "NRestarts" in script
     assert "RestartPreventExitStatus" in script
     assert "NotifyAccess" in script

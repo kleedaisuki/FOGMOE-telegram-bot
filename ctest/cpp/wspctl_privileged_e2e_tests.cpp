@@ -74,10 +74,14 @@ constexpr std::string_view kBaseRootEnvironment{"WSPCTL_PRIVILEGED_E2E_BASE_ROOT
 constexpr std::string_view kProjectIdMinEnvironment{"WSPCTL_PRIVILEGED_E2E_XFS_PROJECT_ID_MIN"};
 /** @brief 为本测试专属保留的 XFS project-ID 末值 / Last XFS project ID reserved exclusively for this test. */
 constexpr std::string_view kProjectIdMaxEnvironment{"WSPCTL_PRIVILEGED_E2E_XFS_PROJECT_ID_MAX"};
-/** @brief native gateway 与 task 使用的非 root UID / Non-root UID used by the native gateway and task. */
+/** @brief native gateway 使用的非 root UID / Non-root UID used by the native gateway. */
 constexpr uid_t kClientUid{65'532U};
-/** @brief native gateway 与 task 使用的非 root GID / Non-root GID used by the native gateway and task. */
+/** @brief native gateway 使用的非 root GID / Non-root GID used by the native gateway. */
 constexpr gid_t kClientGid{65'532U};
+/** @brief 镜像内具名 Agent 的 UID / UID of the named Agent inside the image. */
+constexpr uid_t kAgentUid{65'533U};
+/** @brief 镜像内具名 Agent 的 GID / GID of the named Agent inside the image. */
+constexpr gid_t kAgentGid{65'533U};
 /** @brief 单个 runtime 的稳定 UUID / Stable UUID for the one runtime exercised by this test. */
 constexpr std::string_view kRuntimeKey{"123e4567-e89b-42d3-a456-4266141740e2"};
 /** @brief 首次 broker activation / First broker activation. */
@@ -713,6 +717,73 @@ private:
 }
 
 /**
+ * @brief 把已停止 runtime 的 upper 改写成旧 nobody ownership / Rewrite a stopped runtime upper to legacy nobody ownership.
+ * @param fixture E2E fixture / E2E fixture.
+ * @return 完整改写时为真 / True when the complete rewrite succeeds.
+ * @note 该步骤只在测试自建、已卸载且 cgroup 为空的 state tree 中模拟 v2 升级输入。/
+ *       This only simulates v2 upgrade input in the test-owned, unmounted state tree after its
+ *       cgroup is empty.
+ */
+[[nodiscard]] bool simulate_legacy_workspace_ownership(const E2eFixture& fixture) {
+    /** @brief persistent upper root / Persistent upper root. */
+    const std::filesystem::path upper =
+        fixture.state_root / "runtimes" / sha256_hex(kRuntimeKey) / "workspace" / "upper";
+    std::error_code error;
+    if (!std::filesystem::is_directory(upper, error) || error) {
+        std::cerr << "FAIL: cannot find persistent upper for legacy-owner simulation\n";
+        return false;
+    }
+    for (std::filesystem::recursive_directory_iterator iterator(
+             upper,
+             std::filesystem::directory_options::skip_permission_denied,
+             error),
+         end;
+         iterator != end;
+         iterator.increment(error)) {
+        if (error) {
+            std::cerr << "FAIL: cannot traverse upper for legacy-owner simulation\n";
+            return false;
+        }
+        if (lchown(iterator->path().c_str(), 65'534U, 65'534U) != 0) {
+            std::cerr << "FAIL: cannot assign legacy owner to upper entry\n";
+            return false;
+        }
+    }
+    if (error || lchown(upper.c_str(), 65'534U, 65'534U) != 0 ||
+        chmod(upper.c_str(), 0700) != 0) {
+        std::cerr << "FAIL: cannot commit legacy-owner simulation\n";
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief 验证重启时 legacy upper 已迁移到 Agent / Verify restart migrated a legacy upper to the Agent.
+ * @param fixture E2E fixture / E2E fixture.
+ * @return 根与持久文件 ownership 正确时为真 / True when root and persisted-file ownership are correct.
+ */
+[[nodiscard]] bool verify_agent_workspace_ownership(const E2eFixture& fixture) {
+    /** @brief persistent upper root / Persistent upper root. */
+    const std::filesystem::path upper =
+        fixture.state_root / "runtimes" / sha256_hex(kRuntimeKey) / "workspace" / "upper";
+    /** @brief persisted test file / Persisted test file. */
+    const std::filesystem::path persisted = upper / "e2e-persist.txt";
+    /** @brief upper-root metadata / Upper-root metadata. */
+    struct stat upper_metadata {};
+    /** @brief persisted-file metadata / Persisted-file metadata. */
+    struct stat persisted_metadata {};
+    if (lstat(upper.c_str(), &upper_metadata) != 0 ||
+        lstat(persisted.c_str(), &persisted_metadata) != 0 ||
+        upper_metadata.st_uid != kAgentUid || upper_metadata.st_gid != kAgentGid ||
+        (upper_metadata.st_mode & 0777U) != 0700U ||
+        persisted_metadata.st_uid != kAgentUid || persisted_metadata.st_gid != kAgentGid) {
+        std::cerr << "FAIL: legacy upper was not migrated to the named Agent\n";
+        return false;
+    }
+    return true;
+}
+
+/**
  * @brief 将 ASCII 文本转为 raw payload bytes / Convert ASCII text into raw payload bytes.
  * @param value 待转换文本 / Text to convert.
  * @return 等值 raw bytes / Equivalent raw bytes.
@@ -1035,8 +1106,8 @@ private:
         "--client-uid", std::to_string(kClientUid),
         "--operator-uid", "0",
         "--cgroup-root", fixture.cgroup_root.string(),
-        "--sandbox-uid", std::to_string(kClientUid),
-        "--sandbox-gid", std::to_string(kClientGid),
+        "--sandbox-uid", std::to_string(kAgentUid),
+        "--sandbox-gid", std::to_string(kAgentGid),
         "--memory-max", "268435456",
         "--memory-high", "134217728",
         "--memory-swap-max", "0",
@@ -1341,6 +1412,10 @@ private:
     /** @brief 在 PID namespace 内验证 PID1 父进程及 task hardening 的脚本 / Script validating PID1 parentage and task hardening inside the PID namespace. */
     const std::string namespace_script{
         "test \"$PPID\" = 1 || exit 11; "
+        "test \"$(id -u)\" = 65533 || exit 15; test \"$(id -g)\" = 65533 || exit 16; "
+        "test \"$(id -un)\" = agent || exit 17; "
+        "test \"$HOME:$USER:$LOGNAME\" = /workspace:agent:agent || exit 18; "
+        "test -r /workspace && test -w /workspace && test -x /workspace || exit 19; "
         "cap=''; nnp=''; sec=''; "
         "while IFS=$'\\t' read -r key value; do "
         "case \"$key\" in CapEff:) cap=\"$value\";; NoNewPrivs:) nnp=\"$value\";; Seccomp:) sec=\"$value\";; esac; "
@@ -1664,6 +1739,9 @@ private:
         std::cerr << "FAIL: first broker restart did not prove cgroup drain\n";
         return EXIT_FAILURE;
     }
+    if (!simulate_legacy_workspace_ownership(fixture)) {
+        return EXIT_FAILURE;
+    }
     /** @brief 重启后复用的 Bot socket，直接验收 stale listener pathname 回收 / Bot socket reused after restart to directly accept stale listener pathname recovery. */
     const std::filesystem::path second_socket = first_socket;
     /** @brief 重启后复用的 operator socket，直接验收独立 endpoint 回收 / Operator socket reused after restart to directly accept independent endpoint recovery. */
@@ -1681,10 +1759,13 @@ private:
     if (!run_client_phase(run_recovery_phase_adapter, fixture, second_socket)) {
         return EXIT_FAILURE;
     }
+    if (!verify_agent_workspace_ownership(fixture)) {
+        return EXIT_FAILURE;
+    }
     if (!cleanup_guard.finish()) {
         return EXIT_FAILURE;
     }
-    std::cout << "PASS: privileged wspctld E2E exercised real PID namespace, OverlayFS, cgroup cleanup, add_file, and restart recovery\n";
+    std::cout << "PASS: privileged wspctld E2E exercised real PID namespace, OverlayFS, named-Agent migration, cgroup cleanup, add_file, and restart recovery\n";
     return EXIT_SUCCESS;
 }
 

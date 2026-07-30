@@ -17,12 +17,14 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <dirent.h>
 #include <fcntl.h>
 #include <grp.h>
 #include <fstream>
 #include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/securebits.h>
+#include <memory>
 #include <sched.h>
 #include <string_view>
 #include <sys/sysmacros.h>
@@ -31,6 +33,56 @@
 
 namespace wspctl {
 namespace {
+
+/**
+ * @brief 局部 FD 的 RAII owner / RAII owner for a local file descriptor.
+ */
+class OwnedFileDescriptor final {
+public:
+    /**
+     * @brief 接管 FD / Take ownership of an FD.
+     * @param descriptor 要接管的 FD / FD to own.
+     */
+    explicit OwnedFileDescriptor(const int descriptor = -1) noexcept
+        : descriptor_(descriptor) {}
+
+    /** @brief 析构时关闭 FD / Close the FD on destruction. */
+    ~OwnedFileDescriptor() {
+        if (descriptor_ >= 0) {
+            static_cast<void>(close(descriptor_));
+        }
+    }
+
+    /** @brief 禁止复制 / Disable copying. */
+    OwnedFileDescriptor(const OwnedFileDescriptor&) = delete;
+    /** @brief 禁止复制赋值 / Disable copy assignment. */
+    OwnedFileDescriptor& operator=(const OwnedFileDescriptor&) = delete;
+
+    /**
+     * @brief 取得借用 FD / Get the borrowed FD.
+     * @return 借用 FD / Borrowed FD.
+     */
+    [[nodiscard]] int get() const noexcept { return descriptor_; }
+
+private:
+    /** @brief 被持有的 FD / Owned FD. */
+    int descriptor_;
+};
+
+/**
+ * @brief ``DIR`` stream 的 RAII deleter / RAII deleter for a ``DIR`` stream.
+ */
+struct DirectoryStreamCloser final {
+    /**
+     * @brief 关闭目录流 / Close a directory stream.
+     * @param directory 可为空的目录流 / Nullable directory stream.
+     */
+    void operator()(DIR* const directory) const noexcept {
+        if (directory != nullptr) {
+            static_cast<void>(closedir(directory));
+        }
+    }
+};
 
 /** @brief 是否具有指定 effective Linux capability / Whether an effective Linux capability is present. */
 [[nodiscard]] Result<bool> has_effective_capability(const cap_value_t capability) {
@@ -644,6 +696,164 @@ Result<void> reclaim_dead_task_layers(
     return quota.reclaim_dead_activation_storage(activation_lease);
 }
 
+/**
+ * @brief 判断 inode owner 是否属于可恢复的 workspace 状态 / Check whether an inode owner is a recoverable workspace state.
+ * @param metadata inode metadata / Inode metadata.
+ * @param target_uid 当前 Agent UID / Current Agent UID.
+ * @param target_gid 当前 Agent GID / Current Agent GID.
+ * @return root、旧 nobody 或当前 Agent 时为真 / True for root, legacy nobody, or the current Agent.
+ */
+[[nodiscard]] bool is_migratable_workspace_owner(
+    const struct stat& metadata,
+    const uid_t target_uid,
+    const gid_t target_gid) noexcept {
+    constexpr uid_t kLegacyNobodyUid{65534U};
+    constexpr gid_t kLegacyNobodyGid{65534U};
+    return (metadata.st_uid == 0U && metadata.st_gid == 0U) ||
+           (metadata.st_uid == kLegacyNobodyUid && metadata.st_gid == kLegacyNobodyGid) ||
+           (metadata.st_uid == target_uid && metadata.st_gid == target_gid);
+}
+
+/**
+ * @brief fd-relative 递归迁移 workspace 子树 owner / Recursively migrate workspace subtree owners relative to an FD.
+ * @param directory_fd 已验证父目录 FD / Verified parent-directory FD.
+ * @param target_uid 当前 Agent UID / Current Agent UID.
+ * @param target_gid 当前 Agent GID / Current Agent GID.
+ * @return 成功或 fail-closed 错误 / Success or a fail-closed error.
+ * @note 不跟随 symlink；每个目录在其子项完成后才改 owner，使中断后的重试保持可判定。/
+ *       Symlinks are never followed; each directory changes owner only after its children, keeping
+ *       interrupted retries unambiguous.
+ */
+[[nodiscard]] Result<void> migrate_workspace_children(
+    const int directory_fd,
+    const uid_t target_uid,
+    const gid_t target_gid) {
+    /** @brief 供 ``fdopendir`` 消费的独立扫描 FD / Independent scan FD consumed by ``fdopendir``. */
+    const int scan_fd = fcntl(directory_fd, F_DUPFD_CLOEXEC, 3);
+    if (scan_fd < 0) {
+        return std::unexpected(errno_error(
+            ErrorCode::sandbox_preflight_failed,
+            "duplicate workspace directory FD for owner migration"));
+    }
+    /** @brief 自动关闭的目录流 / Automatically closed directory stream. */
+    std::unique_ptr<DIR, DirectoryStreamCloser> directory(fdopendir(scan_fd));
+    if (!directory) {
+        const int saved_errno = errno;
+        static_cast<void>(close(scan_fd));
+        errno = saved_errno;
+        return std::unexpected(errno_error(
+            ErrorCode::sandbox_preflight_failed,
+            "open workspace directory stream for owner migration"));
+    }
+    for (;;) {
+        errno = 0;
+        /** @brief 当前目录项 / Current directory entry. */
+        dirent* const entry = readdir(directory.get());
+        if (entry == nullptr) {
+            if (errno != 0) {
+                return std::unexpected(errno_error(
+                    ErrorCode::sandbox_preflight_failed,
+                    "read workspace directory during owner migration"));
+            }
+            return {};
+        }
+        const std::string_view name{entry->d_name};
+        if (name == "." || name == "..") {
+            continue;
+        }
+        /** @brief 不跟随 symlink 的目录项 metadata / No-follow directory-entry metadata. */
+        struct stat metadata {};
+        if (fstatat(directory_fd, entry->d_name, &metadata, AT_SYMLINK_NOFOLLOW) != 0) {
+            return std::unexpected(errno_error(
+                ErrorCode::sandbox_preflight_failed,
+                "stat workspace entry during owner migration"));
+        }
+        if (!is_migratable_workspace_owner(metadata, target_uid, target_gid)) {
+            return std::unexpected(make_error(
+                ErrorCode::sandbox_preflight_failed,
+                "workspace entry has an unexpected owner during Agent identity migration"));
+        }
+        if (S_ISDIR(metadata.st_mode)) {
+            /** @brief 不跟随 symlink 的子目录 FD / No-follow child-directory FD. */
+            OwnedFileDescriptor child(openat(
+                directory_fd,
+                entry->d_name,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+            if (child.get() < 0) {
+                return std::unexpected(errno_error(
+                    ErrorCode::sandbox_preflight_failed,
+                    "open workspace child during owner migration"));
+            }
+            if (const auto migrated = migrate_workspace_children(
+                    child.get(),
+                    target_uid,
+                    target_gid);
+                !migrated) {
+                return std::unexpected(migrated.error());
+            }
+        }
+        if (fchownat(
+                directory_fd,
+                entry->d_name,
+                target_uid,
+                target_gid,
+                AT_SYMLINK_NOFOLLOW) != 0) {
+            return std::unexpected(errno_error(
+                ErrorCode::sandbox_preflight_failed,
+                "change workspace entry owner to Agent"));
+        }
+    }
+}
+
+/**
+ * @brief 把 merged workspace 准备为具名 Agent 的 private home / Prepare the merged workspace as the named Agent's private home.
+ * @param merged_dir 已挂载 OverlayFS workspace / Mounted OverlayFS workspace.
+ * @param target_uid 当前 Agent UID / Current Agent UID.
+ * @param target_gid 当前 Agent GID / Current Agent GID.
+ * @return 成功或 fail-closed 错误 / Success or a fail-closed error.
+ */
+[[nodiscard]] Result<void> prepare_agent_workspace(
+    const std::filesystem::path& merged_dir,
+    const uid_t target_uid,
+    const gid_t target_gid) {
+    /** @brief merged workspace 根 FD / Merged-workspace root FD. */
+    OwnedFileDescriptor root(open(
+        merged_dir.c_str(),
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    if (root.get() < 0) {
+        return std::unexpected(errno_error(
+            ErrorCode::sandbox_preflight_failed,
+            "open merged workspace for Agent identity migration"));
+    }
+    /** @brief workspace 根 metadata / Workspace-root metadata. */
+    struct stat metadata {};
+    if (fstat(root.get(), &metadata) != 0 || !S_ISDIR(metadata.st_mode) ||
+        !is_migratable_workspace_owner(metadata, target_uid, target_gid)) {
+        return std::unexpected(make_error(
+            ErrorCode::sandbox_preflight_failed,
+            "merged workspace root has an unexpected type or owner"));
+    }
+    if (metadata.st_uid == target_uid && metadata.st_gid == target_gid &&
+        (metadata.st_mode & 0777U) == 0700U) {
+        return {};
+    }
+    if (const auto migrated = migrate_workspace_children(
+            root.get(),
+            target_uid,
+            target_gid);
+        !migrated) {
+        return std::unexpected(migrated.error());
+    }
+    if (fchown(root.get(), target_uid, target_gid) != 0 ||
+        fchmod(root.get(), 0700) != 0 ||
+        fsync(root.get()) != 0) {
+        return std::unexpected(errno_error(
+            ErrorCode::sandbox_preflight_failed,
+            "commit merged workspace Agent identity migration"));
+    }
+    return {};
+}
+
 Result<void> setup_runtime_mounts(const SandboxConfig& config, const TaskLayer& layer) {
     const auto base_root = image_root(config);
     if (!base_root) {
@@ -671,6 +881,13 @@ Result<void> setup_runtime_mounts(const SandboxConfig& config, const TaskLayer& 
                                         ",workdir=" + layer.work_dir.string() + ",metacopy=off,redirect_dir=nofollow,index=off";
     if (mount("overlay", layer.merged_dir.c_str(), "overlay", MS_NOSUID | MS_NODEV, overlay_options.c_str()) != 0) {
         return std::unexpected(errno_error(ErrorCode::sandbox_preflight_failed, "mount task OverlayFS"));
+    }
+    if (const auto workspace = prepare_agent_workspace(
+            layer.merged_dir,
+            config.sandbox_uid,
+            config.sandbox_gid);
+        !workspace) {
+        return std::unexpected(workspace.error());
     }
     // /tmp must be present in the immutable image and becomes put_old before being replaced by a private tmpfs.
     if (syscall(SYS_pivot_root, layer.root_dir.c_str(), (layer.root_dir / "tmp").c_str()) != 0 || chdir("/") != 0 ||

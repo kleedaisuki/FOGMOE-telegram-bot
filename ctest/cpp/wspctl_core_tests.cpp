@@ -1025,6 +1025,57 @@ void test_supervisor() {
     config.sandbox_uid = getuid();
     config.sandbox_gid = getgid();
     wspctl::Supervisor supervisor(std::move(config));
+    wspctl::ExecuteRequest environment_request = request();
+    environment_request.argv = {
+        "/bin/sh",
+        "-c",
+        "printf '%s\\n' \"$HOME\" \"$USER\" \"$LOGNAME\" \"$SHELL\" \"$PATH\" \"$TMPDIR\" \"$LANG\" \"$LC_ALL\" \"$XDG_CACHE_HOME\"",
+    };
+    const auto environment_result = supervisor.execute_once(environment_request);
+    expect(
+        environment_result.has_value() &&
+            environment_result->stdout_data ==
+                "/workspace\nagent\nagent\n/bin/bash\n/usr/local/bin:/usr/bin:/bin\n/tmp\nC.UTF-8\nC.UTF-8\n/workspace/.cache\n",
+        "expose the fixed named-Agent environment without inheriting broker state");
+    /** @brief 合法嵌套 cwd / Valid nested cwd. */
+    const std::filesystem::path nested_cwd =
+        std::filesystem::path(workspace) / "project" / "nested";
+    expect(
+        std::filesystem::create_directories(nested_cwd),
+        "create nested supervisor cwd");
+    wspctl::ExecuteRequest nested_cwd_request = request();
+    nested_cwd_request.cwd = "/workspace/project/nested";
+    nested_cwd_request.argv = {"/bin/pwd"};
+    const auto nested_cwd_result = supervisor.execute_once(nested_cwd_request);
+    expect(
+        nested_cwd_result.has_value() &&
+            nested_cwd_result->exit_code == 0 &&
+            nested_cwd_result->stdout_data == nested_cwd.string() + "\n",
+        "resolve nested cwd beneath the pinned workspace FD");
+    /** @brief 指向 workspace 内目录的 cwd symlink / Cwd symlink pointing to a directory inside the workspace. */
+    const std::filesystem::path cwd_symlink =
+        std::filesystem::path(workspace) / "cwd-link";
+    expect(
+        symlink(nested_cwd.c_str(), cwd_symlink.c_str()) == 0,
+        "create supervisor cwd symlink");
+    wspctl::ExecuteRequest symlink_cwd_request = request();
+    symlink_cwd_request.cwd = "/workspace/cwd-link";
+    symlink_cwd_request.argv = {"/bin/true"};
+    const auto symlink_cwd_result = supervisor.execute_once(symlink_cwd_request);
+    expect(
+        symlink_cwd_result.has_value() &&
+            symlink_cwd_result->exit_code == 126 &&
+            symlink_cwd_result->stderr_data == "wsp-systemd: chdir failed\n",
+        "reject cwd symlinks even when their target remains inside workspace");
+    wspctl::ExecuteRequest missing_cwd_request = request();
+    missing_cwd_request.cwd = "/workspace/does-not-exist";
+    missing_cwd_request.argv = {"/bin/true"};
+    const auto missing_cwd_result = supervisor.execute_once(missing_cwd_request);
+    expect(
+        missing_cwd_result.has_value() &&
+            missing_cwd_result->exit_code == 126 &&
+            missing_cwd_result->stderr_data == "wsp-systemd: chdir failed\n",
+        "reject a missing cwd without falling back to workspace root");
     wspctl::ExecuteRequest timeout_request = request();
     timeout_request.argv = {"/bin/sh", "-c", "sleep 1"};
     timeout_request.timeout = std::chrono::milliseconds(30);

@@ -111,7 +111,7 @@ WSPCTL_IMAGE_REFERENCE=wspctl-runtime \
 3. importer 从 staging 的 `oci-layout`、`index.json` 和 `blobs/sha256/*` 验证每个 descriptor 的
    media type、size 和 digest；
 4. image config 必须为唯一 `linux/amd64`、layer/DiffID 数量一致、entrypoint 是固定
-   `/usr/local/libexec/wspctl/wsp-systemd`，contract label 为 `2`；
+   `/usr/local/libexec/wspctl/wsp-systemd`，contract label 为 `3`；
 5. umoci rootful 只读取这个 root-owned snapshot，正确应用 layers/whiteouts；
 6. native sealer 验证 runtime contract、root ownership、regular-file set-id、xattr/file capability、special inode、
    symlink、固定入口和空 `site-packages`；
@@ -158,19 +158,21 @@ import、mount、native verify 和 selection 由 root-owned `publish.lock` 串�
    Bot/operator listener 和全部 worker pool 均就绪后，才由 main PID 发送 `READY=1`；发送后立即
    清除 `NOTIFY_SOCKET`，runtime child 不会继承 service-manager notification capability。
    `systemctl start/restart` 因此不会把旧 generation 短暂残留的 socket inode 当成新 generation
-   readiness；30 秒 `TimeoutStartSec` 又让通知丢失或初始化卡死有界失败。
-2. systemd handshake 成功后，安装器再以 Bot UID 通过公共 native endpoint，在固定保留的 health
-   runtime 中真实执行一次 `/bin/true`。canary 的 request ID 绑定 systemd `InvocationID`，要求
-   `replayed=false`，所以历史 durable receipt 不能把本轮启动即死的 PID 1 伪装成健康。
+readiness；30 秒 `TimeoutStartSec` 又让通知丢失或初始化卡死有界失败。
+2. 安装器不再创建 health Runtime。镜像中的 Agent/passwd、`/workspace` lower、supervisor、
+   动态库和基础工具由发布期 native seal 与每次启动前的 `wspctl-image --verify` 静态验证；
+   service 阶段只检查 `Type=notify` readiness、Bot/operator socket 的 owner/mode，以及前后稳定的
+   systemd `InvocationID`。这些条件和部署输入一一对应，不把 XFS quota、cgroup、OverlayFS、
+   namespace 和一次 payload 执行的瞬时状态混入安装事务。
 
-固定 runtime 只占用一对 XFS project ID，不会让重复部署无限消耗 project-ID range；每个新
-service invocation 只验收一次。安装器在 canary 前后复核 `InvocationID`：若外部操作恰好触发
-滚代，只跟随新 generation 有界重试；同一 generation 的真实执行失败不会被重试漂白。只有稳定
-generation 的 canary 成功后，启动脚本才原子记录 fingerprint 与已验证的 `InvocationID`。
+每个新 service invocation 只记录一次 readiness evidence。若外部操作恰好触发滚代，安装器最多
+跟随三个 generation；稳定 generation 通过静态检查后，启动脚本原子记录 fingerprint 与已验证的
+`InvocationID`。真实 Runtime 路径仍在正常请求及 privileged E2E 中验证，而不是用一个部署期
+canary 占用 project ID、创建持久 workspace 或影响安装成败。
 
-若 socket 或真实执行检查失败，同一安装日志还包含 `systemctl status` 或最近 100 行 journal。
-`./statusWspctl.sh` 会报告最近一次安装日志，并只读比较当前 `InvocationID` 与 execution-validation
-evidence；它本身绝不执行 task。
+若 service 或 socket 检查失败，同一安装日志还包含 `systemctl status` 或最近 100 行 journal。
+`./statusWspctl.sh` 会报告最近一次安装日志，并只读比较当前 `InvocationID` 与 readiness evidence；
+它本身绝不执行 task。
 
 安装器不推断 Linux、WSL 或容器环境，也不构造、改写或默认任何代理地址。需要代理访问 base
 image、Debian snapshot 或 Python wheel 时，它直接读取调用环境中已经存在的大小写两组
@@ -279,7 +281,8 @@ ctest --test-dir build/wspctl-prod \
 
 验收环境必须提供 disposable XFS、delegated cgroup v2 parent、私有 socket parent，以及已经按新
 `images/sha256/<hex>/rootfs` 结构发布的 readonly image。测试实际经过 broker、PID namespace、
-OverlayFS upper layer、pivot_root、Python/Bash execution、restart recovery 和 quota enforcement：
+OverlayFS upper layer、pivot_root、具名 `agent` 身份、旧 `nobody` workspace ownership 迁移、
+Python/Bash execution、restart recovery 和 quota enforcement：
 
 ```bash
 WSPCTL_REQUIRE_PRIVILEGED_E2E=1 \

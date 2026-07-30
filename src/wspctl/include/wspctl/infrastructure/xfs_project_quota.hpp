@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string_view>
+#include <sys/types.h>
 
 namespace wspctl {
 
@@ -41,6 +42,15 @@ struct XfsProjectQuotaConfig final {
     std::uint64_t system_reserve_bytes{};
     /** @brief 不给 runtime 分配的 XFS inode 保留量 / XFS inodes reserved outside runtime admission. */
     std::uint64_t system_reserve_inodes{};
+    /**
+     * @brief Overlay upper 根的具名 Agent UID / Named Agent UID owning the Overlay upper root.
+     * @note broker 从同一 ``SandboxConfig`` 派生该值，不能由 Telegram 或 runtime key
+     *       决定。/ The broker derives this value from the same ``SandboxConfig``; Telegram
+     *       input and runtime keys cannot select it.
+     */
+    uid_t workspace_uid{};
+    /** @brief Overlay upper 根的具名 Agent GID / Named Agent GID owning the Overlay upper root. */
+    gid_t workspace_gid{};
 };
 
 /**

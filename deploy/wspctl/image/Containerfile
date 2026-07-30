@@ -7,6 +7,8 @@
 # the image. Debian package resolution is separately fixed to a snapshot timestamp.
 ARG PYTHON_BASE=docker.io/library/python:3.14-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30
 ARG DEBIAN_SNAPSHOT=20260728T000000Z
+ARG WSPCTL_AGENT_UID=65533
+ARG WSPCTL_AGENT_GID=65533
 
 FROM ${PYTHON_BASE} AS supervisor-builder
 
@@ -67,10 +69,12 @@ RUN cmake \
 FROM ${PYTHON_BASE} AS wspctl-runtime
 
 ARG DEBIAN_SNAPSHOT
+ARG WSPCTL_AGENT_UID
+ARG WSPCTL_AGENT_GID
 LABEL org.opencontainers.image.title="FogMoe wspctl workspace runtime" \
       org.opencontainers.image.source="https://github.com/FogMoe/FOGMOE-telegram-bot" \
-      org.opencontainers.image.version="wspctl-runtime-v2" \
-      io.fogmoe.wspctl.contract="2"
+      org.opencontainers.image.version="wspctl-runtime-v3" \
+      io.fogmoe.wspctl.contract="3"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -84,22 +88,70 @@ RUN printf '%s\n' \
     && apt-get -o Acquire::Retries=10 -o Acquire::https::Timeout=60 \
       install --yes --no-install-recommends \
       bash \
+      build-essential \
+      ca-certificates \
       coreutils \
+      curl \
+      diffutils \
+      ffmpeg \
+      file \
       findutils \
+      git \
       grep \
+      htop \
+      imagemagick \
+      jq \
       libcap2 \
       libseccomp2 \
       libssl3 \
+      neofetch \
+      openjdk-17-jdk-headless \
+      patch \
+      procps \
+      ripgrep \
       sed \
+      sqlite3 \
+      tree \
+      unzip \
+      wget \
+      xz-utils \
+      zip \
+    && find /bin /etc /lib /opt /run /sbin /usr /var \
+      -xdev \( ! -uid 0 -o ! -gid 0 \) \
+      -exec chown --no-dereference root:root '{}' + \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/log/*
+
+COPY --from=wspctl-build-tools / /runtime-tools
+
+RUN install --directory --owner=root --group=root --mode=0755 \
+      /usr/local/lib/node_modules/pnpm \
+    && tar --extract --xz \
+      --file /runtime-tools/node-v24.18.1-linux-x64.tar.xz \
+      --directory /usr/local \
+      --no-same-owner \
+      --strip-components=1 \
+    && tar --extract --gzip \
+      --file /runtime-tools/pnpm-11.18.0.tgz \
+      --directory /usr/local/lib/node_modules/pnpm \
+      --no-same-owner \
+      --strip-components=1 \
+    && ln -s ../lib/node_modules/pnpm/bin/pnpm.mjs /usr/local/bin/pnpm \
+    && ln -s ../lib/node_modules/pnpm/bin/pnpx.mjs /usr/local/bin/pnpx \
+    && rm -rf /runtime-tools
 
 RUN find /usr/local/lib/python3.14/site-packages \
       -mindepth 1 \
       -delete \
+    && ! getent passwd "$WSPCTL_AGENT_UID" >/dev/null \
+    && ! getent group "$WSPCTL_AGENT_GID" >/dev/null \
+    && ! getent passwd agent >/dev/null \
+    && ! getent group agent >/dev/null \
+    && printf 'agent:x:%s:\n' "$WSPCTL_AGENT_GID" >> /etc/group \
+    && printf 'agent:x:%s:%s:Workspace Agent:/workspace:/bin/bash\n' \
+      "$WSPCTL_AGENT_UID" "$WSPCTL_AGENT_GID" >> /etc/passwd \
     && install --directory --owner=root --group=root --mode=0755 \
-      /run /usr/local/libexec/wspctl \
-    && install --directory --owner=root --group=root --mode=1777 \
-      /tmp /workspace \
+      /run /usr/local/libexec/wspctl /workspace \
+    && install --directory --owner=root --group=root --mode=1777 /tmp \
     && rm -rf /var/tmp \
     && ln -s /tmp /var/tmp
 
@@ -107,13 +159,38 @@ COPY --from=supervisor-builder \
   /output/usr/local/libexec/wspctl/wsp-systemd \
   /usr/local/libexec/wspctl/wsp-systemd
 
-RUN chown --no-dereference --recursive root:root \
+RUN test -z "$(find \
       /bin /etc /lib /opt /run /sbin /usr /var /workspace \
+      -xdev \( ! -uid 0 -o ! -gid 0 \) -print -quit)" \
     && find / -xdev -type f -perm /6000 -exec chmod a-s '{}' + \
-    && chmod 1777 /tmp /workspace \
+    && chmod 1777 /tmp \
+    && chmod 0755 /workspace \
     && python -I -S -c \
       "import ctypes, json, sqlite3, ssl; assert __import__('sys').version_info[:2] == (3, 14)" \
+    && test "$(id -u agent)" = "$WSPCTL_AGENT_UID" \
+    && test "$(id -g agent)" = "$WSPCTL_AGENT_GID" \
     && test -x /bin/bash \
+    && test -x /usr/bin/ls \
+    && test -x /usr/bin/curl \
+    && test -x /usr/bin/wget \
+    && test -x /usr/bin/git \
+    && test -x /usr/bin/jq \
+    && test -x /usr/bin/gcc \
+    && test -x /usr/bin/g++ \
+    && test -x /usr/bin/ffmpeg \
+    && test -x /usr/bin/convert \
+    && test -x /usr/bin/sqlite3 \
+    && test -x /usr/bin/htop \
+    && test -x /usr/bin/tree \
+    && test -x /usr/bin/neofetch \
+    && test -x /usr/bin/java \
+    && test -x /usr/bin/javac \
+    && test -x /usr/local/bin/node \
+    && test -x /usr/local/bin/npm \
+    && test -x /usr/local/bin/pnpm \
+    && test -x /usr/local/bin/python3 \
+    && test "$(node --version)" = "v24.18.1" \
+    && test "$(pnpm --version)" = "11.18.0" \
     && test -x /usr/local/libexec/wspctl/wsp-systemd \
     && ! ldd /usr/local/bin/python | grep 'not found' \
     && ! ldd /usr/local/libexec/wspctl/wsp-systemd | grep 'not found'

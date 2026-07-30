@@ -137,7 +137,7 @@ def _create_layout(root: Path) -> str:
             "Entrypoint": [
                 "/usr/local/libexec/wspctl/wsp-systemd",
             ],
-            "Labels": {"io.fogmoe.wspctl.contract": "2"},
+            "Labels": {"io.fogmoe.wspctl.contract": "3"},
         },
     }
     config_digest, config_size = _write_blob(root, _json_bytes(config))
