@@ -138,17 +138,124 @@ def test_application_declares_a_port_and_use_case() -> None:
     assert "<filesystem>" not in text
 
 
-def test_proc_mount_hides_peers_and_fails_closed() -> None:
-    """@brief runtime proc mount 必须启用 hidepid=2 和 subset=pid / Runtime proc mount must enable hidepid=2 and subset=pid.
+def test_proc_mount_is_agent_usable_and_masks_host_global_surfaces() -> None:
+    """@brief runtime procfs 必须允许 Agent 诊断，同时隐藏宿主敏感面 / Runtime procfs must support Agent diagnostics while hiding host-sensitive surfaces.
 
     @return None / None.
     """
 
     text = SANDBOX_SOURCE.read_text(encoding="utf-8")
-    assert (
-        'mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, "hidepid=2,subset=pid")'
-        in text
+    assert 'mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, nullptr)' in text
+    assert "hidepid=" not in text
+    assert "subset=pid" not in text
+    for source, target in (
+        ("proc/cpuinfo", "/proc/cpuinfo"),
+        ("proc/diskstats", "/proc/diskstats"),
+        ("proc/loadavg", "/proc/loadavg"),
+        ("proc/meminfo", "/proc/meminfo"),
+        ("proc/slabinfo", "/proc/slabinfo"),
+        ("proc/stat", "/proc/stat"),
+        ("proc/swaps", "/proc/swaps"),
+        ("proc/uptime", "/proc/uptime"),
+        ("proc/pressure/cpu", "/proc/pressure/cpu"),
+        ("proc/pressure/io", "/proc/pressure/io"),
+        ("proc/pressure/memory", "/proc/pressure/memory"),
+    ):
+        assert f'.source = "{source}", .target = "{target}"' in text
+    assert "filesystem.f_type != FUSE_SUPER_MAGIC" in text
+    assert 'std::string_view(entry.mnt_type) == "fuse.lxcfs"' in text
+    assert "validate_lxcfs_root(config.lxcfs_root)" in text
+    assert "kRequiredCgroupAwareProcFiles" in text
+    assert "kPressureCgroupAwareProcFiles" in text
+    for count, state in (
+        (0, "absent"),
+        (1, "partial"),
+        (2, "partial"),
+        (3, "complete"),
+    ):
+        assert (
+            f"classify_pressure_capability({count}U) == "
+            f"PressureCapabilityState::{state}" in text
+        )
+    assert "LXCFS exposes only part of the procfs pressure capability group" in text
+    stage = text.index("stage_lxcfs_root(config, layer.root_dir)")
+    pivot = text.index("SYS_pivot_root", stage)
+    proc_mount = text.index('mount("proc", "/proc"', pivot)
+    harden = text.index("harden_runtime_procfs(*lxcfs)", proc_mount)
+    mapping = text.index("map_cgroup_aware_procfs(pressure_available)")
+    masks = text.index("create procfs mask sources", mapping)
+    detach = text.index('umount2("/run", MNT_DETACH)', mapping)
+    assert stage < pivot < proc_mount < harden
+    assert mapping < masks < detach
+    for masked_path in (
+        "/proc/sys/kernel/random/boot_id",
+        "/proc/kallsyms",
+        "/proc/modules",
+        "/proc/vmstat",
+        "/proc/zoneinfo",
+        "/proc/vmallocinfo",
+        "/proc/softirqs",
+        "/proc/schedstat",
+    ):
+        assert f'.path = "{masked_path}"' in text
+    for mapped_path in ("/proc/diskstats", "/proc/swaps"):
+        assert f'.path = "{mapped_path}"' not in text
+    assert '.path = "/proc/pressure"' in text
+    assert "if (!pressure_available)" in text
+    for readonly_path in ("/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys"):
+        assert f'"{readonly_path}"' in text
+    assert "MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC" in text
+    assert "create_runtime_character_device(path, device)" in text
+    assert "chmod(path.data(), 0666)" in text
+
+
+def test_runtime_cpuset_matches_cpu_quota_and_lxcfs_visibility() -> None:
+    """@brief runtime cpuset 必须从 quota 推导并驱动 LXCFS CPU 可见性 / Runtime cpuset derives from quota and drives LXCFS CPU visibility.
+
+    @return None / None.
+    """
+
+    text = SANDBOX_SOURCE.read_text(encoding="utf-8")
+    assert 'contains_token(*enabled, "cpuset")' in text
+    assert '"+cpuset +cpu +memory +pids +io"' in text
+    assert '"+cpuset +cpu +memory +pids"' in text
+    assert 'required : {"cpuset", "cpu", "memory", "pids"}' in text
+    assert 'wspctl_cgroup / "cpuset.cpus.effective"' in text
+    assert 'wspctl_cgroup / "cpuset.mems.effective"' in text
+    assert 'runtime_cgroup / "cpuset.mems", *effective_mems' in text
+    assert 'runtime_cgroup / "cpuset.cpus", *selected_cpus' in text
+    assert "quota_us / period_us" in text
+    for quota, period, available, expected in (
+        ("50'000U", "100'000U", "20U", "1U"),
+        ("200'000U", "100'000U", "20U", "2U"),
+        ("250'000U", "100'000U", "20U", "3U"),
+        ("4'000'000U", "100'000U", "20U", "20U"),
+    ):
+        assert (
+            f"runtime_cpu_parallelism({quota}, {period}, {available}) == {expected}"
+            in text
+        )
+
+
+def test_runtime_uts_identity_is_fixed_before_pid1_fork() -> None:
+    """@brief UTS namespace 必须在 fork PID 1 前设置固定 hostname/domainname / The UTS namespace must receive a fixed hostname/domain name before PID 1 is forked.
+
+    @return None / None.
+    """
+
+    text = BROKER_SOURCE.read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+    unshare = normalized.index(
+        "unshare(CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWIPC | "
+        "CLONE_NEWNET | CLONE_NEWCGROUP)"
     )
+    configure = normalized.index("configure_runtime_uts_identity()", unshare)
+    pid1_fork = normalized.index("const pid_t pid1 = fork()", configure)
+    assert unshare < configure < pid1_fork
+    assert 'kRuntimeHostname{"workspace"}' in text
+    assert 'kRuntimeDomainname{"localdomain"}' in text
+    assert "sethostname(" in text
+    assert "setdomainname(" in text
 
 
 def test_workspace_overlay_remains_executable_for_untrusted_payload_scripts() -> None:
@@ -446,7 +553,8 @@ def _run_contract_tests() -> None:
 
     test_domain_has_no_host_or_transport_dependencies()
     test_application_declares_a_port_and_use_case()
-    test_proc_mount_hides_peers_and_fails_closed()
+    test_proc_mount_is_agent_usable_and_masks_host_global_surfaces()
+    test_runtime_uts_identity_is_fixed_before_pid1_fork()
     test_workspace_overlay_remains_executable_for_untrusted_payload_scripts()
     test_task_seccomp_closes_io_uring_socket_bypass()
     test_task_seccomp_denies_global_keyring_and_module_operations()

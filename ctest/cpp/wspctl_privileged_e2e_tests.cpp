@@ -25,11 +25,11 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
-#include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -56,23 +56,31 @@ namespace {
 
 /** @brief CTest 的标准 skip 返回码 / Conventional CTest skip return code. */
 constexpr int kSkipReturnCode{77};
-/** @brief CI 强制真实 E2E 验收的环境变量 / Environment variable requiring real E2E acceptance in CI. */
+/** @brief CI 强制真实 E2E 验收的环境变量 / Environment variable requiring real E2E acceptance in
+ * CI. */
 constexpr std::string_view kRequireEnvironment{"WSPCTL_REQUIRE_PRIVILEGED_E2E"};
 /** @brief disposable XFS mount 的环境变量 / Environment variable for the disposable XFS mount. */
 constexpr std::string_view kXfsMountEnvironment{"WSPCTL_PRIVILEGED_E2E_XFS_MOUNT"};
-/** @brief disposable state parent 的环境变量 / Environment variable for the disposable state parent. */
+/** @brief disposable state parent 的环境变量 / Environment variable for the disposable state
+ * parent. */
 constexpr std::string_view kStateParentEnvironment{"WSPCTL_PRIVILEGED_E2E_STATE_PARENT"};
-/** @brief 仅供本测试创建 socket directory 的 parent / Parent used only to create this test's socket directory. */
+/** @brief 仅供本测试创建 socket directory 的 parent / Parent used only to create this test's socket
+ * directory. */
 constexpr std::string_view kSocketParentEnvironment{"WSPCTL_PRIVILEGED_E2E_SOCKET_PARENT"};
-/** @brief delegated cgroup parent 的环境变量 / Environment variable for the delegated cgroup parent. */
+/** @brief delegated cgroup parent 的环境变量 / Environment variable for the delegated cgroup
+ * parent. */
 constexpr std::string_view kCgroupParentEnvironment{"WSPCTL_PRIVILEGED_E2E_CGROUP_PARENT"};
 /** @brief 受控 image 根的环境变量 / Environment variable for the controlled images root. */
 constexpr std::string_view kImagesRootEnvironment{"WSPCTL_PRIVILEGED_E2E_IMAGES_ROOT"};
 /** @brief 只读 sealed rootfs 的环境变量 / Environment variable for the readonly sealed rootfs. */
 constexpr std::string_view kBaseRootEnvironment{"WSPCTL_PRIVILEGED_E2E_BASE_ROOT"};
-/** @brief 为本测试专属保留的 XFS project-ID 首值 / First XFS project ID reserved exclusively for this test. */
+/** @brief 专用 LXCFS root 的环境变量 / Environment variable for the dedicated LXCFS root. */
+constexpr std::string_view kLxcfsRootEnvironment{"WSPCTL_PRIVILEGED_E2E_LXCFS_ROOT"};
+/** @brief 为本测试专属保留的 XFS project-ID 首值 / First XFS project ID reserved exclusively for
+ * this test. */
 constexpr std::string_view kProjectIdMinEnvironment{"WSPCTL_PRIVILEGED_E2E_XFS_PROJECT_ID_MIN"};
-/** @brief 为本测试专属保留的 XFS project-ID 末值 / Last XFS project ID reserved exclusively for this test. */
+/** @brief 为本测试专属保留的 XFS project-ID 末值 / Last XFS project ID reserved exclusively for
+ * this test. */
 constexpr std::string_view kProjectIdMaxEnvironment{"WSPCTL_PRIVILEGED_E2E_XFS_PROJECT_ID_MAX"};
 /** @brief native gateway 使用的非 root UID / Non-root UID used by the native gateway. */
 constexpr uid_t kClientUid{65'532U};
@@ -92,13 +100,17 @@ constexpr std::string_view kSecondActivation{"e2e-activation-two"};
 constexpr std::string_view kPayloadOpaqueId{"e2e-payload"};
 /** @brief add_file 应返回的唯一 workspace 路径 / Sole workspace path expected from add_file. */
 constexpr std::string_view kPayloadWorkspacePath{"/workspace/uploads/e2e-payload/payload"};
-/** @brief runtime control tree 的 hard byte quota / Hard byte quota for one runtime control tree. */
+/** @brief runtime control tree 的 hard byte quota / Hard byte quota for one runtime control tree.
+ */
 constexpr std::uint64_t kControlHardBytes{8U * 1024U * 1024U};
-/** @brief runtime control tree 的 hard inode quota / Hard inode quota for one runtime control tree. */
+/** @brief runtime control tree 的 hard inode quota / Hard inode quota for one runtime control tree.
+ */
 constexpr std::uint64_t kControlHardInodes{512U};
-/** @brief runtime workspace tree 的 hard byte quota / Hard byte quota for one runtime workspace tree. */
+/** @brief runtime workspace tree 的 hard byte quota / Hard byte quota for one runtime workspace
+ * tree. */
 constexpr std::uint64_t kWorkspaceHardBytes{32U * 1024U * 1024U};
-/** @brief runtime workspace tree 的 hard inode quota / Hard inode quota for one runtime workspace tree. */
+/** @brief runtime workspace tree 的 hard inode quota / Hard inode quota for one runtime workspace
+ * tree. */
 constexpr std::uint64_t kWorkspaceHardInodes{1'024U};
 /** @brief XFS 系统保留字节数 / Bytes reserved outside the test runtime admission. */
 constexpr std::uint64_t kSystemReserveBytes{1U * 1024U * 1024U};
@@ -106,7 +118,8 @@ constexpr std::uint64_t kSystemReserveBytes{1U * 1024U * 1024U};
 constexpr std::uint64_t kSystemReserveInodes{256U};
 /** @brief broker 启动等待上限 / Maximum wait for broker startup. */
 constexpr auto kBrokerStartDeadline{std::chrono::seconds(15)};
-/** @brief broker crash 后 cgroup 清空等待上限 / Maximum wait for cgroup drain after a broker crash. */
+/** @brief broker crash 后 cgroup 清空等待上限 / Maximum wait for cgroup drain after a broker crash.
+ */
 constexpr auto kCgroupDrainDeadline{std::chrono::seconds(10)};
 
 /**
@@ -129,7 +142,8 @@ struct E2eEnvironment final {
     std::filesystem::path xfs_mount;
     /** @brief state root 的测试专属 parent / Test-exclusive parent for the state root. */
     std::filesystem::path state_parent;
-    /** @brief socket directory 的测试专属 parent / Test-exclusive parent for the socket directory. */
+    /** @brief socket directory 的测试专属 parent / Test-exclusive parent for the socket directory.
+     */
     std::filesystem::path socket_parent;
     /** @brief cgroup child 的 delegated parent / Delegated parent for the cgroup child. */
     std::filesystem::path cgroup_parent;
@@ -137,14 +151,19 @@ struct E2eEnvironment final {
     std::filesystem::path images_root;
     /** @brief readonly sealed rootfs / 只读且 sealed 的 rootfs。 */
     std::filesystem::path base_root;
-    /** @brief 测试独占 XFS range 的最小 project ID / Minimum project ID in the test-exclusive XFS range. */
+    /** @brief 专用 cgroup-aware procfs FUSE root / Dedicated cgroup-aware procfs FUSE root. */
+    std::filesystem::path lxcfs_root;
+    /** @brief 测试独占 XFS range 的最小 project ID / Minimum project ID in the test-exclusive XFS
+     * range. */
     std::uint32_t project_id_min{};
-    /** @brief 测试独占 XFS range 的最大 project ID / Maximum project ID in the test-exclusive XFS range. */
+    /** @brief 测试独占 XFS range 的最大 project ID / Maximum project ID in the test-exclusive XFS
+     * range. */
     std::uint32_t project_id_max{};
 };
 
 /**
- * @brief 一个 self-created test directory 的不可替换身份 / Non-replaceable identity of one self-created test directory.
+ * @brief 一个 self-created test directory 的不可替换身份 / Non-replaceable identity of one
+ * self-created test directory.
  */
 struct TestDirectoryIdentity final {
     /** @brief 创建时的所在 filesystem device / Filesystem device at creation. */
@@ -193,7 +212,8 @@ struct BrokerLaunch final {
     std::filesystem::path executable;
     /** @brief 本次实例的 Bot 专属 socket 路径 / Bot-exclusive socket path for this instance. */
     std::filesystem::path bot_socket_path;
-    /** @brief 本次实例的 operator 专属 socket 路径 / Operator-exclusive socket path for this instance. */
+    /** @brief 本次实例的 operator 专属 socket 路径 / Operator-exclusive socket path for this
+     * instance. */
     std::filesystem::path operator_socket_path;
 };
 
@@ -203,7 +223,8 @@ struct BrokerLaunch final {
 class OneChunkPayloadSource final : public wspctl::presentation::PayloadChunkSource {
 public:
     /**
-     * @brief 以 immutable payload 构造一次性 source / Construct a single-use source from immutable payload bytes.
+     * @brief 以 immutable payload 构造一次性 source / Construct a single-use source from immutable
+     * payload bytes.
      * @param bytes 待发送的完整 raw bytes / Complete raw bytes to send.
      */
     explicit OneChunkPayloadSource(std::vector<std::byte> bytes) : bytes_(std::move(bytes)) {}
@@ -228,13 +249,15 @@ private:
 };
 
 /**
- * @brief 解析特权 E2E 的严格 required/optional 语义 / Parse strict required/optional semantics for privileged E2E.
+ * @brief 解析特权 E2E 的严格 required/optional 语义 / Parse strict required/optional semantics for
+ * privileged E2E.
  * @return optional、required 或 invalid / Optional, required, or invalid.
  */
 [[nodiscard]] Requirement test_requirement() {
     /** @brief 原始环境值 / Raw environment value. */
     const char* const raw_value = std::getenv(kRequireEnvironment.data());
-    if (raw_value == nullptr || std::string_view(raw_value).empty() || std::string_view(raw_value) == "0") {
+    if (raw_value == nullptr || std::string_view(raw_value).empty() ||
+        std::string_view(raw_value) == "0") {
         return Requirement::optional;
     }
     if (std::string_view(raw_value) == "1") {
@@ -244,14 +267,16 @@ private:
 }
 
 /**
- * @brief 以 CTest 语义报告尚未具备的前置条件 / Report an unavailable prerequisite with CTest semantics.
+ * @brief 以 CTest 语义报告尚未具备的前置条件 / Report an unavailable prerequisite with CTest
+ * semantics.
  * @param requirement 当前 required/optional 要求 / Current required/optional requirement.
  * @param reason 缺失原因 / Reason the prerequisite is unavailable.
  * @return optional 时 77，required 时失败 / 77 when optional, failure when required.
  */
 [[nodiscard]] int unavailable(const Requirement requirement, const std::string_view reason) {
     if (requirement == Requirement::required) {
-        std::cerr << "FAIL: " << kRequireEnvironment << "=1 but privileged E2E cannot run: " << reason << '\n';
+        std::cerr << "FAIL: " << kRequireEnvironment
+                  << "=1 but privileged E2E cannot run: " << reason << '\n';
         return EXIT_FAILURE;
     }
     std::cerr << "SKIP: privileged E2E unavailable: " << reason << '\n';
@@ -298,10 +323,9 @@ private:
  * @param reason 输出失败原因 / Output failure reason.
  * @return canonical directory 或空值 / Canonical directory or no value.
  */
-[[nodiscard]] std::optional<std::filesystem::path> canonical_directory(
-    const std::string_view value,
-    const std::string_view description,
-    std::string& reason) {
+[[nodiscard]] std::optional<std::filesystem::path>
+canonical_directory(const std::string_view value, const std::string_view description,
+                    std::string& reason) {
     /** @brief 原始 path 对象 / Raw path object. */
     const std::filesystem::path candidate(value);
     if (!candidate.is_absolute()) {
@@ -325,37 +349,40 @@ private:
 }
 
 /**
- * @brief 验证 operator parent 是 root-owned 且不可 group/other 写 / Validate an operator parent is root-owned and not group/other writable.
+ * @brief 验证 operator parent 是 root-owned 且不可 group/other 写 / Validate an operator parent is
+ * root-owned and not group/other writable.
  * @param parent 已 canonical 的 parent / Canonical parent.
  * @param description 诊断语义 / Diagnostic purpose.
  * @param reason 输出失败原因 / Output failure reason.
  * @return 满足所有权契约时为真 / True when the ownership contract holds.
  */
-[[nodiscard]] bool validate_private_parent(
-    const std::filesystem::path& parent,
-    const std::string_view description,
-    std::string& reason) {
+[[nodiscard]] bool validate_private_parent(const std::filesystem::path& parent,
+                                           const std::string_view description,
+                                           std::string& reason) {
     if (parent == parent.root_path()) {
         reason = std::string(description) + " cannot be the host root directory";
         return false;
     }
     /** @brief parent metadata / parent 元数据。 */
     struct stat metadata {};
-    if (lstat(parent.c_str(), &metadata) != 0 || !S_ISDIR(metadata.st_mode) || metadata.st_uid != 0U ||
-        (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
-        reason = std::string(description) + " must be a root-owned non-group/world-writable directory";
+    if (lstat(parent.c_str(), &metadata) != 0 || !S_ISDIR(metadata.st_mode) ||
+        metadata.st_uid != 0U || (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        reason =
+            std::string(description) + " must be a root-owned non-group/world-writable directory";
         return false;
     }
     return true;
 }
 
 /**
- * @brief 判断 canonical child 是否位于 canonical parent 内 / Check whether a canonical child lies within a canonical parent.
+ * @brief 判断 canonical child 是否位于 canonical parent 内 / Check whether a canonical child lies
+ * within a canonical parent.
  * @param child 已规范化的待检查 child / Canonical child to inspect.
  * @param parent 已规范化的祖先目录 / Canonical ancestor directory.
  * @return child 等于或位于 parent 下时为真 / True when child equals or lies below parent.
  */
-[[nodiscard]] bool is_below_or_equal(const std::filesystem::path& child, const std::filesystem::path& parent) {
+[[nodiscard]] bool is_below_or_equal(const std::filesystem::path& child,
+                                     const std::filesystem::path& parent) {
     /** @brief child 的当前 path component / Current path component of the child. */
     auto child_component = child.begin();
     /** @brief parent 的当前 path component / Current path component of the parent. */
@@ -371,30 +398,36 @@ private:
 }
 
 /**
- * @brief 在创建任何 child 前验证 state parent 与 XFS quota mount 同属一个专用 XFS / Validate state parent and XFS quota mount before creating children.
+ * @brief 在创建任何 child 前验证 state parent 与 XFS quota mount 同属一个专用 XFS / Validate state
+ * parent and XFS quota mount before creating children.
  * @param environment 已 canonical 的 operator E2E 输入 / Canonicalized operator E2E inputs.
  * @param reason 失败时的 operator 可操作诊断 / Operator-actionable diagnostic on failure.
- * @return XFS containment、superblock 与专用 mount 契约满足时为真 / True when XFS containment, superblock, and dedicated-mount contracts hold.
+ * @return XFS containment、superblock 与专用 mount 契约满足时为真 / True when XFS containment,
+ * superblock, and dedicated-mount contracts hold.
  * @note 这里是 E2E preflight，而不是替代 broker 的 production preflight；它保证本测试不会在错误
  *       filesystem 创建可配额 state child。 This is E2E preflight, not a substitute for the
  *       broker's production preflight; it prevents this test from creating quota state on the
  *       wrong filesystem.
  */
-[[nodiscard]] bool validate_xfs_state_parent_contract(const E2eEnvironment& environment, std::string& reason) {
+[[nodiscard]] bool validate_xfs_state_parent_contract(const E2eEnvironment& environment,
+                                                      std::string& reason) {
     if (!is_below_or_equal(environment.state_parent, environment.xfs_mount)) {
-        reason = "WSPCTL_PRIVILEGED_E2E_STATE_PARENT must lie below WSPCTL_PRIVILEGED_E2E_XFS_MOUNT";
+        reason =
+            "WSPCTL_PRIVILEGED_E2E_STATE_PARENT must lie below WSPCTL_PRIVILEGED_E2E_XFS_MOUNT";
         return false;
     }
     if (environment.xfs_mount == environment.xfs_mount.root_path()) {
         reason = "WSPCTL_PRIVILEGED_E2E_XFS_MOUNT must be a dedicated non-root mountpoint";
         return false;
     }
-    /** @brief XFS mount 与 state parent 的 filesystem metadata / Filesystem metadata for XFS mount and state parent. */
+    /** @brief XFS mount 与 state parent 的 filesystem metadata / Filesystem metadata for XFS mount
+     * and state parent. */
     struct statfs mount_filesystem {};
     struct statfs state_filesystem {};
     /** @brief XFS mount 的容量/只读标志 / Capacity and readonly flags for the XFS mount. */
     struct statvfs mount_capacity {};
-    /** @brief mount、mount parent 与 state parent 的 device metadata / Device metadata for mount, mount parent, and state parent. */
+    /** @brief mount、mount parent 与 state parent 的 device metadata / Device metadata for mount,
+     * mount parent, and state parent. */
     struct stat mount_metadata {};
     struct stat mount_parent_metadata {};
     struct stat state_metadata {};
@@ -404,12 +437,14 @@ private:
         stat(environment.xfs_mount.c_str(), &mount_metadata) != 0 ||
         stat(environment.xfs_mount.parent_path().c_str(), &mount_parent_metadata) != 0 ||
         stat(environment.state_parent.c_str(), &state_metadata) != 0) {
-        reason = "cannot inspect privileged E2E XFS mount/state parent: " + std::string(std::strerror(errno));
+        reason = "cannot inspect privileged E2E XFS mount/state parent: " +
+                 std::string(std::strerror(errno));
         return false;
     }
     if (mount_filesystem.f_type != XFS_SUPER_MAGIC || state_filesystem.f_type != XFS_SUPER_MAGIC ||
         (mount_capacity.f_flag & ST_RDONLY) != 0U) {
-        reason = "WSPCTL_PRIVILEGED_E2E_XFS_MOUNT and STATE_PARENT must be on a writable XFS filesystem";
+        reason =
+            "WSPCTL_PRIVILEGED_E2E_XFS_MOUNT and STATE_PARENT must be on a writable XFS filesystem";
         return false;
     }
     if (mount_metadata.st_dev == mount_parent_metadata.st_dev) {
@@ -417,8 +452,10 @@ private:
         return false;
     }
     if (mount_metadata.st_dev != state_metadata.st_dev ||
-        std::memcmp(&mount_filesystem.f_fsid, &state_filesystem.f_fsid, sizeof(mount_filesystem.f_fsid)) != 0) {
-        reason = "WSPCTL_PRIVILEGED_E2E_STATE_PARENT must share the XFS superblock/fsid of XFS_MOUNT";
+        std::memcmp(&mount_filesystem.f_fsid, &state_filesystem.f_fsid,
+                    sizeof(mount_filesystem.f_fsid)) != 0) {
+        reason =
+            "WSPCTL_PRIVILEGED_E2E_STATE_PARENT must share the XFS superblock/fsid of XFS_MOUNT";
         return false;
     }
     return true;
@@ -431,10 +468,8 @@ private:
  * @param missing 输出是否仅为缺失变量 / Whether the failure is only a missing variable.
  * @return 已解析值或空值 / Parsed value or no value.
  */
-[[nodiscard]] std::optional<std::uint32_t> environment_u32(
-    const std::string_view name,
-    std::string& reason,
-    bool& missing) {
+[[nodiscard]] std::optional<std::uint32_t> environment_u32(const std::string_view name,
+                                                           std::string& reason, bool& missing) {
     const std::optional<std::string> value = environment_text(name);
     if (!value.has_value()) {
         missing = true;
@@ -461,13 +496,14 @@ private:
  */
 [[nodiscard]] std::optional<E2eEnvironment> load_environment(std::string& reason, bool& missing) {
     /** @brief 所有必须存在的路径变量 / All required path variables. */
-    constexpr std::array<std::pair<std::string_view, std::string_view>, 6U> kPathVariables{{
+    constexpr std::array<std::pair<std::string_view, std::string_view>, 7U> kPathVariables{{
         {kXfsMountEnvironment, "WSPCTL privileged E2E XFS mount"},
         {kStateParentEnvironment, "WSPCTL privileged E2E state parent"},
         {kSocketParentEnvironment, "WSPCTL privileged E2E socket parent"},
         {kCgroupParentEnvironment, "WSPCTL privileged E2E cgroup parent"},
         {kImagesRootEnvironment, "WSPCTL privileged E2E images root"},
         {kBaseRootEnvironment, "WSPCTL privileged E2E base root"},
+        {kLxcfsRootEnvironment, "WSPCTL privileged E2E LXCFS root"},
     }};
     /** @brief canonical path slots in the same order / 同顺序的 canonical path 槽。 */
     std::array<std::filesystem::path, kPathVariables.size()> paths{};
@@ -513,13 +549,15 @@ private:
         .cgroup_parent = paths[3],
         .images_root = paths[4],
         .base_root = paths[5],
+        .lxcfs_root = paths[6],
         .project_id_min = *project_min,
         .project_id_max = *project_max,
     };
 }
 
 /**
- * @brief 验证 delegated cgroup parent 暴露必要控制文件 / Verify a delegated cgroup parent exposes required control files.
+ * @brief 验证 delegated cgroup parent 暴露必要控制文件 / Verify a delegated cgroup parent exposes
+ * required control files.
  * @param parent 已 canonical 的 cgroup parent / Canonical cgroup parent.
  * @return 可创建并委派 test child 时为真 / True when a test child can be created and delegated.
  */
@@ -530,8 +568,9 @@ private:
         return false;
     }
     /** @brief controller 文本 / Controller text. */
-    std::string controller_text((std::istreambuf_iterator<char>(controllers)), std::istreambuf_iterator<char>());
-    for (const std::string_view controller : {"cpu", "memory", "pids", "io"}) {
+    std::string controller_text((std::istreambuf_iterator<char>(controllers)),
+                                std::istreambuf_iterator<char>());
+    for (const std::string_view controller : {"cpuset", "cpu", "memory", "pids", "io"}) {
         if (controller_text.find(controller) == std::string::npos) {
             return false;
         }
@@ -540,6 +579,8 @@ private:
              "cgroup.procs",
              "cgroup.subtree_control",
              "cgroup.kill",
+             "cpuset.cpus",
+             "cpuset.mems",
              "memory.high",
              "memory.swap.max",
              "memory.oom.group",
@@ -557,17 +598,17 @@ private:
  * @param parent 已验证、不可删除的 parent / Verified parent that must never be deleted.
  * @param prefix self-created child 的固定前缀 / Fixed prefix for the self-created child.
  * @param mode 创建后显式收紧/开放的 mode / Mode explicitly applied after creation.
- * @param apply_mode 是否在创建后调用 chmod；cgroupfs child 不应 chmod / Whether to call chmod after creation; a cgroupfs child must not be chmod'ed.
+ * @param apply_mode 是否在创建后调用 chmod；cgroupfs child 不应 chmod / Whether to call chmod after
+ * creation; a cgroupfs child must not be chmod'ed.
  * @param reason 输出失败原因 / Output failure reason.
- * @return canonical self-created child 与其 inode identity，或空值 / Canonical self-created child and its inode identity, or no value.
+ * @return canonical self-created child 与其 inode identity，或空值 / Canonical self-created child
+ * and its inode identity, or no value.
  */
-[[nodiscard]] std::optional<CreatedTestDirectory> create_test_directory(
-    const std::filesystem::path& parent,
-    const std::string_view prefix,
-    const mode_t mode,
-    const bool apply_mode,
-    std::string& reason) {
-    /** @brief mkdtemp 消费的 NUL-terminated template / NUL-terminated template consumed by mkdtemp. */
+[[nodiscard]] std::optional<CreatedTestDirectory>
+create_test_directory(const std::filesystem::path& parent, const std::string_view prefix,
+                      const mode_t mode, const bool apply_mode, std::string& reason) {
+    /** @brief mkdtemp 消费的 NUL-terminated template / NUL-terminated template consumed by mkdtemp.
+     */
     std::string template_path = (parent / (std::string(prefix) + "XXXXXX")).string();
     template_path.push_back('\0');
     /** @brief mkdtemp 返回的已创建目录 / Directory created by mkdtemp. */
@@ -587,8 +628,10 @@ private:
     const std::filesystem::path canonical = std::filesystem::canonical(created_path, error);
     /** @brief canonical child metadata / 已规范化 child 元数据。 */
     struct stat metadata {};
-    if (error || canonical.parent_path() != parent || !canonical.filename().string().starts_with(prefix) ||
-        lstat(canonical.c_str(), &metadata) != 0 || !S_ISDIR(metadata.st_mode) || metadata.st_uid != 0U) {
+    if (error || canonical.parent_path() != parent ||
+        !canonical.filename().string().starts_with(prefix) ||
+        lstat(canonical.c_str(), &metadata) != 0 || !S_ISDIR(metadata.st_mode) ||
+        metadata.st_uid != 0U) {
         reason = "mkdtemp did not create the expected self-owned child";
         static_cast<void>(rmdir(created_path.c_str()));
         return std::nullopt;
@@ -600,8 +643,10 @@ private:
 }
 
 /**
- * @brief 在 self-created socket root 中建立一个固定权限的 endpoint 子目录 / Create a fixed-mode endpoint child beneath a self-created socket root.
- * @param parent 本测试创建、root-owned 且不可被他人写的 socket root / Test-created root-owned socket root not writable by others.
+ * @brief 在 self-created socket root 中建立一个固定权限的 endpoint 子目录 / Create a fixed-mode
+ * endpoint child beneath a self-created socket root.
+ * @param parent 本测试创建、root-owned 且不可被他人写的 socket root / Test-created root-owned
+ * socket root not writable by others.
  * @param leaf 固定单分量 endpoint 目录名 / Fixed single-component endpoint-directory name.
  * @param mode endpoint 目录期望的 POSIX mode / Required POSIX mode of the endpoint directory.
  * @param reason 失败时的可操作诊断 / Actionable diagnostic on failure.
@@ -609,13 +654,12 @@ private:
  * @note 这不是 production directory factory；它只服务于本测试已经控制的 parent，目的是让真实
  *       broker 经过与部署相同的 Bot/operator sibling-directory preflight。/ This is not a
  *       production directory factory. It only serves a parent already controlled by this test,
- *       so the real broker traverses the same Bot/operator sibling-directory preflight as deployment.
+ *       so the real broker traverses the same Bot/operator sibling-directory preflight as
+ * deployment.
  */
-[[nodiscard]] std::optional<std::filesystem::path> create_endpoint_directory(
-    const std::filesystem::path& parent,
-    const std::string_view leaf,
-    const mode_t mode,
-    std::string& reason) {
+[[nodiscard]] std::optional<std::filesystem::path>
+create_endpoint_directory(const std::filesystem::path& parent, const std::string_view leaf,
+                          const mode_t mode, std::string& reason) {
     if (leaf.empty() || leaf == "." || leaf == ".." || leaf.find('/') != std::string_view::npos ||
         leaf.find('\0') != std::string_view::npos) {
         reason = "test endpoint directory leaf is not a safe single path component";
@@ -632,8 +676,8 @@ private:
         return std::nullopt;
     }
     struct stat metadata {};
-    if (lstat(child.c_str(), &metadata) != 0 || !S_ISDIR(metadata.st_mode) || metadata.st_uid != 0U ||
-        (metadata.st_mode & 0777U) != mode) {
+    if (lstat(child.c_str(), &metadata) != 0 || !S_ISDIR(metadata.st_mode) ||
+        metadata.st_uid != 0U || (metadata.st_mode & 0777U) != mode) {
         reason = "test endpoint directory does not have the requested root-owned mode";
         static_cast<void>(rmdir(child.c_str()));
         return std::nullopt;
@@ -642,7 +686,8 @@ private:
 }
 
 /**
- * @brief 仅删除严格匹配 self-created contract 的普通目录树 / Remove only a directory tree matching the self-created contract.
+ * @brief 仅删除严格匹配 self-created contract 的普通目录树 / Remove only a directory tree matching
+ * the self-created contract.
  * @param parent operator 给定且绝不删除的 parent / Operator-provided parent that is never deleted.
  * @param child 测试创建的精确 child / Exact child created by this test.
  * @param prefix 测试 child 的固定前缀 / Fixed prefix for the test child.
@@ -650,16 +695,16 @@ private:
  * @param report 是否输出 cleanup 诊断 / Whether to report cleanup diagnostics.
  * @return 删除成功时为真 / True when deletion succeeds.
  */
-[[nodiscard]] bool remove_test_directory(
-    const std::filesystem::path& parent,
-    const std::filesystem::path& child,
-    const std::string_view prefix,
-    const std::optional<TestDirectoryIdentity>& identity,
-    const bool report) {
+[[nodiscard]] bool remove_test_directory(const std::filesystem::path& parent,
+                                         const std::filesystem::path& child,
+                                         const std::string_view prefix,
+                                         const std::optional<TestDirectoryIdentity>& identity,
+                                         const bool report) {
     if (child.empty()) {
         return true;
     }
-    if (!identity.has_value() || child.parent_path() != parent || !child.filename().string().starts_with(prefix)) {
+    if (!identity.has_value() || child.parent_path() != parent ||
+        !child.filename().string().starts_with(prefix)) {
         if (report) {
             std::cerr << "FAIL: refusing to delete a non-test directory\n";
         }
@@ -676,8 +721,8 @@ private:
         }
         return false;
     }
-    if (!S_ISDIR(metadata.st_mode) || metadata.st_uid != 0U || metadata.st_dev != identity->device ||
-        metadata.st_ino != identity->inode) {
+    if (!S_ISDIR(metadata.st_mode) || metadata.st_uid != 0U ||
+        metadata.st_dev != identity->device || metadata.st_ino != identity->inode) {
         if (report) {
             std::cerr << "FAIL: refusing to delete a changed self-created test directory\n";
         }
@@ -717,7 +762,8 @@ private:
 }
 
 /**
- * @brief 把已停止 runtime 的 upper 改写成旧 nobody ownership / Rewrite a stopped runtime upper to legacy nobody ownership.
+ * @brief 把已停止 runtime 的 upper 改写成旧 nobody ownership / Rewrite a stopped runtime upper to
+ * legacy nobody ownership.
  * @param fixture E2E fixture / E2E fixture.
  * @return 完整改写时为真 / True when the complete rewrite succeeds.
  * @note 该步骤只在测试自建、已卸载且 cgroup 为空的 state tree 中模拟 v2 升级输入。/
@@ -733,13 +779,10 @@ private:
         std::cerr << "FAIL: cannot find persistent upper for legacy-owner simulation\n";
         return false;
     }
-    for (std::filesystem::recursive_directory_iterator iterator(
-             upper,
-             std::filesystem::directory_options::skip_permission_denied,
-             error),
+    for (std::filesystem::recursive_directory_iterator
+             iterator(upper, std::filesystem::directory_options::skip_permission_denied, error),
          end;
-         iterator != end;
-         iterator.increment(error)) {
+         iterator != end; iterator.increment(error)) {
         if (error) {
             std::cerr << "FAIL: cannot traverse upper for legacy-owner simulation\n";
             return false;
@@ -749,8 +792,7 @@ private:
             return false;
         }
     }
-    if (error || lchown(upper.c_str(), 65'534U, 65'534U) != 0 ||
-        chmod(upper.c_str(), 0700) != 0) {
+    if (error || lchown(upper.c_str(), 65'534U, 65'534U) != 0 || chmod(upper.c_str(), 0700) != 0) {
         std::cerr << "FAIL: cannot commit legacy-owner simulation\n";
         return false;
     }
@@ -758,9 +800,11 @@ private:
 }
 
 /**
- * @brief 验证重启时 legacy upper 已迁移到 Agent / Verify restart migrated a legacy upper to the Agent.
+ * @brief 验证重启时 legacy upper 已迁移到 Agent / Verify restart migrated a legacy upper to the
+ * Agent.
  * @param fixture E2E fixture / E2E fixture.
- * @return 根与持久文件 ownership 正确时为真 / True when root and persisted-file ownership are correct.
+ * @return 根与持久文件 ownership 正确时为真 / True when root and persisted-file ownership are
+ * correct.
  */
 [[nodiscard]] bool verify_agent_workspace_ownership(const E2eFixture& fixture) {
     /** @brief persistent upper root / Persistent upper root. */
@@ -773,9 +817,8 @@ private:
     /** @brief persisted-file metadata / Persisted-file metadata. */
     struct stat persisted_metadata {};
     if (lstat(upper.c_str(), &upper_metadata) != 0 ||
-        lstat(persisted.c_str(), &persisted_metadata) != 0 ||
-        upper_metadata.st_uid != kAgentUid || upper_metadata.st_gid != kAgentGid ||
-        (upper_metadata.st_mode & 0777U) != 0700U ||
+        lstat(persisted.c_str(), &persisted_metadata) != 0 || upper_metadata.st_uid != kAgentUid ||
+        upper_metadata.st_gid != kAgentGid || (upper_metadata.st_mode & 0777U) != 0700U ||
         persisted_metadata.st_uid != kAgentUid || persisted_metadata.st_gid != kAgentGid) {
         std::cerr << "FAIL: legacy upper was not migrated to the named Agent\n";
         return false;
@@ -820,14 +863,14 @@ private:
 }
 
 /**
- * @brief 等待 self-created cgroup subtree 没有进程 / Wait until the self-created cgroup subtree has no processes.
+ * @brief 等待 self-created cgroup subtree 没有进程 / Wait until the self-created cgroup subtree has
+ * no processes.
  * @param cgroup_root self-created cgroup root / Self-created cgroup root.
  * @param deadline 最大等待时长 / Maximum wait duration.
  * @return cgroup 已空时为真 / True when the cgroup becomes empty.
  */
-[[nodiscard]] bool wait_for_empty_cgroup(
-    const std::filesystem::path& cgroup_root,
-    const std::chrono::steady_clock::duration deadline) {
+[[nodiscard]] bool wait_for_empty_cgroup(const std::filesystem::path& cgroup_root,
+                                         const std::chrono::steady_clock::duration deadline) {
     if (cgroup_root.empty()) {
         return true;
     }
@@ -884,20 +927,26 @@ private:
 
 /**
  * @brief 移除本测试精确创建的 cgroup 层级 / Remove the exact cgroup hierarchy created by this test.
- * @param fixture 含 self-created cgroup root 的 fixture / Fixture containing the self-created cgroup root.
+ * @param fixture 含 self-created cgroup root 的 fixture / Fixture containing the self-created
+ * cgroup root.
  * @param report 是否输出诊断 / Whether to output diagnostics.
- * @return 所有已知 test cgroup 目录均已移除时为真 / True when every known test cgroup directory is removed.
+ * @return 所有已知 test cgroup 目录均已移除时为真 / True when every known test cgroup directory is
+ * removed.
  * @note 此函数只尝试固定的 broker-owned names；遇到未知 child 时会失败而不是递归删除。
- *       This function only attempts fixed broker-owned names; an unknown child causes failure rather than recursive deletion.
+ *       This function only attempts fixed broker-owned names; an unknown child causes failure
+ * rather than recursive deletion.
  */
 [[nodiscard]] bool remove_test_cgroup_hierarchy(const E2eFixture& fixture, const bool report) {
     if (fixture.cgroup_root.empty()) {
         return true;
     }
-    /** @brief 先确认 cgroup root 仍是 mkdtemp 创建的那个 inode / Verify the cgroup root is still the mkdtemp-created inode before any rmdir. */
+    /** @brief 先确认 cgroup root 仍是 mkdtemp 创建的那个 inode / Verify the cgroup root is still
+     * the mkdtemp-created inode before any rmdir. */
     struct stat root_metadata {};
-    if (!fixture.cgroup_root_identity.has_value() || lstat(fixture.cgroup_root.c_str(), &root_metadata) != 0 ||
-        !S_ISDIR(root_metadata.st_mode) || root_metadata.st_dev != fixture.cgroup_root_identity->device ||
+    if (!fixture.cgroup_root_identity.has_value() ||
+        lstat(fixture.cgroup_root.c_str(), &root_metadata) != 0 ||
+        !S_ISDIR(root_metadata.st_mode) ||
+        root_metadata.st_dev != fixture.cgroup_root_identity->device ||
         root_metadata.st_ino != fixture.cgroup_root_identity->inode) {
         if (report) {
             std::cerr << "FAIL: refusing to remove a replaced or non-test cgroup root\n";
@@ -908,7 +957,8 @@ private:
     const std::string runtime_hash = sha256_hex(kRuntimeKey);
     /** @brief runtime cgroup directory / Runtime cgroup directory. */
     const std::filesystem::path runtime = fixture.cgroup_root / "wspctl" / runtime_hash;
-    /** @brief 仅允许删除的自创建 cgroup 目录，按 leaf-to-root 排序 / Only self-created cgroup directories permitted for deletion, leaf-to-root. */
+    /** @brief 仅允许删除的自创建 cgroup 目录，按 leaf-to-root 排序 / Only self-created cgroup
+     * directories permitted for deletion, leaf-to-root. */
     const std::array<std::filesystem::path, 6U> directories{{
         runtime / "task",
         runtime / "supervisor",
@@ -944,29 +994,24 @@ private:
     if (!wait_for_empty_cgroup(fixture.cgroup_root, kCgroupDrainDeadline)) {
         success = false;
         if (report) {
-            std::cerr << "FAIL: self-created cgroup subtree remained populated after broker shutdown\n";
+            std::cerr
+                << "FAIL: self-created cgroup subtree remained populated after broker shutdown\n";
         }
     }
     success = remove_test_cgroup_hierarchy(fixture, report) && success;
-    success = remove_test_directory(
-                  fixture.environment.socket_parent,
-                  fixture.socket_directory,
-                  "wspctl-e2e-socket-",
-                  fixture.socket_directory_identity,
-                  report) &&
-              success;
-    success = remove_test_directory(
-                  fixture.environment.state_parent,
-                  fixture.state_root,
-                  "wspctl-e2e-state-",
-                  fixture.state_root_identity,
-                  report) &&
+    success =
+        remove_test_directory(fixture.environment.socket_parent, fixture.socket_directory,
+                              "wspctl-e2e-socket-", fixture.socket_directory_identity, report) &&
+        success;
+    success = remove_test_directory(fixture.environment.state_parent, fixture.state_root,
+                                    "wspctl-e2e-state-", fixture.state_root_identity, report) &&
               success;
     return success;
 }
 
 /**
- * @brief 异常路径下仍清理 self-created fixture 的 RAII guard / RAII guard cleaning self-created fixture paths on exceptional paths.
+ * @brief 异常路径下仍清理 self-created fixture 的 RAII guard / RAII guard cleaning self-created
+ * fixture paths on exceptional paths.
  */
 class FixtureCleanupGuard final {
 public:
@@ -993,7 +1038,8 @@ public:
         return cleanup_fixture(fixture_, true);
     }
 
-    /** @brief 析构时尽力清理，不覆盖原始失败 / Best-effort cleanup on destruction without masking original failure. */
+    /** @brief 析构时尽力清理，不覆盖原始失败 / Best-effort cleanup on destruction without masking
+     * original failure. */
     ~FixtureCleanupGuard() {
         if (active_) {
             static_cast<void>(cleanup_fixture(fixture_, false));
@@ -1016,30 +1062,27 @@ private:
  *       the unit and runtime capability contracts.
  */
 [[nodiscard]] bool install_service_equivalent_capabilities() {
-    /** @brief production service unit 授予 broker 的精确集合 / Exact set granted by the production service unit. */
+    /** @brief production service unit 授予 broker 的精确集合 / Exact set granted by the production
+     * service unit. */
     constexpr std::array<cap_value_t, 10U> kServiceCapabilities{
-        CAP_SYS_ADMIN,
-        CAP_SYS_CHROOT,
-        CAP_SETUID,
-        CAP_SETGID,
-        CAP_SETPCAP,
-        CAP_CHOWN,
-        CAP_DAC_OVERRIDE,
-        CAP_FOWNER,
-        CAP_KILL,
-        CAP_MKNOD,
+        CAP_SYS_ADMIN, CAP_SYS_CHROOT,   CAP_SETUID, CAP_SETGID, CAP_SETPCAP,
+        CAP_CHOWN,     CAP_DAC_OVERRIDE, CAP_FOWNER, CAP_KILL,   CAP_MKNOD,
     };
-    /** @brief 判断 capability 是否属于 production 集 / Check whether a capability belongs to the production set. */
+    /** @brief 判断 capability 是否属于 production 集 / Check whether a capability belongs to the
+     * production set. */
     const auto retained = [&](const int capability) noexcept {
         return std::ranges::find(kServiceCapabilities, capability) != kServiceCapabilities.end();
     };
-    /** @brief 防止异常 kernel ABI 导致无界 capability 探测 / Guard against an anomalous unbounded capability ABI. */
+    /** @brief 防止异常 kernel ABI 导致无界 capability 探测 / Guard against an anomalous unbounded
+     * capability ABI. */
     constexpr int kCapabilityProbeLimit = 1024;
-    /** @brief 是否找到运行中内核的 capability 上界 / Whether the running-kernel capability boundary was found. */
+    /** @brief 是否找到运行中内核的 capability 上界 / Whether the running-kernel capability boundary
+     * was found. */
     bool found_kernel_boundary = false;
     for (int capability = 0; capability < kCapabilityProbeLimit; ++capability) {
         errno = 0;
-        /** @brief capability 是否在 child bounding set 中 / Whether the capability is in the child bounding set. */
+        /** @brief capability 是否在 child bounding set 中 / Whether the capability is in the child
+         * bounding set. */
         const int present = prctl(PR_CAPBSET_READ, capability, 0, 0, 0);
         if (present < 0) {
             if (errno == EINVAL) {
@@ -1056,25 +1099,20 @@ private:
     if (!found_kernel_boundary) {
         return false;
     }
-    /** @brief 待安装的 production permitted/effective sets / Production permitted/effective sets to install. */
+    /** @brief 待安装的 production permitted/effective sets / Production permitted/effective sets to
+     * install. */
     cap_t capabilities = cap_init();
     if (capabilities == nullptr) {
         return false;
     }
     /** @brief permitted-set 配置结果 / Permitted-set configuration result. */
-    const int permitted = cap_set_flag(
-        capabilities,
-        CAP_PERMITTED,
-        static_cast<int>(kServiceCapabilities.size()),
-        kServiceCapabilities.data(),
-        CAP_SET);
+    const int permitted =
+        cap_set_flag(capabilities, CAP_PERMITTED, static_cast<int>(kServiceCapabilities.size()),
+                     kServiceCapabilities.data(), CAP_SET);
     /** @brief effective-set 配置结果 / Effective-set configuration result. */
-    const int effective = cap_set_flag(
-        capabilities,
-        CAP_EFFECTIVE,
-        static_cast<int>(kServiceCapabilities.size()),
-        kServiceCapabilities.data(),
-        CAP_SET);
+    const int effective =
+        cap_set_flag(capabilities, CAP_EFFECTIVE, static_cast<int>(kServiceCapabilities.size()),
+                     kServiceCapabilities.data(), CAP_SET);
     /** @brief capability application 结果 / Capability application result. */
     const int applied = permitted == 0 && effective == 0 ? cap_set_proc(capabilities) : -1;
     cap_free(capabilities);
@@ -1083,51 +1121,85 @@ private:
 
 /**
  * @brief fork/exec 一个真实 wspctld 进程 / Fork and exec one real wspctld process.
- * @param fixture 包含实际 state/cgroup 路径的 fixture / Fixture holding actual state and cgroup paths.
+ * @param fixture 包含实际 state/cgroup 路径的 fixture / Fixture holding actual state and cgroup
+ * paths.
  * @param launch broker executable 与 socket 描述 / Broker executable and socket description.
  * @return 成功 fork 时为真 / True when fork succeeds.
  */
 [[nodiscard]] bool launch_broker(E2eFixture& fixture, const BrokerLaunch& launch) {
-    const auto image = wspctl::validate_image_root(
-        fixture.environment.base_root, fixture.environment.images_root);
+    const auto image =
+        wspctl::validate_image_root(fixture.environment.base_root, fixture.environment.images_root);
     if (!image) {
-        std::cerr << "FAIL: cannot derive broker OCI identity: "
-                  << image.error().message << '\n';
+        std::cerr << "FAIL: cannot derive broker OCI identity: " << image.error().message << '\n';
         return false;
     }
     /** @brief 传给 broker 的完整 argv 文本 / Complete argv text passed to broker. */
     std::vector<std::string> arguments{
         launch.executable.string(),
-        "--socket", launch.bot_socket_path.string(),
-        "--operator-socket", launch.operator_socket_path.string(),
-        "--state-root", fixture.state_root.string(),
-        "--image-store", fixture.environment.images_root.string(),
-        "--image-digest", image->source_oci_manifest_digest,
-        "--client-uid", std::to_string(kClientUid),
-        "--operator-uid", "0",
-        "--cgroup-root", fixture.cgroup_root.string(),
-        "--sandbox-uid", std::to_string(kAgentUid),
-        "--sandbox-gid", std::to_string(kAgentGid),
-        "--memory-max", "268435456",
-        "--memory-high", "134217728",
-        "--memory-swap-max", "0",
-        "--cpu-max-us", "50000",
-        "--cpu-period-us", "100000",
-        "--pids-max", "64",
-        "--io-weight", "100",
-        "--idle-minutes", "1",
-        "--quota-backend", "xfs_project_v1",
-        "--xfs-quota-mount", fixture.environment.xfs_mount.string(),
-        "--xfs-project-id-min", std::to_string(fixture.environment.project_id_min),
-        "--xfs-project-id-max", std::to_string(fixture.environment.project_id_max),
-        "--runtime-control-hard-bytes", std::to_string(kControlHardBytes),
-        "--runtime-control-hard-inodes", std::to_string(kControlHardInodes),
-        "--runtime-workspace-hard-bytes", std::to_string(kWorkspaceHardBytes),
-        "--runtime-workspace-hard-inodes", std::to_string(kWorkspaceHardInodes),
-        "--xfs-global-admission-bytes", std::to_string(kControlHardBytes + kWorkspaceHardBytes),
-        "--xfs-global-admission-inodes", std::to_string(kControlHardInodes + kWorkspaceHardInodes),
-        "--xfs-system-reserve-bytes", std::to_string(kSystemReserveBytes),
-        "--xfs-system-reserve-inodes", std::to_string(kSystemReserveInodes),
+        "--socket",
+        launch.bot_socket_path.string(),
+        "--operator-socket",
+        launch.operator_socket_path.string(),
+        "--state-root",
+        fixture.state_root.string(),
+        "--image-store",
+        fixture.environment.images_root.string(),
+        "--image-digest",
+        image->source_oci_manifest_digest,
+        "--client-uid",
+        std::to_string(kClientUid),
+        "--operator-uid",
+        "0",
+        "--cgroup-root",
+        fixture.cgroup_root.string(),
+        "--lxcfs-root",
+        fixture.environment.lxcfs_root.string(),
+        "--sandbox-uid",
+        std::to_string(kAgentUid),
+        "--sandbox-gid",
+        std::to_string(kAgentGid),
+        "--memory-max",
+        "268435456",
+        "--memory-high",
+        "134217728",
+        "--memory-swap-max",
+        "0",
+        "--tmp-size-bytes",
+        "67108864",
+        "--cpu-max-us",
+        "50000",
+        "--cpu-period-us",
+        "100000",
+        "--pids-max",
+        "64",
+        "--io-weight",
+        "100",
+        "--idle-minutes",
+        "1",
+        "--quota-backend",
+        "xfs_project_v1",
+        "--xfs-quota-mount",
+        fixture.environment.xfs_mount.string(),
+        "--xfs-project-id-min",
+        std::to_string(fixture.environment.project_id_min),
+        "--xfs-project-id-max",
+        std::to_string(fixture.environment.project_id_max),
+        "--runtime-control-hard-bytes",
+        std::to_string(kControlHardBytes),
+        "--runtime-control-hard-inodes",
+        std::to_string(kControlHardInodes),
+        "--runtime-workspace-hard-bytes",
+        std::to_string(kWorkspaceHardBytes),
+        "--runtime-workspace-hard-inodes",
+        std::to_string(kWorkspaceHardInodes),
+        "--xfs-global-admission-bytes",
+        std::to_string(kControlHardBytes + kWorkspaceHardBytes),
+        "--xfs-global-admission-inodes",
+        std::to_string(kControlHardInodes + kWorkspaceHardInodes),
+        "--xfs-system-reserve-bytes",
+        std::to_string(kSystemReserveBytes),
+        "--xfs-system-reserve-inodes",
+        std::to_string(kSystemReserveInodes),
     };
     /** @brief execv 所需的可变 argv 指针 / Mutable argv pointers required by execv. */
     std::vector<char*> argv;
@@ -1157,16 +1229,18 @@ private:
 }
 
 /**
- * @brief 等待 broker 绑定并保护其两个 Unix socket / Wait for broker binding and protecting both Unix sockets.
+ * @brief 等待 broker 绑定并保护其两个 Unix socket / Wait for broker binding and protecting both
+ * Unix sockets.
  * @param fixture 包含 broker PID 的 fixture / Fixture containing the broker PID.
  * @param bot_socket_path 期待出现的 Bot socket / Expected Bot socket path.
- * @param operator_socket_path 期待出现的 root-owned operator socket / Expected root-owned operator socket path.
- * @return 两 socket 均以预期 owner/mode 就绪时为真 / True when both sockets are ready with expected owner/mode.
+ * @param operator_socket_path 期待出现的 root-owned operator socket / Expected root-owned operator
+ * socket path.
+ * @return 两 socket 均以预期 owner/mode 就绪时为真 / True when both sockets are ready with expected
+ * owner/mode.
  */
-[[nodiscard]] bool wait_for_broker_sockets(
-    E2eFixture& fixture,
-    const std::filesystem::path& bot_socket_path,
-    const std::filesystem::path& operator_socket_path) {
+[[nodiscard]] bool wait_for_broker_sockets(E2eFixture& fixture,
+                                           const std::filesystem::path& bot_socket_path,
+                                           const std::filesystem::path& operator_socket_path) {
     /** @brief 启动等待绝对截止 / Absolute startup deadline. */
     const auto deadline = std::chrono::steady_clock::now() + kBrokerStartDeadline;
     do {
@@ -1176,8 +1250,9 @@ private:
         struct stat operator_metadata {};
         if (lstat(bot_socket_path.c_str(), &bot_metadata) == 0 && S_ISSOCK(bot_metadata.st_mode) &&
             bot_metadata.st_uid == kClientUid && (bot_metadata.st_mode & 0777) == 0600 &&
-            lstat(operator_socket_path.c_str(), &operator_metadata) == 0 && S_ISSOCK(operator_metadata.st_mode) &&
-            operator_metadata.st_uid == 0U && (operator_metadata.st_mode & 0777) == 0600) {
+            lstat(operator_socket_path.c_str(), &operator_metadata) == 0 &&
+            S_ISSOCK(operator_metadata.st_mode) && operator_metadata.st_uid == 0U &&
+            (operator_metadata.st_mode & 0777) == 0600) {
             return true;
         }
         /** @brief broker 的非阻塞 wait 状态 / Nonblocking wait state for broker. */
@@ -1185,7 +1260,8 @@ private:
         const pid_t waited = waitpid(fixture.broker_pid, &status, WNOHANG);
         if (waited == fixture.broker_pid) {
             fixture.broker_pid = -1;
-            std::cerr << "FAIL: wspctld exited before binding its socket, status=" << status << '\n';
+            std::cerr << "FAIL: wspctld exited before binding its socket, status=" << status
+                      << '\n';
             return false;
         }
         if (waited < 0 && errno != EINTR) {
@@ -1232,11 +1308,9 @@ private:
  * @param timeout 墙钟超时 / Wall-clock timeout.
  * @return 已填充的 gateway DTO / Filled gateway DTO.
  */
-[[nodiscard]] wspctl::presentation::ClientExecuteRequest make_execute_request(
-    const std::string_view activation,
-    const std::string_view request_id,
-    std::string script,
-    const std::chrono::milliseconds timeout) {
+[[nodiscard]] wspctl::presentation::ClientExecuteRequest
+make_execute_request(const std::string_view activation, const std::string_view request_id,
+                     std::string script, const std::chrono::milliseconds timeout) {
     return wspctl::presentation::ClientExecuteRequest{
         .runtime_key = std::string(kRuntimeKey),
         .activation_id = std::string(activation),
@@ -1258,11 +1332,13 @@ private:
 [[nodiscard]] std::optional<pid_t> parse_orphan_pid(const std::string_view output) {
     /** @brief 首行结尾位置 / End position of the first line. */
     const std::size_t end = output.find('\n');
-    const std::string_view line = output.substr(0U, end == std::string_view::npos ? output.size() : end);
+    const std::string_view line =
+        output.substr(0U, end == std::string_view::npos ? output.size() : end);
     /** @brief 临时 64-bit PID / Temporary 64-bit PID. */
     std::uint64_t parsed{};
     /** @brief `from_chars` 结果 / `from_chars` result. */
-    const auto [parsed_end, error] = std::from_chars(line.data(), line.data() + line.size(), parsed);
+    const auto [parsed_end, error] =
+        std::from_chars(line.data(), line.data() + line.size(), parsed);
     if (error != std::errc{} || parsed_end != line.data() + line.size() || parsed == 0U ||
         parsed > static_cast<std::uint64_t>(std::numeric_limits<pid_t>::max())) {
         return std::nullopt;
@@ -1277,22 +1353,24 @@ private:
  * @param operation 诊断操作名 / Diagnostic operation name.
  * @return 所有断言满足时为真 / True when all assertions hold.
  */
-[[nodiscard]] bool expect_successful_result(
-    const wspctl::presentation::ClientExecutionResult& result,
-    const std::string_view marker,
-    const std::string_view operation) {
-    if (result.timed_out || result.replayed || !result.exit_code.has_value() || *result.exit_code != 0 ||
-        result.stdout_data.find(marker) == std::string::npos) {
-        std::cerr << "FAIL: " << operation << " did not return the expected successful task result\n";
+[[nodiscard]] bool
+expect_successful_result(const wspctl::presentation::ClientExecutionResult& result,
+                         const std::string_view marker, const std::string_view operation) {
+    if (result.timed_out || result.replayed || !result.exit_code.has_value() ||
+        *result.exit_code != 0 || result.stdout_data.find(marker) == std::string::npos) {
+        std::cerr << "FAIL: " << operation
+                  << " did not return the expected successful task result\n";
         return false;
     }
     return true;
 }
 
 /**
- * @brief 验收 operator status 不会为缺失 runtime 激活 RuntimeProcess / Accept that operator status does not activate a missing runtime.
+ * @brief 验收 operator status 不会为缺失 runtime 激活 RuntimeProcess / Accept that operator status
+ * does not activate a missing runtime.
  * @param operator_socket root-only operator endpoint / Root-only operator endpoint.
- * @return 返回 absent/inactive/no-quota 读模型时为真 / True when the result is absent, inactive, and quota-free.
+ * @return 返回 absent/inactive/no-quota 读模型时为真 / True when the result is absent, inactive,
+ * and quota-free.
  */
 [[nodiscard]] bool run_operator_absent_read_phase(const std::filesystem::path& operator_socket) {
     const auto runtime = wspctl::domain::RuntimeId::parse(std::string(kRuntimeKey));
@@ -1303,12 +1381,15 @@ private:
     const wspctl::presentation::OperatorGatewayClient client(operator_socket.string());
     const auto status = client.status(*runtime);
     if (!status) {
-        std::cerr << "FAIL: root operator status before activation: " << status.error().message << '\n';
+        std::cerr << "FAIL: root operator status before activation: " << status.error().message
+                  << '\n';
         return false;
     }
     if (status->persistence() != wspctl::domain::WorkspacePersistence::absent ||
-        status->activity() != wspctl::domain::WorkspaceActivity::inactive || status->quota().has_value()) {
-        std::cerr << "FAIL: operator status unexpectedly activated or materialized a missing runtime\n";
+        status->activity() != wspctl::domain::WorkspaceActivity::inactive ||
+        status->quota().has_value()) {
+        std::cerr
+            << "FAIL: operator status unexpectedly activated or materialized a missing runtime\n";
         return false;
     }
     const auto root = wspctl::domain::OperatorWorkspacePath::parse("/workspace");
@@ -1325,9 +1406,11 @@ private:
 }
 
 /**
- * @brief 验收 operator 能只读查看已持久化的 upper layer / Accept that the operator can read a persisted upper layer.
+ * @brief 验收 operator 能只读查看已持久化的 upper layer / Accept that the operator can read a
+ * persisted upper layer.
  * @param operator_socket root-only operator endpoint / Root-only operator endpoint.
- * @return status/list 都符合只读 workspace 合同则为真 / True when both status and list satisfy the readonly workspace contract.
+ * @return status/list 都符合只读 workspace 合同则为真 / True when both status and list satisfy the
+ * readonly workspace contract.
  */
 [[nodiscard]] bool run_operator_ready_read_phase(const std::filesystem::path& operator_socket) {
     const auto runtime = wspctl::domain::RuntimeId::parse(std::string(kRuntimeKey));
@@ -1341,7 +1424,8 @@ private:
     if (!status || status->persistence() != wspctl::domain::WorkspacePersistence::ready ||
         !status->quota().has_value()) {
         if (!status) {
-            std::cerr << "FAIL: root operator status after persistence: " << status.error().message << '\n';
+            std::cerr << "FAIL: root operator status after persistence: " << status.error().message
+                      << '\n';
         } else {
             std::cerr << "FAIL: operator status omitted ready workspace quota\n";
         }
@@ -1352,10 +1436,11 @@ private:
         std::cerr << "FAIL: root operator workspace listing: " << listing.error().message << '\n';
         return false;
     }
-    const bool contains_persisted_file = std::any_of(
-        listing->entries.begin(),
-        listing->entries.end(),
-        [](const wspctl::domain::WorkspaceEntry& entry) { return entry.encoded_name() == "e2e-persist.txt"; });
+    const bool contains_persisted_file =
+        std::any_of(listing->entries.begin(), listing->entries.end(),
+                    [](const wspctl::domain::WorkspaceEntry& entry) {
+                        return entry.encoded_name() == "e2e-persist.txt";
+                    });
     if (!contains_persisted_file) {
         std::cerr << "FAIL: operator upper-layer listing omitted persisted workspace file\n";
         return false;
@@ -1364,14 +1449,15 @@ private:
 }
 
 /**
- * @brief 验收 Bot UID 不能访问 root-only operator endpoint / Accept that the Bot UID cannot access the root-only operator endpoint.
+ * @brief 验收 Bot UID 不能访问 root-only operator endpoint / Accept that the Bot UID cannot access
+ * the root-only operator endpoint.
  * @param fixture 未使用的 fixture / Unused fixture.
  * @param operator_socket root-only operator endpoint / Root-only operator endpoint.
- * @return 降权后的连接无法读取 status 时为真 / True when the identity-dropped client cannot read status.
+ * @return 降权后的连接无法读取 status 时为真 / True when the identity-dropped client cannot read
+ * status.
  */
-[[nodiscard]] bool run_operator_denial_phase(
-    const E2eFixture& fixture,
-    const std::filesystem::path& operator_socket) {
+[[nodiscard]] bool run_operator_denial_phase(const E2eFixture& fixture,
+                                             const std::filesystem::path& operator_socket) {
     static_cast<void>(fixture);
     if (!drop_to_client_identity()) {
         return false;
@@ -1391,16 +1477,62 @@ private:
 }
 
 /**
- * @brief 运行首个 broker 的 gateway 验收序列 / Run the native-gateway acceptance sequence against the first broker.
+ * @brief 读取 host 进程的 namespace identity link / Read a host process namespace identity link.
+ * @param process_id host 进程 PID / Host process PID.
+ * @param namespace_name ``/proc/PID/ns`` 下的 namespace 名 / Namespace name below ``/proc/PID/ns``.
+ * @return ``net:[inode]`` 形式的 identity，失败时为空 / An identity such as ``net:[inode]``, or
+ * empty on failure.
+ */
+[[nodiscard]] std::optional<std::string>
+read_namespace_identity(const pid_t process_id, const std::string_view namespace_name) {
+    /** @brief 待读取的 procfs namespace link / Procfs namespace link to read. */
+    const std::filesystem::path link = std::filesystem::path("/proc") / std::to_string(process_id) /
+                                       "ns" / std::string(namespace_name);
+    /** @brief read_symlink 错误 / read_symlink error. */
+    std::error_code error;
+    /** @brief 内核返回的 namespace identity / Namespace identity returned by the kernel. */
+    const std::filesystem::path identity = std::filesystem::read_symlink(link, error);
+    if (error || identity.empty()) {
+        std::cerr << "FAIL: cannot read broker " << namespace_name
+                  << " namespace identity: " << error.message() << '\n';
+        return std::nullopt;
+    }
+    return identity.string();
+}
+
+/**
+ * @brief 运行首个 broker 的 gateway 验收序列 / Run the native-gateway acceptance sequence against
+ * the first broker.
  * @param fixture 实际测试 fixture / Actual test fixture.
  * @param socket_path 首个 broker 的 socket / First broker socket.
  * @return 所有首阶段断言成立时为真 / True when every first-phase assertion holds.
  */
-[[nodiscard]] bool run_first_client_phase(const E2eFixture& fixture, const std::filesystem::path& socket_path) {
+[[nodiscard]] bool run_first_client_phase(const E2eFixture& fixture,
+                                          const std::filesystem::path& socket_path) {
+    /** @brief 必须与 payload 隔离的 namespace 类型 / Namespace kinds that must differ from the
+     * payload. */
+    constexpr std::array<std::string_view, 6U> kIsolatedNamespaces{
+        "cgroup", "ipc", "mnt", "net", "pid", "uts",
+    };
+    /** @brief payload 对 broker namespace identity 的反相断言 / Payload assertions rejecting broker
+     * namespace identities. */
+    std::string namespace_identity_checks;
+    for (const std::string_view namespace_name : kIsolatedNamespaces) {
+        /** @brief broker 当前 namespace identity / Current broker namespace identity. */
+        const std::optional<std::string> identity =
+            read_namespace_identity(fixture.broker_pid, namespace_name);
+        if (!identity.has_value()) {
+            return false;
+        }
+        namespace_identity_checks += "test \"$(readlink /proc/self/ns/" +
+                                     std::string(namespace_name) + ")\" != \"" + *identity +
+                                     "\" || exit 43; ";
+    }
     if (!drop_to_client_identity()) {
         return false;
     }
-    /** @brief 对 client UID 不可遍历的 host state root probe / Host-state traversal probe for the client UID. */
+    /** @brief 对 client UID 不可遍历的 host state root probe / Host-state traversal probe for the
+     * client UID. */
     const int state_probe = open(fixture.state_root.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (state_probe >= 0) {
         static_cast<void>(close(state_probe));
@@ -1409,28 +1541,101 @@ private:
     }
     /** @brief 真实非特权 Unix gateway client / Real unprivileged Unix gateway client. */
     const wspctl::presentation::UnixGatewayClient client(socket_path.string());
-    /** @brief 在 PID namespace 内验证 PID1 父进程及 task hardening 的脚本 / Script validating PID1 parentage and task hardening inside the PID namespace. */
-    const std::string namespace_script{
-        "test \"$PPID\" = 1 || exit 11; "
-        "test \"$(id -u)\" = 65533 || exit 15; test \"$(id -g)\" = 65533 || exit 16; "
-        "test \"$(id -un)\" = agent || exit 17; "
-        "test \"$HOME:$USER:$LOGNAME\" = /workspace:agent:agent || exit 18; "
-        "test -r /workspace && test -w /workspace && test -x /workspace || exit 19; "
-        "cap=''; nnp=''; sec=''; "
-        "while IFS=$'\\t' read -r key value; do "
-        "case \"$key\" in CapEff:) cap=\"$value\";; NoNewPrivs:) nnp=\"$value\";; Seccomp:) sec=\"$value\";; esac; "
-        "done < /proc/self/status; "
-        "case \"$cap\" in ''|*[!0]*) exit 12;; esac; "
-        "test \"$nnp\" = 1 || exit 13; test \"$sec\" = 2 || exit 14; "
-        "printf 'pid-namespace-task-hardened\\n'"};
+    /** @brief 验证 namespace、固定身份、procfs 与 task hardening 的真实脚本 /
+     * Real script validating namespaces, fixed identity, procfs, and task hardening. */
+    /** @brief 当前 LXCFS 是否完整提供 PSI capability group / Whether this LXCFS exposes the
+     * complete PSI capability group. */
+    const bool pressure_available = std::ranges::all_of(
+        std::array<std::string_view, 3U>{
+            "proc/pressure/cpu",
+            "proc/pressure/io",
+            "proc/pressure/memory",
+        },
+        [&fixture](const std::string_view path) {
+            return access((fixture.environment.lxcfs_root / path).c_str(), R_OK) == 0;
+        });
+    /** @brief 与 LXCFS PSI 能力匹配的 runtime 断言 / Runtime assertion matching the LXCFS PSI
+     * capability. */
+    const std::string pressure_checks =
+        pressure_available ? "for path in pressure/cpu pressure/io pressure/memory; do "
+                             "test -r \"/proc/$path\" || exit 40; done; "
+                           : "test ! -r /proc/pressure/cpu || exit 40; ";
+    const std::string namespace_script =
+        namespace_identity_checks + pressure_checks +
+        std::string{
+            "test \"$PPID\" = 1 || exit 11; "
+            "test \"$(id -u)\" = 65533 || exit 15; test \"$(id -g)\" = 65533 || exit 16; "
+            "test \"$(id -un)\" = agent || exit 17; "
+            "test \"$HOME:$USER:$LOGNAME\" = /workspace:agent:agent || exit 18; "
+            "test -r /workspace && test -w /workspace && test -x /workspace || exit 19; "
+            "test \"$(hostname)\" = workspace || exit 31; "
+            "test \"$(uname -n)\" = workspace || exit 32; "
+            "test \"$(domainname)\" = localdomain || exit 33; "
+            "test \"$(hostname -f)\" = workspace.localdomain || exit 44; "
+            "test \"$(cat /etc/hostname)\" = workspace || exit 34; "
+            "grep -q '^127\\.0\\.1\\.1 workspace\\.localdomain workspace$' /etc/hosts || exit 35; "
+            "test \"$(cat /proc/1/comm)\" = wsp-systemd || exit 36; "
+            "for path in self/status self/cgroup cpuinfo diskstats loadavg meminfo slabinfo stat "
+            "swaps uptime "
+            "version filesystems net/dev net/route; do "
+            "test -r \"/proc/$path\" || exit 37; done; "
+            "test \"$(grep -c '^processor[[:space:]]*:' /proc/cpuinfo)\" = 1 || exit 49; "
+            "awk '$1 == \"MemTotal:\" { found=1; ok=($2 > 0 && $2 <= 262144) } "
+            "END { exit !(found && ok) }' "
+            "/proc/meminfo || exit 50; "
+            "awk 'NR == 1 { exit !($1 >= 0 && $1 < 300) }' /proc/uptime || exit 51; "
+            "ps -o pid= -p $$ >/dev/null || exit 38; "
+            "test -c /dev/null && test -r /dev/null && test -w /dev/null || exit 45; "
+            "test \"$(stat -c '%a:%t:%T' /dev/null)\" = 666:1:3 || exit 46; "
+            "printf probe >/dev/null || exit 47; "
+            "test \"$(df -B1 --output=size /tmp | tail -n 1 | tr -d ' ')\" = 67108864 || exit 54; "
+            "test ! -e /sys/class/hwmon || exit 48; "
+            "for path in kallsyms modules partitions vmstat zoneinfo vmallocinfo softirqs "
+            "schedstat "
+            "sys/kernel/random/boot_id; do "
+            "test ! -r \"/proc/$path\" || exit 39; done; "
+            "awk '$5 == \"/proc/sys\" && $6 ~ /(^|,)ro(,|$)/ { found=1 } END { exit !found }' "
+            "/proc/self/mountinfo || exit 41; "
+            "awk '$5 == \"/proc/meminfo\" && $6 ~ /(^|,)ro(,|$)/ && $0 ~ / - fuse\\.lxcfs / "
+            "{ found=1 } END { exit !found }' /proc/self/mountinfo || exit 52; "
+            "! grep -q '/run/\\.wspctl-lxcfs' /proc/self/mountinfo || exit 53; "
+            "awk 'NR == 1 && $1 != \"Iface\" { exit 1 } NR > 1 { exit 1 }' "
+            "/proc/net/route || exit 42; "
+            "cap=''; nnp=''; sec=''; "
+            "while IFS=$'\\t' read -r key value; do "
+            "case \"$key\" in CapEff:) cap=\"$value\";; NoNewPrivs:) nnp=\"$value\";; Seccomp:) "
+            "sec=\"$value\";; esac; "
+            "done < /proc/self/status; "
+            "case \"$cap\" in ''|*[!0]*) exit 12;; esac; "
+            "test \"$nnp\" = 1 || exit 13; test \"$sec\" = 2 || exit 14; "
+            "python3 -I -S - <<'PY'\n"
+            "import errno\n"
+            "import socket\n"
+            "for name in ('AF_INET', 'AF_INET6', 'AF_NETLINK', 'AF_PACKET', 'AF_VSOCK'):\n"
+            "    family = getattr(socket, name, None)\n"
+            "    if family is None:\n"
+            "        continue\n"
+            "    try:\n"
+            "        endpoint = socket.socket(family, socket.SOCK_STREAM)\n"
+            "    except OSError as error:\n"
+            "        if error.errno != errno.EPERM:\n"
+            "            raise\n"
+            "    else:\n"
+            "        endpoint.close()\n"
+            "        raise AssertionError(f'{name} unexpectedly available')\n"
+            "left, right = socket.socketpair()\n"
+            "left.close()\n"
+            "right.close()\n"
+            "PY\n"
+            "printf 'pid-namespace-task-hardened\\n'"};
     const auto namespace_result = client.execute(make_execute_request(
-        kFirstActivation,
-        "e2e-namespace-task",
-        namespace_script,
-        std::chrono::seconds(5)));
-    if (!namespace_result || !expect_successful_result(*namespace_result, "pid-namespace-task-hardened", "namespace/PID1 task")) {
+        kFirstActivation, "e2e-namespace-task", namespace_script, std::chrono::seconds(5)));
+    if (!namespace_result ||
+        !expect_successful_result(*namespace_result, "pid-namespace-task-hardened",
+                                  "namespace/PID1 task")) {
         if (!namespace_result) {
-            std::cerr << "FAIL: native gateway namespace task: " << namespace_result.error().message << '\n';
+            std::cerr << "FAIL: native gateway namespace task: " << namespace_result.error().message
+                      << '\n';
         }
         return false;
     }
@@ -1439,17 +1644,17 @@ private:
         "printf 'persisted-e2e\\n' > /workspace/e2e-persist.txt; "
         "test -f /workspace/e2e-persist.txt; printf 'overlay-written\\n'"};
     const auto overlay_result = client.execute(make_execute_request(
-        kFirstActivation,
-        "e2e-overlay-write",
-        overlay_script,
-        std::chrono::seconds(5)));
-    if (!overlay_result || !expect_successful_result(*overlay_result, "overlay-written", "Overlay write")) {
+        kFirstActivation, "e2e-overlay-write", overlay_script, std::chrono::seconds(5)));
+    if (!overlay_result ||
+        !expect_successful_result(*overlay_result, "overlay-written", "Overlay write")) {
         if (!overlay_result) {
-            std::cerr << "FAIL: native gateway Overlay write: " << overlay_result.error().message << '\n';
+            std::cerr << "FAIL: native gateway Overlay write: " << overlay_result.error().message
+                      << '\n';
         }
         return false;
     }
-    /** @brief 要经 add_file 导入的可执行 workspace payload / Executable workspace payload imported through add_file. */
+    /** @brief 要经 add_file 导入的可执行 workspace payload / Executable workspace payload imported
+     * through add_file. */
     const std::string payload{"#!/bin/bash\nprintf 'ingress-executed\\n'\n"};
     /** @brief add_file request / add_file 请求。 */
     const wspctl::presentation::ClientAddFileRequest add_file_request{
@@ -1464,41 +1669,45 @@ private:
     /** @brief 单次 raw-byte source / Single raw-byte source. */
     OneChunkPayloadSource source(payload_bytes(payload));
     const auto add_file_result = client.add_file(add_file_request, source);
-    if (!add_file_result || add_file_result->replayed || add_file_result->path != kPayloadWorkspacePath ||
-        add_file_result->byte_size != payload.size() || add_file_result->sha256 != add_file_request.sha256) {
+    if (!add_file_result || add_file_result->replayed ||
+        add_file_result->path != kPayloadWorkspacePath ||
+        add_file_result->byte_size != payload.size() ||
+        add_file_result->sha256 != add_file_request.sha256) {
         if (!add_file_result) {
-            std::cerr << "FAIL: native gateway add_file: " << add_file_result.error().message << '\n';
+            std::cerr << "FAIL: native gateway add_file: " << add_file_result.error().message
+                      << '\n';
         } else {
             std::cerr << "FAIL: native gateway add_file returned an unsafe or unexpected receipt\n";
         }
         return false;
     }
-    /** @brief 仅在 workspace task 内 chmod 并直接执行导入 payload 的脚本 / Script chmodding and directly executing the imported payload only inside the workspace task. */
+    /** @brief 仅在 workspace task 内 chmod 并直接执行导入 payload 的脚本 / Script chmodding and
+     * directly executing the imported payload only inside the workspace task. */
     const std::string execute_payload_script{
         "payload=/workspace/uploads/e2e-payload/payload; "
         "test ! -x \"$payload\" || exit 21; chmod 700 \"$payload\"; \"$payload\""};
-    const auto payload_result = client.execute(make_execute_request(
-        kFirstActivation,
-        "e2e-workspace-chmod-exec",
-        execute_payload_script,
-        std::chrono::seconds(5)));
-    if (!payload_result || !expect_successful_result(*payload_result, "ingress-executed", "workspace-only chmod/execute")) {
+    const auto payload_result =
+        client.execute(make_execute_request(kFirstActivation, "e2e-workspace-chmod-exec",
+                                            execute_payload_script, std::chrono::seconds(5)));
+    if (!payload_result || !expect_successful_result(*payload_result, "ingress-executed",
+                                                     "workspace-only chmod/execute")) {
         if (!payload_result) {
-            std::cerr << "FAIL: native gateway workspace payload execution: " << payload_result.error().message << '\n';
+            std::cerr << "FAIL: native gateway workspace payload execution: "
+                      << payload_result.error().message << '\n';
         }
         return false;
     }
-    /** @brief 开启 Bash job control，让 background orphan 脱离前台 process group 后再让 task 超时的脚本 / Script enabling Bash job control so the background orphan leaves the foreground process group before timing out the task. */
-    const std::string timeout_script{
-        "set -m; (while :; do :; done) & orphan=$!; printf '%s\\n' \"$orphan\"; while :; do :; done"};
+    /** @brief 开启 Bash job control，让 background orphan 脱离前台 process group 后再让 task
+     * 超时的脚本 / Script enabling Bash job control so the background orphan leaves the foreground
+     * process group before timing out the task. */
+    const std::string timeout_script{"set -m; (while :; do :; done) & orphan=$!; printf '%s\\n' "
+                                     "\"$orphan\"; while :; do :; done"};
     const auto timeout_result = client.execute(make_execute_request(
-        kFirstActivation,
-        "e2e-timeout-orphan",
-        timeout_script,
-        std::chrono::milliseconds(300)));
+        kFirstActivation, "e2e-timeout-orphan", timeout_script, std::chrono::milliseconds(300)));
     if (!timeout_result || !timeout_result->timed_out || timeout_result->replayed) {
         if (!timeout_result) {
-            std::cerr << "FAIL: native gateway timeout/orphan task: " << timeout_result.error().message << '\n';
+            std::cerr << "FAIL: native gateway timeout/orphan task: "
+                      << timeout_result.error().message << '\n';
         } else {
             std::cerr << "FAIL: timeout/orphan task did not time out\n";
         }
@@ -1509,17 +1718,17 @@ private:
         std::cerr << "FAIL: timeout/orphan task did not publish a valid orphan PID\n";
         return false;
     }
-    /** @brief 后续 task 检查 prior orphan 已被 task cgroup kill 的脚本 / Follow-up task script checking that task cgroup kill removed the prior orphan. */
-    const std::string cleanup_script{
-        "test ! -e /proc/" + std::to_string(*orphan_pid) + " || exit 31; printf 'orphan-cleaned\\n'"};
+    /** @brief 后续 task 检查 prior orphan 已被 task cgroup kill 的脚本 / Follow-up task script
+     * checking that task cgroup kill removed the prior orphan. */
+    const std::string cleanup_script{"test ! -e /proc/" + std::to_string(*orphan_pid) +
+                                     " || exit 31; printf 'orphan-cleaned\\n'"};
     const auto cleanup_result = client.execute(make_execute_request(
-        kFirstActivation,
-        "e2e-orphan-cleanup",
-        cleanup_script,
-        std::chrono::seconds(5)));
-    if (!cleanup_result || !expect_successful_result(*cleanup_result, "orphan-cleaned", "timeout orphan cleanup")) {
+        kFirstActivation, "e2e-orphan-cleanup", cleanup_script, std::chrono::seconds(5)));
+    if (!cleanup_result ||
+        !expect_successful_result(*cleanup_result, "orphan-cleaned", "timeout orphan cleanup")) {
         if (!cleanup_result) {
-            std::cerr << "FAIL: native gateway orphan cleanup check: " << cleanup_result.error().message << '\n';
+            std::cerr << "FAIL: native gateway orphan cleanup check: "
+                      << cleanup_result.error().message << '\n';
         }
         return false;
     }
@@ -1528,34 +1737,38 @@ private:
 
 /**
  * @brief 运行 restart 后的恢复验证 / Run recovery verification after broker restart.
- * @param socket_path 崩溃重启后重新绑定的 broker socket / Broker socket rebound after a crash restart.
- * @return workspace upper、payload mode 与 PID namespace 均恢复时为真 / True when workspace upper, payload mode, and PID namespace recover.
+ * @param socket_path 崩溃重启后重新绑定的 broker socket / Broker socket rebound after a crash
+ * restart.
+ * @return workspace upper、payload mode 与 PID namespace 均恢复时为真 / True when workspace upper,
+ * payload mode, and PID namespace recover.
  */
 [[nodiscard]] bool run_recovery_client_phase(const std::filesystem::path& socket_path) {
     if (!drop_to_client_identity()) {
         return false;
     }
-    /** @brief restart 后的真实非特权 Unix gateway client / Real unprivileged Unix gateway client after restart. */
+    /** @brief restart 后的真实非特权 Unix gateway client / Real unprivileged Unix gateway client
+     * after restart. */
     const wspctl::presentation::UnixGatewayClient client(socket_path.string());
-    /** @brief 同 key、新 activation 恢复 upper 与 payload 的脚本 / Script recovering upper and payload under the same key and a new activation. */
-    const std::string recovery_script{
-        "test \"$PPID\" = 1 || exit 41; "
-        "IFS= read -r persisted < /workspace/e2e-persist.txt; test \"$persisted\" = persisted-e2e || exit 42; "
-        "payload=/workspace/uploads/e2e-payload/payload; test -x \"$payload\" || exit 43; \"$payload\"; "
-        "printf 'overlay-recovered\\n'"};
+    /** @brief 同 key、新 activation 恢复 upper 与 payload 的脚本 / Script recovering upper and
+     * payload under the same key and a new activation. */
+    const std::string recovery_script{"test \"$PPID\" = 1 || exit 41; "
+                                      "IFS= read -r persisted < /workspace/e2e-persist.txt; test "
+                                      "\"$persisted\" = persisted-e2e || exit 42; "
+                                      "payload=/workspace/uploads/e2e-payload/payload; test -x "
+                                      "\"$payload\" || exit 43; \"$payload\"; "
+                                      "printf 'overlay-recovered\\n'"};
     const auto result = client.execute(make_execute_request(
-        kSecondActivation,
-        "e2e-recovery",
-        recovery_script,
-        std::chrono::seconds(5)));
-    if (!result || !expect_successful_result(*result, "overlay-recovered", "broker restart recovery")) {
+        kSecondActivation, "e2e-recovery", recovery_script, std::chrono::seconds(5)));
+    if (!result ||
+        !expect_successful_result(*result, "overlay-recovered", "broker restart recovery")) {
         if (!result) {
             std::cerr << "FAIL: native gateway recovery task: " << result.error().message << '\n';
         }
         return false;
     }
     if (result->stdout_data.find("ingress-executed") == std::string::npos) {
-        std::cerr << "FAIL: recovered workspace payload was not directly executable inside the new workspace activation\n";
+        std::cerr << "FAIL: recovered workspace payload was not directly executable inside the new "
+                     "workspace activation\n";
         return false;
     }
     return true;
@@ -1568,10 +1781,9 @@ private:
  * @param socket_path phase 使用的 socket / Socket used by the phase.
  * @return child phase 成功时为真 / True when the child phase succeeds.
  */
-[[nodiscard]] bool run_client_phase(
-    bool (*phase)(const E2eFixture&, const std::filesystem::path&),
-    const E2eFixture& fixture,
-    const std::filesystem::path& socket_path) {
+[[nodiscard]] bool run_client_phase(bool (*phase)(const E2eFixture&, const std::filesystem::path&),
+                                    const E2eFixture& fixture,
+                                    const std::filesystem::path& socket_path) {
     /** @brief gateway child PID / Gateway child PID. */
     const pid_t child = fork();
     if (child < 0) {
@@ -1596,12 +1808,14 @@ private:
 }
 
 /**
- * @brief 将只需 socket 的恢复 phase 适配为统一 phase 签名 / Adapt the socket-only recovery phase to the common phase signature.
+ * @brief 将只需 socket 的恢复 phase 适配为统一 phase 签名 / Adapt the socket-only recovery phase to
+ * the common phase signature.
  * @param fixture 未使用的 fixture / Unused fixture.
  * @param socket_path crash-recovered socket / Socket recovered after a broker crash.
  * @return recovery phase 的结果 / Result of the recovery phase.
  */
-[[nodiscard]] bool run_recovery_phase_adapter(const E2eFixture& fixture, const std::filesystem::path& socket_path) {
+[[nodiscard]] bool run_recovery_phase_adapter(const E2eFixture& fixture,
+                                              const std::filesystem::path& socket_path) {
     static_cast<void>(fixture);
     return run_recovery_client_phase(socket_path);
 }
@@ -1609,48 +1823,60 @@ private:
 /**
  * @brief 运行真实特权 E2E 验收 / Run the real privileged E2E acceptance.
  * @param broker_executable CMake 构建出的 wspctld 可执行文件 / CMake-built wspctld executable.
- * @param requirement 当前 CTest required/optional 要求 / Current CTest required/optional requirement.
+ * @param requirement 当前 CTest required/optional 要求 / Current CTest required/optional
+ * requirement.
  * @return POSIX/CTest 退出状态 / POSIX/CTest exit status.
  */
-[[nodiscard]] int run_privileged_e2e(const std::filesystem::path& broker_executable, const Requirement requirement) {
+[[nodiscard]] int run_privileged_e2e(const std::filesystem::path& broker_executable,
+                                     const Requirement requirement) {
     if (geteuid() != 0U) {
         return unavailable(requirement, "effective UID is not root");
     }
-    for (const cap_value_t capability : {CAP_SYS_ADMIN, CAP_SYS_CHROOT, CAP_SETUID, CAP_SETGID, CAP_SETPCAP, CAP_MKNOD}) {
+    for (const cap_value_t capability :
+         {CAP_SYS_ADMIN, CAP_SYS_CHROOT, CAP_SETUID, CAP_SETGID, CAP_SETPCAP, CAP_MKNOD}) {
         if (!has_effective_capability(capability)) {
             return unavailable(requirement, "required broker Linux capabilities are absent");
         }
     }
     /** @brief 配置加载失败原因 / Configuration-load failure reason. */
     std::string reason;
-    /** @brief 是否仅为缺失 operator 前置条件 / Whether failure is only a missing operator prerequisite. */
+    /** @brief 是否仅为缺失 operator 前置条件 / Whether failure is only a missing operator
+     * prerequisite. */
     bool missing = false;
     const auto environment = load_environment(reason, missing);
     if (!environment.has_value()) {
-        return missing ? unavailable(requirement, reason) : (std::cerr << "FAIL: " << reason << '\n', EXIT_FAILURE);
+        return missing ? unavailable(requirement, reason)
+                       : (std::cerr << "FAIL: " << reason << '\n', EXIT_FAILURE);
     }
     if (!validate_xfs_state_parent_contract(*environment, reason)) {
         return unavailable(requirement, reason);
     }
     /** @brief broker executable metadata / broker executable 元数据。 */
     struct stat executable_metadata {};
-    if (!broker_executable.is_absolute() || lstat(broker_executable.c_str(), &executable_metadata) != 0 ||
+    if (!broker_executable.is_absolute() ||
+        lstat(broker_executable.c_str(), &executable_metadata) != 0 ||
         !S_ISREG(executable_metadata.st_mode) || (executable_metadata.st_mode & S_IXUSR) == 0) {
         std::cerr << "FAIL: CMake did not provide an executable wspctld path\n";
         return EXIT_FAILURE;
     }
     /** @brief readonly image mount state / 只读 image mount 状态。 */
     struct statvfs image_filesystem {};
-    if (statvfs(environment->base_root.c_str(), &image_filesystem) != 0 || (image_filesystem.f_flag & ST_RDONLY) == 0U) {
+    if (statvfs(environment->base_root.c_str(), &image_filesystem) != 0 ||
+        (image_filesystem.f_flag & ST_RDONLY) == 0U) {
         std::cerr << "FAIL: WSPCTL_PRIVILEGED_E2E_BASE_ROOT is not on a real readonly mount\n";
         return EXIT_FAILURE;
     }
-    if (const auto image = wspctl::validate_image_root(environment->base_root, environment->images_root); !image) {
-        std::cerr << "FAIL: supplied image generation is not a sealed broker-valid image: " << image.error().message << '\n';
+    if (const auto image =
+            wspctl::validate_image_root(environment->base_root, environment->images_root);
+        !image) {
+        std::cerr << "FAIL: supplied image generation is not a sealed broker-valid image: "
+                  << image.error().message << '\n';
         return EXIT_FAILURE;
     }
     if (!cgroup_parent_is_usable(environment->cgroup_parent)) {
-        return unavailable(requirement, "delegated cgroup parent is not writable with cpu/memory/pids/io controls");
+        return unavailable(
+            requirement,
+            "delegated cgroup parent is not writable with cpu/memory/pids/io controls");
     }
     E2eFixture fixture{
         .environment = *environment,
@@ -1663,14 +1889,11 @@ private:
         .broker_pid = -1,
     };
     FixtureCleanupGuard cleanup_guard(fixture);
-    const auto cgroup_child = create_test_directory(
-        environment->cgroup_parent,
-        "wspctl-e2e-cgroup-",
-        0700,
-        false,
-        reason);
+    const auto cgroup_child = create_test_directory(environment->cgroup_parent,
+                                                    "wspctl-e2e-cgroup-", 0700, false, reason);
     if (!cgroup_child.has_value()) {
-        return unavailable(requirement, "cannot create a self-owned child below delegated cgroup parent");
+        return unavailable(requirement,
+                           "cannot create a self-owned child below delegated cgroup parent");
     }
     fixture.cgroup_root = cgroup_child->path;
     fixture.cgroup_root_identity = cgroup_child->identity;
@@ -1678,47 +1901,41 @@ private:
         std::cerr << "FAIL: self-created cgroup child is not delegated for cpu/memory/pids/io\n";
         return EXIT_FAILURE;
     }
-    const auto state_root = create_test_directory(
-        environment->state_parent,
-        "wspctl-e2e-state-",
-        0700,
-        true,
-        reason);
+    const auto state_root =
+        create_test_directory(environment->state_parent, "wspctl-e2e-state-", 0700, true, reason);
     if (!state_root.has_value()) {
         std::cerr << "FAIL: cannot create self-owned XFS state root: " << reason << '\n';
         return EXIT_FAILURE;
     }
     fixture.state_root = state_root->path;
     fixture.state_root_identity = state_root->identity;
-    const auto socket_directory = create_test_directory(
-        environment->socket_parent,
-        "wspctl-e2e-socket-",
-        0711,
-        true,
-        reason);
+    const auto socket_directory =
+        create_test_directory(environment->socket_parent, "wspctl-e2e-socket-", 0711, true, reason);
     if (!socket_directory.has_value()) {
         std::cerr << "FAIL: cannot create self-owned socket directory: " << reason << '\n';
         return EXIT_FAILURE;
     }
     fixture.socket_directory = socket_directory->path;
     fixture.socket_directory_identity = socket_directory->identity;
-    const auto bot_socket_directory = create_endpoint_directory(fixture.socket_directory, "bot", 0711, reason);
-    const auto operator_socket_directory = create_endpoint_directory(fixture.socket_directory, "operator", 0700, reason);
+    const auto bot_socket_directory =
+        create_endpoint_directory(fixture.socket_directory, "bot", 0711, reason);
+    const auto operator_socket_directory =
+        create_endpoint_directory(fixture.socket_directory, "operator", 0700, reason);
     if (!bot_socket_directory.has_value() || !operator_socket_directory.has_value()) {
-        std::cerr << "FAIL: cannot create disjoint self-owned Bot/operator socket directories: " << reason << '\n';
+        std::cerr << "FAIL: cannot create disjoint self-owned Bot/operator socket directories: "
+                  << reason << '\n';
         return EXIT_FAILURE;
     }
     /** @brief 首次 broker socket / First broker socket. */
     const std::filesystem::path first_socket = *bot_socket_directory / "wspctld.sock";
     /** @brief 首次 root-only operator socket / First root-only operator socket. */
     const std::filesystem::path first_operator_socket = *operator_socket_directory / "wspctld.sock";
-    if (!launch_broker(
-            fixture,
-            BrokerLaunch{
-                .executable = broker_executable,
-                .bot_socket_path = first_socket,
-                .operator_socket_path = first_operator_socket,
-            }) ||
+    if (!launch_broker(fixture,
+                       BrokerLaunch{
+                           .executable = broker_executable,
+                           .bot_socket_path = first_socket,
+                           .operator_socket_path = first_operator_socket,
+                       }) ||
         !wait_for_broker_sockets(fixture, first_socket, first_operator_socket)) {
         return EXIT_FAILURE;
     }
@@ -1735,24 +1952,26 @@ private:
     // SIGTERM is deliberately an ungraceful broker restart here: the next broker must reclaim
     // the stale Bot and operator socket names, kill stale cgroup state, and reconstruct a new
     // activation from the persistent upper layer.
-    if (!stop_broker(fixture, true) || !wait_for_empty_cgroup(fixture.cgroup_root, kCgroupDrainDeadline)) {
+    if (!stop_broker(fixture, true) ||
+        !wait_for_empty_cgroup(fixture.cgroup_root, kCgroupDrainDeadline)) {
         std::cerr << "FAIL: first broker restart did not prove cgroup drain\n";
         return EXIT_FAILURE;
     }
     if (!simulate_legacy_workspace_ownership(fixture)) {
         return EXIT_FAILURE;
     }
-    /** @brief 重启后复用的 Bot socket，直接验收 stale listener pathname 回收 / Bot socket reused after restart to directly accept stale listener pathname recovery. */
+    /** @brief 重启后复用的 Bot socket，直接验收 stale listener pathname 回收 / Bot socket reused
+     * after restart to directly accept stale listener pathname recovery. */
     const std::filesystem::path second_socket = first_socket;
-    /** @brief 重启后复用的 operator socket，直接验收独立 endpoint 回收 / Operator socket reused after restart to directly accept independent endpoint recovery. */
+    /** @brief 重启后复用的 operator socket，直接验收独立 endpoint 回收 / Operator socket reused
+     * after restart to directly accept independent endpoint recovery. */
     const std::filesystem::path second_operator_socket = first_operator_socket;
-    if (!launch_broker(
-            fixture,
-            BrokerLaunch{
-                .executable = broker_executable,
-                .bot_socket_path = second_socket,
-                .operator_socket_path = second_operator_socket,
-            }) ||
+    if (!launch_broker(fixture,
+                       BrokerLaunch{
+                           .executable = broker_executable,
+                           .bot_socket_path = second_socket,
+                           .operator_socket_path = second_operator_socket,
+                       }) ||
         !wait_for_broker_sockets(fixture, second_socket, second_operator_socket)) {
         return EXIT_FAILURE;
     }
@@ -1765,11 +1984,12 @@ private:
     if (!cleanup_guard.finish()) {
         return EXIT_FAILURE;
     }
-    std::cout << "PASS: privileged wspctld E2E exercised real PID namespace, OverlayFS, named-Agent migration, cgroup cleanup, add_file, and restart recovery\n";
+    std::cout << "PASS: privileged wspctld E2E exercised real PID namespace, OverlayFS, "
+                 "named-Agent migration, cgroup cleanup, add_file, and restart recovery\n";
     return EXIT_SUCCESS;
 }
 
-}  // namespace
+} // namespace
 
 /**
  * @brief privileged E2E CTest 入口 / Privileged E2E CTest entry point.

@@ -11,7 +11,9 @@
 
 [Unit]
 Description=FogMoe recoverable isolated Workspace broker (wspctld)
-After=local-fs.target
+Requires=wspctl-lxcfs.service
+BindsTo=wspctl-lxcfs.service
+After=local-fs.target wspctl-lxcfs.service
 Before=fogmoe-telegram-bot.service
 # ``state`` is an existing dedicated XFS mount, not a directory this unit is allowed to create
 # on an arbitrary parent filesystem.  The native preflight repeats the filesystem/type/enforcement
@@ -30,7 +32,7 @@ User=root
 Group=root
 UMask=0077
 EnvironmentFile=@WSPCTL_HOST_ENVIRONMENT_PATH@
-Delegate=cpu memory pids io
+Delegate=cpuset cpu memory pids io
 TasksMax=infinity
 KillMode=control-group
 Restart=on-failure
@@ -78,7 +80,7 @@ ExecStartPre=/usr/bin/install --directory --owner=root --group=root --mode=0700 
 # hard filesystem quota before it creates a persistent OverlayFS upperdir; otherwise it fails closed.
 # Native preflight derives exactly images/sha256/<digest>/rootfs, verifies its readonly VFS
 # mount, OCI identity, runtime contract, and local materialization seal before binding sockets.
-ExecStart=@WSPCTL_HOST_BROKER_EXECUTABLE@ --systemd-notify --socket ${WSPCTL_SOCKET} --operator-socket ${WSPCTL_OPERATOR_SOCKET} --state-root ${WSPCTL_STATE_ROOT} --image-store ${WSPCTL_IMAGES_ROOT} --image-digest ${WSPCTL_IMAGE_DIGEST} --client-uid ${WSPCTL_CLIENT_UID} --operator-uid ${WSPCTL_OPERATOR_UID} --cgroup-root ${WSPCTL_CGROUP_ROOT} --sandbox-uid ${WSPCTL_SANDBOX_UID} --sandbox-gid ${WSPCTL_SANDBOX_GID} --memory-max ${WSPCTL_MEMORY_MAX} --memory-high ${WSPCTL_MEMORY_HIGH} --memory-swap-max ${WSPCTL_MEMORY_SWAP_MAX} --cpu-max-us ${WSPCTL_CPU_MAX_US} --cpu-period-us ${WSPCTL_CPU_PERIOD_US} --pids-max ${WSPCTL_PIDS_MAX} --io-weight ${WSPCTL_IO_WEIGHT} --idle-minutes ${WSPCTL_IDLE_MINUTES} --quota-backend ${WSPCTL_QUOTA_BACKEND} --xfs-quota-mount ${WSPCTL_XFS_QUOTA_MOUNT} --xfs-project-id-min ${WSPCTL_XFS_PROJECT_ID_MIN} --xfs-project-id-max ${WSPCTL_XFS_PROJECT_ID_MAX} --runtime-control-hard-bytes ${WSPCTL_RUNTIME_CONTROL_HARD_BYTES} --runtime-control-hard-inodes ${WSPCTL_RUNTIME_CONTROL_HARD_INODES} --runtime-workspace-hard-bytes ${WSPCTL_RUNTIME_WORKSPACE_HARD_BYTES} --runtime-workspace-hard-inodes ${WSPCTL_RUNTIME_WORKSPACE_HARD_INODES} --xfs-global-admission-bytes ${WSPCTL_XFS_GLOBAL_ADMISSION_BYTES} --xfs-global-admission-inodes ${WSPCTL_XFS_GLOBAL_ADMISSION_INODES} --xfs-system-reserve-bytes ${WSPCTL_XFS_SYSTEM_RESERVE_BYTES} --xfs-system-reserve-inodes ${WSPCTL_XFS_SYSTEM_RESERVE_INODES} @WSPCTL_INSECURE_DEVELOPMENT_ROOT_ARGUMENT@
+ExecStart=@WSPCTL_HOST_BROKER_EXECUTABLE@ --systemd-notify --socket ${WSPCTL_SOCKET} --operator-socket ${WSPCTL_OPERATOR_SOCKET} --state-root ${WSPCTL_STATE_ROOT} --image-store ${WSPCTL_IMAGES_ROOT} --image-digest ${WSPCTL_IMAGE_DIGEST} --client-uid ${WSPCTL_CLIENT_UID} --operator-uid ${WSPCTL_OPERATOR_UID} --cgroup-root ${WSPCTL_CGROUP_ROOT} --lxcfs-root @WSPCTL_HOST_LXCFS_ROOT@ --sandbox-uid ${WSPCTL_SANDBOX_UID} --sandbox-gid ${WSPCTL_SANDBOX_GID} --memory-max ${WSPCTL_MEMORY_MAX} --memory-high ${WSPCTL_MEMORY_HIGH} --memory-swap-max ${WSPCTL_MEMORY_SWAP_MAX} --tmp-size-bytes ${WSPCTL_TMP_SIZE_BYTES} --cpu-max-us ${WSPCTL_CPU_MAX_US} --cpu-period-us ${WSPCTL_CPU_PERIOD_US} --pids-max ${WSPCTL_PIDS_MAX} --io-weight ${WSPCTL_IO_WEIGHT} --idle-minutes ${WSPCTL_IDLE_MINUTES} --quota-backend ${WSPCTL_QUOTA_BACKEND} --xfs-quota-mount ${WSPCTL_XFS_QUOTA_MOUNT} --xfs-project-id-min ${WSPCTL_XFS_PROJECT_ID_MIN} --xfs-project-id-max ${WSPCTL_XFS_PROJECT_ID_MAX} --runtime-control-hard-bytes ${WSPCTL_RUNTIME_CONTROL_HARD_BYTES} --runtime-control-hard-inodes ${WSPCTL_RUNTIME_CONTROL_HARD_INODES} --runtime-workspace-hard-bytes ${WSPCTL_RUNTIME_WORKSPACE_HARD_BYTES} --runtime-workspace-hard-inodes ${WSPCTL_RUNTIME_WORKSPACE_HARD_INODES} --xfs-global-admission-bytes ${WSPCTL_XFS_GLOBAL_ADMISSION_BYTES} --xfs-global-admission-inodes ${WSPCTL_XFS_GLOBAL_ADMISSION_INODES} --xfs-system-reserve-bytes ${WSPCTL_XFS_SYSTEM_RESERVE_BYTES} --xfs-system-reserve-inodes ${WSPCTL_XFS_SYSTEM_RESERVE_INODES} @WSPCTL_INSECURE_DEVELOPMENT_ROOT_ARGUMENT@
 
 [Install]
 WantedBy=multi-user.target

@@ -32,6 +32,10 @@ CGROUP_PARENT="/sys/fs/cgroup/system.slice"
 BUILD_DIRECTORY="$REPOSITORY_ROOT/build/wspctld-dev"
 # @brief host service unit name / Host service-unit name.
 SERVICE_NAME="wspctld.service"
+# @brief wspctl 专用 LXCFS service unit / Dedicated wspctl LXCFS service unit.
+LXCFS_SERVICE_NAME="wspctl-lxcfs.service"
+# @brief wspctl 专用 LXCFS FUSE mount / Dedicated wspctl LXCFS FUSE mount.
+LXCFS_ROOT="/run/fogmoe-wspctl-lxcfs/root"
 # @brief expected client UID; default is direct host runBot user / Expected client UID; default is the direct-host runBot user.
 CLIENT_UID="${WSPCTL_CLIENT_UID:-$(id -u)}"
 # @brief 镜像内具名 Agent 的固定 UID / Fixed UID of the named Agent inside the image.
@@ -52,6 +56,20 @@ BASE_ROOT=""
 REQUESTED_IO_WEIGHT="${WSPCTL_IO_WEIGHT:-auto}"
 # @brief 最终写入 broker 环境的 I/O 权重；0 表示禁用 / Effective I/O weight written to the broker environment; zero disables it.
 IO_WEIGHT=""
+# @brief 每个 runtime 的 memory.max / Per-runtime memory.max.
+MEMORY_MAX_BYTES="${WSPCTL_MEMORY_MAX:-4294967296}"
+# @brief 每个 runtime 的 memory.high / Per-runtime memory.high.
+MEMORY_HIGH_BYTES="${WSPCTL_MEMORY_HIGH:-4294967296}"
+# @brief 每个 runtime 的 memory.swap.max / Per-runtime memory.swap.max.
+MEMORY_SWAP_MAX_BYTES="${WSPCTL_MEMORY_SWAP_MAX:-2147483648}"
+# @brief 每个 runtime 私有 /tmp 的 tmpfs 上限 / Per-runtime private /tmp tmpfs limit.
+TMP_SIZE_BYTES="${WSPCTL_TMP_SIZE_BYTES:-1073741824}"
+# @brief 每个 runtime 的 cpu.max quota / Per-runtime cpu.max quota.
+CPU_MAX_US="${WSPCTL_CPU_MAX_US:-200000}"
+# @brief 每个 runtime 的 cpu.max period / Per-runtime cpu.max period.
+CPU_PERIOD_US="${WSPCTL_CPU_PERIOD_US:-100000}"
+# @brief 每个 runtime 的持久 workspace hard limit / Per-runtime persistent workspace hard limit.
+WORKSPACE_HARD_BYTES="${WSPCTL_RUNTIME_WORKSPACE_HARD_BYTES:-4294967296}"
 # @brief checkout-local lifecycle lock / Checkout-local lifecycle lock.
 LOCK_FILE="$REPOSITORY_ROOT/.runtime/wspctld-control.lock"
 # @brief 最近一次已应用 broker 配置的 fingerprint / Fingerprint of the most recently applied broker configuration.
@@ -98,6 +116,38 @@ require_loop_size() {
         || die "WSPCTL_LOOP_SIZE 必须是类似 20G 的正整数 IEC 容量"
 }
 
+# @brief 校验一个正十进制资源参数 / Validate one positive decimal resource parameter.
+# @param $1 参数值 / Parameter value.
+# @param $2 环境变量名 / Environment-variable name.
+require_positive_decimal() {
+    [[ "$1" =~ ^[1-9][0-9]*$ ]] || die "$2 必须是正十进制整数"
+}
+
+# @brief 校验一个非负十进制资源参数 / Validate one nonnegative decimal resource parameter.
+# @param $1 参数值 / Parameter value.
+# @param $2 环境变量名 / Environment-variable name.
+require_decimal() {
+    [[ "$1" =~ ^[0-9]+$ ]] || die "$2 必须是非负十进制整数"
+}
+
+# @brief 幂等写入 root-owned broker 环境设置 / Idempotently write one root-owned broker environment setting.
+# @param $1 环境文件 / Environment file.
+# @param $2 设置名 / Setting name.
+# @param $3 设置值 / Setting value.
+upsert_root_environment_setting() {
+    local environment_file="$1"
+    local setting_name="$2"
+    local setting_value="$3"
+    if sudo grep --quiet "^${setting_name}=" "$environment_file"; then
+        sudo sed --in-place --regexp-extended \
+            "s|^${setting_name}=.*$|${setting_name}=${setting_value}|" \
+            "$environment_file"
+        return 0
+    fi
+    printf '%s=%s\n' "$setting_name" "$setting_value" \
+        | sudo tee --append "$environment_file" >/dev/null
+}
+
 # @brief 解析 host 支持的相对 I/O 权重策略 / Resolve relative I/O weighting supported by the host.
 # @return 成功时返回零 / Zero on success.
 resolve_io_weight() {
@@ -120,7 +170,7 @@ resolve_io_weight() {
 # @brief 验证开发机的基础命令 / Verify development-machine prerequisite commands.
 require_commands() {
     local command_name
-    for command_name in cmake sudo systemctl journalctl udevadm findmnt mountpoint mount install bash sha256sum flock grep tr stat awk fallocate losetup mkfs.xfs blkid find sort xargs; do
+    for command_name in cmake sudo systemctl journalctl udevadm findmnt mountpoint mount install bash sha256sum flock grep tr stat awk fallocate losetup mkfs.xfs blkid find sort xargs lxcfs fusermount3; do
         command -v "$command_name" >/dev/null 2>&1 \
             || die "缺少必需命令: $command_name"
     done
@@ -234,6 +284,7 @@ write_install_manifest() {
         /usr/local/bin/wspctl
         /usr/local/bin/wspctl-image
         /usr/local/libexec/wspctl/publish_wspctl_image.py
+        /usr/local/share/fogmoe-wspctl/systemd/wspctl-lxcfs.service
         /usr/local/share/fogmoe-wspctl/systemd/wspctld.service
         /usr/local/share/fogmoe-wspctl/systemd/wspctld.env.example
     )
@@ -403,6 +454,7 @@ select_published_image() {
 # @brief 安装生成的 unit 与受控 environment file / Install generated unit and the controlled environment file.
 install_service_configuration() {
     local unit_source="$BUILD_DIRECTORY/deploy/wspctl/systemd/wspctld.service"
+    local lxcfs_unit_source="$BUILD_DIRECTORY/deploy/wspctl/systemd/wspctl-lxcfs.service"
     local environment_template="$BUILD_DIRECTORY/deploy/wspctl/systemd/wspctld.env.example"
     local environment_file="$WORK_ROOT/wspctld.env"
     local filesystem_bytes
@@ -412,8 +464,9 @@ install_service_configuration() {
     local admission_bytes
     local admission_inodes
 
-    [[ -f "$unit_source" && -f "$environment_template" ]] \
+    [[ -f "$unit_source" && -f "$lxcfs_unit_source" && -f "$environment_template" ]] \
         || die "CMake 没有生成 systemd 部署资产"
+    sudo install -o root -g root -m 0644 "$lxcfs_unit_source" "/etc/systemd/system/$LXCFS_SERVICE_NAME"
     sudo install -o root -g root -m 0644 "$unit_source" "/etc/systemd/system/$SERVICE_NAME"
     if [[ ! -f "$environment_file" ]]; then
         sudo install -o root -g root -m 0600 "$environment_template" "$environment_file"
@@ -433,6 +486,16 @@ install_service_configuration() {
     sudo sed --in-place --regexp-extended \
         "s|^WSPCTL_SANDBOX_GID=.*$|WSPCTL_SANDBOX_GID=$AGENT_GID|" \
         "$environment_file"
+    upsert_root_environment_setting "$environment_file" WSPCTL_MEMORY_MAX "$MEMORY_MAX_BYTES"
+    upsert_root_environment_setting "$environment_file" WSPCTL_MEMORY_HIGH "$MEMORY_HIGH_BYTES"
+    upsert_root_environment_setting "$environment_file" WSPCTL_MEMORY_SWAP_MAX "$MEMORY_SWAP_MAX_BYTES"
+    upsert_root_environment_setting "$environment_file" WSPCTL_TMP_SIZE_BYTES "$TMP_SIZE_BYTES"
+    upsert_root_environment_setting "$environment_file" WSPCTL_CPU_MAX_US "$CPU_MAX_US"
+    upsert_root_environment_setting "$environment_file" WSPCTL_CPU_PERIOD_US "$CPU_PERIOD_US"
+    upsert_root_environment_setting \
+        "$environment_file" \
+        WSPCTL_RUNTIME_WORKSPACE_HARD_BYTES \
+        "$WORKSPACE_HARD_BYTES"
     sudo sed --in-place --regexp-extended \
         '/^WSPCTL_BASE_ROOT=/d;/^WSPCTL_SUPERVISOR=/d' \
         "$environment_file"
@@ -454,8 +517,8 @@ install_service_configuration() {
     admission_bytes=$((filesystem_bytes - reserve_bytes))
     reserve_inodes=$((filesystem_inodes / 5))
     admission_inodes=$((filesystem_inodes - reserve_inodes))
-    (( admission_bytes >= 1090519040 && admission_inodes >= 139264 )) \
-        || die "loopback XFS 太小，至少需要容纳一个 1 GiB workspace 配额与 control layer"
+    (( admission_bytes >= WORKSPACE_HARD_BYTES + 16777216 && admission_inodes >= 139264 )) \
+        || die "loopback XFS 太小，无法容纳一个配置的 workspace 配额与 control layer"
     sudo sed --in-place --regexp-extended \
         "s|^WSPCTL_XFS_GLOBAL_ADMISSION_BYTES=.*$|WSPCTL_XFS_GLOBAL_ADMISSION_BYTES=$admission_bytes|" \
         "$environment_file"
@@ -480,13 +543,14 @@ install_service_configuration() {
 # @return SHA-256 fingerprint / SHA-256 fingerprint.
 broker_fingerprint() {
     local unit_source="$BUILD_DIRECTORY/deploy/wspctl/systemd/wspctld.service"
+    local lxcfs_unit_source="$BUILD_DIRECTORY/deploy/wspctl/systemd/wspctl-lxcfs.service"
     local environment_file="$WORK_ROOT/wspctld.env"
 
     {
-        printf 'health_contract=static-ready-v1-image-service-sockets\n'
+        printf 'health_contract=static-ready-v2-image-lxcfs-service-sockets\n'
         printf 'source_oci_manifest_digest=%s\nclient_uid=%s\noperator_uid=%s\noperator_socket=%s\n' \
             "$IMAGE_DIGEST" "$CLIENT_UID" "$OPERATOR_UID" "$OPERATOR_SOCKET_PATH"
-        sha256sum "$BUILD_DIRECTORY/src/wspctl/wspctld" "$unit_source"
+        sha256sum "$BUILD_DIRECTORY/src/wspctl/wspctld" "$unit_source" "$lxcfs_unit_source"
         sudo sha256sum "$environment_file"
     } | sha256sum | awk '{print $1}'
 }
@@ -571,7 +635,12 @@ record_applied_fingerprint() {
 #       through sudo. Otherwise an unprivileged caller would restart a healthy daemon on every
 #       no-op invocation merely because it cannot traverse the operator directory.
 broker_is_healthy() {
-    sudo systemctl is-active --quiet "$SERVICE_NAME" \
+    sudo systemctl is-active --quiet "$LXCFS_SERVICE_NAME" \
+        && sudo findmnt --noheadings --output FSTYPE --target "$LXCFS_ROOT" \
+            | grep --fixed-strings --line-regexp --quiet "fuse.lxcfs" \
+        && sudo test -r "$LXCFS_ROOT/proc/cpuinfo" \
+        && sudo test -r "$LXCFS_ROOT/proc/meminfo" \
+        && sudo systemctl is-active --quiet "$SERVICE_NAME" \
         && sudo test -S "$SOCKET_PATH" \
         && [[ "$(sudo stat --format='%u:%a' "$SOCKET_PATH")" == "$CLIENT_UID:600" ]] \
         && sudo test -S "$OPERATOR_SOCKET_PATH" \
@@ -631,7 +700,7 @@ validate_current_broker_readiness() {
 start_service() {
     local invocation_id
 
-    sudo systemctl enable "$SERVICE_NAME"
+    sudo systemctl enable "$LXCFS_SERVICE_NAME" "$SERVICE_NAME"
     if broker_is_healthy; then
         if [[ "$BROKER_RESTART_REQUIRED" == false ]]; then
             invocation_id="$(current_broker_invocation_id)"
@@ -652,7 +721,10 @@ start_service() {
     fi
     wait_for_broker_healthy \
         || {
+            sudo systemctl --no-pager --full status "$LXCFS_SERVICE_NAME" || true
             sudo systemctl --no-pager --full status "$SERVICE_NAME" || true
+            sudo journalctl --unit "$LXCFS_SERVICE_NAME" --lines 100 --no-pager \
+                --output short-precise || true
             sudo journalctl --unit "$SERVICE_NAME" --lines 100 --no-pager \
                 --output short-precise || true
             die "broker 没有通过 service/socket 健康检查"
@@ -667,12 +739,13 @@ start_service() {
 
 # @brief 显示 broker 状态 / Display broker status.
 show_status() {
-    sudo systemctl --no-pager --full status "$SERVICE_NAME"
+    sudo systemctl --no-pager --full status "$LXCFS_SERVICE_NAME" "$SERVICE_NAME"
 }
 
 # @brief 停止 broker；不会删除任何持久 workspace / Stop broker without deleting persistent workspaces.
 stop_service() {
     sudo systemctl stop "$SERVICE_NAME"
+    sudo systemctl stop "$LXCFS_SERVICE_NAME"
 }
 
 # @brief 执行启动流程 / Execute the start flow.
@@ -682,6 +755,15 @@ start() {
     [[ "$CLIENT_UID" != "$OPERATOR_UID" ]] \
         || die "WSPCTL_OPERATOR_UID 必须与 WSPCTL_CLIENT_UID 不同；不要给 Bot operator 权限"
     require_loop_size "$LOOP_SIZE"
+    require_positive_decimal "$MEMORY_MAX_BYTES" "WSPCTL_MEMORY_MAX"
+    require_positive_decimal "$MEMORY_HIGH_BYTES" "WSPCTL_MEMORY_HIGH"
+    require_decimal "$MEMORY_SWAP_MAX_BYTES" "WSPCTL_MEMORY_SWAP_MAX"
+    require_positive_decimal "$TMP_SIZE_BYTES" "WSPCTL_TMP_SIZE_BYTES"
+    require_positive_decimal "$CPU_MAX_US" "WSPCTL_CPU_MAX_US"
+    require_positive_decimal "$CPU_PERIOD_US" "WSPCTL_CPU_PERIOD_US"
+    require_positive_decimal "$WORKSPACE_HARD_BYTES" "WSPCTL_RUNTIME_WORKSPACE_HARD_BYTES"
+    (( MEMORY_HIGH_BYTES <= MEMORY_MAX_BYTES )) \
+        || die "WSPCTL_MEMORY_HIGH 不得高于 WSPCTL_MEMORY_MAX"
     resolve_io_weight
     require_commands
     mkdir -p "$REPOSITORY_ROOT/.runtime"
@@ -715,6 +797,13 @@ show_help() {
   WSPCTL_IMAGE_DIGEST 可选 sha256:<64hex> OCI manifest digest；默认读取已发布 current-image-digest。
   WSPCTL_LOOP_SIZE    首次创建 image 的容量；默认 32G，已有 image 不会自动 resize。
   WSPCTL_IO_WEIGHT    auto（默认）按 host cgroup v2 capability 选择 100 或 0；也可显式设为 0..10000。
+  WSPCTL_MEMORY_MAX   每个 Runtime memory.max；默认 4294967296（4 GiB）。
+  WSPCTL_MEMORY_HIGH  每个 Runtime memory.high；默认 4294967296（4 GiB）。
+  WSPCTL_MEMORY_SWAP_MAX 每个 Runtime memory.swap.max；默认 2147483648（2 GiB）。
+  WSPCTL_TMP_SIZE_BYTES 私有 /tmp tmpfs 上限；默认 1073741824（1 GiB）。
+  WSPCTL_CPU_MAX_US   cpu.max quota；默认 200000。
+  WSPCTL_CPU_PERIOD_US cpu.max period；默认 100000，即最多 2 CPUs。
+  WSPCTL_RUNTIME_WORKSPACE_HARD_BYTES 持久 Workspace hard limit；默认 4294967296（4 GiB）。
 EOF
 }
 

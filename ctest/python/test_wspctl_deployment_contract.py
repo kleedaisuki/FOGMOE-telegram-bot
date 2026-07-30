@@ -26,6 +26,22 @@ WSPCTL_CONTAINERFILE_PATH = (
 WSPCTL_BUILD_TOOLS_LOCK_PATH = (
     REPOSITORY_ROOT / "deploy" / "wspctl" / "image" / "build-tools.lock"
 )
+#: @brief 固定 runtime hostname 文件 / Fixed runtime hostname file.
+WSPCTL_HOSTNAME_PATH = (
+    REPOSITORY_ROOT / "deploy" / "wspctl" / "image" / "etc" / "hostname"
+)
+#: @brief 固定 runtime hosts 文件 / Fixed runtime hosts file.
+WSPCTL_HOSTS_PATH = (
+    REPOSITORY_ROOT / "deploy" / "wspctl" / "image" / "etc" / "hosts"
+)
+#: @brief 离线 runtime resolver 文件 / Offline runtime resolver file.
+WSPCTL_RESOLV_CONF_PATH = (
+    REPOSITORY_ROOT / "deploy" / "wspctl" / "image" / "etc" / "resolv.conf"
+)
+#: @brief native runtime image contract 实现 / Native runtime-image contract implementation.
+WSPCTL_IMAGE_CONTRACT_SOURCE_PATH = (
+    REPOSITORY_ROOT / "src" / "wspctl" / "src" / "infrastructure" / "image.cpp"
+)
 #: @brief workspace PID 1 入口 / Workspace PID 1 entry point.
 WSPCTL_SUPERVISOR_MAIN_PATH = (
     REPOSITORY_ROOT
@@ -50,6 +66,10 @@ DEPLOYMENT_CMAKE_PATH = REPOSITORY_ROOT / "deploy" / "wspctl" / "CMakeLists.txt"
 #: @brief host broker systemd unit 模板路径 / Host-broker systemd unit template path.
 SYSTEMD_UNIT_TEMPLATE_PATH = (
     REPOSITORY_ROOT / "deploy" / "wspctl" / "systemd" / "wspctld.service.in"
+)
+#: @brief wspctl 专用 LXCFS unit 模板路径 / Dedicated wspctl LXCFS unit-template path.
+LXCFS_SYSTEMD_UNIT_TEMPLATE_PATH = (
+    REPOSITORY_ROOT / "deploy" / "wspctl" / "systemd" / "wspctl-lxcfs.service.in"
 )
 #: @brief host broker 环境文件模板路径 / Host-broker environment-template path.
 SYSTEMD_ENVIRONMENT_TEMPLATE_PATH = (
@@ -182,6 +202,8 @@ def test_workspace_runtime_is_a_digest_pinned_explicit_oci_build() -> None:
         "/usr/bin/convert",
         "/usr/bin/sqlite3",
         "/usr/bin/htop",
+        "/usr/bin/hostname",
+        "/usr/bin/domainname",
         "/usr/bin/tree",
         "/usr/bin/neofetch",
         "/usr/bin/java",
@@ -194,6 +216,40 @@ def test_workspace_runtime_is_a_digest_pinned_explicit_oci_build() -> None:
     assert "COPY .venv" not in containerfile
     assert "readelf" not in containerfile
     assert "ldconfig" not in containerfile
+
+
+def test_workspace_runtime_files_match_the_fixed_offline_uts_identity() -> None:
+    """@brief 镜像静态主机文件必须与 UTS 固定身份及无 IP 网络合同一致 / Image host files must match the fixed UTS identity and no-IP-network contract.
+
+    @return None / None.
+    """
+
+    containerfile = WSPCTL_CONTAINERFILE_PATH.read_text(encoding="utf-8")
+    hostname = WSPCTL_HOSTNAME_PATH.read_text(encoding="utf-8")
+    hosts = WSPCTL_HOSTS_PATH.read_text(encoding="utf-8")
+    resolv_conf = WSPCTL_RESOLV_CONF_PATH.read_text(encoding="utf-8")
+    native_contract = WSPCTL_IMAGE_CONTRACT_SOURCE_PATH.read_text(encoding="utf-8")
+    assert hostname == "workspace\n"
+    assert "127.0.0.1 localhost\n" in hosts
+    assert "127.0.1.1 workspace.localdomain workspace\n" in hosts
+    assert "::1 localhost ip6-localhost ip6-loopback\n" in hosts
+    assert "nameserver" not in resolv_conf
+    assert "COPY --chown=0:0 --chmod=0644 deploy/wspctl/image/etc/ /etc/" in containerfile
+    assert "hosts:          files" in containerfile
+    final_validation = containerfile.index("RUN test -z")
+    host_files_copy = containerfile.index(
+        "COPY --chown=0:0 --chmod=0644 deploy/wspctl/image/etc/ /etc/"
+    )
+    assert final_validation < host_files_copy < containerfile.index("ENTRYPOINT")
+    for contract_path in (
+        "etc/hostname",
+        "etc/hosts",
+        "etc/resolv.conf",
+        "etc/nsswitch.conf",
+        "usr/bin/hostname",
+        "usr/bin/domainname",
+    ):
+        assert f'"{contract_path}"' in native_contract
 
 
 def test_supervisor_pins_private_workspace_before_dropping_dac_override() -> None:
@@ -252,12 +308,16 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_image_mount() -> None:
     """
 
     unit = SYSTEMD_UNIT_TEMPLATE_PATH.read_text(encoding="utf-8")
+    lxcfs_unit = LXCFS_SYSTEMD_UNIT_TEMPLATE_PATH.read_text(encoding="utf-8")
     environment = SYSTEMD_ENVIRONMENT_TEMPLATE_PATH.read_text(encoding="utf-8")
     deployment_cmake = DEPLOYMENT_CMAKE_PATH.read_text(encoding="utf-8")
     deployment_guide = DEPLOYMENT_GUIDE_PATH.read_text(encoding="utf-8")
     quota_guide = XFS_QUOTA_GUIDE_PATH.read_text(encoding="utf-8")
     assert not (REPOSITORY_ROOT / "systemd").exists()
-    assert "Delegate=cpu memory pids io" in unit
+    assert "Delegate=cpuset cpu memory pids io" in unit
+    assert "Requires=wspctl-lxcfs.service" in unit
+    assert "BindsTo=wspctl-lxcfs.service" in unit
+    assert "After=local-fs.target wspctl-lxcfs.service" in unit
     assert "Type=notify" in unit
     assert "Type=simple" not in unit
     assert "NotifyAccess=main" in unit
@@ -305,7 +365,9 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_image_mount() -> None:
     assert "--cpu-period-us ${WSPCTL_CPU_PERIOD_US}" in unit
     assert "--memory-high ${WSPCTL_MEMORY_HIGH}" in unit
     assert "--memory-swap-max ${WSPCTL_MEMORY_SWAP_MAX}" in unit
+    assert "--tmp-size-bytes ${WSPCTL_TMP_SIZE_BYTES}" in unit
     assert "--io-weight ${WSPCTL_IO_WEIGHT}" in unit
+    assert "--lxcfs-root @WSPCTL_HOST_LXCFS_ROOT@" in unit
     assert "--quota-backend ${WSPCTL_QUOTA_BACKEND}" in unit
     assert "--xfs-quota-mount ${WSPCTL_XFS_QUOTA_MOUNT}" in unit
     assert "--xfs-project-id-min ${WSPCTL_XFS_PROJECT_ID_MIN}" in unit
@@ -327,6 +389,7 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_image_mount() -> None:
     assert "WSPCTL_XFS_PROJECT_ID_MIN=100000" in environment
     assert "WSPCTL_XFS_PROJECT_ID_MAX=199999" in environment
     assert "WSPCTL_RUNTIME_CONTROL_HARD_BYTES=16777216" in environment
+    assert "WSPCTL_RUNTIME_WORKSPACE_HARD_BYTES=4294967296" in environment
     assert "WSPCTL_RUNTIME_WORKSPACE_HARD_INODES=131072" in environment
     assert "WSPCTL_XFS_GLOBAL_ADMISSION_BYTES=53687091200" in environment
     assert "WSPCTL_XFS_SYSTEM_RESERVE_INODES=262144" in environment
@@ -337,10 +400,12 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_image_mount() -> None:
     assert "WSPCTL_BASE_ROOT" not in environment
     assert "WSPCTL_SUPERVISOR" not in environment
     assert "WSPCTL_IMAGE_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX" in environment
-    assert "WSPCTL_CPU_MAX_US=50000" in environment
+    assert "WSPCTL_CPU_MAX_US=200000" in environment
     assert "WSPCTL_CPU_PERIOD_US=100000" in environment
-    assert "WSPCTL_MEMORY_HIGH=536870912" in environment
-    assert "WSPCTL_MEMORY_SWAP_MAX=0" in environment
+    assert "WSPCTL_MEMORY_MAX=4294967296" in environment
+    assert "WSPCTL_MEMORY_HIGH=4294967296" in environment
+    assert "WSPCTL_MEMORY_SWAP_MAX=2147483648" in environment
+    assert "WSPCTL_TMP_SIZE_BYTES=1073741824" in environment
     assert "WSPCTL_IO_WEIGHT=100" in environment
     assert "Authoritative identity" in environment
     assert "per-runtime" in unit
@@ -356,6 +421,12 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_image_mount() -> None:
     assert "--allow-insecure-dev-root" in deployment_cmake
     assert "WSPCTL_HOST_WORKDIR is mandatory" in deployment_cmake
     assert "WSPCTL_HOST_ENVIRONMENT_PATH" in deployment_cmake
+    assert "WSPCTL_HOST_LXCFS_ROOT" in deployment_cmake
+    assert "wspctl-lxcfs.service.in" in deployment_cmake
+    assert "/usr/bin/lxcfs --enable-loadavg --enable-cfs --enable-pidfd" in lxcfs_unit
+    assert "RuntimeDirectory=fogmoe-wspctl-lxcfs" in lxcfs_unit
+    assert "ExecStopPost=-/usr/bin/fusermount3 --unmount" in lxcfs_unit
+    assert "ConditionPathIsExecutable" not in lxcfs_unit
     assert (
         'set(WSPCTL_HOST_BROKER_EXECUTABLE "${CMAKE_INSTALL_FULL_BINDIR}/wspctld")'
         in deployment_cmake

@@ -22,8 +22,16 @@ IMAGES_ROOT="$WORK_ROOT/images"
 ARTIFACT_STORE="$WORK_ROOT/artifacts"
 # @brief systemd service managed by the development installer / Systemd service managed by the development installer.
 SERVICE_NAME="wspctld.service"
+# @brief wspctl 专用 LXCFS service / Dedicated wspctl LXCFS service.
+LXCFS_SERVICE_NAME="wspctl-lxcfs.service"
 # @brief active systemd unit path / Active systemd unit path.
 UNIT_PATH="/etc/systemd/system/$SERVICE_NAME"
+# @brief active dedicated LXCFS unit path / Active dedicated LXCFS unit path.
+LXCFS_UNIT_PATH="/etc/systemd/system/$LXCFS_SERVICE_NAME"
+# @brief installed immutable LXCFS unit copy / Installed immutable LXCFS unit copy.
+LXCFS_UNIT_ARTIFACT="/usr/local/share/fogmoe-wspctl/systemd/wspctl-lxcfs.service"
+# @brief dedicated LXCFS mountpoint / 专用 LXCFS 挂载点。
+LXCFS_ROOT="/run/fogmoe-wspctl-lxcfs/root"
 # @brief generated environment file / Generated environment file.
 ENVIRONMENT_FILE="$WORK_ROOT/wspctld.env"
 # @brief host-artifact ownership manifest / Host-artifact ownership manifest.
@@ -48,7 +56,7 @@ note() {
 require_commands() {
     local command_name
 
-    for command_name in sudo systemctl systemd-escape grep findmnt mountpoint umount losetup sha256sum awk sort cut cat rm rmdir; do
+    for command_name in sudo systemctl systemd-escape grep findmnt mountpoint umount fusermount3 losetup sha256sum awk sort cut cat rm rmdir; do
         command -v "$command_name" >/dev/null 2>&1 \
             || die "缺少必需命令: $command_name"
     done
@@ -61,16 +69,46 @@ is_checkout_unit() {
         && sudo grep --fixed-strings --quiet "ReadWritePaths=$WORK_ROOT /sys/fs/cgroup" "$UNIT_PATH"
 }
 
+# @brief 验证 active LXCFS unit 与本 checkout 安装的 immutable copy 完全一致 /
+# Verify that the active LXCFS unit exactly matches the immutable copy installed by this checkout.
+# @return 0 表示可安全管理 / Zero when this script may safely manage it.
+is_checkout_lxcfs_unit() {
+    local active_checksum
+    local artifact_checksum
+
+    sudo test -f "$LXCFS_UNIT_PATH" \
+        && sudo test -f "$LXCFS_UNIT_ARTIFACT" \
+        || return 1
+    active_checksum="$(sudo sha256sum "$LXCFS_UNIT_PATH" | awk '{print $1}')"
+    artifact_checksum="$(sudo sha256sum "$LXCFS_UNIT_ARTIFACT" | awk '{print $1}')"
+    [[ "$active_checksum" == "$artifact_checksum" ]]
+}
+
 # @brief 停止并移除仅属于本 checkout 的 unit / Stop and remove only the unit belonging to this checkout.
 remove_checkout_unit() {
-    if ! sudo test -e "$UNIT_PATH"; then
+    if ! sudo test -e "$UNIT_PATH" && ! sudo test -e "$LXCFS_UNIT_PATH"; then
         return 0
     fi
-    is_checkout_unit \
-        || die "$UNIT_PATH 不属于 $WORK_ROOT；拒绝停止或删除其他 wspctld 安装"
-    note "禁用并停止 $SERVICE_NAME"
-    sudo systemctl disable --now "$SERVICE_NAME" || true
-    sudo rm -f -- "$UNIT_PATH"
+    if sudo test -e "$UNIT_PATH"; then
+        is_checkout_unit \
+            || die "$UNIT_PATH 不属于 $WORK_ROOT；拒绝停止或删除其他 wspctld 安装"
+    fi
+    if sudo test -e "$LXCFS_UNIT_PATH"; then
+        is_checkout_lxcfs_unit \
+            || die "$LXCFS_UNIT_PATH 与本 checkout 安装工件不一致；拒绝停止或删除"
+    fi
+    note "禁用并停止 $SERVICE_NAME 与 $LXCFS_SERVICE_NAME"
+    if sudo test -e "$UNIT_PATH"; then
+        sudo systemctl disable --now "$SERVICE_NAME" || true
+    fi
+    if sudo test -e "$LXCFS_UNIT_PATH"; then
+        sudo systemctl disable --now "$LXCFS_SERVICE_NAME" || true
+    fi
+    if sudo mountpoint -q "$LXCFS_ROOT"; then
+        sudo fusermount3 --unmount "$LXCFS_ROOT" \
+            || die "无法卸载专用 LXCFS FUSE mount: $LXCFS_ROOT"
+    fi
+    sudo rm -f -- "$UNIT_PATH" "$LXCFS_UNIT_PATH"
     sudo systemctl daemon-reload
 }
 

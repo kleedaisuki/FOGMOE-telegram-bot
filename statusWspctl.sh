@@ -30,6 +30,10 @@ OPERATOR_SOCKET_PATH="$WORK_ROOT/run/operator/wspctld.sock"
 ENVIRONMENT_FILE="$WORK_ROOT/wspctld.env"
 # @brief broker service name / Broker service name.
 SERVICE_NAME="wspctld.service"
+# @brief dedicated cgroup-aware procfs service / 专用 cgroup-aware procfs 服务。
+LXCFS_SERVICE_NAME="wspctl-lxcfs.service"
+# @brief dedicated LXCFS FUSE root / 专用 LXCFS FUSE root。
+LXCFS_ROOT="/run/fogmoe-wspctl-lxcfs/root"
 # @brief checkout-local 生命周期日志目录 / Checkout-local lifecycle log directory.
 LOG_DIR="$REPOSITORY_ROOT/logs"
 # @brief 最近一次通过静态 readiness 验收的部署记录 / Deployment record for the last static readiness validation.
@@ -109,6 +113,52 @@ report_service() {
     else
         warning "无法读取 systemd service properties"
     fi
+}
+
+# @brief 报告专用 LXCFS service、FUSE mount 与动态 procfs 节点 /
+# Report the dedicated LXCFS service, FUSE mount, and dynamic procfs nodes.
+report_lxcfs() {
+    local filesystem_type
+    local pressure_nodes=0
+    local virtual_file
+
+    heading "cgroup-aware procfs"
+    if sudo systemctl is-active --quiet "$LXCFS_SERVICE_NAME"; then
+        ok "$LXCFS_SERVICE_NAME active"
+    else
+        warning "$LXCFS_SERVICE_NAME inactive"
+    fi
+    filesystem_type="$(
+        sudo findmnt --noheadings --output FSTYPE --target "$LXCFS_ROOT" 2>/dev/null \
+            | tr -d '[:space:]'
+    )"
+    if [[ "$filesystem_type" == fuse.lxcfs ]]; then
+        ok "$LXCFS_ROOT mounted as fuse.lxcfs"
+    else
+        warning "$LXCFS_ROOT 不是专用 fuse.lxcfs mount（实际: ${filesystem_type:-missing}）"
+    fi
+    for virtual_file in \
+        proc/cpuinfo proc/diskstats proc/loadavg proc/meminfo proc/slabinfo proc/stat \
+        proc/swaps proc/uptime; do
+        sudo test -r "$LXCFS_ROOT/$virtual_file" \
+            || warning "LXCFS dynamic node missing/unreadable: $virtual_file"
+    done
+    for virtual_file in proc/pressure/cpu proc/pressure/io proc/pressure/memory; do
+        if sudo test -r "$LXCFS_ROOT/$virtual_file"; then
+            ((pressure_nodes += 1))
+        fi
+    done
+    case "$pressure_nodes" in
+        0)
+            info "LXCFS 未提供 PSI capability group；runtime 会遮蔽 /proc/pressure"
+            ;;
+        3)
+            ok "LXCFS PSI capability group complete"
+            ;;
+        *)
+            warning "LXCFS PSI capability group 不完整（$pressure_nodes/3）"
+            ;;
+    esac
 }
 
 # @brief 只读核对当前 service generation 是否通过静态 readiness 验收 /
@@ -322,6 +372,7 @@ report_runtime_aggregates() {
 # @return 全部边界健康时为零，否则非零 / Zero when every boundary is healthy; nonzero otherwise.
 main() {
     report_install_log
+    report_lxcfs
     report_service
     report_readiness_validation
     report_sockets

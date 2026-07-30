@@ -1,0 +1,34 @@
+# @brief wspctl 专用的 cgroup-aware procfs 数据源 / Dedicated cgroup-aware procfs source for wspctl.
+#
+# 此实例不修改发行版全局 LXCFS。它必须位于 host mount namespace，使 broker 的私有 mount
+# namespace 能在 pivot_root 前固定 FUSE 文件；runtime 随后只看到逐文件只读 bind。/
+# This instance does not alter the distribution-global LXCFS service. It must remain in the host
+# mount namespace so the broker can pin FUSE files before pivot_root; runtimes receive only
+# per-file readonly bind mounts.
+
+[Unit]
+Description=FogMoe wspctl cgroup-aware procfs provider
+Documentation=https://github.com/lxc/lxcfs
+Before=wspctld.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+RuntimeDirectory=fogmoe-wspctl-lxcfs
+RuntimeDirectoryMode=0755
+ExecStartPre=/usr/bin/install --directory --owner=root --group=root --mode=0755 @WSPCTL_HOST_LXCFS_ROOT@
+ExecStartPre=-/usr/bin/fusermount3 --unmount @WSPCTL_HOST_LXCFS_ROOT@
+ExecStart=/usr/bin/lxcfs --enable-loadavg --enable-cfs --enable-pidfd --pidfile=@WSPCTL_HOST_LXCFS_PID_FILE@ @WSPCTL_HOST_LXCFS_ROOT@
+ExecStopPost=-/usr/bin/fusermount3 --unmount @WSPCTL_HOST_LXCFS_ROOT@
+KillMode=process
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

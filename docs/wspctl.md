@@ -374,11 +374,48 @@ runtime mount namespace 的顺序如下：
 2. 用 `pivot_root` 建立只含授权对象的 rootfs；不把 `chroot` 当安全边界；
 3. 将完整 OCI rootfs bind 并 remount 为 `ro,nosuid,nodev`；不暴露 host `/`、`/home`、
    `/proc`、`/sys`、`/run`、container socket 或宿主设备；
-4. 新挂最小 `/proc`、受限 `/dev`、`/tmp`/`/run` tmpfs；默认无网络；
-5. 只将 `/workspace` 设为可持久化 OverlayFS 上层，Python/GNU base 始终由只读 bind 覆盖；
+4. pivot 前在私有 `/run` 固定专用 LXCFS mount；pivot 后新挂完整 `/proc`，逐文件覆盖
+   cgroup-aware 性能节点，再 detach 整个 `/run` staging；受限 `/dev` 与上限 1 GiB 的 `/tmp`
+   仍为私有 tmpfs，且 `/tmp` 实际内存同时计入 Runtime memory cgroup；
+5. 只将 `/workspace` 设为可持久化 OverlayFS 上层，当前每 Runtime hard limit 为 4 GiB；
+   Python/GNU base 始终由只读 bind 覆盖；
 6. activation 在 `pivot_root` 前把 merged workspace 收敛为 `agent:agent 0700`。迁移器不跟随
    symlink，接受新建的 `root:root`、旧版 `65534:65534` 与已迁移的 Agent inode，逐子树迁移且
    最后提交根 inode，所以中断后可以安全重试；其他 owner 一律失败关闭。
+
+每个 Runtime 同时获得独立的 UTS、network、IPC、PID、mount 与 cgroup namespace。broker 在进入
+新的 UTS namespace 后把 syscall hostname/domainname 固定为 `workspace`/`localdomain`；镜像内
+`/etc/hostname`、`/etc/hosts` 与仅含说明的离线 `/etc/resolv.conf` 保持相同身份，不回显构建机或
+宿主名称，`hostname -f` 稳定返回 `workspace.localdomain`。network namespace 不配置接口、地址、
+route 或 resolver，payload 的 seccomp 还以
+`EPERM` 拒绝 `AF_INET`、`AF_INET6`、`AF_NETLINK`、`AF_PACKET` 与 `AF_VSOCK` socket family；
+`AF_UNIX` 保留给本地进程通信。这两个边界是互补的：network namespace 隔离网络状态，socket
+filter 防止 payload 自行配置或探测该 namespace。
+
+`/proc` 使用完整 procfs，不再使用 `hidepid` 或会删除所有顶层诊断节点的 `subset=pid`。PID
+namespace 已经排除了宿主进程，因此 Agent 可以读取 `/proc/self`、Runtime PID 1 的 `comm`、
+同一 Runtime 内的进程。`cpuinfo`、`diskstats`、`loadavg`、`meminfo`、`slabinfo`、`stat`、
+`swaps` 与 `uptime` 是强制核心能力，由 wspctl 专用 LXCFS（Linux Containers Filesystem）按
+发起读取的进程所在 cgroup 动态生成，并以逐文件 `ro,nosuid,nodev,noexec` bind 覆盖宿主
+procfs。runtime cgroup 同时把 `cpuset.cpus` 固定为 `ceil(cpu.max quota / period)` 个 delegated
+CPU（不超过宿主可用 CPU），并保留 `cpu.max` 作为时间份额硬上限；CPU 选择由 runtime key
+稳定散列分散。因此 LXCFS 5.x 也会让编译器、JVM、Python、`htop` 看到与实际可并行调度范围一致的
+CPU 数，而不是宿主总量；小于 1 CPU 的 quota 显示 1 CPU，但仍受 `cpu.max` 的小数份额约束。
+`pressure/{cpu,io,memory}` 作为不可拆分的 PSI（Pressure Stall Information）能力组协商：
+较新 LXCFS 完整提供三项时全部动态映射；LXCFS 5.0 等版本完全不提供时，整个 `/proc/pressure`
+被遮蔽；只提供一部分视为损坏并 fail closed。任何情况都不会回落到宿主全局 PSI。
+`version`、`filesystems` 与当前 network namespace 的 `/proc/net` 继续来自该 namespace 的
+procfs，root-only 文件仍由标准 DAC/ptrace 权限保护。
+
+没有可靠 cgroup 虚拟化语义的 host-global `vmstat`、`zoneinfo`、`vmallocinfo`、`softirqs`、
+`schedstat`，以及 boot identity、内核符号/module/key、硬件与磁盘拓扑等节点，以不可读空 inode
+做 bind mask；`/proc/bus`、`/proc/fs`、`/proc/irq` 与 `/proc/sys` 另做递归只读 bind。LXCFS 与
+mask 来源都位于临时私有 `/run`，逐文件 bind 完成后立即 detach，Agent 看不到用于构造策略的
+source path。LXCFS 缺失、不是 root-owned FUSE mount、任一核心动态节点缺失/返回空数据，或
+可选能力组只出现部分节点时，broker fail closed，不退化为宿主数据或静态快照。
+同一 Runtime 的 task 是一个信任域；若将来需要互不可信的并发 Agent，必须分配不同 Runtime，
+不能把 procfs mount option 当成 task 间安全边界。宿主 sysfs 完全不挂载，因此
+`/sys/class/hwmon` 等硬件传感器与设备拓扑不可见。
 
 payload 使用镜像内持久命名的低权限 `agent`（UID/GID 65533），`HOME=/workspace`；不再使用
 Linux 的特殊 overflow/nobody 身份 65534。identity 负责文件访问和稳定 ownership，cgroup 负责
@@ -391,8 +428,9 @@ RESOLVE_NO_XDEV)` 与 `fchdir` 进入目录。不存在的 cwd、symlink、mount
 
 runtime contract 至少包含上述工具、`/bin/bash`、
 `/usr/local/libexec/wspctl/wsp-systemd` 和 `/workspace`、`/proc`、`/dev`、`/tmp`、`/run`。
-native sealer 同时验证平台、固定入口、root ownership、regular file 的 set-id bit、file capability、特殊 inode、
-symlink 的容器根语义和 `site-packages` 为空。标准镜像中的绝对 symlink 按 pivot 后的容器根解释；
+native sealer 同时验证平台、固定入口、上述静态身份文件、仅使用 `files` 的 NSS host lookup、
+root ownership、regular file 的 set-id bit、file capability、特殊 inode、symlink 的容器根语义和
+`site-packages` 为空。标准镜像中的绝对 symlink 按 pivot 后的容器根解释；
 只有词法上逃出 rootfs 的链接才拒绝，不能用宿主 `Path.resolve()` 错解。
 
 当前 `wspctl-image --verify` 只验证由受控发布流程生成的 manifest 和 rootfs digest，故意不接受
@@ -417,7 +455,7 @@ admission 前创建/读回 pair，并将 journal 放入 control project；没有
 
 ## cgroup、seccomp 与信号
 
-`wspctld.service` 应由 systemd 以 `Delegate=cpu,memory,pids,io` 启动，并遵守 cgroup v2
+`wspctld.service` 应由 systemd 以 `Delegate=cpuset,cpu,memory,pids,io` 启动，并遵守 cgroup v2
 “inner node 无进程、single writer”规则：broker 本身位于 `manager/` leaf，runtime 边界为
 无进程父节点，supervisor 与每一个 task 位于 sibling leaf。
 

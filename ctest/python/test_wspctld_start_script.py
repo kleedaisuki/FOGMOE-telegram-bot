@@ -49,6 +49,15 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
     assert "WSPCTL_LOOP_SIZE" in script
     assert "WSPCTL_IO_WEIGHT" in script
     assert "resolve_io_weight" in script
+    assert 'MEMORY_MAX_BYTES="${WSPCTL_MEMORY_MAX:-4294967296}"' in script
+    assert 'MEMORY_SWAP_MAX_BYTES="${WSPCTL_MEMORY_SWAP_MAX:-2147483648}"' in script
+    assert 'TMP_SIZE_BYTES="${WSPCTL_TMP_SIZE_BYTES:-1073741824}"' in script
+    assert 'CPU_MAX_US="${WSPCTL_CPU_MAX_US:-200000}"' in script
+    assert (
+        'WORKSPACE_HARD_BYTES="${WSPCTL_RUNTIME_WORKSPACE_HARD_BYTES:-4294967296}"'
+        in script
+    )
+    assert "upsert_root_environment_setting" in script
     assert 'CGROUP_PARENT="/sys/fs/cgroup/system.slice"' in script
     assert "host cgroup v2 不提供 io.weight" in script
     assert "WSPCTL_IO_WEIGHT=$IO_WEIGHT" in script
@@ -86,11 +95,17 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
     ):
         assert forbidden not in script
     assert "systemctl start" in script
-    assert 'systemctl enable "$SERVICE_NAME"' in script
+    assert 'systemctl enable "$LXCFS_SERVICE_NAME" "$SERVICE_NAME"' in script
     assert "probe_broker_execution" not in script
     assert "RuntimeProcess" not in script
     assert "InvocationID" in script
-    assert "static-ready-v1-image-service-sockets" in script
+    assert "static-ready-v2-image-lxcfs-service-sockets" in script
+    assert 'LXCFS_SERVICE_NAME="wspctl-lxcfs.service"' in script
+    assert 'LXCFS_ROOT="/run/fogmoe-wspctl-lxcfs/root"' in script
+    assert "lxcfs fusermount3" in script
+    assert "/usr/local/share/fogmoe-wspctl/systemd/wspctl-lxcfs.service" in script
+    assert 'systemctl is-active --quiet "$LXCFS_SERVICE_NAME"' in script
+    assert '"fuse.lxcfs"' in script
     assert "WSPCTL_SANDBOX_UID=$AGENT_UID" in script
     assert "WSPCTL_SANDBOX_GID=$AGENT_GID" in script
     assert "BROKER_VALIDATED_INVOCATION_ID" in script
@@ -524,6 +539,10 @@ def test_root_uninstaller_is_syntax_valid_and_requires_explicit_purge() -> None:
     assert "install manifest" in script
     assert "losetup --detach" in script
     assert 'systemctl disable --now "$SERVICE_NAME"' in script
+    assert 'LXCFS_SERVICE_NAME="wspctl-lxcfs.service"' in script
+    assert "is_checkout_lxcfs_unit" in script
+    assert 'systemctl disable --now "$LXCFS_SERVICE_NAME"' in script
+    assert 'fusermount3 --unmount "$LXCFS_ROOT"' in script
     assert "findmnt --raw --noheadings --output TARGET" in script
     assert "findmnt --list --raw" not in script
     assert "systemd-escape --path --suffix=mount" in script
@@ -560,6 +579,10 @@ def test_root_status_script_is_readonly_and_reports_operational_boundaries() -> 
     assert "WSPCTL_STATUS=healthy" in script
     assert "WSPCTL_STATUS=degraded" in script
     assert "persistent runtime aggregates" in script
+    assert "cgroup-aware procfs" in script
+    assert 'LXCFS_SERVICE_NAME="wspctl-lxcfs.service"' in script
+    assert "fuse.lxcfs" in script
+    assert "proc/pressure/memory" in script
     assert "workspace OCI image" in script
     assert "source_oci_manifest_digest" in script
     assert "current-image-digest" in script

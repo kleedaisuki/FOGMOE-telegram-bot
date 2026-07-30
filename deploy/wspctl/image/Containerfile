@@ -98,6 +98,7 @@ RUN printf '%s\n' \
       findutils \
       git \
       grep \
+      hostname \
       htop \
       imagemagick \
       jq \
@@ -142,6 +143,7 @@ RUN install --directory --owner=root --group=root --mode=0755 \
 RUN find /usr/local/lib/python3.14/site-packages \
       -mindepth 1 \
       -delete \
+    && sed --in-place --regexp-extended 's/^hosts:.*/hosts:          files/' /etc/nsswitch.conf \
     && ! getent passwd "$WSPCTL_AGENT_UID" >/dev/null \
     && ! getent group "$WSPCTL_AGENT_GID" >/dev/null \
     && ! getent passwd agent >/dev/null \
@@ -169,6 +171,7 @@ RUN test -z "$(find \
       "import ctypes, json, sqlite3, ssl; assert __import__('sys').version_info[:2] == (3, 14)" \
     && test "$(id -u agent)" = "$WSPCTL_AGENT_UID" \
     && test "$(id -g agent)" = "$WSPCTL_AGENT_GID" \
+    && grep --fixed-strings --line-regexp "hosts:          files" /etc/nsswitch.conf \
     && test -x /bin/bash \
     && test -x /usr/bin/ls \
     && test -x /usr/bin/curl \
@@ -181,6 +184,8 @@ RUN test -z "$(find \
     && test -x /usr/bin/convert \
     && test -x /usr/bin/sqlite3 \
     && test -x /usr/bin/htop \
+    && test -x /usr/bin/hostname \
+    && test -x /usr/bin/domainname \
     && test -x /usr/bin/tree \
     && test -x /usr/bin/neofetch \
     && test -x /usr/bin/java \
@@ -194,5 +199,13 @@ RUN test -z "$(find \
     && test -x /usr/local/libexec/wspctl/wsp-systemd \
     && ! ldd /usr/local/bin/python | grep 'not found' \
     && ! ldd /usr/local/libexec/wspctl/wsp-systemd | grep 'not found'
+
+# Hostname 的 syscall 状态由 broker 在 UTS namespace 内设置；这些文件保持 libc、shell
+# 与诊断工具看到同一个固定离线身份。特殊 host 文件必须最后复制，因为 OCI builder 会在
+# RUN step 临时覆盖它们。/
+# The broker sets the syscall hostname inside the UTS namespace; these files keep libc, shells,
+# and diagnostics aligned on the same fixed offline identity. Special host files are copied last
+# because OCI builders temporarily overmount them during RUN steps.
+COPY --chown=0:0 --chmod=0644 deploy/wspctl/image/etc/ /etc/
 
 ENTRYPOINT ["/usr/local/libexec/wspctl/wsp-systemd"]

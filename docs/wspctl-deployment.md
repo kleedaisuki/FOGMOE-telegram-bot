@@ -55,6 +55,8 @@ enable/start `wspctld.service`。这是显式、可能要求 sudo 的部署操�
 - Buildah：构建并导出 OCI layout；
 - Skopeo：按 digest ingest/copy OCI graph；
 - umoci：按 OCI layer、whiteout 和 opaque-directory 语义 rootful unpack。
+- LXCFS 与 FUSE3：由 `wspctl-lxcfs.service` 提供独立的 cgroup-aware procfs 数据源；
+  安装器要求 host 上已有 `/usr/bin/lxcfs` 和 `fusermount3`，不静默安装或复用发行版全局实例。
 
 不提供 Docker、裸 tar、`debootstrap`、host Python 或 host `ldconfig` fallback。缺少工具会直接失败并
 报告名字，因为静默换后端会改变 ownership、capability、whiteout 和 provenance 语义。
@@ -154,12 +156,17 @@ import、mount、native verify 和 selection 由 root-owned `publish.lock` 串�
 `logs/wspctl_install_<timestamp>_<pid>.log`。日志以 `0600` 创建，失败时保留底层阶段的原始
 退出码。readiness 分为两个互不替代的层次：
 
-1. `wspctld.service` 使用 `Type=notify` 与 `NotifyAccess=main`。daemon 只有在 native preflight、
+1. `wspctl-lxcfs.service` 先在 host mount namespace 建立
+   `/run/fogmoe-wspctl-lxcfs/root`。`wspctld.service` 以 `Requires`、`BindsTo` 和 `After`
+   绑定该专用实例；启动前验证它是 root-owned、不可由 group/world 写的 FUSE mount，并逐个读取
+   全部核心映射节点。PSI 三节点按完整能力组协商：全有才映射，全无则遮蔽 `/proc/pressure`，
+   部分存在则拒绝启动。实例退出会连带停止 broker，不会让新 Runtime 回退到宿主 procfs。
+2. `wspctld.service` 使用 `Type=notify` 与 `NotifyAccess=main`。daemon 只有在 native preflight、
    Bot/operator listener 和全部 worker pool 均就绪后，才由 main PID 发送 `READY=1`；发送后立即
    清除 `NOTIFY_SOCKET`，runtime child 不会继承 service-manager notification capability。
    `systemctl start/restart` 因此不会把旧 generation 短暂残留的 socket inode 当成新 generation
 readiness；30 秒 `TimeoutStartSec` 又让通知丢失或初始化卡死有界失败。
-2. 安装器不再创建 health Runtime。镜像中的 Agent/passwd、`/workspace` lower、supervisor、
+3. 安装器不再创建 health Runtime。镜像中的 Agent/passwd、`/workspace` lower、supervisor、
    动态库和基础工具由发布期 native seal 与每次启动前的 `wspctl-image --verify` 静态验证；
    service 阶段只检查 `Type=notify` readiness、Bot/operator socket 的 owner/mode，以及前后稳定的
    systemd `InvocationID`。这些条件和部署输入一一对应，不把 XFS quota、cgroup、OverlayFS、
@@ -292,6 +299,7 @@ WSPCTL_PRIVILEGED_E2E_SOCKET_PARENT=/run/wspctl-ctest \
 WSPCTL_PRIVILEGED_E2E_CGROUP_PARENT=/sys/fs/cgroup/wspctl-ctest \
 WSPCTL_PRIVILEGED_E2E_IMAGES_ROOT=/srv/fogmoe-wspctl/images \
 WSPCTL_PRIVILEGED_E2E_BASE_ROOT=/srv/fogmoe-wspctl/images/sha256/<hex>/rootfs \
+WSPCTL_PRIVILEGED_E2E_LXCFS_ROOT=/run/fogmoe-wspctl-lxcfs/root \
 WSPCTL_PRIVILEGED_E2E_XFS_PROJECT_ID_MIN=200000 \
 WSPCTL_PRIVILEGED_E2E_XFS_PROJECT_ID_MAX=200199 \
 ctest --test-dir build/wspctl-prod \

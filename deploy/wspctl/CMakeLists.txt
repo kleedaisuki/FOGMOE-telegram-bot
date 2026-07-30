@@ -95,6 +95,12 @@ set(WSPCTL_HOST_ENVIRONMENT_PATH "${WSPCTL_HOST_WORKDIR}/wspctld.env")
 set(WSPCTL_HOST_STATE_ROOT "${WSPCTL_HOST_WORKDIR}/state")
 #: @brief 只读 OCI image 发布根 / Read-only OCI image publication root.
 set(WSPCTL_HOST_IMAGES_ROOT "${WSPCTL_HOST_WORKDIR}/images")
+#: @brief 专用 LXCFS 的 host runtime directory / Host runtime directory for the dedicated LXCFS instance.
+set(WSPCTL_HOST_LXCFS_RUNTIME_DIRECTORY "/run/fogmoe-wspctl-lxcfs")
+#: @brief 专用 LXCFS mount root / Dedicated LXCFS mount root.
+set(WSPCTL_HOST_LXCFS_ROOT "${WSPCTL_HOST_LXCFS_RUNTIME_DIRECTORY}/root")
+#: @brief 专用 LXCFS pidfile / Dedicated LXCFS pidfile.
+set(WSPCTL_HOST_LXCFS_PID_FILE "${WSPCTL_HOST_LXCFS_RUNTIME_DIRECTORY}/lxcfs.pid")
 #: @brief native broker 的本地开发显式授权参数 / Explicit local-development authorization argument for the native broker.
 set(WSPCTL_INSECURE_DEVELOPMENT_ROOT_ARGUMENT "")
 if(WSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT)
@@ -125,6 +131,11 @@ configure_file(
     @ONLY
 )
 configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/systemd/wspctl-lxcfs.service.in"
+    "${WSPCTL_SYSTEMD_OUTPUT_DIRECTORY}/wspctl-lxcfs.service"
+    @ONLY
+)
+configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/systemd/wspctld.env.example.in"
     "${WSPCTL_SYSTEMD_OUTPUT_DIRECTORY}/wspctld.env.example"
     @ONLY
@@ -133,6 +144,7 @@ configure_file(
 install(
     FILES
         "${WSPCTL_SYSTEMD_OUTPUT_DIRECTORY}/wspctld.service"
+        "${WSPCTL_SYSTEMD_OUTPUT_DIRECTORY}/wspctl-lxcfs.service"
         "${WSPCTL_SYSTEMD_OUTPUT_DIRECTORY}/wspctld.env.example"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/fogmoe-wspctl/systemd"
     COMPONENT WspctlHost

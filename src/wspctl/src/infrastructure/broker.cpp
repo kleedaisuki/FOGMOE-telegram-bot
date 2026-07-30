@@ -6,11 +6,11 @@
 #include "wspctl/domain/operator_workspace.hpp"
 #include "wspctl/domain/runtime.hpp"
 #include "wspctl/infrastructure/detail/launcher_transport.hpp"
+#include "wspctl/infrastructure/detail/payload_replay.hpp"
+#include "wspctl/infrastructure/detail/pidfd_control.hpp"
 #include "wspctl/infrastructure/operator_endpoint.hpp"
 #include "wspctl/infrastructure/operator_protocol.hpp"
 #include "wspctl/infrastructure/operator_workspace_reader.hpp"
-#include "wspctl/infrastructure/detail/payload_replay.hpp"
-#include "wspctl/infrastructure/detail/pidfd_control.hpp"
 #include "wspctl/infrastructure/protocol.hpp"
 
 #include <algorithm>
@@ -28,24 +28,24 @@
 #include <linux/close_range.h>
 #include <linux/magic.h>
 #include <memory>
-#include <poll.h>
 #include <mutex>
 #include <optional>
-#include <sys/resource.h>
+#include <poll.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/syscall.h>
-#include <sys/types.h>
 #include <sys/time.h>
-#include <sys/un.h>
+#include <sys/types.h>
 #include <sys/uio.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <system_error>
 #include <thread>
-#include <unordered_set>
 #include <unistd.h>
+#include <unordered_set>
 #include <vector>
 
 namespace wspctl::detail::launcher_transport {
@@ -60,12 +60,11 @@ void close_launcher_packet_fds(LauncherPacket& packet) noexcept {
     packet.fd_count = 0U;
 }
 
-Result<void> send_launcher_packet(
-    const int fd,
-    const std::span<const std::byte> bytes,
-    const std::span<const int> fds) {
+Result<void> send_launcher_packet(const int fd, const std::span<const std::byte> bytes,
+                                  const std::span<const int> fds) {
     if (bytes.empty() || bytes.size() > kMaxPacketBytes || fds.size() > kMaxFileDescriptors) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid fork-server packet bounds"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid fork-server packet bounds"));
     }
     iovec vector{.iov_base = const_cast<std::byte*>(bytes.data()), .iov_len = bytes.size()};
     std::array<std::byte, CMSG_SPACE(sizeof(int) * kMaxFileDescriptors)> control{};
@@ -100,22 +99,29 @@ Result<LauncherPacket> receive_launcher_packet(const int fd) {
     message.msg_controllen = control.size();
     const ssize_t received = recvmsg(fd, &message, MSG_CMSG_CLOEXEC);
     if (received <= 0) {
-        return std::unexpected(received == 0 ? make_error(ErrorCode::io_failure, "fork-server peer closed") : errno_error(ErrorCode::io_failure, "receive fork-server packet"));
+        return std::unexpected(
+            received == 0 ? make_error(ErrorCode::io_failure, "fork-server peer closed")
+                          : errno_error(ErrorCode::io_failure, "receive fork-server packet"));
     }
-    for (cmsghdr* header = CMSG_FIRSTHDR(&message); header != nullptr; header = CMSG_NXTHDR(&message, header)) {
-        if (header->cmsg_level != SOL_SOCKET || header->cmsg_type != SCM_RIGHTS || header->cmsg_len < CMSG_LEN(0)) {
+    for (cmsghdr* header = CMSG_FIRSTHDR(&message); header != nullptr;
+         header = CMSG_NXTHDR(&message, header)) {
+        if (header->cmsg_level != SOL_SOCKET || header->cmsg_type != SCM_RIGHTS ||
+            header->cmsg_len < CMSG_LEN(0)) {
             close_launcher_packet_fds(packet);
-            return std::unexpected(make_error(ErrorCode::protocol_violation, "unexpected fork-server ancillary data"));
+            return std::unexpected(
+                make_error(ErrorCode::protocol_violation, "unexpected fork-server ancillary data"));
         }
         const std::size_t payload_bytes = header->cmsg_len - CMSG_LEN(0);
         if (payload_bytes % sizeof(int) != 0U) {
             close_launcher_packet_fds(packet);
-            return std::unexpected(make_error(ErrorCode::protocol_violation, "misaligned fork-server SCM_RIGHTS payload"));
+            return std::unexpected(make_error(ErrorCode::protocol_violation,
+                                              "misaligned fork-server SCM_RIGHTS payload"));
         }
         const std::size_t count = payload_bytes / sizeof(int);
         if (count == 0U || packet.fd_count + count > kMaxFileDescriptors) {
             close_launcher_packet_fds(packet);
-            return std::unexpected(make_error(ErrorCode::protocol_violation, "invalid fork-server FD count"));
+            return std::unexpected(
+                make_error(ErrorCode::protocol_violation, "invalid fork-server FD count"));
         }
         const auto* received_fds = reinterpret_cast<const int*>(CMSG_DATA(header));
         for (std::size_t index = 0; index < count; ++index) {
@@ -124,42 +130,45 @@ Result<LauncherPacket> receive_launcher_packet(const int fd) {
     }
     if ((message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0) {
         close_launcher_packet_fds(packet);
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "truncated fork-server packet or ancillary data"));
+        return std::unexpected(make_error(ErrorCode::frame_too_large,
+                                          "truncated fork-server packet or ancillary data"));
     }
     packet.bytes.resize(static_cast<std::size_t>(received));
     return packet;
 }
 
-}  // namespace wspctl::detail::launcher_transport
+} // namespace wspctl::detail::launcher_transport
 
 namespace wspctl {
 namespace {
 
-using detail::launcher_transport::LauncherPacket;
 using detail::launcher_transport::close_launcher_packet_fds;
 using detail::launcher_transport::kMaxPacketBytes;
+using detail::launcher_transport::LauncherPacket;
 using detail::launcher_transport::receive_launcher_packet;
 using detail::launcher_transport::send_launcher_packet;
 
 /**
- * @brief 将纯领域错误投影到 native transport 错误 / Project a pure domain error into a native transport error.
+ * @brief 将纯领域错误投影到 native transport 错误 / Project a pure domain error into a native
+ * transport error.
  * @param error 领域错误 / Domain error.
  * @return 可通过 broker 传播的错误 / Error that can cross the broker boundary.
  */
 [[nodiscard]] Error transport_error(const domain::Error& error) {
     switch (error.code) {
-        case domain::ErrorCode::invalid_identity:
-        case domain::ErrorCode::invalid_budget:
-            return make_error(ErrorCode::invalid_argument, error.message);
-        case domain::ErrorCode::illegal_transition:
-        case domain::ErrorCode::activation_mismatch:
-            return make_error(ErrorCode::protocol_violation, error.message);
+    case domain::ErrorCode::invalid_identity:
+    case domain::ErrorCode::invalid_budget:
+        return make_error(ErrorCode::invalid_argument, error.message);
+    case domain::ErrorCode::illegal_transition:
+    case domain::ErrorCode::activation_mismatch:
+        return make_error(ErrorCode::protocol_violation, error.message);
     }
     return make_error(ErrorCode::internal, "unknown domain error category");
 }
 
 /**
- * @brief 已通过领域值对象验证的 execute admission / Execute admission validated by domain value objects.
+ * @brief 已通过领域值对象验证的 execute admission / Execute admission validated by domain value
+ * objects.
  *
  * 该对象是 journal、quota registry 与任何 Linux side effect 前的语义闸门；wire parser 的
  * bounded-string 检查不能替代 canonical UUID、command ID、digest 与 budget 的领域约束。/
@@ -181,8 +190,10 @@ struct TypedExecuteAdmission final {
 };
 
 /**
- * @brief 在任何 durable storage 之前执行 typed command admission / Perform typed command admission before any durable storage.
- * @param request 已通过 wire parser 的执行请求 / Execute request already accepted by the wire parser.
+ * @brief 在任何 durable storage 之前执行 typed command admission / Perform typed command admission
+ * before any durable storage.
+ * @param request 已通过 wire parser 的执行请求 / Execute request already accepted by the wire
+ * parser.
  * @return 强类型 admission 或 transport error / Typed admission or a transport error.
  */
 [[nodiscard]] Result<TypedExecuteAdmission> admit_execute_request(const ExecuteRequest& request) {
@@ -192,15 +203,11 @@ struct TypedExecuteAdmission final {
     const auto request_hash = domain::Sha256Digest::parse(request.request_hash);
     const auto budget = domain::ExecutionBudget::create(request.timeout, request.output_limit);
     if (!runtime || !activation || !command || !request_hash || !budget) {
-        const domain::Error* const error = !runtime
-            ? &runtime.error()
-            : !activation
-            ? &activation.error()
-            : !command
-            ? &command.error()
-            : !request_hash
-            ? &request_hash.error()
-            : &budget.error();
+        const domain::Error* const error = !runtime        ? &runtime.error()
+                                           : !activation   ? &activation.error()
+                                           : !command      ? &command.error()
+                                           : !request_hash ? &request_hash.error()
+                                                           : &budget.error();
         return std::unexpected(transport_error(*error));
     }
     return TypedExecuteAdmission{
@@ -213,17 +220,19 @@ struct TypedExecuteAdmission final {
 }
 
 /**
- * @brief 已通过领域值对象验证的文件写入 admission / File-ingress admission validated by domain value objects.
+ * @brief 已通过领域值对象验证的文件写入 admission / File-ingress admission validated by domain
+ * value objects.
  *
  * 文件内容本身不进入 broker 内存；这里验证其声明的 digest、调用身份与 runtime ownership，实际 bytes
- * 由 PID 1 以流式 SHA-256 校验。/ File contents never enter broker memory here; this validates their
- * declared digest, invocation identity, and runtime ownership, while PID1 validates actual bytes by
- * streaming SHA-256.
+ * 由 PID 1 以流式 SHA-256 校验。/ File contents never enter broker memory here; this validates
+ * their declared digest, invocation identity, and runtime ownership, while PID1 validates actual
+ * bytes by streaming SHA-256.
  */
 struct TypedPayloadAdmission final {
     /** @brief canonical long-lived runtime identity / Canonical long-lived runtime identity. */
     domain::RuntimeId runtime;
-    /** @brief RuntimeProcess activation ownership identity / RuntimeProcess activation ownership identity. */
+    /** @brief RuntimeProcess activation ownership identity / RuntimeProcess activation ownership
+     * identity. */
     domain::ActivationId activation;
     /** @brief durable ingress invocation identity / Durable ingress invocation identity. */
     domain::CommandId command;
@@ -234,26 +243,25 @@ struct TypedPayloadAdmission final {
 };
 
 /**
- * @brief 在任何 durable storage 之前执行 typed file admission / Perform typed file admission before durable storage.
- * @param request 已通过 wire parser 的文件开始请求 / File-begin request already accepted by the wire parser.
+ * @brief 在任何 durable storage 之前执行 typed file admission / Perform typed file admission before
+ * durable storage.
+ * @param request 已通过 wire parser 的文件开始请求 / File-begin request already accepted by the
+ * wire parser.
  * @return 强类型 admission 或 transport error / Typed admission or a transport error.
  */
-[[nodiscard]] Result<TypedPayloadAdmission> admit_payload_begin_request(const PayloadBeginRequest& request) {
+[[nodiscard]] Result<TypedPayloadAdmission>
+admit_payload_begin_request(const PayloadBeginRequest& request) {
     const auto runtime = domain::RuntimeId::parse(request.runtime_key);
     const auto activation = domain::ActivationId::parse(request.activation_id);
     const auto command = domain::CommandId::parse(request.request_id);
     const auto request_hash = domain::Sha256Digest::parse(request.request_hash);
     const auto content_hash = domain::Sha256Digest::parse(request.sha256);
     if (!runtime || !activation || !command || !request_hash || !content_hash) {
-        const domain::Error* const error = !runtime
-            ? &runtime.error()
-            : !activation
-            ? &activation.error()
-            : !command
-            ? &command.error()
-            : !request_hash
-            ? &request_hash.error()
-            : &content_hash.error();
+        const domain::Error* const error = !runtime        ? &runtime.error()
+                                           : !activation   ? &activation.error()
+                                           : !command      ? &command.error()
+                                           : !request_hash ? &request_hash.error()
+                                                           : &content_hash.error();
         return std::unexpected(transport_error(*error));
     }
     return TypedPayloadAdmission{
@@ -266,7 +274,8 @@ struct TypedPayloadAdmission final {
 }
 
 /**
- * @brief 已通过领域值对象验证的只读文件恢复 admission / Read-only file-replay admission validated by domain value objects.
+ * @brief 已通过领域值对象验证的只读文件恢复 admission / Read-only file-replay admission validated
+ * by domain value objects.
  *
  * 和写入 admission 分开表达，以类型系统禁止 replay 路径依赖 activation。/ This is represented
  * separately from write admission so the type system prevents the replay path from depending on
@@ -275,32 +284,35 @@ struct TypedPayloadAdmission final {
 struct TypedPayloadReplayAdmission final {
     /** @brief canonical long-lived runtime identity / Canonical long-lived runtime identity. */
     domain::RuntimeId runtime;
-    /** @brief durable original ingress invocation identity / Durable original ingress invocation identity. */
+    /** @brief durable original ingress invocation identity / Durable original ingress invocation
+     * identity. */
     domain::CommandId command;
-    /** @brief caller-supplied original semantic digest / Caller-supplied original semantic digest. */
+    /** @brief caller-supplied original semantic digest / Caller-supplied original semantic digest.
+     */
     domain::Sha256Digest request_hash;
-    /** @brief declared original complete-content digest / Declared original complete-content digest. */
+    /** @brief declared original complete-content digest / Declared original complete-content
+     * digest. */
     domain::Sha256Digest content_hash;
 };
 
 /**
- * @brief 在任何 durable storage 或 runtime session 前执行 typed replay admission / Perform typed replay admission before durable storage or a runtime session.
- * @param request 已通过 wire parser 的 activation-free replay 请求 / Activation-free replay request accepted by the wire parser.
+ * @brief 在任何 durable storage 或 runtime session 前执行 typed replay admission / Perform typed
+ * replay admission before durable storage or a runtime session.
+ * @param request 已通过 wire parser 的 activation-free replay 请求 / Activation-free replay request
+ * accepted by the wire parser.
  * @return 强类型 admission 或 transport error / Typed admission or a transport error.
  */
-[[nodiscard]] Result<TypedPayloadReplayAdmission> admit_payload_replay_request(const PayloadReplayRequest& request) {
+[[nodiscard]] Result<TypedPayloadReplayAdmission>
+admit_payload_replay_request(const PayloadReplayRequest& request) {
     const auto runtime = domain::RuntimeId::parse(request.runtime_key);
     const auto command = domain::CommandId::parse(request.request_id);
     const auto request_hash = domain::Sha256Digest::parse(request.request_hash);
     const auto content_hash = domain::Sha256Digest::parse(request.sha256);
     if (!runtime || !command || !request_hash || !content_hash) {
-        const domain::Error* const error = !runtime
-            ? &runtime.error()
-            : !command
-            ? &command.error()
-            : !request_hash
-            ? &request_hash.error()
-            : &content_hash.error();
+        const domain::Error* const error = !runtime        ? &runtime.error()
+                                           : !command      ? &command.error()
+                                           : !request_hash ? &request_hash.error()
+                                                           : &content_hash.error();
         return std::unexpected(transport_error(*error));
     }
     return TypedPayloadReplayAdmission{
@@ -312,10 +324,12 @@ struct TypedPayloadReplayAdmission final {
 }
 
 /**
- * @brief 将受限 host 效果适配为 application activation port / Adapt constrained host effects into the application activation port.
+ * @brief 将受限 host 效果适配为 application activation port / Adapt constrained host effects into
+ * the application activation port.
  *
  * 此类保留 native Error，避免 domain 层为表达 cgroup 清理不确定性而依赖 transport 错误类型。
- * This class retains the native Error so the domain layer never depends on transport errors merely to express uncertain cgroup cleanup.
+ * This class retains the native Error so the domain layer never depends on transport errors merely
+ * to express uncertain cgroup cleanup.
  */
 class BrokerRuntimeActivationPort final : public application::RuntimeActivationPort {
 public:
@@ -323,18 +337,19 @@ public:
     using Operation = std::function<Result<void>()>;
 
     /**
-     * @brief 构造绑定单一 runtime/activation 的适配器 / Construct an adapter bound to one runtime/activation.
+     * @brief 构造绑定单一 runtime/activation 的适配器 / Construct an adapter bound to one
+     * runtime/activation.
      * @param runtime 预期长期 runtime / Expected long-lived runtime.
      * @param activation 预期 activation / Expected activation.
-     * @param establish 建立 PID1/cgroup/overlay 的效果 / Effect that establishes PID1/cgroup/overlay.
+     * @param establish 建立 PID1/cgroup/overlay 的效果 / Effect that establishes
+     * PID1/cgroup/overlay.
      * @param retire 终止 PID1/cgroup/overlay 的效果 / Effect that retires PID1/cgroup/overlay.
      */
-    BrokerRuntimeActivationPort(
-        const domain::RuntimeId& runtime,
-        const domain::ActivationId& activation,
-        Operation establish,
-        Operation retire)
-        : runtime_(runtime), activation_(activation), establish_(std::move(establish)), retire_(std::move(retire)) {}
+    BrokerRuntimeActivationPort(const domain::RuntimeId& runtime,
+                                const domain::ActivationId& activation, Operation establish,
+                                Operation retire)
+        : runtime_(runtime), activation_(activation), establish_(std::move(establish)),
+          retire_(std::move(retire)) {}
 
     /**
      * @brief 执行建立效果 / Perform the establish effect.
@@ -342,9 +357,8 @@ public:
      * @param activation application 提供的 activation / Activation supplied by application.
      * @return 成功或映射后的领域错误 / Success or mapped domain error.
      */
-    [[nodiscard]] domain::Result<void> establish(
-        const domain::RuntimeId& runtime,
-        const domain::ActivationId& activation) override {
+    [[nodiscard]] domain::Result<void> establish(const domain::RuntimeId& runtime,
+                                                 const domain::ActivationId& activation) override {
         return invoke(runtime, activation, establish_, "establish");
     }
 
@@ -354,14 +368,15 @@ public:
      * @param activation application 提供的 activation / Activation supplied by application.
      * @return 成功或映射后的领域错误 / Success or mapped domain error.
      */
-    [[nodiscard]] domain::Result<void> retire(
-        const domain::RuntimeId& runtime,
-        const domain::ActivationId& activation) override {
+    [[nodiscard]] domain::Result<void> retire(const domain::RuntimeId& runtime,
+                                              const domain::ActivationId& activation) override {
         return invoke(runtime, activation, retire_, "retire");
     }
 
     /** @brief 返回保留的 native failure / Return the retained native failure. */
-    [[nodiscard]] const std::optional<Error>& native_error() const noexcept { return native_error_; }
+    [[nodiscard]] const std::optional<Error>& native_error() const noexcept {
+        return native_error_;
+    }
 
 private:
     /**
@@ -372,20 +387,18 @@ private:
      * @param name 诊断操作名 / Diagnostic operation name.
      * @return 成功或映射后的领域错误 / Success or mapped domain error.
      */
-    [[nodiscard]] domain::Result<void> invoke(
-        const domain::RuntimeId& runtime,
-        const domain::ActivationId& activation,
-        Operation& operation,
-        const std::string_view name) {
+    [[nodiscard]] domain::Result<void> invoke(const domain::RuntimeId& runtime,
+                                              const domain::ActivationId& activation,
+                                              Operation& operation, const std::string_view name) {
         if (runtime != runtime_ || activation != activation_) {
             return std::unexpected(domain::make_error(
                 domain::ErrorCode::activation_mismatch,
                 "activation port was invoked for a different runtime or activation"));
         }
         if (!operation) {
-            return std::unexpected(domain::make_error(
-                domain::ErrorCode::illegal_transition,
-                "runtime activation port has no " + std::string(name) + " operation"));
+            return std::unexpected(domain::make_error(domain::ErrorCode::illegal_transition,
+                                                      "runtime activation port has no " +
+                                                          std::string(name) + " operation"));
         }
         const auto completed = operation();
         if (completed) {
@@ -393,11 +406,11 @@ private:
         }
         native_error_ = completed.error();
         const domain::ErrorCode category = completed.error().code == ErrorCode::invalid_argument
-            ? domain::ErrorCode::invalid_identity
-            : domain::ErrorCode::illegal_transition;
-        return std::unexpected(domain::make_error(
-            category,
-            "privileged runtime " + std::string(name) + " failed: " + completed.error().message));
+                                               ? domain::ErrorCode::invalid_identity
+                                               : domain::ErrorCode::illegal_transition;
+        return std::unexpected(
+            domain::make_error(category, "privileged runtime " + std::string(name) +
+                                             " failed: " + completed.error().message));
     }
 
     /** @brief 绑定 runtime / Bound runtime. */
@@ -413,7 +426,8 @@ private:
 };
 
 /**
- * @brief 将 broker SharedState 读模型适配为 application 状态端口 / Adapt the broker SharedState read model to the application status port.
+ * @brief 将 broker SharedState 读模型适配为 application 状态端口 / Adapt the broker SharedState
+ * read model to the application status port.
  *
  * 这个适配器只持有一个已构造的读取函数；它没有 activation、quota、journal 或 supervisor I/O
  * 能力。/ This adapter holds only a preconstructed read function; it has no activation, quota,
@@ -422,7 +436,8 @@ private:
 class BrokerRuntimeStatusPort final : public application::RuntimeStatusPort {
 public:
     /** @brief 一个无副作用 runtime 状态读取函数 / One side-effect-free runtime-status reader. */
-    using Reader = std::function<domain::Result<application::RuntimeStatus>(const application::RuntimeStatusQuery&)>;
+    using Reader = std::function<domain::Result<application::RuntimeStatus>(
+        const application::RuntimeStatusQuery&)>;
 
     /**
      * @brief 以读取函数构造端口 / Construct the port from a read function.
@@ -435,12 +450,11 @@ public:
      * @param query 已验证 runtime/activation 查询 / Validated runtime/activation query.
      * @return allowlisted 运行态或领域错误 / Allowlisted operating status or a domain error.
      */
-    [[nodiscard]] domain::Result<application::RuntimeStatus> observe(
-        const application::RuntimeStatusQuery& query) const override {
+    [[nodiscard]] domain::Result<application::RuntimeStatus>
+    observe(const application::RuntimeStatusQuery& query) const override {
         if (!reader_) {
-            return std::unexpected(domain::make_error(
-                domain::ErrorCode::illegal_transition,
-                "runtime status port has no read model"));
+            return std::unexpected(domain::make_error(domain::ErrorCode::illegal_transition,
+                                                      "runtime status port has no read model"));
         }
         return reader_(query);
     }
@@ -450,7 +464,8 @@ private:
     Reader reader_;
 };
 
-/** @brief runtime supervisor 启动时固定保留的 FD / Fixed FDs retained while launching runtime supervisor. */
+/** @brief runtime supervisor 启动时固定保留的 FD / Fixed FDs retained while launching runtime
+ * supervisor. */
 enum class LaunchFd : int {
     control = 3,
     pid_report = 4,
@@ -461,13 +476,38 @@ enum class LaunchFd : int {
     task_cgroup_events = 9,
 };
 
-/** @brief Bot endpoint 同时服务 client 的硬上限 / Hard cap for clients served from the Bot endpoint. */
+/** @brief runtime 内固定且不可关联宿主的 hostname / Fixed runtime hostname that cannot identify the
+ * host. */
+constexpr std::string_view kRuntimeHostname{"workspace"};
+/** @brief runtime 内固定且不可关联宿主的 NIS domain name / Fixed runtime NIS domain name that
+ * cannot identify the host. */
+constexpr std::string_view kRuntimeDomainname{"localdomain"};
+
+/**
+ * @brief 在新 UTS namespace 中安装固定 runtime 身份 / Install the fixed runtime identity in a new
+ * UTS namespace.
+ * @return hostname 与 domain name 均成功写入时为真 / True when both hostname and domain name were
+ * installed.
+ * @note 必须在 ``unshare(CLONE_NEWUTS)`` 后、fork PID 1 前调用，避免继承宿主标识。
+ *       Call after ``unshare(CLONE_NEWUTS)`` and before forking PID 1 to avoid inheriting host
+ * identifiers.
+ */
+[[nodiscard]] bool configure_runtime_uts_identity() noexcept {
+    return sethostname(kRuntimeHostname.data(), kRuntimeHostname.size()) == 0 &&
+           setdomainname(kRuntimeDomainname.data(), kRuntimeDomainname.size()) == 0;
+}
+
+/** @brief Bot endpoint 同时服务 client 的硬上限 / Hard cap for clients served from the Bot
+ * endpoint. */
 constexpr std::size_t kMaxClientWorkers{32U};
-/** @brief 为独立 operator endpoint 保留的 worker 数 / Workers reserved for the independent operator endpoint. */
+/** @brief 为独立 operator endpoint 保留的 worker 数 / Workers reserved for the independent operator
+ * endpoint. */
 constexpr std::size_t kReservedOperatorWorkers{2U};
-/** @brief 等待 worker 的已 accept client 硬上限 / Hard cap for accepted clients waiting for a worker. */
+/** @brief 等待 worker 的已 accept client 硬上限 / Hard cap for accepted clients waiting for a
+ * worker. */
 constexpr std::size_t kMaxQueuedClients{64U};
-/** @brief 为独立 operator endpoint 保留的已 accept client 硬上限 / Reserved accepted-client cap for the independent operator endpoint. */
+/** @brief 为独立 operator endpoint 保留的已 accept client 硬上限 / Reserved accepted-client cap for
+ * the independent operator endpoint. */
 constexpr std::size_t kMaxQueuedOperatorClients{16U};
 
 /** @brief 关闭临时或借用 FD / Close a temporary or borrowed FD. */
@@ -485,18 +525,22 @@ void close_fd(int& fd) noexcept {
     }
 }
 
-/** @brief 为控制 socket 配置有界单包与 I/O deadline / Configure bounded packets and an I/O deadline on a control socket. */
-[[nodiscard]] Result<void> configure_control_socket(const int fd, const std::chrono::milliseconds deadline) {
+/** @brief 为控制 socket 配置有界单包与 I/O deadline / Configure bounded packets and an I/O deadline
+ * on a control socket. */
+[[nodiscard]] Result<void> configure_control_socket(const int fd,
+                                                    const std::chrono::milliseconds deadline) {
     const int requested_buffer = static_cast<int>(kMaxFrameBytes * 2U);
     if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &requested_buffer, sizeof(requested_buffer)) != 0 ||
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &requested_buffer, sizeof(requested_buffer)) != 0) {
-        return std::unexpected(errno_error(ErrorCode::io_failure, "configure SOCK_SEQPACKET buffer"));
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "configure SOCK_SEQPACKET buffer"));
     }
     int actual_buffer = 0;
     socklen_t actual_size = sizeof(actual_buffer);
     if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &actual_buffer, &actual_size) != 0 ||
         actual_buffer < static_cast<int>(kMaxFrameBytes)) {
-        return std::unexpected(make_error(ErrorCode::io_failure, "SOCK_SEQPACKET buffer cannot carry one bounded frame"));
+        return std::unexpected(make_error(ErrorCode::io_failure,
+                                          "SOCK_SEQPACKET buffer cannot carry one bounded frame"));
     }
     const auto milliseconds = std::max<std::int64_t>(1, deadline.count());
     const timeval timeout{
@@ -505,7 +549,8 @@ void close_fd(int& fd) noexcept {
     };
     if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0 ||
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) != 0) {
-        return std::unexpected(errno_error(ErrorCode::io_failure, "configure SOCK_SEQPACKET deadline"));
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "configure SOCK_SEQPACKET deadline"));
     }
     return {};
 }
@@ -541,13 +586,12 @@ void close_range_from(const unsigned int first) noexcept {
  * @param cgroup cgroup task controls / cgroup task controls.
  * @return 成功与否 / Whether whitelisting succeeded.
  */
-[[nodiscard]] bool install_launcher_fd_whitelist(
-    const int control,
-    const int pid_report,
-    const int release,
-    const TaskCgroupControl& cgroup) noexcept {
+[[nodiscard]] bool install_launcher_fd_whitelist(const int control, const int pid_report,
+                                                 const int release,
+                                                 const TaskCgroupControl& cgroup) noexcept {
     const std::array<int, 7> sources{
-        control, pid_report, release, cgroup.supervisor_procs_fd, cgroup.procs_fd, cgroup.kill_fd, cgroup.events_fd};
+        control,         pid_report,     release,         cgroup.supervisor_procs_fd,
+        cgroup.procs_fd, cgroup.kill_fd, cgroup.events_fd};
     std::array<int, 7> staging{-1, -1, -1, -1, -1, -1, -1};
     for (std::size_t index = 0; index < sources.size(); ++index) {
         staging[index] = fcntl(sources[index], F_DUPFD_CLOEXEC, 32);
@@ -589,17 +633,16 @@ void close_range_from(const unsigned int first) noexcept {
  * @return 写入完整 ``0`` 时为真 / True when a complete ``0`` was written.
  * @note launcher 在 fork namespace PID 1 前调用它；PID 1 因而继承 supervisor cgroup，broker
  *       不再向 cgroup.procs 写可复用的 host PID。 The launcher calls this before forking namespace
- *       PID 1, which inherits the supervisor cgroup; the broker no longer writes a reusable host PID.
+ *       PID 1, which inherits the supervisor cgroup; the broker no longer writes a reusable host
+ * PID.
  */
 [[nodiscard]] bool join_cgroup_self(const int descriptor) noexcept {
     /** @brief cgroup self-join payload / cgroup self-join payload. */
     constexpr std::string_view kSelf{"0"};
     std::size_t offset{0U};
     while (offset < kSelf.size()) {
-        const ssize_t count = write(
-            descriptor,
-            kSelf.data() + static_cast<std::ptrdiff_t>(offset),
-            kSelf.size() - offset);
+        const ssize_t count = write(descriptor, kSelf.data() + static_cast<std::ptrdiff_t>(offset),
+                                    kSelf.size() - offset);
         if (count < 0 && errno == EINTR) {
             continue;
         }
@@ -616,7 +659,8 @@ void close_range_from(const unsigned int first) noexcept {
     const auto* bytes = reinterpret_cast<const std::byte*>(&pid);
     std::size_t offset = 0;
     while (offset < sizeof(pid)) {
-        const ssize_t count = write(fd, bytes + static_cast<std::ptrdiff_t>(offset), sizeof(pid) - offset);
+        const ssize_t count =
+            write(fd, bytes + static_cast<std::ptrdiff_t>(offset), sizeof(pid) - offset);
         if (count < 0 && errno == EINTR) {
             continue;
         }
@@ -634,17 +678,20 @@ void close_range_from(const unsigned int first) noexcept {
     auto* bytes = reinterpret_cast<std::byte*>(&pid);
     std::size_t offset = 0;
     while (offset < sizeof(pid)) {
-        const ssize_t count = read(fd, bytes + static_cast<std::ptrdiff_t>(offset), sizeof(pid) - offset);
+        const ssize_t count =
+            read(fd, bytes + static_cast<std::ptrdiff_t>(offset), sizeof(pid) - offset);
         if (count < 0 && errno == EINTR) {
             continue;
         }
         if (count <= 0) {
-            return std::unexpected(make_error(ErrorCode::child_failure, "runtime launcher failed before reporting PID 1"));
+            return std::unexpected(make_error(ErrorCode::child_failure,
+                                              "runtime launcher failed before reporting PID 1"));
         }
         offset += static_cast<std::size_t>(count);
     }
     if (pid <= 0) {
-        return std::unexpected(make_error(ErrorCode::child_failure, "runtime launcher reported invalid PID 1"));
+        return std::unexpected(
+            make_error(ErrorCode::child_failure, "runtime launcher reported invalid PID 1"));
     }
     return pid;
 }
@@ -676,7 +723,8 @@ void close_range_from(const unsigned int first) noexcept {
 }
 
 /** @brief 发送一个 allowlisted runtime 状态快照 / Send one allowlisted runtime-status snapshot. */
-[[nodiscard]] Result<void> send_runtime_status_frame(const int fd, const RuntimeStatusResult& result) {
+[[nodiscard]] Result<void> send_runtime_status_frame(const int fd,
+                                                     const RuntimeStatusResult& result) {
     const auto payload = encode_runtime_status_result(result);
     if (!payload) {
         return std::unexpected(payload.error());
@@ -689,38 +737,39 @@ void close_range_from(const unsigned int first) noexcept {
 }
 
 /**
- * @brief 将 application operator 查询错误映射为不带文本的 operator wire 错误 / Map an application operator-query error to a text-free operator wire error.
+ * @brief 将 application operator 查询错误映射为不带文本的 operator wire 错误 / Map an application
+ * operator-query error to a text-free operator wire error.
  * @param error 应用层查询错误 / Application query error.
  * @return operator wire 错误码 / Operator wire error code.
  */
-[[nodiscard]] operator_protocol::OperatorErrorCode operator_error_code(
-    const application::OperatorWorkspaceQueryError& error) noexcept {
+[[nodiscard]] operator_protocol::OperatorErrorCode
+operator_error_code(const application::OperatorWorkspaceQueryError& error) noexcept {
     switch (error.code) {
-        case application::OperatorWorkspaceQueryErrorCode::not_found:
-            return operator_protocol::OperatorErrorCode::not_found;
-        case application::OperatorWorkspaceQueryErrorCode::inconsistent:
-        case application::OperatorWorkspaceQueryErrorCode::unavailable:
-            return operator_protocol::OperatorErrorCode::unavailable;
+    case application::OperatorWorkspaceQueryErrorCode::not_found:
+        return operator_protocol::OperatorErrorCode::not_found;
+    case application::OperatorWorkspaceQueryErrorCode::inconsistent:
+    case application::OperatorWorkspaceQueryErrorCode::unavailable:
+        return operator_protocol::OperatorErrorCode::unavailable;
     }
     return operator_protocol::OperatorErrorCode::unavailable;
 }
 
 /**
- * @brief 发送不含诊断或 payload 的 operator 错误帧 / Send an operator error frame without diagnostics or payload.
+ * @brief 发送不含诊断或 payload 的 operator 错误帧 / Send an operator error frame without
+ * diagnostics or payload.
  * @param fd operator client FD / Operator client FD.
  * @param code operator wire 错误码 / Operator wire error code.
  * @return 成功或 transport 错误 / Success or a transport error.
  */
-[[nodiscard]] Result<void> send_operator_error_frame(
-    const int fd,
-    const operator_protocol::OperatorErrorCode code) {
-    const auto payload = operator_protocol::encode_error_response(operator_protocol::ErrorResponse{.code = code});
+[[nodiscard]] Result<void>
+send_operator_error_frame(const int fd, const operator_protocol::OperatorErrorCode code) {
+    const auto payload =
+        operator_protocol::encode_error_response(operator_protocol::ErrorResponse{.code = code});
     if (!payload) {
         return std::unexpected(payload.error());
     }
     const auto wire = operator_protocol::encode_operator_frame(
-        operator_protocol::OperatorMessageKind::error_response,
-        *payload);
+        operator_protocol::OperatorMessageKind::error_response, *payload);
     if (!wire) {
         return std::unexpected(wire.error());
     }
@@ -733,16 +782,15 @@ void close_range_from(const unsigned int first) noexcept {
  * @param status allowlisted runtime 状态 / Allowlisted runtime status.
  * @return 成功或 transport 错误 / Success or a transport error.
  */
-[[nodiscard]] Result<void> send_operator_status_frame(
-    const int fd,
-    const domain::OperatorWorkspaceStatus& status) {
-    const auto payload = operator_protocol::encode_status_response(operator_protocol::StatusResponse{.status = status});
+[[nodiscard]] Result<void>
+send_operator_status_frame(const int fd, const domain::OperatorWorkspaceStatus& status) {
+    const auto payload = operator_protocol::encode_status_response(
+        operator_protocol::StatusResponse{.status = status});
     if (!payload) {
         return std::unexpected(payload.error());
     }
     const auto wire = operator_protocol::encode_operator_frame(
-        operator_protocol::OperatorMessageKind::status_response,
-        *payload);
+        operator_protocol::OperatorMessageKind::status_response, *payload);
     if (!wire) {
         return std::unexpected(wire.error());
     }
@@ -755,16 +803,15 @@ void close_range_from(const unsigned int first) noexcept {
  * @param listing 有界目录列举 / Bounded directory listing.
  * @return 成功或 transport 错误 / Success or a transport error.
  */
-[[nodiscard]] Result<void> send_operator_list_frame(
-    const int fd,
-    const domain::WorkspaceListing& listing) {
-    const auto payload = operator_protocol::encode_list_response(operator_protocol::ListResponse{.listing = listing});
+[[nodiscard]] Result<void> send_operator_list_frame(const int fd,
+                                                    const domain::WorkspaceListing& listing) {
+    const auto payload = operator_protocol::encode_list_response(
+        operator_protocol::ListResponse{.listing = listing});
     if (!payload) {
         return std::unexpected(payload.error());
     }
     const auto wire = operator_protocol::encode_operator_frame(
-        operator_protocol::OperatorMessageKind::list_response,
-        *payload);
+        operator_protocol::OperatorMessageKind::list_response, *payload);
     if (!wire) {
         return std::unexpected(wire.error());
     }
@@ -772,35 +819,39 @@ void close_range_from(const unsigned int first) noexcept {
 }
 
 /**
- * @brief 将 runtime 生命周期状态投影为 operator 活动状态 / Project a runtime lifecycle state into an operator activity state.
+ * @brief 将 runtime 生命周期状态投影为 operator 活动状态 / Project a runtime lifecycle state into
+ * an operator activity state.
  * @param state 已观察 runtime 生命周期状态 / Observed runtime lifecycle state.
- * @return 不含 activation ID 的 operator 活动状态 / Operator activity state without an activation ID.
+ * @return 不含 activation ID 的 operator 活动状态 / Operator activity state without an activation
+ * ID.
  */
-[[nodiscard]] domain::WorkspaceActivity workspace_activity_from_runtime_state(
-    const domain::RuntimeState state) noexcept {
+[[nodiscard]] domain::WorkspaceActivity
+workspace_activity_from_runtime_state(const domain::RuntimeState state) noexcept {
     switch (state) {
-        case domain::RuntimeState::dormant:
-            return domain::WorkspaceActivity::inactive;
-        case domain::RuntimeState::activating:
-            return domain::WorkspaceActivity::activating;
-        case domain::RuntimeState::ready:
-            return domain::WorkspaceActivity::ready;
-        case domain::RuntimeState::executing:
-            return domain::WorkspaceActivity::executing;
-        case domain::RuntimeState::retiring:
-            return domain::WorkspaceActivity::retiring;
-        case domain::RuntimeState::failed:
-            return domain::WorkspaceActivity::failed;
+    case domain::RuntimeState::dormant:
+        return domain::WorkspaceActivity::inactive;
+    case domain::RuntimeState::activating:
+        return domain::WorkspaceActivity::activating;
+    case domain::RuntimeState::ready:
+        return domain::WorkspaceActivity::ready;
+    case domain::RuntimeState::executing:
+        return domain::WorkspaceActivity::executing;
+    case domain::RuntimeState::retiring:
+        return domain::WorkspaceActivity::retiring;
+    case domain::RuntimeState::failed:
+        return domain::WorkspaceActivity::failed;
     }
     return domain::WorkspaceActivity::failed;
 }
 
 /**
- * @brief 将 native 只读失败归一化为 application operator 查询错误 / Normalize a native read-only failure into an application operator-query error.
+ * @brief 将 native 只读失败归一化为 application operator 查询错误 / Normalize a native read-only
+ * failure into an application operator-query error.
  * @param error native 失败 / Native failure.
  * @return 不含 host path 的 application 查询错误 / Application query error without a host path.
  */
-[[nodiscard]] application::OperatorWorkspaceQueryError normalize_operator_read_error(const Error& error) {
+[[nodiscard]] application::OperatorWorkspaceQueryError
+normalize_operator_read_error(const Error& error) {
     if (error.code == ErrorCode::not_found) {
         return application::make_operator_workspace_query_error(
             application::OperatorWorkspaceQueryErrorCode::not_found,
@@ -843,17 +894,19 @@ void close_range_from(const unsigned int first) noexcept {
 }
 
 /**
- * @brief 在一次 gate 内解析命令 journal 决定 / Resolve an execution journal decision while holding one runtime gate.
+ * @brief 在一次 gate 内解析命令 journal 决定 / Resolve an execution journal decision while holding
+ * one runtime gate.
  * @param journal runtime journal / Runtime journal.
  * @param request 已验证 command 请求 / Validated command request.
  * @return 空表示首次执行；非空表示完成回放；或 conflict/in-doubt/error /
- *         Empty means first execution; a value means completed replay; otherwise conflict/in-doubt/error.
+ *         Empty means first execution; a value means completed replay; otherwise
+ * conflict/in-doubt/error.
  * @note gate 前调用可快速回放；任何准备 begin 副作用的调用者还必须在 gate 内再次调用。
- *       A pre-gate call may fast-replay; every caller about to begin a side effect must call it again inside the gate.
+ *       A pre-gate call may fast-replay; every caller about to begin a side effect must call it
+ * again inside the gate.
  */
-[[nodiscard]] Result<std::optional<ExecutionResult>> resolve_execution_journal(
-    const Journal& journal,
-    const ExecuteRequest& request) {
+[[nodiscard]] Result<std::optional<ExecutionResult>>
+resolve_execution_journal(const Journal& journal, const ExecuteRequest& request) {
     const auto existing = journal.lookup(request.runtime_key, request.request_id);
     if (!existing) {
         return std::unexpected(existing.error());
@@ -862,19 +915,20 @@ void close_range_from(const unsigned int first) noexcept {
         return std::optional<ExecutionResult>{};
     }
     const JournalRecord& record = **existing;
-    if (record.operation != JournalOperation::execution || record.request_hash != request.request_hash ||
+    if (record.operation != JournalOperation::execution ||
+        record.request_hash != request.request_hash ||
         record.payload_hash != canonical_request_hash(request)) {
         return std::unexpected(make_error(
             ErrorCode::journal_conflict,
             "request ID was previously used with another journal operation or command metadata"));
     }
     if (record.state == JournalState::pending) {
-        return std::unexpected(make_error(
-            ErrorCode::invocation_in_doubt,
-            "invocation is pending after an interrupted execution"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "invocation is pending after an interrupted execution"));
     }
     if (!record.execution_result.has_value()) {
-        return std::unexpected(make_error(ErrorCode::journal_conflict, "completed execution journal has no result"));
+        return std::unexpected(
+            make_error(ErrorCode::journal_conflict, "completed execution journal has no result"));
     }
     ExecutionResult replay = *record.execution_result;
     replay.replayed = true;
@@ -882,19 +936,21 @@ void close_range_from(const unsigned int first) noexcept {
 }
 
 /**
- * @brief 在一次 gate 内解析文件 ingress journal 决定 / Resolve a file-ingress journal decision while holding one runtime gate.
+ * @brief 在一次 gate 内解析文件 ingress journal 决定 / Resolve a file-ingress journal decision
+ * while holding one runtime gate.
  * @param journal runtime journal / Runtime journal.
  * @param request 已验证文件开始请求 / Validated file-begin request.
  * @return 空表示可开始流；非空表示完成收据回放；或 conflict/in-doubt/error /
- *         Empty means a stream may begin; a value means a completed-receipt replay; otherwise conflict/in-doubt/error.
+ *         Empty means a stream may begin; a value means a completed-receipt replay; otherwise
+ * conflict/in-doubt/error.
  * @note 此决定可在 gate 前用于快速回放；开始流之前必须在 gate 内重读，因此另一 worker 在第一次
  *       lookup 后完成/中断时，本 worker 不会重新 seal 相同 invocation。/ This decision may
- *       fast-replay before the gate; it must be reread inside the gate before streaming, so if another
- *       worker completes or interrupts after the first lookup, this worker never reseals the same invocation.
+ *       fast-replay before the gate; it must be reread inside the gate before streaming, so if
+ * another worker completes or interrupts after the first lookup, this worker never reseals the same
+ * invocation.
  */
-[[nodiscard]] Result<std::optional<PayloadResult>> resolve_payload_journal(
-    const Journal& journal,
-    const PayloadBeginRequest& request) {
+[[nodiscard]] Result<std::optional<PayloadResult>>
+resolve_payload_journal(const Journal& journal, const PayloadBeginRequest& request) {
     const auto existing = journal.lookup(request.runtime_key, request.request_id);
     if (!existing) {
         return std::unexpected(existing.error());
@@ -903,62 +959,72 @@ void close_range_from(const unsigned int first) noexcept {
         return std::optional<PayloadResult>{};
     }
     const JournalRecord& record = **existing;
-    if (record.operation != JournalOperation::payload || record.request_hash != request.request_hash ||
+    if (record.operation != JournalOperation::payload ||
+        record.request_hash != request.request_hash ||
         record.payload_hash != canonical_payload_hash(request)) {
         return std::unexpected(make_error(
             ErrorCode::journal_conflict,
             "request ID was previously used with another journal operation or file metadata"));
     }
     if (record.state == JournalState::pending) {
-        return std::unexpected(make_error(
-            ErrorCode::invocation_in_doubt,
-            "file invocation is pending after an interrupted publish"));
+        return std::unexpected(
+            make_error(ErrorCode::invocation_in_doubt,
+                       "file invocation is pending after an interrupted publish"));
     }
     if (!record.payload_result.has_value()) {
-        return std::unexpected(make_error(ErrorCode::journal_conflict, "completed file journal has no receipt"));
+        return std::unexpected(
+            make_error(ErrorCode::journal_conflict, "completed file journal has no receipt"));
     }
     PayloadResult replay = *record.payload_result;
     const std::string expected_path = "/workspace/uploads/" + request.opaque_id + "/payload";
-    if (replay.path != expected_path || replay.byte_size != request.byte_size || replay.sha256 != request.sha256) {
-        return std::unexpected(make_error(
-            ErrorCode::journal_conflict,
-            "completed file receipt does not match file begin metadata"));
+    if (replay.path != expected_path || replay.byte_size != request.byte_size ||
+        replay.sha256 != request.sha256) {
+        return std::unexpected(
+            make_error(ErrorCode::journal_conflict,
+                       "completed file receipt does not match file begin metadata"));
     }
     replay.replayed = true;
     return std::optional<PayloadResult>{std::move(replay)};
 }
 
-/** @brief 验证并规范化 broker socket 目录为 root-owned 且不可被他人写 / Validate and canonicalize a root-owned non-writable broker socket directory. */
-[[nodiscard]] Result<std::filesystem::path> validate_socket_parent(
-    const std::filesystem::path& socket_path,
-    const bool allow_insecure_dev_root) {
+/** @brief 验证并规范化 broker socket 目录为 root-owned 且不可被他人写 / Validate and canonicalize a
+ * root-owned non-writable broker socket directory. */
+[[nodiscard]] Result<std::filesystem::path>
+validate_socket_parent(const std::filesystem::path& socket_path,
+                       const bool allow_insecure_dev_root) {
     if (!socket_path.is_absolute() || socket_path.filename().empty()) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "broker socket path must be absolute"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "broker socket path must be absolute"));
     }
     std::error_code error;
-    const std::filesystem::path parent = std::filesystem::canonical(socket_path.parent_path(), error);
+    const std::filesystem::path parent =
+        std::filesystem::canonical(socket_path.parent_path(), error);
     if (error) {
-        return std::unexpected(make_error(ErrorCode::not_found, "broker socket parent does not exist"));
+        return std::unexpected(
+            make_error(ErrorCode::not_found, "broker socket parent does not exist"));
     }
-    if (const auto secure = validate_secure_directory_ancestry(parent, allow_insecure_dev_root); !secure) {
+    if (const auto secure = validate_secure_directory_ancestry(parent, allow_insecure_dev_root);
+        !secure) {
         return std::unexpected(secure.error());
     }
     return parent;
 }
 
 /**
- * @brief 判断一个已 canonical 的目录是否包含另一个目录 / Check whether one canonical directory contains another.
+ * @brief 判断一个已 canonical 的目录是否包含另一个目录 / Check whether one canonical directory
+ * contains another.
  * @param ancestor 候选祖先目录 / Candidate ancestor directory.
  * @param descendant 候选后代目录 / Candidate descendant directory.
- * @return 相等或 ancestor 是 descendant 的祖先时为真 / True when equal or when ancestor contains descendant.
+ * @return 相等或 ancestor 是 descendant 的祖先时为真 / True when equal or when ancestor contains
+ * descendant.
  */
-[[nodiscard]] bool canonical_directory_contains(
-    const std::filesystem::path& ancestor,
-    const std::filesystem::path& descendant) noexcept {
+[[nodiscard]] bool canonical_directory_contains(const std::filesystem::path& ancestor,
+                                                const std::filesystem::path& descendant) noexcept {
     auto ancestor_component = ancestor.begin();
     auto descendant_component = descendant.begin();
     while (ancestor_component != ancestor.end()) {
-        if (descendant_component == descendant.end() || *ancestor_component != *descendant_component) {
+        if (descendant_component == descendant.end() ||
+            *ancestor_component != *descendant_component) {
             return false;
         }
         ++ancestor_component;
@@ -968,7 +1034,8 @@ void close_range_from(const unsigned int first) noexcept {
 }
 
 /**
- * @brief 在已验证私有父目录中回收一个无 listener 的 stale UNIX socket / Reclaim one stale UNIX socket below a verified private parent.
+ * @brief 在已验证私有父目录中回收一个无 listener 的 stale UNIX socket / Reclaim one stale UNIX
+ * socket below a verified private parent.
  * @param socket_path 待绑定的受控 endpoint / Controlled endpoint about to be bound.
  * @param description 仅供 host 诊断的 endpoint 名称 / Endpoint name used only for host diagnostics.
  * @return 成功、路径不存在或已安全 unlink；活 listener/不确定状态返回 fail-closed 错误 /
@@ -981,26 +1048,27 @@ void close_range_from(const unsigned int first) noexcept {
  *       `lstat` to be a socket whose nonblocking `connect` explicitly returns `ECONNREFUSED`; it
  *       never removes a regular file, directory, symlink, or connectable listener.
  */
-[[nodiscard]] Result<void> reclaim_stale_listener_path(
-    const std::filesystem::path& socket_path,
-    const std::string_view description) {
+[[nodiscard]] Result<void> reclaim_stale_listener_path(const std::filesystem::path& socket_path,
+                                                       const std::string_view description) {
     struct stat original {};
     if (lstat(socket_path.c_str(), &original) != 0) {
         if (errno == ENOENT) {
             return {};
         }
-        return std::unexpected(errno_error(ErrorCode::io_failure, "lstat " + std::string(description) + " socket"));
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "lstat " + std::string(description) + " socket"));
     }
     if (!S_ISSOCK(original.st_mode)) {
-        return std::unexpected(make_error(
-            ErrorCode::already_exists,
-            std::string(description) + " socket path names a non-socket object"));
+        return std::unexpected(
+            make_error(ErrorCode::already_exists,
+                       std::string(description) + " socket path names a non-socket object"));
     }
     const int probe_fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (probe_fd < 0) {
-        return std::unexpected(errno_error(ErrorCode::io_failure, "create stale " + std::string(description) + " probe"));
+        return std::unexpected(errno_error(ErrorCode::io_failure,
+                                           "create stale " + std::string(description) + " probe"));
     }
-    sockaddr_un address {};
+    sockaddr_un address{};
     address.sun_family = AF_UNIX;
     std::strncpy(address.sun_path, socket_path.c_str(), sizeof(address.sun_path) - 1U);
     int connection_error{0};
@@ -1010,55 +1078,64 @@ void close_range_from(const unsigned int first) noexcept {
             pollfd readiness{.fd = probe_fd, .events = POLLOUT, .revents = 0};
             const int ready = poll(&readiness, 1U, 250);
             if (ready < 0) {
-                const Error error = errno_error(ErrorCode::io_failure, "poll stale " + std::string(description) + " probe");
+                const Error error = errno_error(
+                    ErrorCode::io_failure, "poll stale " + std::string(description) + " probe");
                 close_fd(probe_fd);
                 return std::unexpected(error);
             }
             if (ready == 0 || (readiness.revents & POLLNVAL) != 0) {
                 close_fd(probe_fd);
-                return std::unexpected(make_error(
-                    ErrorCode::already_exists,
-                    std::string(description) + " socket liveness is indeterminate; refusing unlink"));
+                return std::unexpected(
+                    make_error(ErrorCode::already_exists,
+                               std::string(description) +
+                                   " socket liveness is indeterminate; refusing unlink"));
             }
             socklen_t error_size = sizeof(connection_error);
             if (getsockopt(probe_fd, SOL_SOCKET, SO_ERROR, &connection_error, &error_size) != 0) {
-                const Error error = errno_error(ErrorCode::io_failure, "read stale " + std::string(description) + " probe status");
+                const Error error =
+                    errno_error(ErrorCode::io_failure,
+                                "read stale " + std::string(description) + " probe status");
                 close_fd(probe_fd);
                 return std::unexpected(error);
             }
             if (error_size != sizeof(connection_error)) {
                 close_fd(probe_fd);
-                return std::unexpected(make_error(
-                    ErrorCode::io_failure,
-                    "stale " + std::string(description) + " probe returned an invalid status size"));
+                return std::unexpected(make_error(ErrorCode::io_failure,
+                                                  "stale " + std::string(description) +
+                                                      " probe returned an invalid status size"));
             }
         }
     }
     close_fd(probe_fd);
     if (connection_error == 0) {
-        return std::unexpected(make_error(
-            ErrorCode::already_exists,
-            std::string(description) + " socket has a live listener; refusing replacement"));
+        return std::unexpected(make_error(ErrorCode::already_exists,
+                                          std::string(description) +
+                                              " socket has a live listener; refusing replacement"));
     }
     if (connection_error != ECONNREFUSED) {
-        return std::unexpected(make_error(
-            ErrorCode::already_exists,
-            std::string(description) + " socket probe did not prove a stale listener; refusing unlink"));
+        return std::unexpected(
+            make_error(ErrorCode::already_exists,
+                       std::string(description) +
+                           " socket probe did not prove a stale listener; refusing unlink"));
     }
     struct stat current {};
     if (lstat(socket_path.c_str(), &current) != 0) {
         if (errno == ENOENT) {
             return {};
         }
-        return std::unexpected(errno_error(ErrorCode::io_failure, "recheck stale " + std::string(description) + " socket"));
+        return std::unexpected(errno_error(
+            ErrorCode::io_failure, "recheck stale " + std::string(description) + " socket"));
     }
-    if (!S_ISSOCK(current.st_mode) || current.st_dev != original.st_dev || current.st_ino != original.st_ino) {
-        return std::unexpected(make_error(
-            ErrorCode::already_exists,
-            std::string(description) + " socket path changed during stale recovery; refusing unlink"));
+    if (!S_ISSOCK(current.st_mode) || current.st_dev != original.st_dev ||
+        current.st_ino != original.st_ino) {
+        return std::unexpected(
+            make_error(ErrorCode::already_exists,
+                       std::string(description) +
+                           " socket path changed during stale recovery; refusing unlink"));
     }
     if (unlink(socket_path.c_str()) != 0) {
-        return std::unexpected(errno_error(ErrorCode::io_failure, "unlink stale " + std::string(description) + " socket"));
+        return std::unexpected(errno_error(ErrorCode::io_failure,
+                                           "unlink stale " + std::string(description) + " socket"));
     }
     return {};
 }
@@ -1073,20 +1150,20 @@ void close_range_from(const unsigned int first) noexcept {
  * @param release_fd PID 1 读端 / PID 1 read end.
  * @return 不返回 / Does not return.
  */
-[[noreturn]] void launch_namespace_pid1(
-    const BrokerConfig& config,
-    const TaskLayer& layer,
-    const TaskCgroupControl& cgroup,
-    const int control_fd,
-    const int pid_report_fd,
-    const int release_fd) {
+[[noreturn]] void launch_namespace_pid1(const BrokerConfig& config, const TaskLayer& layer,
+                                        const TaskCgroupControl& cgroup, const int control_fd,
+                                        const int pid_report_fd, const int release_fd) {
     if (!install_launcher_fd_whitelist(control_fd, pid_report_fd, release_fd, cgroup)) {
         _exit(125);
     }
     if (!join_cgroup_self(static_cast<int>(LaunchFd::supervisor_cgroup_procs))) {
         _exit(125);
     }
-    if (unshare(CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWNET | CLONE_NEWCGROUP) != 0) {
+    if (unshare(CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWNET |
+                CLONE_NEWCGROUP) != 0) {
+        _exit(125);
+    }
+    if (!configure_runtime_uts_identity()) {
         _exit(125);
     }
     const pid_t pid1 = fork();
@@ -1127,24 +1204,11 @@ void close_range_from(const unsigned int first) noexcept {
     const std::string events = std::to_string(static_cast<int>(LaunchFd::task_cgroup_events));
     const std::string uid = std::to_string(config.sandbox.sandbox_uid);
     const std::string gid = std::to_string(config.sandbox.sandbox_gid);
-    constexpr const char* kSupervisorPath =
-        "/usr/local/libexec/wspctl/wsp-systemd";
-    execl(
-        kSupervisorPath,
-        kSupervisorPath,
-        "--control-fd",
-        control.c_str(),
-        "--task-cgroup-procs-fd",
-        procs.c_str(),
-        "--task-cgroup-kill-fd",
-        kill.c_str(),
-        "--task-cgroup-events-fd",
-        events.c_str(),
-        "--sandbox-uid",
-        uid.c_str(),
-        "--sandbox-gid",
-        gid.c_str(),
-        static_cast<char*>(nullptr));
+    constexpr const char* kSupervisorPath = "/usr/local/libexec/wspctl/wsp-systemd";
+    execl(kSupervisorPath, kSupervisorPath, "--control-fd", control.c_str(),
+          "--task-cgroup-procs-fd", procs.c_str(), "--task-cgroup-kill-fd", kill.c_str(),
+          "--task-cgroup-events-fd", events.c_str(), "--sandbox-uid", uid.c_str(), "--sandbox-gid",
+          gid.c_str(), static_cast<char*>(nullptr));
     _exit(125);
 }
 
@@ -1158,9 +1222,11 @@ enum class LauncherMessageKind : std::uint16_t {
     error = 3,
     /** @brief 正常停止 fork-server / Cleanly stop the fork server. */
     shutdown = 4,
-    /** @brief broker 已完成 cgroup placement 与 release / Broker completed cgroup placement and release. */
+    /** @brief broker 已完成 cgroup placement 与 release / Broker completed cgroup placement and
+       release. */
     commit = 5,
-    /** @brief broker 放弃尚未 commit 的 launch / Broker abandons a launch that has not committed. */
+    /** @brief broker 放弃尚未 commit 的 launch / Broker abandons a launch that has not committed.
+     */
     cancel = 6,
     /** @brief helper 已达 commit/cancel 终态 / Helper reached a commit/cancel terminal state. */
     terminal = 7,
@@ -1169,7 +1235,8 @@ enum class LauncherMessageKind : std::uint16_t {
 };
 
 /** @brief fork-server wire magic / Fork-server wire magic. */
-constexpr std::array<std::byte, 4> kLauncherMagic{std::byte{'W'}, std::byte{'S'}, std::byte{'P'}, std::byte{'L'}};
+constexpr std::array<std::byte, 4> kLauncherMagic{std::byte{'W'}, std::byte{'S'}, std::byte{'P'},
+                                                  std::byte{'L'}};
 /** @brief fork-server wire version / Fork-server wire version. */
 constexpr std::uint16_t kLauncherVersion{1U};
 /** @brief fork-server 已解析包头 / Parsed fork-server packet header. */
@@ -1182,11 +1249,13 @@ struct LauncherHeader final {
     std::size_t payload_offset;
 };
 
-/** @brief helper 持有的未回收 launcher 记录 / Launcher record retained by the helper until reaping. */
+/** @brief helper 持有的未回收 launcher 记录 / Launcher record retained by the helper until reaping.
+ */
 struct HelperLaunchRecord final {
     /** @brief helper 的直接 child PID / Helper's direct child PID. */
     pid_t launcher_pid{-1};
-    /** @brief namespace PID 1 的 identity-stable pidfd / Identity-stable pidfd of namespace PID 1. */
+    /** @brief namespace PID 1 的 identity-stable pidfd / Identity-stable pidfd of namespace PID 1.
+     */
     int pid1_pidfd{-1};
     /** @brief helper 保留的 release pipe 写端 / Release-pipe write end retained by helper. */
     int retained_release_fd{-1};
@@ -1219,9 +1288,11 @@ void append_launcher_u64(std::vector<std::byte>& bytes, const std::uint64_t valu
 }
 
 /** @brief 写入有界字符串 / Append a bounded string. */
-[[nodiscard]] Result<void> append_launcher_string(std::vector<std::byte>& bytes, const std::string_view value) {
+[[nodiscard]] Result<void> append_launcher_string(std::vector<std::byte>& bytes,
+                                                  const std::string_view value) {
     if (value.size() > 4096U || value.find('\0') != std::string_view::npos) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid fork-server string"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid fork-server string"));
     }
     append_launcher_u32(bytes, static_cast<std::uint32_t>(value.size()));
     for (const char character : value) {
@@ -1231,47 +1302,55 @@ void append_launcher_u64(std::vector<std::byte>& bytes, const std::uint64_t valu
 }
 
 /** @brief 从 bytes 读取 little-endian u16 / Read a little-endian u16 from bytes. */
-[[nodiscard]] Result<std::uint16_t> read_launcher_u16(const std::span<const std::byte> bytes, std::size_t& offset) {
+[[nodiscard]] Result<std::uint16_t> read_launcher_u16(const std::span<const std::byte> bytes,
+                                                      std::size_t& offset) {
     if (offset > bytes.size() || bytes.size() - offset < 2U) {
         return std::unexpected(make_error(ErrorCode::malformed_frame, "truncated fork-server u16"));
     }
-    const std::uint16_t value = static_cast<std::uint16_t>(std::to_integer<unsigned char>(bytes[offset])) |
+    const std::uint16_t value =
+        static_cast<std::uint16_t>(std::to_integer<unsigned char>(bytes[offset])) |
         (static_cast<std::uint16_t>(std::to_integer<unsigned char>(bytes[offset + 1U])) << 8U);
     offset += 2U;
     return value;
 }
 
 /** @brief 从 bytes 读取 little-endian u32 / Read a little-endian u32 from bytes. */
-[[nodiscard]] Result<std::uint32_t> read_launcher_u32(const std::span<const std::byte> bytes, std::size_t& offset) {
+[[nodiscard]] Result<std::uint32_t> read_launcher_u32(const std::span<const std::byte> bytes,
+                                                      std::size_t& offset) {
     if (offset > bytes.size() || bytes.size() - offset < 4U) {
         return std::unexpected(make_error(ErrorCode::malformed_frame, "truncated fork-server u32"));
     }
     std::uint32_t value = 0U;
     for (unsigned int index = 0; index < 4U; ++index) {
-        value |= static_cast<std::uint32_t>(std::to_integer<unsigned char>(bytes[offset + index])) << (index * 8U);
+        value |= static_cast<std::uint32_t>(std::to_integer<unsigned char>(bytes[offset + index]))
+                 << (index * 8U);
     }
     offset += 4U;
     return value;
 }
 
 /** @brief 从 bytes 读取 little-endian u64 / Read a little-endian u64 from bytes. */
-[[nodiscard]] Result<std::uint64_t> read_launcher_u64(const std::span<const std::byte> bytes, std::size_t& offset) {
+[[nodiscard]] Result<std::uint64_t> read_launcher_u64(const std::span<const std::byte> bytes,
+                                                      std::size_t& offset) {
     if (offset > bytes.size() || bytes.size() - offset < 8U) {
         return std::unexpected(make_error(ErrorCode::malformed_frame, "truncated fork-server u64"));
     }
     std::uint64_t value = 0U;
     for (unsigned int index = 0; index < 8U; ++index) {
-        value |= static_cast<std::uint64_t>(std::to_integer<unsigned char>(bytes[offset + index])) << (index * 8U);
+        value |= static_cast<std::uint64_t>(std::to_integer<unsigned char>(bytes[offset + index]))
+                 << (index * 8U);
     }
     offset += 8U;
     return value;
 }
 
 /** @brief 从 bytes 读取有界字符串 / Read a bounded string from bytes. */
-[[nodiscard]] Result<std::string> read_launcher_string(const std::span<const std::byte> bytes, std::size_t& offset) {
+[[nodiscard]] Result<std::string> read_launcher_string(const std::span<const std::byte> bytes,
+                                                       std::size_t& offset) {
     const auto length = read_launcher_u32(bytes, offset);
     if (!length || *length > 4096U || *length > bytes.size() - offset) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid fork-server string length"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid fork-server string length"));
     }
     std::string value;
     value.reserve(*length);
@@ -1283,10 +1362,8 @@ void append_launcher_u64(std::vector<std::byte>& bytes, const std::uint64_t valu
 }
 
 /** @brief 编码 fork-server 包头 / Encode a fork-server packet header. */
-void append_launcher_header(
-    std::vector<std::byte>& bytes,
-    const LauncherMessageKind kind,
-    const std::uint64_t request_id) {
+void append_launcher_header(std::vector<std::byte>& bytes, const LauncherMessageKind kind,
+                            const std::uint64_t request_id) {
     bytes.insert(bytes.end(), kLauncherMagic.begin(), kLauncherMagic.end());
     append_launcher_u16(bytes, kLauncherVersion);
     append_launcher_u16(bytes, static_cast<std::uint16_t>(kind));
@@ -1297,7 +1374,8 @@ void append_launcher_header(
 [[nodiscard]] Result<LauncherHeader> parse_launcher_header(const std::span<const std::byte> bytes) {
     if (bytes.size() < 16U || bytes.size() > kMaxPacketBytes ||
         !std::equal(kLauncherMagic.begin(), kLauncherMagic.end(), bytes.begin())) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid fork-server packet magic or length"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid fork-server packet magic or length"));
     }
     std::size_t offset = 4U;
     const auto version = read_launcher_u16(bytes, offset);
@@ -1306,7 +1384,8 @@ void append_launcher_header(
     if (!version || !raw_kind || !request_id || *version != kLauncherVersion ||
         (*raw_kind < static_cast<std::uint16_t>(LauncherMessageKind::launch) ||
          *raw_kind > static_cast<std::uint16_t>(LauncherMessageKind::released))) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid fork-server packet header"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid fork-server packet header"));
     }
     return LauncherHeader{
         .kind = static_cast<LauncherMessageKind>(*raw_kind),
@@ -1316,9 +1395,8 @@ void append_launcher_header(
 }
 
 /** @brief 编码启动请求 / Encode a launch request. */
-[[nodiscard]] Result<std::vector<std::byte>> encode_launcher_request(
-    const std::uint64_t request_id,
-    const TaskLayer& layer) {
+[[nodiscard]] Result<std::vector<std::byte>> encode_launcher_request(const std::uint64_t request_id,
+                                                                     const TaskLayer& layer) {
     std::vector<std::byte> bytes;
     bytes.reserve(512U);
     append_launcher_header(bytes, LauncherMessageKind::launch, request_id);
@@ -1326,55 +1404,60 @@ void append_launcher_header(
              &layer.runtime_dir, &layer.upper_dir, &layer.work_dir, &layer.root_dir,
              &layer.workspace_lower_dir, &layer.merged_dir}) {
         if (!path->is_absolute()) {
-            return std::unexpected(make_error(ErrorCode::invalid_argument, "fork-server layer path must be absolute"));
+            return std::unexpected(
+                make_error(ErrorCode::invalid_argument, "fork-server layer path must be absolute"));
         }
         if (const auto appended = append_launcher_string(bytes, path->string()); !appended) {
             return std::unexpected(appended.error());
         }
     }
     if (bytes.size() > kMaxPacketBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "fork-server launch request exceeds quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "fork-server launch request exceeds quota"));
     }
     return bytes;
 }
 
 /** @brief 解码启动请求 / Decode a launch request. */
-[[nodiscard]] Result<std::pair<std::uint64_t, TaskLayer>> decode_launcher_request(const std::span<const std::byte> bytes) {
+[[nodiscard]] Result<std::pair<std::uint64_t, TaskLayer>>
+decode_launcher_request(const std::span<const std::byte> bytes) {
     const auto header = parse_launcher_header(bytes);
     if (!header || header->kind != LauncherMessageKind::launch) {
-        return std::unexpected(header ? make_error(ErrorCode::protocol_violation, "unexpected fork-server request kind") : header.error());
+        return std::unexpected(header ? make_error(ErrorCode::protocol_violation,
+                                                   "unexpected fork-server request kind")
+                                      : header.error());
     }
     std::size_t offset = header->payload_offset;
     std::array<std::string, 6> paths;
     for (std::string& path : paths) {
         const auto decoded = read_launcher_string(bytes, offset);
         if (!decoded || !std::filesystem::path(*decoded).is_absolute()) {
-            return std::unexpected(decoded ? make_error(ErrorCode::malformed_frame, "fork-server layer path is not absolute") : decoded.error());
+            return std::unexpected(decoded ? make_error(ErrorCode::malformed_frame,
+                                                        "fork-server layer path is not absolute")
+                                           : decoded.error());
         }
         path = *decoded;
     }
     if (offset != bytes.size()) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "trailing fork-server launch bytes"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "trailing fork-server launch bytes"));
     }
-    return std::pair{
-        header->request_id,
-        TaskLayer{
-            .quota_binding = {},
-            .activation_id = {},
-            .runtime_dir = std::move(paths[0]),
-            .upper_dir = std::move(paths[1]),
-            .work_dir = std::move(paths[2]),
-            .root_dir = std::move(paths[3]),
-            .workspace_lower_dir = std::move(paths[4]),
-            .merged_dir = std::move(paths[5]),
-        }};
+    return std::pair{header->request_id, TaskLayer{
+                                             .quota_binding = {},
+                                             .activation_id = {},
+                                             .runtime_dir = std::move(paths[0]),
+                                             .upper_dir = std::move(paths[1]),
+                                             .work_dir = std::move(paths[2]),
+                                             .root_dir = std::move(paths[3]),
+                                             .workspace_lower_dir = std::move(paths[4]),
+                                             .merged_dir = std::move(paths[5]),
+                                         }};
 }
 
 /** @brief 编码成功启动回复 / Encode a successful launch reply. */
-[[nodiscard]] std::vector<std::byte> encode_launcher_reply(
-    const std::uint64_t request_id,
-    const pid_t launcher_pid,
-    const pid_t pid1_pid) {
+[[nodiscard]] std::vector<std::byte> encode_launcher_reply(const std::uint64_t request_id,
+                                                           const pid_t launcher_pid,
+                                                           const pid_t pid1_pid) {
     std::vector<std::byte> bytes;
     bytes.reserve(24U);
     append_launcher_header(bytes, LauncherMessageKind::launched, request_id);
@@ -1384,19 +1467,24 @@ void append_launcher_header(
 }
 
 /** @brief 解码成功启动回复 / Decode a successful launch reply. */
-[[nodiscard]] Result<std::pair<pid_t, pid_t>> decode_launcher_reply(
-    const std::span<const std::byte> bytes,
-    const std::uint64_t expected_request_id) {
+[[nodiscard]] Result<std::pair<pid_t, pid_t>>
+decode_launcher_reply(const std::span<const std::byte> bytes,
+                      const std::uint64_t expected_request_id) {
     const auto header = parse_launcher_header(bytes);
-    if (!header || header->kind != LauncherMessageKind::launched || header->request_id != expected_request_id) {
-        return std::unexpected(header ? make_error(ErrorCode::protocol_violation, "fork-server reply identity mismatch") : header.error());
+    if (!header || header->kind != LauncherMessageKind::launched ||
+        header->request_id != expected_request_id) {
+        return std::unexpected(header ? make_error(ErrorCode::protocol_violation,
+                                                   "fork-server reply identity mismatch")
+                                      : header.error());
     }
     std::size_t offset = header->payload_offset;
     const auto launcher_pid = read_launcher_u32(bytes, offset);
     const auto pid1_pid = read_launcher_u32(bytes, offset);
-    if (!launcher_pid || !pid1_pid || offset != bytes.size() || *launcher_pid == 0U || *pid1_pid == 0U ||
-        *launcher_pid > static_cast<std::uint32_t>(INT_MAX) || *pid1_pid > static_cast<std::uint32_t>(INT_MAX)) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid fork-server launch PIDs"));
+    if (!launcher_pid || !pid1_pid || offset != bytes.size() || *launcher_pid == 0U ||
+        *pid1_pid == 0U || *launcher_pid > static_cast<std::uint32_t>(INT_MAX) ||
+        *pid1_pid > static_cast<std::uint32_t>(INT_MAX)) {
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid fork-server launch PIDs"));
     }
     return std::pair{static_cast<pid_t>(*launcher_pid), static_cast<pid_t>(*pid1_pid)};
 }
@@ -1407,14 +1495,14 @@ enum class LauncherTerminalState : std::uint16_t {
     committed = 1,
     /** @brief helper 已取消且回收 launcher / Helper cancelled and reaped the launcher. */
     cancelled = 2,
-    /** @brief broker 已 release，helper 可关闭保留 FD / Broker released; helper may close retained FD. */
+    /** @brief broker 已 release，helper 可关闭保留 FD / Broker released; helper may close retained
+       FD. */
     released = 3,
 };
 
 /** @brief 编码 helper 终态确认 / Encode a helper terminal acknowledgement. */
-[[nodiscard]] std::vector<std::byte> encode_launcher_terminal(
-    const std::uint64_t request_id,
-    const LauncherTerminalState state) {
+[[nodiscard]] std::vector<std::byte> encode_launcher_terminal(const std::uint64_t request_id,
+                                                              const LauncherTerminalState state) {
     std::vector<std::byte> bytes;
     bytes.reserve(20U);
     append_launcher_header(bytes, LauncherMessageKind::terminal, request_id);
@@ -1423,12 +1511,15 @@ enum class LauncherTerminalState : std::uint16_t {
 }
 
 /** @brief 解码 helper 终态确认 / Decode a helper terminal acknowledgement. */
-[[nodiscard]] Result<LauncherTerminalState> decode_launcher_terminal(
-    const std::span<const std::byte> bytes,
-    const std::uint64_t expected_request_id) {
+[[nodiscard]] Result<LauncherTerminalState>
+decode_launcher_terminal(const std::span<const std::byte> bytes,
+                         const std::uint64_t expected_request_id) {
     const auto header = parse_launcher_header(bytes);
-    if (!header || header->kind != LauncherMessageKind::terminal || header->request_id != expected_request_id) {
-        return std::unexpected(header ? make_error(ErrorCode::protocol_violation, "fork-server terminal identity mismatch") : header.error());
+    if (!header || header->kind != LauncherMessageKind::terminal ||
+        header->request_id != expected_request_id) {
+        return std::unexpected(header ? make_error(ErrorCode::protocol_violation,
+                                                   "fork-server terminal identity mismatch")
+                                      : header.error());
     }
     std::size_t offset = header->payload_offset;
     const auto state = read_launcher_u16(bytes, offset);
@@ -1436,13 +1527,15 @@ enum class LauncherTerminalState : std::uint16_t {
         (*state != static_cast<std::uint16_t>(LauncherTerminalState::committed) &&
          *state != static_cast<std::uint16_t>(LauncherTerminalState::cancelled) &&
          *state != static_cast<std::uint16_t>(LauncherTerminalState::released))) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid fork-server terminal state"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid fork-server terminal state"));
     }
     return static_cast<LauncherTerminalState>(*state);
 }
 
 /** @brief 编码 fork-server 错误 / Encode a fork-server error. */
-[[nodiscard]] std::vector<std::byte> encode_launcher_error(const std::uint64_t request_id, const std::string_view message) {
+[[nodiscard]] std::vector<std::byte> encode_launcher_error(const std::uint64_t request_id,
+                                                           const std::string_view message) {
     std::vector<std::byte> bytes;
     bytes.reserve(64U);
     append_launcher_header(bytes, LauncherMessageKind::error, request_id);
@@ -1450,12 +1543,13 @@ enum class LauncherTerminalState : std::uint16_t {
     return bytes;
 }
 
-/** @brief 验证 broker 传给 helper 的控制 socket 角色 / Validate the control-socket role broker passes to helper. */
+/** @brief 验证 broker 传给 helper 的控制 socket 角色 / Validate the control-socket role broker
+ * passes to helper. */
 [[nodiscard]] bool is_unix_seqpacket_socket(const int fd) noexcept {
     struct stat metadata {};
     int type = 0;
     socklen_t type_size = sizeof(type);
-    sockaddr_storage address {};
+    sockaddr_storage address{};
     socklen_t address_size = sizeof(address);
     return fstat(fd, &metadata) == 0 && S_ISSOCK(metadata.st_mode) &&
            getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &type_size) == 0 && type == SOCK_SEQPACKET &&
@@ -1474,25 +1568,30 @@ enum class LauncherTerminalState : std::uint16_t {
     return std::string(buffer.data(), static_cast<std::size_t>(size));
 }
 
-/** @brief 验证一个 cgroup control FD 的 fs 与文件角色 / Validate one cgroup-control FD's filesystem and file role. */
+/** @brief 验证一个 cgroup control FD 的 fs 与文件角色 / Validate one cgroup-control FD's filesystem
+ * and file role. */
 [[nodiscard]] bool is_cgroup_control_fd(const int fd, const std::string_view expected_name) {
     struct statfs filesystem {};
     const int flags = fcntl(fd, F_GETFL);
     const auto target = fd_link_target(fd);
-    return fstatfs(fd, &filesystem) == 0 && filesystem.f_type == CGROUP2_SUPER_MAGIC && flags >= 0 &&
-           (flags & O_ACCMODE) == O_WRONLY && target.has_value() && target->ends_with(expected_name);
+    return fstatfs(fd, &filesystem) == 0 && filesystem.f_type == CGROUP2_SUPER_MAGIC &&
+           flags >= 0 && (flags & O_ACCMODE) == O_WRONLY && target.has_value() &&
+           target->ends_with(expected_name);
 }
 
-/** @brief 验证 task cgroup.events 读取 FD 的 fs 与文件角色 / Validate task cgroup.events FD role. */
+/** @brief 验证 task cgroup.events 读取 FD 的 fs 与文件角色 / Validate task cgroup.events FD role.
+ */
 [[nodiscard]] bool is_task_cgroup_events_fd(const int fd) {
     struct statfs filesystem {};
     const int flags = fcntl(fd, F_GETFL);
     const auto target = fd_link_target(fd);
-    return fstatfs(fd, &filesystem) == 0 && filesystem.f_type == CGROUP2_SUPER_MAGIC && flags >= 0 &&
-           (flags & O_ACCMODE) == O_RDONLY && target.has_value() && target->ends_with("/cgroup.events");
+    return fstatfs(fd, &filesystem) == 0 && filesystem.f_type == CGROUP2_SUPER_MAGIC &&
+           flags >= 0 && (flags & O_ACCMODE) == O_RDONLY && target.has_value() &&
+           target->ends_with("/cgroup.events");
 }
 
-/** @brief 验证 helper 回传的 release pipe 写端 / Validate the helper-returned release-pipe write end. */
+/** @brief 验证 helper 回传的 release pipe 写端 / Validate the helper-returned release-pipe write
+ * end. */
 [[nodiscard]] bool is_pipe_write_fd(const int fd) noexcept {
     struct stat metadata {};
     const int flags = fcntl(fd, F_GETFL);
@@ -1510,34 +1609,45 @@ enum class LauncherTerminalState : std::uint16_t {
     std::array<char, 512> buffer{};
     const ssize_t size = read(info_fd, buffer.data(), buffer.size());
     close_fd(info_fd);
-    return size > 0 && std::string_view(buffer.data(), static_cast<std::size_t>(size)).find("Pid:\t") != std::string_view::npos;
+    return size > 0 &&
+           std::string_view(buffer.data(), static_cast<std::size_t>(size)).find("Pid:\t") !=
+               std::string_view::npos;
 }
 
 /** @brief 验证 broker->helper launch FD 集 / Validate the exact broker-to-helper launch FD set. */
 [[nodiscard]] bool has_valid_launch_request_fds(const LauncherPacket& packet) {
-    return packet.fd_count == detail::launcher_transport::kMaxFileDescriptors && is_unix_seqpacket_socket(packet.fds[0]) &&
+    return packet.fd_count == detail::launcher_transport::kMaxFileDescriptors &&
+           is_unix_seqpacket_socket(packet.fds[0]) &&
            is_cgroup_control_fd(packet.fds[1], "/supervisor/cgroup.procs") &&
            is_cgroup_control_fd(packet.fds[2], "/task/cgroup.procs") &&
            is_cgroup_control_fd(packet.fds[3], "/task/cgroup.kill") &&
            is_task_cgroup_events_fd(packet.fds[4]);
 }
 
-/** @brief 验证 helper->broker launch reply FD 集 / Validate the exact helper-to-broker launch reply FD set. */
+/** @brief 验证 helper->broker launch reply FD 集 / Validate the exact helper-to-broker launch reply
+ * FD set. */
 [[nodiscard]] bool has_valid_launch_reply_fds(const LauncherPacket& packet) {
     return packet.fd_count == 2U && is_pipe_write_fd(packet.fds[0]) && is_pidfd(packet.fds[1]);
 }
 
-/** @brief 在 deadline 内读取 launcher 报告的 PID / Read a launcher-reported PID within a deadline. */
-[[nodiscard]] Result<pid_t> read_pid_with_deadline(const int fd, const std::chrono::milliseconds deadline) {
+/** @brief 在 deadline 内读取 launcher 报告的 PID / Read a launcher-reported PID within a deadline.
+ */
+[[nodiscard]] Result<pid_t> read_pid_with_deadline(const int fd,
+                                                   const std::chrono::milliseconds deadline) {
     pollfd descriptor{.fd = fd, .events = POLLIN | POLLHUP, .revents = 0};
-    const int ready = poll(&descriptor, 1U, static_cast<int>(std::min<std::int64_t>(deadline.count(), INT_MAX)));
+    const int ready =
+        poll(&descriptor, 1U, static_cast<int>(std::min<std::int64_t>(deadline.count(), INT_MAX)));
     if (ready <= 0) {
-        return std::unexpected(ready == 0 ? make_error(ErrorCode::timeout, "fork-server timed out waiting for namespace PID 1") : errno_error(ErrorCode::io_failure, "poll namespace PID 1 report"));
+        return std::unexpected(
+            ready == 0 ? make_error(ErrorCode::timeout,
+                                    "fork-server timed out waiting for namespace PID 1")
+                       : errno_error(ErrorCode::io_failure, "poll namespace PID 1 report"));
     }
     return read_pid(fd);
 }
 
-/** @brief 判断 helper-owned launcher 的 pidfd 是否报告退出 / Check whether a helper-owned launcher's pidfd reports exit. */
+/** @brief 判断 helper-owned launcher 的 pidfd 是否报告退出 / Check whether a helper-owned
+ * launcher's pidfd reports exit. */
 [[nodiscard]] bool launcher_exited(const int pidfd) noexcept {
     if (pidfd < 0) {
         return true;
@@ -1548,21 +1658,27 @@ enum class LauncherTerminalState : std::uint16_t {
            (descriptor.revents & (POLLERR | POLLNVAL)) == 0;
 }
 
-/** @brief 等待 helper-owned launcher 的 pidfd 退出 / Wait for a helper-owned launcher pidfd to exit. */
-[[nodiscard]] Result<void> wait_launcher_exit(const int pidfd, const std::chrono::milliseconds deadline) {
+/** @brief 等待 helper-owned launcher 的 pidfd 退出 / Wait for a helper-owned launcher pidfd to
+ * exit. */
+[[nodiscard]] Result<void> wait_launcher_exit(const int pidfd,
+                                              const std::chrono::milliseconds deadline) {
     if (pidfd < 0) {
         return std::unexpected(make_error(ErrorCode::child_failure, "missing launcher pidfd"));
     }
     pollfd descriptor{.fd = pidfd, .events = POLLIN | POLLHUP, .revents = 0};
-    const int ready = poll(&descriptor, 1U, static_cast<int>(std::min<std::int64_t>(deadline.count(), INT_MAX)));
+    const int ready =
+        poll(&descriptor, 1U, static_cast<int>(std::min<std::int64_t>(deadline.count(), INT_MAX)));
     if (ready > 0 && (descriptor.revents & (POLLIN | POLLHUP)) != 0 &&
         (descriptor.revents & (POLLERR | POLLNVAL)) == 0) {
         return {};
     }
     if (ready > 0) {
-        return std::unexpected(make_error(ErrorCode::child_failure, "launcher pidfd reported an invalid poll state"));
+        return std::unexpected(
+            make_error(ErrorCode::child_failure, "launcher pidfd reported an invalid poll state"));
     }
-    return std::unexpected(ready == 0 ? make_error(ErrorCode::timeout, "launcher did not exit after cgroup cleanup") : errno_error(ErrorCode::child_failure, "poll launcher pidfd"));
+    return std::unexpected(
+        ready == 0 ? make_error(ErrorCode::timeout, "launcher did not exit after cgroup cleanup")
+                   : errno_error(ErrorCode::child_failure, "poll launcher pidfd"));
 }
 
 /** @brief helper 保存的 launch 表 / Launch table retained by the helper. */
@@ -1588,7 +1704,8 @@ void on_launcher_stop_signal(const int signal) {
     return waited == record.launcher_pid || (waited < 0 && errno == ECHILD);
 }
 
-/** @brief 取消未 commit launch，并取得 helper 的 terminal/reap 状态 / Cancel an uncommitted launch and reach helper terminal/reap state. */
+/** @brief 取消未 commit launch，并取得 helper 的 terminal/reap 状态 / Cancel an uncommitted launch
+ * and reach helper terminal/reap state. */
 [[nodiscard]] bool cancel_helper_launch(HelperLaunchRecord& record) noexcept {
     close_fd(record.retained_release_fd);
     // Once a broker has released PID 1, closing the pipe alone is no longer sufficient. Linux
@@ -1615,7 +1732,8 @@ void on_launcher_stop_signal(const int signal) {
     return pid1_terminal;
 }
 
-/** @brief 取消并回收 helper 跟踪的全部 launch / Cancel and reap every launch tracked by the helper. */
+/** @brief 取消并回收 helper 跟踪的全部 launch / Cancel and reap every launch tracked by the helper.
+ */
 void cancel_all_helper_launches(HelperLaunches& launches) noexcept {
     for (auto& [request_id, record] : launches) {
         static_cast<void>(request_id);
@@ -1624,7 +1742,8 @@ void cancel_all_helper_launches(HelperLaunches& launches) noexcept {
     launches.clear();
 }
 
-/** @brief 回收已退出 launcher，并让未 commit launch 自动过期 / Reap exited launchers and expire uncommitted launches. */
+/** @brief 回收已退出 launcher，并让未 commit launch 自动过期 / Reap exited launchers and expire
+ * uncommitted launches. */
 void reap_helper_launches(HelperLaunches& launches) noexcept {
     const auto now = std::chrono::steady_clock::now();
     for (auto iterator = launches.begin(); iterator != launches.end();) {
@@ -1644,14 +1763,11 @@ void reap_helper_launches(HelperLaunches& launches) noexcept {
     }
 }
 
-/** @brief 在单线程 helper 中处理一个 launch request / Handle one launch request in the single-threaded helper. */
-void handle_launcher_request(
-    const int server_fd,
-    const BrokerConfig& config,
-    HelperLaunches& launches,
-    LauncherPacket& packet,
-    const std::uint64_t request_id,
-    const TaskLayer& layer) noexcept {
+/** @brief 在单线程 helper 中处理一个 launch request / Handle one launch request in the
+ * single-threaded helper. */
+void handle_launcher_request(const int server_fd, const BrokerConfig& config,
+                             HelperLaunches& launches, LauncherPacket& packet,
+                             const std::uint64_t request_id, const TaskLayer& layer) noexcept {
     const auto send_error = [&](const std::string_view message) {
         const std::vector<std::byte> error = encode_launcher_error(request_id, message);
         static_cast<void>(send_launcher_packet(server_fd, error, {}));
@@ -1747,16 +1863,15 @@ void handle_launcher_request(
     close_fd(launcher_pidfd);
     // Keep a helper-owned duplicate of release until broker commit. A lost SCM_RIGHTS response
     // therefore cannot leave a namespace PID 1 permanently blocked outside its cgroup.
-    launches.emplace(
-        request_id,
-        HelperLaunchRecord{
-            .launcher_pid = launcher,
-            .pid1_pidfd = std::exchange(pid1_pidfd, -1),
-            .retained_release_fd = release[1],
-            .committed = false,
-            .released = false,
-            .expiry = std::chrono::steady_clock::now() + std::chrono::seconds(5),
-        });
+    launches.emplace(request_id,
+                     HelperLaunchRecord{
+                         .launcher_pid = launcher,
+                         .pid1_pidfd = std::exchange(pid1_pidfd, -1),
+                         .retained_release_fd = release[1],
+                         .committed = false,
+                         .released = false,
+                         .expiry = std::chrono::steady_clock::now() + std::chrono::seconds(5),
+                     });
     if (!sent) {
         // The record's bounded expiry performs the same cancellation path after the peer-loss
         // window, while preserving helper ownership/reaping semantics.
@@ -1764,12 +1879,14 @@ void handle_launcher_request(
 }
 
 /** @brief 运行单线程 fork-server / Run the single-threaded fork server. */
-[[noreturn]] void run_launcher_server(const int server_fd, const BrokerConfig& config, const pid_t expected_parent) {
+[[noreturn]] void run_launcher_server(const int server_fd, const BrokerConfig& config,
+                                      const pid_t expected_parent) {
     struct sigaction stop_action {};
     stop_action.sa_handler = on_launcher_stop_signal;
     sigemptyset(&stop_action.sa_mask);
     stop_action.sa_flags = 0;
-    if (sigaction(SIGTERM, &stop_action, nullptr) != 0 || sigaction(SIGINT, &stop_action, nullptr) != 0) {
+    if (sigaction(SIGTERM, &stop_action, nullptr) != 0 ||
+        sigaction(SIGINT, &stop_action, nullptr) != 0) {
         _exit(125);
     }
     if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0 || getppid() != expected_parent) {
@@ -1784,7 +1901,8 @@ void handle_launcher_request(
         credential_size != sizeof(credentials) || credentials.uid != 0U) {
         _exit(125);
     }
-    if (const auto configured = configure_control_socket(server_fd, std::chrono::seconds(5)); !configured) {
+    if (const auto configured = configure_control_socket(server_fd, std::chrono::seconds(5));
+        !configured) {
         _exit(125);
     }
     HelperLaunches launches;
@@ -1825,39 +1943,46 @@ void handle_launcher_request(
         if (header->kind == LauncherMessageKind::launch) {
             const auto request = decode_launcher_request(packet->bytes);
             if (!request || request->first != header->request_id) {
-                const std::vector<std::byte> error = encode_launcher_error(header->request_id, "malformed fork-server launch request");
+                const std::vector<std::byte> error = encode_launcher_error(
+                    header->request_id, "malformed fork-server launch request");
                 static_cast<void>(send_launcher_packet(server_fd, error, {}));
                 close_launcher_packet_fds(*packet);
                 continue;
             }
-            handle_launcher_request(server_fd, config, launches, *packet, request->first, request->second);
+            handle_launcher_request(server_fd, config, launches, *packet, request->first,
+                                    request->second);
             close_launcher_packet_fds(*packet);
             continue;
         }
-        if ((header->kind == LauncherMessageKind::commit || header->kind == LauncherMessageKind::cancel ||
+        if ((header->kind == LauncherMessageKind::commit ||
+             header->kind == LauncherMessageKind::cancel ||
              header->kind == LauncherMessageKind::released) &&
             packet->fd_count == 0U && header->payload_offset == packet->bytes.size()) {
             const auto current = launches.find(header->request_id);
             if (current == launches.end()) {
-                const std::vector<std::byte> error = encode_launcher_error(header->request_id, "unknown fork-server launch ID");
+                const std::vector<std::byte> error =
+                    encode_launcher_error(header->request_id, "unknown fork-server launch ID");
                 static_cast<void>(send_launcher_packet(server_fd, error, {}));
                 close_launcher_packet_fds(*packet);
                 continue;
             }
             if (header->kind == LauncherMessageKind::commit) {
                 current->second.committed = true;
-                const std::vector<std::byte> terminal = encode_launcher_terminal(header->request_id, LauncherTerminalState::committed);
+                const std::vector<std::byte> terminal =
+                    encode_launcher_terminal(header->request_id, LauncherTerminalState::committed);
                 static_cast<void>(send_launcher_packet(server_fd, terminal, {}));
             } else if (header->kind == LauncherMessageKind::released) {
                 if (!current->second.committed) {
-                    const std::vector<std::byte> error = encode_launcher_error(header->request_id, "release before commit");
+                    const std::vector<std::byte> error =
+                        encode_launcher_error(header->request_id, "release before commit");
                     static_cast<void>(send_launcher_packet(server_fd, error, {}));
                     close_launcher_packet_fds(*packet);
                     continue;
                 }
                 close_fd(current->second.retained_release_fd);
                 current->second.released = true;
-                const std::vector<std::byte> terminal = encode_launcher_terminal(header->request_id, LauncherTerminalState::released);
+                const std::vector<std::byte> terminal =
+                    encode_launcher_terminal(header->request_id, LauncherTerminalState::released);
                 static_cast<void>(send_launcher_packet(server_fd, terminal, {}));
             } else {
                 const bool cancelled = cancel_helper_launch(current->second);
@@ -1868,25 +1993,28 @@ void handle_launcher_request(
                         "fork-server could not prove namespace PID 1 termination through pidfd");
                     static_cast<void>(send_launcher_packet(server_fd, error, {}));
                 } else {
-                    const std::vector<std::byte> terminal = encode_launcher_terminal(header->request_id, LauncherTerminalState::cancelled);
+                    const std::vector<std::byte> terminal = encode_launcher_terminal(
+                        header->request_id, LauncherTerminalState::cancelled);
                     static_cast<void>(send_launcher_packet(server_fd, terminal, {}));
                 }
             }
             close_launcher_packet_fds(*packet);
             continue;
         }
-        const std::vector<std::byte> error = encode_launcher_error(header->request_id, "unexpected fork-server request kind or FD set");
+        const std::vector<std::byte> error = encode_launcher_error(
+            header->request_id, "unexpected fork-server request kind or FD set");
         static_cast<void>(send_launcher_packet(server_fd, error, {}));
         close_launcher_packet_fds(*packet);
     }
 }
 
-}  // namespace
+} // namespace
 
 /** @brief 运行中的 supervisor session / Running supervisor session. */
 struct Broker::RuntimeSession final {
     /**
-     * @brief 用已验证的 domain runtime 构造 session / Construct a session from a validated domain runtime.
+     * @brief 用已验证的 domain runtime 构造 session / Construct a session from a validated domain
+     * runtime.
      * @param runtime_id 长期 runtime ID / Long-lived runtime ID.
      */
     explicit RuntimeSession(domain::RuntimeId runtime_id, domain::ActivationId activation_value)
@@ -1899,48 +2027,62 @@ struct Broker::RuntimeSession final {
     int launcher_pidfd{-1};
     /** @brief broker 到 PID 1 的 control socket / Broker-to-PID1 control socket. */
     int control_fd{-1};
-    /** @brief 串行化该 runtime control socket 与最后使用时间 / Serialize this runtime control socket and last-use time. */
+    /** @brief 串行化该 runtime control socket 与最后使用时间 / Serialize this runtime control
+     * socket and last-use time. */
     std::mutex mutex;
-    /** @brief 已从 map 借用且尚未取得 session mutex 的 dispatch 数 / Dispatches borrowing this session from the map. */
+    /** @brief 已从 map 借用且尚未取得 session mutex 的 dispatch 数 / Dispatches borrowing this
+     * session from the map. */
     std::atomic<unsigned int> dispatch_references{0U};
-    /** @brief 强制 lifecycle 不变量的 domain aggregate / Domain aggregate enforcing lifecycle invariants. */
+    /** @brief 强制 lifecycle 不变量的 domain aggregate / Domain aggregate enforcing lifecycle
+     * invariants. */
     domain::Runtime runtime;
-    /** @brief 清理失败后不可复用的 session / Session that cannot be reused after cleanup failure. */
+    /** @brief 清理失败后不可复用的 session / Session that cannot be reused after cleanup failure.
+     */
     bool poisoned{false};
-    /** @brief session 所绑定的强类型 activation / Strongly typed activation bound to this session. */
+    /** @brief session 所绑定的强类型 activation / Strongly typed activation bound to this session.
+     */
     domain::ActivationId activation;
-    /** @brief 仅该 activation 可删除的 transient staging 层 / Transient staging layer deletable only for this activation. */
+    /** @brief 仅该 activation 可删除的 transient staging 层 / Transient staging layer deletable
+     * only for this activation. */
     TaskLayer layer;
-    /** @brief 覆盖存活 PID 1 与 cgroup 的 runtime activation 排他租约 / Runtime activation lease covering the live PID 1 and cgroup. */
+    /** @brief 覆盖存活 PID 1 与 cgroup 的 runtime activation 排他租约 / Runtime activation lease
+     * covering the live PID 1 and cgroup. */
     std::optional<RuntimeActivationLease> activation_lease;
     /** @brief 最近使用时刻 / Last use time. */
     std::chrono::steady_clock::time_point last_used;
 
-    /** @brief 析构时关闭 control socket 与 pidfd / Close control socket and pidfd at destruction. */
+    /** @brief 析构时关闭 control socket 与 pidfd / Close control socket and pidfd at destruction.
+     */
     ~RuntimeSession() {
         close_fd(control_fd);
         close_fd(launcher_pidfd);
     }
 };
 
-/** @brief 将 session mutex 与 reaper 借用绑定为一个 RAII 租约 / RAII lease binding a session mutex to a reaper reference. */
+/** @brief 将 session mutex 与 reaper 借用绑定为一个 RAII 租约 / RAII lease binding a session mutex
+ * to a reaper reference. */
 struct Broker::SessionLease final {
     /**
      * @brief 构造独占 session 租约 / Construct an exclusive session lease.
-     * @param session_value 已增加 dispatch reference 的 session / Session whose dispatch reference was incremented.
+     * @param session_value 已增加 dispatch reference 的 session / Session whose dispatch reference
+     * was incremented.
      * @param lock_value 已持有的 session mutex / Already-held session mutex.
      */
-    SessionLease(std::shared_ptr<RuntimeSession> session_value, std::unique_lock<std::mutex> lock_value)
+    SessionLease(std::shared_ptr<RuntimeSession> session_value,
+                 std::unique_lock<std::mutex> lock_value)
         : session(std::move(session_value)), lock(std::move(lock_value)) {}
 
-    /** @brief 租约结束时释放 reaper 借用；mutex 随成员析构解锁 / Release reaper reference; member destruction unlocks mutex. */
+    /** @brief 租约结束时释放 reaper 借用；mutex 随成员析构解锁 / Release reaper reference; member
+     * destruction unlocks mutex. */
     ~SessionLease() {
         if (session) {
-            static_cast<void>(session->dispatch_references.fetch_sub(1U, std::memory_order_release));
+            static_cast<void>(
+                session->dispatch_references.fetch_sub(1U, std::memory_order_release));
         }
     }
 
-    /** @brief 禁止复制，确保借用只释放一次 / Copying is forbidden so the reference is released once. */
+    /** @brief 禁止复制，确保借用只释放一次 / Copying is forbidden so the reference is released
+     * once. */
     SessionLease(const SessionLease&) = delete;
     /** @brief 禁止复制赋值 / Copy assignment is forbidden. */
     SessionLease& operator=(const SessionLease&) = delete;
@@ -1957,15 +2099,20 @@ struct Broker::SharedState final {
     std::mutex sessions_mutex;
     /** @brief runtime 到可共享 session 的映射 / Mapping from runtime to shareable session. */
     std::unordered_map<std::string, std::shared_ptr<RuntimeSession>> sessions;
-    /** @brief 正在进行慢 activation 的 runtime 及其强类型 owner / Runtimes undergoing slow activation and their typed owners. */
+    /** @brief 正在进行慢 activation 的 runtime 及其强类型 owner / Runtimes undergoing slow
+     * activation and their typed owners. */
     std::unordered_map<std::string, domain::ActivationId> activating;
-    /** @brief fork-server unknown outcome 后禁止复用的 runtime / Runtimes blocked after an unknown fork-server outcome. */
+    /** @brief fork-server unknown outcome 后禁止复用的 runtime / Runtimes blocked after an unknown
+     * fork-server outcome. */
     std::unordered_set<std::string> launch_unknown;
-    /** @brief 串行化对单个 fork-server socket 的 RPC / Serialize RPCs over the single fork-server socket. */
+    /** @brief 串行化对单个 fork-server socket 的 RPC / Serialize RPCs over the single fork-server
+     * socket. */
     std::mutex launcher_mutex;
-    /** @brief broker 一端 fork-server SOCK_SEQPACKET / Broker end of the fork-server SOCK_SEQPACKET. */
+    /** @brief broker 一端 fork-server SOCK_SEQPACKET / Broker end of the fork-server
+     * SOCK_SEQPACKET. */
     int launcher_fd{-1};
-    /** @brief fork-server host PID（仅诊断；helper 自己回收其 child） / Fork-server host PID (diagnostic only; helper reaps its children). */
+    /** @brief fork-server host PID（仅诊断；helper 自己回收其 child） / Fork-server host PID
+     * (diagnostic only; helper reaps its children). */
     pid_t launcher_server_pid{-1};
     /** @brief 单调 fork-server request ID / Monotonic fork-server request ID. */
     std::uint64_t next_launcher_request_id{1U};
@@ -1977,9 +2124,11 @@ struct Broker::LauncherReply final {
     LauncherReply() = default;
     /** @brief broker/helper 共享的 launch ID / Launch ID shared by broker and helper. */
     std::uint64_t launch_id{};
-    /** @brief helper 直接 child launcher 的 host PID / Host PID of the helper's direct launcher child. */
+    /** @brief helper 直接 child launcher 的 host PID / Host PID of the helper's direct launcher
+     * child. */
     pid_t launcher_pid{-1};
-    /** @brief host namespace 中的 namespace PID 1 / Namespace PID 1 visible in the host namespace. */
+    /** @brief host namespace 中的 namespace PID 1 / Namespace PID 1 visible in the host namespace.
+     */
     pid_t pid1_pid{-1};
     /** @brief 可轮询 launcher 退出的 pidfd / pidfd that can be polled for launcher exit. */
     int launcher_pidfd{-1};
@@ -1998,7 +2147,8 @@ struct Broker::LauncherReply final {
     /** @brief 支持移交 FD owner / Moving FD ownership is supported. */
     LauncherReply(LauncherReply&& other) noexcept
         : launch_id(other.launch_id), launcher_pid(other.launcher_pid), pid1_pid(other.pid1_pid),
-          launcher_pidfd(std::exchange(other.launcher_pidfd, -1)), release_fd(std::exchange(other.release_fd, -1)) {}
+          launcher_pidfd(std::exchange(other.launcher_pidfd, -1)),
+          release_fd(std::exchange(other.release_fd, -1)) {}
     /** @brief 支持移动赋值 / Move assignment is supported. */
     LauncherReply& operator=(LauncherReply&& other) noexcept {
         if (this != &other) {
@@ -2017,8 +2167,7 @@ struct Broker::LauncherReply final {
 Broker::Broker(BrokerConfig config)
     : config_(std::move(config)),
       quota_(config_.sandbox.state_root, config_.sandbox.xfs_project_quota),
-      journal_(config_.sandbox.state_root),
-      state_(std::make_unique<SharedState>()) {}
+      journal_(config_.sandbox.state_root), state_(std::make_unique<SharedState>()) {}
 
 Result<void> Broker::start_launcher_server() {
     if (!state_) {
@@ -2028,9 +2177,11 @@ Result<void> Broker::start_launcher_server() {
     if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, channel.data()) != 0) {
         return std::unexpected(errno_error(ErrorCode::child_failure, "create fork-server channel"));
     }
-    if (const auto parent_socket = configure_control_socket(channel[0], std::chrono::seconds(5)); !parent_socket ||
-        !configure_control_socket(channel[1], std::chrono::seconds(5))) {
-        const Error error = parent_socket ? make_error(ErrorCode::io_failure, "configure fork-server socket") : parent_socket.error();
+    if (const auto parent_socket = configure_control_socket(channel[0], std::chrono::seconds(5));
+        !parent_socket || !configure_control_socket(channel[1], std::chrono::seconds(5))) {
+        const Error error = parent_socket
+                                ? make_error(ErrorCode::io_failure, "configure fork-server socket")
+                                : parent_socket.error();
         close_fd(channel[0]);
         close_fd(channel[1]);
         return std::unexpected(error);
@@ -2039,7 +2190,8 @@ Result<void> Broker::start_launcher_server() {
     // This is intentionally the only broker-process fork before serve_forever creates workers.
     const pid_t helper = fork();
     if (helper < 0) {
-        const Error error = errno_error(ErrorCode::child_failure, "fork single-threaded fork-server");
+        const Error error =
+            errno_error(ErrorCode::child_failure, "fork single-threaded fork-server");
         close_fd(channel[0]);
         close_fd(channel[1]);
         return std::unexpected(error);
@@ -2054,13 +2206,13 @@ Result<void> Broker::start_launcher_server() {
     return {};
 }
 
-Result<Broker::LauncherReply> Broker::launch_runtime(
-    const TaskLayer& layer,
-    const TaskCgroupControl& cgroup,
-    const int control_fd) {
+Result<Broker::LauncherReply> Broker::launch_runtime(const TaskLayer& layer,
+                                                     const TaskCgroupControl& cgroup,
+                                                     const int control_fd) {
     if (!state_ || state_->launcher_fd < 0 || control_fd < 0 || cgroup.supervisor_procs_fd < 0 ||
         cgroup.procs_fd < 0 || cgroup.kill_fd < 0 || cgroup.events_fd < 0) {
-        return std::unexpected(make_error(ErrorCode::internal, "fork-server launch controls are unavailable"));
+        return std::unexpected(
+            make_error(ErrorCode::internal, "fork-server launch controls are unavailable"));
     }
     std::lock_guard launch_lock(state_->launcher_mutex);
     const std::uint64_t request_id = state_->next_launcher_request_id++;
@@ -2069,15 +2221,12 @@ Result<Broker::LauncherReply> Broker::launch_runtime(
         return std::unexpected(request.error());
     }
     const std::array<int, detail::launcher_transport::kMaxFileDescriptors> request_fds{
-        control_fd,
-        cgroup.supervisor_procs_fd,
-        cgroup.procs_fd,
-        cgroup.kill_fd,
-        cgroup.events_fd,
+        control_fd, cgroup.supervisor_procs_fd, cgroup.procs_fd, cgroup.kill_fd, cgroup.events_fd,
     };
     if (const auto sent = send_launcher_packet(state_->launcher_fd, *request, request_fds); !sent) {
         poison_launcher_server_locked();
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server launch send outcome is unknown"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server launch send outcome is unknown"));
     }
     auto response = receive_launcher_packet(state_->launcher_fd);
     if (!response) {
@@ -2087,18 +2236,24 @@ Result<Broker::LauncherReply> Broker::launch_runtime(
         auto late_response = receive_launcher_packet(state_->launcher_fd);
         if (late_response) {
             const auto late_header = parse_launcher_header(late_response->bytes);
-            if (late_header && late_header->request_id == request_id && late_header->kind == LauncherMessageKind::launched &&
+            if (late_header && late_header->request_id == request_id &&
+                late_header->kind == LauncherMessageKind::launched &&
                 has_valid_launch_reply_fds(*late_response)) {
                 close_launcher_packet_fds(*late_response);
                 std::vector<std::byte> cancel;
                 append_launcher_header(cancel, LauncherMessageKind::cancel, request_id);
                 const auto cancelled = send_launcher_packet(state_->launcher_fd, cancel, {});
-                auto terminal = cancelled ? receive_launcher_packet(state_->launcher_fd) : Result<LauncherPacket>{std::unexpected(cancelled.error())};
+                auto terminal = cancelled
+                                    ? receive_launcher_packet(state_->launcher_fd)
+                                    : Result<LauncherPacket>{std::unexpected(cancelled.error())};
                 if (terminal) {
-                    const auto terminal_state = decode_launcher_terminal(terminal->bytes, request_id);
+                    const auto terminal_state =
+                        decode_launcher_terminal(terminal->bytes, request_id);
                     close_launcher_packet_fds(*terminal);
                     if (terminal_state && *terminal_state == LauncherTerminalState::cancelled) {
-                        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server launch was cancelled after reply timeout"));
+                        return std::unexpected(
+                            make_error(ErrorCode::invocation_in_doubt,
+                                       "fork-server launch was cancelled after reply timeout"));
                     }
                 }
             } else {
@@ -2109,35 +2264,42 @@ Result<Broker::LauncherReply> Broker::launch_runtime(
         // and kill the helper rather than ever treating its socket as reusable; its retained
         // release FD closes, so an uncommitted PID 1 cannot remain blocked outside cgroup.
         poison_launcher_server_locked();
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server launch outcome is unknown"));
+        return std::unexpected(
+            make_error(ErrorCode::invocation_in_doubt, "fork-server launch outcome is unknown"));
     }
     const auto header = parse_launcher_header(response->bytes);
     if (!header || header->request_id != request_id) {
         close_launcher_packet_fds(*response);
         poison_launcher_server_locked();
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server response identity is unknown"));
+        return std::unexpected(
+            make_error(ErrorCode::invocation_in_doubt, "fork-server response identity is unknown"));
     }
     if (header->kind == LauncherMessageKind::error) {
         std::size_t offset = header->payload_offset;
         const auto message = read_launcher_string(response->bytes, offset);
-        const bool valid_error = response->fd_count == 0U && message && offset == response->bytes.size();
+        const bool valid_error =
+            response->fd_count == 0U && message && offset == response->bytes.size();
         close_launcher_packet_fds(*response);
         if (!valid_error) {
             poison_launcher_server_locked();
-            return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server returned malformed launch rejection"));
+            return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                              "fork-server returned malformed launch rejection"));
         }
-        return std::unexpected(make_error(ErrorCode::child_failure, "fork-server rejected launch: " + *message));
+        return std::unexpected(
+            make_error(ErrorCode::child_failure, "fork-server rejected launch: " + *message));
     }
     if (header->kind != LauncherMessageKind::launched || !has_valid_launch_reply_fds(*response)) {
         close_launcher_packet_fds(*response);
         poison_launcher_server_locked();
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server response FD contract is unknown"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server response FD contract is unknown"));
     }
     const auto identities = decode_launcher_reply(response->bytes, request_id);
     if (!identities) {
         close_launcher_packet_fds(*response);
         poison_launcher_server_locked();
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server launch reply payload is unknown"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server launch reply payload is unknown"));
     }
     LauncherReply reply;
     reply.launch_id = request_id;
@@ -2153,125 +2315,142 @@ Result<Broker::LauncherReply> Broker::launch_runtime(
 
 Result<void> Broker::commit_launch(const std::uint64_t launch_id) {
     if (!state_ || state_->launcher_fd < 0) {
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server commit controls are unavailable"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server commit controls are unavailable"));
     }
     if (launch_id == 0U) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "fork-server commit launch ID is invalid"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "fork-server commit launch ID is invalid"));
     }
     std::lock_guard launch_lock(state_->launcher_mutex);
     std::vector<std::byte> request;
     append_launcher_header(request, LauncherMessageKind::commit, launch_id);
     if (const auto sent = send_launcher_packet(state_->launcher_fd, request, {}); !sent) {
         poison_launcher_server_locked();
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server commit send outcome is unknown"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server commit send outcome is unknown"));
     }
     auto response = receive_launcher_packet(state_->launcher_fd);
     if (!response) {
         poison_launcher_server_locked();
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server commit acknowledgement is unknown"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server commit acknowledgement is unknown"));
     }
     const auto terminal = decode_launcher_terminal(response->bytes, launch_id);
     const bool fd_contract = response->fd_count == 0U;
     close_launcher_packet_fds(*response);
     if (!terminal || !fd_contract || *terminal != LauncherTerminalState::committed) {
         poison_launcher_server_locked();
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server commit terminal state is unknown"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server commit terminal state is unknown"));
     }
     return {};
 }
 
 Result<void> Broker::cancel_launch(const std::uint64_t launch_id) {
     if (!state_ || state_->launcher_fd < 0) {
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server cancel controls are unavailable"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server cancel controls are unavailable"));
     }
     if (launch_id == 0U) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "fork-server cancel launch ID is invalid"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "fork-server cancel launch ID is invalid"));
     }
     std::lock_guard launch_lock(state_->launcher_mutex);
     std::vector<std::byte> request;
     append_launcher_header(request, LauncherMessageKind::cancel, launch_id);
     if (const auto sent = send_launcher_packet(state_->launcher_fd, request, {}); !sent) {
         poison_launcher_server_locked();
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server cancel send outcome is unknown"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server cancel send outcome is unknown"));
     }
     auto response = receive_launcher_packet(state_->launcher_fd);
     if (!response) {
         poison_launcher_server_locked();
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server cancel acknowledgement is unknown"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server cancel acknowledgement is unknown"));
     }
     const auto terminal = decode_launcher_terminal(response->bytes, launch_id);
     const bool fd_contract = response->fd_count == 0U;
     close_launcher_packet_fds(*response);
     if (!terminal || !fd_contract || *terminal != LauncherTerminalState::cancelled) {
         poison_launcher_server_locked();
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server cancel terminal state is unknown"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server cancel terminal state is unknown"));
     }
     return {};
 }
 
 Result<void> Broker::release_launch(const std::uint64_t launch_id) {
     if (!state_ || state_->launcher_fd < 0) {
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server release controls are unavailable"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server release controls are unavailable"));
     }
     if (launch_id == 0U) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "fork-server release launch ID is invalid"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "fork-server release launch ID is invalid"));
     }
     std::lock_guard launch_lock(state_->launcher_mutex);
     std::vector<std::byte> request;
     append_launcher_header(request, LauncherMessageKind::released, launch_id);
     if (const auto sent = send_launcher_packet(state_->launcher_fd, request, {}); !sent) {
         poison_launcher_server_locked();
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server release send outcome is unknown"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server release send outcome is unknown"));
     }
     auto response = receive_launcher_packet(state_->launcher_fd);
     if (!response) {
         poison_launcher_server_locked();
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server release acknowledgement is unknown"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server release acknowledgement is unknown"));
     }
     const auto terminal = decode_launcher_terminal(response->bytes, launch_id);
     const bool fd_contract = response->fd_count == 0U;
     close_launcher_packet_fds(*response);
     if (!terminal || !fd_contract || *terminal != LauncherTerminalState::released) {
         poison_launcher_server_locked();
-        return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "fork-server release terminal state is unknown"));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "fork-server release terminal state is unknown"));
     }
     return {};
 }
 
-Result<void> Broker::retire_session(
-    const std::string& runtime_key,
-    const std::shared_ptr<RuntimeSession>& session) {
+Result<void> Broker::retire_session(const std::string& runtime_key,
+                                    const std::shared_ptr<RuntimeSession>& session) {
     if (!session) {
-        return std::unexpected(make_error(ErrorCode::internal, "cannot retire an empty runtime session"));
+        return std::unexpected(
+            make_error(ErrorCode::internal, "cannot retire an empty runtime session"));
     }
     const auto cleanup = [this, &runtime_key, &session]() -> Result<void> {
         if (const auto killed = kill_runtime_cgroup(config_.sandbox, runtime_key); !killed) {
             session->poisoned = true;
             return std::unexpected(killed.error());
         }
-        if (const auto exited = wait_launcher_exit(session->launcher_pidfd, std::chrono::seconds(5)); !exited) {
+        if (const auto exited =
+                wait_launcher_exit(session->launcher_pidfd, std::chrono::seconds(5));
+            !exited) {
             session->poisoned = true;
             return std::unexpected(exited.error());
         }
         if (!session->activation_lease.has_value()) {
             session->poisoned = true;
-            return std::unexpected(make_error(ErrorCode::internal, "running runtime session lost its activation lease"));
+            return std::unexpected(make_error(ErrorCode::internal,
+                                              "running runtime session lost its activation lease"));
         }
-        if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, *session->activation_lease, session->layer); !cleaned) {
+        if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_,
+                                                    *session->activation_lease, session->layer);
+            !cleaned) {
             session->poisoned = true;
             return std::unexpected(cleaned.error());
         }
         return {};
     };
-    BrokerRuntimeActivationPort port(
-        session->runtime.id(),
-        session->activation,
-        {},
-        cleanup);
+    BrokerRuntimeActivationPort port(session->runtime.id(), session->activation, {}, cleanup);
     application::RuntimeActivationService lifecycle;
-    const domain::Result<void> retired = session->runtime.state() == domain::RuntimeState::ready
-        ? lifecycle.retire(session->runtime, session->activation, port)
-        : lifecycle.abort(session->runtime, session->activation, port);
+    const domain::Result<void> retired =
+        session->runtime.state() == domain::RuntimeState::ready
+            ? lifecycle.retire(session->runtime, session->activation, port)
+            : lifecycle.abort(session->runtime, session->activation, port);
     if (!retired) {
         session->poisoned = true;
         if (port.native_error().has_value()) {
@@ -2313,7 +2492,8 @@ void Broker::stop_launcher_server() noexcept {
     if (server_fd >= 0) {
         const std::vector<std::byte> shutdown = [&]() {
             std::vector<std::byte> bytes;
-            append_launcher_header(bytes, LauncherMessageKind::shutdown, state_->next_launcher_request_id++);
+            append_launcher_header(bytes, LauncherMessageKind::shutdown,
+                                   state_->next_launcher_request_id++);
             return bytes;
         }();
         static_cast<void>(send_launcher_packet(server_fd, shutdown, {}));
@@ -2337,12 +2517,9 @@ void Broker::stop_launcher_server() noexcept {
 }
 
 Broker::Broker(Broker&& other) noexcept
-    : config_(std::move(other.config_)),
-      quota_(std::move(other.quota_)),
-      journal_(std::move(other.journal_)),
-      listen_fd_(std::exchange(other.listen_fd_, -1)),
-      socket_device_(other.socket_device_),
-      socket_inode_(other.socket_inode_),
+    : config_(std::move(other.config_)), quota_(std::move(other.quota_)),
+      journal_(std::move(other.journal_)), listen_fd_(std::exchange(other.listen_fd_, -1)),
+      socket_device_(other.socket_device_), socket_inode_(other.socket_inode_),
       owns_socket_path_(std::exchange(other.owns_socket_path_, false)),
       operator_listen_fd_(std::exchange(other.operator_listen_fd_, -1)),
       operator_socket_device_(other.operator_socket_device_),
@@ -2391,18 +2568,20 @@ Broker::~Broker() {
     }
     if (owns_operator_socket_path_ && !config_.operator_socket_path.empty()) {
         struct stat metadata {};
-        if (lstat(config_.operator_socket_path.c_str(), &metadata) == 0 && S_ISSOCK(metadata.st_mode) &&
-            metadata.st_dev == operator_socket_device_ && metadata.st_ino == operator_socket_inode_) {
+        if (lstat(config_.operator_socket_path.c_str(), &metadata) == 0 &&
+            S_ISSOCK(metadata.st_mode) && metadata.st_dev == operator_socket_device_ &&
+            metadata.st_ino == operator_socket_inode_) {
             static_cast<void>(unlink(config_.operator_socket_path.c_str()));
         }
     }
 }
 
 Result<Broker> Broker::create(BrokerConfig config) {
-    if (config.client_uid == 0U || config.operator_socket_path.empty() || config.idle_ttl.count() <= 0) {
-        return std::unexpected(make_error(
-            ErrorCode::invalid_argument,
-            "broker Bot UID, independent operator endpoint, and idle TTL must be set"));
+    if (config.client_uid == 0U || config.operator_socket_path.empty() ||
+        config.idle_ttl.count() <= 0) {
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument,
+                       "broker Bot UID, independent operator endpoint, and idle TTL must be set"));
     }
     // Quota 持有 host-side upper root，而 SandboxConfig 持有 payload identity；从同一个
     // trusted value 派生两者，避免持久 upper 被重新绑定到 caller-selected UID/GID。/
@@ -2411,11 +2590,9 @@ Result<Broker> Broker::create(BrokerConfig config) {
     // caller-selected UID/GID.
     config.sandbox.xfs_project_quota.workspace_uid = config.sandbox.sandbox_uid;
     config.sandbox.xfs_project_quota.workspace_gid = config.sandbox.sandbox_gid;
-    if (const auto separated = validate_operator_endpoint_separation(
-            config.socket_path,
-            config.client_uid,
-            config.operator_socket_path,
-            config.operator_uid);
+    if (const auto separated =
+            validate_operator_endpoint_separation(config.socket_path, config.client_uid,
+                                                  config.operator_socket_path, config.operator_uid);
         !separated) {
         return std::unexpected(separated.error());
     }
@@ -2426,21 +2603,22 @@ Result<Broker> Broker::create(BrokerConfig config) {
     if (!base_root) {
         return std::unexpected(base_root.error());
     }
-    for (const std::filesystem::path* root : std::array<const std::filesystem::path*, 3>{
-             &config.sandbox.state_root,
-             &config.sandbox.images_root,
-             &*base_root}) {
-        if (const auto secure = validate_secure_directory_ancestry(*root, config.allow_insecure_dev_root); !secure) {
+    for (const std::filesystem::path* root : std::array<const std::filesystem::path*, 4>{
+             &config.sandbox.state_root, &config.sandbox.images_root, &*base_root,
+             &config.sandbox.lxcfs_root}) {
+        if (const auto secure =
+                validate_secure_directory_ancestry(*root, config.allow_insecure_dev_root);
+            !secure) {
             return std::unexpected(secure.error());
         }
     }
-    const auto socket_parent = validate_socket_parent(config.socket_path, config.allow_insecure_dev_root);
+    const auto socket_parent =
+        validate_socket_parent(config.socket_path, config.allow_insecure_dev_root);
     if (!socket_parent) {
         return std::unexpected(socket_parent.error());
     }
-    const auto operator_socket_parent = validate_socket_parent(
-        config.operator_socket_path,
-        config.allow_insecure_dev_root);
+    const auto operator_socket_parent =
+        validate_socket_parent(config.operator_socket_path, config.allow_insecure_dev_root);
     if (!operator_socket_parent) {
         return std::unexpected(operator_socket_parent.error());
     }
@@ -2451,9 +2629,9 @@ Result<Broker> Broker::create(BrokerConfig config) {
             "Bot and operator socket parent directories resolve to overlapping host views"));
     }
     if (config.allow_insecure_dev_root) {
-        std::fputs(
-            "wspctld: WARNING --allow-insecure-dev-root trusts non-root checkout ancestors; production must not use it\n",
-            stderr);
+        std::fputs("wspctld: WARNING --allow-insecure-dev-root trusts non-root checkout ancestors; "
+                   "production must not use it\n",
+                   stderr);
     }
     if (const auto manager = prepare_broker_cgroup(config.sandbox); !manager) {
         return std::unexpected(manager.error());
@@ -2480,7 +2658,8 @@ Result<Broker> Broker::create(BrokerConfig config) {
 
 Result<void> Broker::bind_listener() {
     if (config_.socket_path.string().size() >= sizeof(sockaddr_un::sun_path)) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "broker socket path exceeds AF_UNIX limit"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "broker socket path exceeds AF_UNIX limit"));
     }
     if (const auto stale = reclaim_stale_listener_path(config_.socket_path, "Bot"); !stale) {
         return std::unexpected(stale.error());
@@ -2489,19 +2668,21 @@ Result<void> Broker::bind_listener() {
     if (listen_fd_ < 0) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "create broker SOCK_SEQPACKET"));
     }
-    sockaddr_un address {};
+    sockaddr_un address{};
     address.sun_family = AF_UNIX;
     std::strncpy(address.sun_path, config_.socket_path.c_str(), sizeof(address.sun_path) - 1U);
     if (bind(listen_fd_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "bind broker socket"));
     }
     struct stat bound_metadata {};
-    if (lstat(config_.socket_path.c_str(), &bound_metadata) != 0 || !S_ISSOCK(bound_metadata.st_mode)) {
+    if (lstat(config_.socket_path.c_str(), &bound_metadata) != 0 ||
+        !S_ISSOCK(bound_metadata.st_mode)) {
         // `bind` just created this pathname below a validated private parent.  If it cannot be
         // re-observed, best-effort unlink prevents this failed half-bind from becoming a durable
         // restart blocker; no untrusted peer can replace this path in the validated parent.
         static_cast<void>(unlink(config_.socket_path.c_str()));
-        return std::unexpected(make_error(ErrorCode::io_failure, "cannot prove ownership of bound broker socket"));
+        return std::unexpected(
+            make_error(ErrorCode::io_failure, "cannot prove ownership of bound broker socket"));
     }
     socket_device_ = bound_metadata.st_dev;
     socket_inode_ = bound_metadata.st_ino;
@@ -2510,10 +2691,12 @@ Result<void> Broker::bind_listener() {
         chmod(config_.socket_path.c_str(), 0600) != 0) {
         return std::unexpected(errno_error(ErrorCode::permission_denied, "protect broker socket"));
     }
-    if (lstat(config_.socket_path.c_str(), &bound_metadata) != 0 || !S_ISSOCK(bound_metadata.st_mode) ||
-        bound_metadata.st_dev != socket_device_ || bound_metadata.st_ino != socket_inode_ ||
-        bound_metadata.st_uid != config_.client_uid || (bound_metadata.st_mode & 0777) != 0600) {
-        return std::unexpected(make_error(ErrorCode::io_failure, "cannot prove protection of bound broker socket"));
+    if (lstat(config_.socket_path.c_str(), &bound_metadata) != 0 ||
+        !S_ISSOCK(bound_metadata.st_mode) || bound_metadata.st_dev != socket_device_ ||
+        bound_metadata.st_ino != socket_inode_ || bound_metadata.st_uid != config_.client_uid ||
+        (bound_metadata.st_mode & 0777) != 0600) {
+        return std::unexpected(
+            make_error(ErrorCode::io_failure, "cannot prove protection of bound broker socket"));
     }
     if (listen(listen_fd_, 32) != 0) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "listen broker socket"));
@@ -2523,39 +2706,50 @@ Result<void> Broker::bind_listener() {
 
 Result<void> Broker::bind_operator_listener() {
     if (config_.operator_socket_path.string().size() >= sizeof(sockaddr_un::sun_path)) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "operator socket path exceeds AF_UNIX limit"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "operator socket path exceeds AF_UNIX limit"));
     }
-    if (const auto stale = reclaim_stale_listener_path(config_.operator_socket_path, "operator"); !stale) {
+    if (const auto stale = reclaim_stale_listener_path(config_.operator_socket_path, "operator");
+        !stale) {
         return std::unexpected(stale.error());
     }
     operator_listen_fd_ = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
     if (operator_listen_fd_ < 0) {
-        return std::unexpected(errno_error(ErrorCode::io_failure, "create operator SOCK_SEQPACKET"));
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "create operator SOCK_SEQPACKET"));
     }
-    sockaddr_un address {};
+    sockaddr_un address{};
     address.sun_family = AF_UNIX;
-    std::strncpy(address.sun_path, config_.operator_socket_path.c_str(), sizeof(address.sun_path) - 1U);
-    if (bind(operator_listen_fd_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
+    std::strncpy(address.sun_path, config_.operator_socket_path.c_str(),
+                 sizeof(address.sun_path) - 1U);
+    if (bind(operator_listen_fd_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) !=
+        0) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "bind operator socket"));
     }
     struct stat bound_metadata {};
-    if (lstat(config_.operator_socket_path.c_str(), &bound_metadata) != 0 || !S_ISSOCK(bound_metadata.st_mode)) {
+    if (lstat(config_.operator_socket_path.c_str(), &bound_metadata) != 0 ||
+        !S_ISSOCK(bound_metadata.st_mode)) {
         // See the Bot endpoint equivalent: this is a just-created path under a verified private
         // parent, so a best-effort unlink avoids retaining an unprotected half-bind.
         static_cast<void>(unlink(config_.operator_socket_path.c_str()));
-        return std::unexpected(make_error(ErrorCode::io_failure, "cannot prove ownership of bound operator socket"));
+        return std::unexpected(
+            make_error(ErrorCode::io_failure, "cannot prove ownership of bound operator socket"));
     }
     operator_socket_device_ = bound_metadata.st_dev;
     operator_socket_inode_ = bound_metadata.st_ino;
     owns_operator_socket_path_ = true;
-    if (chown(config_.operator_socket_path.c_str(), config_.operator_uid, static_cast<gid_t>(-1)) != 0 ||
+    if (chown(config_.operator_socket_path.c_str(), config_.operator_uid, static_cast<gid_t>(-1)) !=
+            0 ||
         chmod(config_.operator_socket_path.c_str(), 0600) != 0) {
-        return std::unexpected(errno_error(ErrorCode::permission_denied, "protect operator socket"));
+        return std::unexpected(
+            errno_error(ErrorCode::permission_denied, "protect operator socket"));
     }
-    if (lstat(config_.operator_socket_path.c_str(), &bound_metadata) != 0 || !S_ISSOCK(bound_metadata.st_mode) ||
-        bound_metadata.st_dev != operator_socket_device_ || bound_metadata.st_ino != operator_socket_inode_ ||
+    if (lstat(config_.operator_socket_path.c_str(), &bound_metadata) != 0 ||
+        !S_ISSOCK(bound_metadata.st_mode) || bound_metadata.st_dev != operator_socket_device_ ||
+        bound_metadata.st_ino != operator_socket_inode_ ||
         bound_metadata.st_uid != config_.operator_uid || (bound_metadata.st_mode & 0777) != 0600) {
-        return std::unexpected(make_error(ErrorCode::io_failure, "cannot prove protection of bound operator socket"));
+        return std::unexpected(
+            make_error(ErrorCode::io_failure, "cannot prove protection of bound operator socket"));
     }
     if (listen(operator_listen_fd_, 16) != 0) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "listen operator socket"));
@@ -2563,9 +2757,8 @@ Result<void> Broker::bind_operator_listener() {
     return {};
 }
 
-Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
-    const std::string& runtime_key,
-    const std::string& activation_id) {
+Result<std::unique_ptr<Broker::SessionLease>>
+Broker::acquire_session(const std::string& runtime_key, const std::string& activation_id) {
     const auto runtime_id = domain::RuntimeId::parse(runtime_key);
     if (!runtime_id) {
         return std::unexpected(transport_error(runtime_id.error()));
@@ -2586,28 +2779,35 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
             if (!cgroup) {
                 return std::unexpected(cgroup.error());
             }
-            if (const auto reclaimed = reclaim_dead_task_layers(config_.sandbox, quota_, *activation_lease, runtime_key); !reclaimed) {
+            if (const auto reclaimed = reclaim_dead_task_layers(config_.sandbox, quota_,
+                                                                *activation_lease, runtime_key);
+                !reclaimed) {
                 close_fd(cgroup->supervisor_procs_fd);
                 close_fd(cgroup->procs_fd);
                 close_fd(cgroup->kill_fd);
                 close_fd(cgroup->events_fd);
                 return std::unexpected(reclaimed.error());
             }
-            const auto layer = prepare_task_layer(config_.sandbox, quota_, *activation_lease, activation_id);
+            const auto layer =
+                prepare_task_layer(config_.sandbox, quota_, *activation_lease, activation_id);
             if (!layer) {
                 close_fd(cgroup->supervisor_procs_fd);
                 close_fd(cgroup->procs_fd);
                 close_fd(cgroup->kill_fd);
                 close_fd(cgroup->events_fd);
-                if (const auto killed = kill_runtime_cgroup(config_.sandbox, runtime_key); !killed) {
-                    return std::unexpected(make_error(
-                        ErrorCode::invocation_in_doubt,
-                        "runtime cgroup could not be proven empty after task-layer preparation failure"));
+                if (const auto killed = kill_runtime_cgroup(config_.sandbox, runtime_key);
+                    !killed) {
+                    return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                                      "runtime cgroup could not be proven empty "
+                                                      "after task-layer preparation failure"));
                 }
-                if (const auto reclaimed = reclaim_dead_task_layers(config_.sandbox, quota_, *activation_lease, runtime_key); !reclaimed) {
-                    return std::unexpected(make_error(
-                        ErrorCode::invocation_in_doubt,
-                        "runtime task-layer preparation failed and transient staging recovery could not be proven"));
+                if (const auto reclaimed = reclaim_dead_task_layers(config_.sandbox, quota_,
+                                                                    *activation_lease, runtime_key);
+                    !reclaimed) {
+                    return std::unexpected(
+                        make_error(ErrorCode::invocation_in_doubt,
+                                   "runtime task-layer preparation failed and transient staging "
+                                   "recovery could not be proven"));
                 }
                 return std::unexpected(layer.error());
             }
@@ -2623,7 +2823,8 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
             const auto abort_prelaunch = [&](const Error& error) -> Result<void> {
                 close_controls();
                 const auto killed = kill_runtime_cgroup(config_.sandbox, runtime_key);
-                const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, *activation_lease, *layer);
+                const auto cleaned =
+                    cleanup_task_layer(config_.sandbox, quota_, *activation_lease, *layer);
                 if (!killed || !cleaned) {
                     return std::unexpected(make_error(
                         ErrorCode::invocation_in_doubt,
@@ -2632,14 +2833,18 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
                 return std::unexpected(error);
             };
             if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, control.data()) != 0) {
-                const Error error = errno_error(ErrorCode::io_failure, "create runtime control channels");
+                const Error error =
+                    errno_error(ErrorCode::io_failure, "create runtime control channels");
                 return abort_prelaunch(error);
             }
-            if (const auto socket_configured = configure_control_socket(control[0], std::chrono::seconds(5)); !socket_configured ||
+            if (const auto socket_configured =
+                    configure_control_socket(control[0], std::chrono::seconds(5));
+                !socket_configured ||
                 !configure_control_socket(control[1], std::chrono::seconds(5))) {
-                const Error error = socket_configured
-                    ? make_error(ErrorCode::io_failure, "configure supervisor control socket")
-                    : socket_configured.error();
+                const Error error =
+                    socket_configured
+                        ? make_error(ErrorCode::io_failure, "configure supervisor control socket")
+                        : socket_configured.error();
                 return abort_prelaunch(error);
             }
             auto launched = launch_runtime(*layer, *cgroup, control[1]);
@@ -2650,16 +2855,19 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
             close_fd(cgroup->events_fd);
             if (!launched) {
                 close_fd(control[0]);
-                if (const auto killed = kill_runtime_cgroup(config_.sandbox, runtime_key); !killed) {
-                    return std::unexpected(make_error(
-                        ErrorCode::invocation_in_doubt,
-                        "runtime launch failed and cgroup cleanup could not be proven"));
+                if (const auto killed = kill_runtime_cgroup(config_.sandbox, runtime_key);
+                    !killed) {
+                    return std::unexpected(
+                        make_error(ErrorCode::invocation_in_doubt,
+                                   "runtime launch failed and cgroup cleanup could not be proven"));
                 }
                 if (launched.error().code != ErrorCode::invocation_in_doubt) {
-                    if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, *activation_lease, *layer); !cleaned) {
-                        return std::unexpected(make_error(
-                            ErrorCode::invocation_in_doubt,
-                            "runtime launch failed and activation staging cleanup could not be proven"));
+                    if (const auto cleaned =
+                            cleanup_task_layer(config_.sandbox, quota_, *activation_lease, *layer);
+                        !cleaned) {
+                        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                                          "runtime launch failed and activation "
+                                                          "staging cleanup could not be proven"));
                     }
                 }
                 return std::unexpected(launched.error());
@@ -2669,16 +2877,19 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
                 close_fd(control[0]);
                 const auto cancelled = cancel_launch(launched->launch_id);
                 const auto killed = kill_runtime_cgroup(config_.sandbox, runtime_key);
-                const auto exited = wait_launcher_exit(launched->launcher_pidfd, std::chrono::seconds(5));
+                const auto exited =
+                    wait_launcher_exit(launched->launcher_pidfd, std::chrono::seconds(5));
                 if (!cancelled || !killed || !exited) {
-                    return std::unexpected(make_error(
-                        ErrorCode::invocation_in_doubt,
-                        "runtime activation cleanup could not prove launcher and cgroup termination"));
+                    return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                                      "runtime activation cleanup could not prove "
+                                                      "launcher and cgroup termination"));
                 }
-                if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, *activation_lease, *layer); !cleaned) {
-                    return std::unexpected(make_error(
-                        ErrorCode::invocation_in_doubt,
-                        "runtime activation staging cleanup could not be proven"));
+                if (const auto cleaned =
+                        cleanup_task_layer(config_.sandbox, quota_, *activation_lease, *layer);
+                    !cleaned) {
+                    return std::unexpected(
+                        make_error(ErrorCode::invocation_in_doubt,
+                                   "runtime activation staging cleanup could not be proven"));
                 }
                 return std::unexpected(error);
             };
@@ -2694,12 +2905,15 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
                 released = write(launched->release_fd, &release, 1U);
             } while (released < 0 && errno == EINTR);
             if (released != 1) {
-                return abort_launch(errno_error(ErrorCode::child_failure, "release committed runtime PID 1"));
+                return abort_launch(
+                    errno_error(ErrorCode::child_failure, "release committed runtime PID 1"));
             }
             close_fd(launched->release_fd);
-            // The helper retains its own release-pipe duplicate until this explicit acknowledgement.
-            // This closes the launch transaction only after PID 1 can actually leave its gate.
-            if (const auto release_acknowledged = release_launch(launched->launch_id); !release_acknowledged) {
+            // The helper retains its own release-pipe duplicate until this explicit
+            // acknowledgement. This closes the launch transaction only after PID 1 can actually
+            // leave its gate.
+            if (const auto release_acknowledged = release_launch(launched->launch_id);
+                !release_acknowledged) {
                 return abort_launch(release_acknowledged.error());
             }
             created->launcher_pid = launched->launcher_pid;
@@ -2715,31 +2929,35 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
             if (created->control_fd >= 0) {
                 const auto shutdown = encode_frame(MessageKind::shutdown, {});
                 if (shutdown) {
-                    static_cast<void>(configure_control_socket(created->control_fd, std::chrono::seconds(1)));
+                    static_cast<void>(
+                        configure_control_socket(created->control_fd, std::chrono::seconds(1)));
                     static_cast<void>(send_frame(created->control_fd, *shutdown));
                 }
             }
             if (const auto killed = kill_runtime_cgroup(config_.sandbox, runtime_key); !killed) {
                 return std::unexpected(killed.error());
             }
-            if (const auto exited = wait_launcher_exit(created->launcher_pidfd, std::chrono::seconds(5)); !exited) {
+            if (const auto exited =
+                    wait_launcher_exit(created->launcher_pidfd, std::chrono::seconds(5));
+                !exited) {
                 return std::unexpected(exited.error());
             }
             if (!created->activation_lease.has_value()) {
-                return std::unexpected(make_error(ErrorCode::internal, "established runtime session lost its activation lease"));
+                return std::unexpected(make_error(
+                    ErrorCode::internal, "established runtime session lost its activation lease"));
             }
-            if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_, *created->activation_lease, created->layer); !cleaned) {
+            if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_,
+                                                        *created->activation_lease, created->layer);
+                !cleaned) {
                 return std::unexpected(cleaned.error());
             }
             return {};
         };
-        BrokerRuntimeActivationPort port(
-            created->runtime.id(),
-            created->activation,
-            establish,
-            cleanup_established);
+        BrokerRuntimeActivationPort port(created->runtime.id(), created->activation, establish,
+                                         cleanup_established);
         application::RuntimeActivationService lifecycle;
-        if (const auto activated = lifecycle.activate(created->runtime, created->activation, port); !activated) {
+        if (const auto activated = lifecycle.activate(created->runtime, created->activation, port);
+            !activated) {
             if (port.native_error().has_value()) {
                 return std::unexpected(*port.native_error());
             }
@@ -2752,14 +2970,18 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
         {
             std::lock_guard map_lock(state_->sessions_mutex);
             if (state_->launch_unknown.contains(runtime_key)) {
-                return std::unexpected(make_error(ErrorCode::invocation_in_doubt, "runtime launch remains quarantined after an unknown helper outcome"));
+                return std::unexpected(make_error(
+                    ErrorCode::invocation_in_doubt,
+                    "runtime launch remains quarantined after an unknown helper outcome"));
             }
             const auto existing = state_->sessions.find(runtime_key);
             if (existing != state_->sessions.end()) {
                 session = existing->second;
-                static_cast<void>(session->dispatch_references.fetch_add(1U, std::memory_order_acq_rel));
+                static_cast<void>(
+                    session->dispatch_references.fetch_add(1U, std::memory_order_acq_rel));
             } else if (!state_->activating.try_emplace(runtime_key, *typed_activation_id).second) {
-                return std::unexpected(make_error(ErrorCode::busy, "runtime activation is already in progress"));
+                return std::unexpected(
+                    make_error(ErrorCode::busy, "runtime activation is already in progress"));
             } else {
                 activate = true;
             }
@@ -2776,14 +2998,18 @@ Result<std::unique_ptr<Broker::SessionLease>> Broker::acquire_session(
             }
             const auto [iterator, inserted] = state_->sessions.emplace(runtime_key, *created);
             if (!inserted) {
-                return std::unexpected(make_error(ErrorCode::internal, "runtime session appeared while activation reservation was held"));
+                return std::unexpected(
+                    make_error(ErrorCode::internal,
+                               "runtime session appeared while activation reservation was held"));
             }
             session = iterator->second;
-            static_cast<void>(session->dispatch_references.fetch_add(1U, std::memory_order_acq_rel));
+            static_cast<void>(
+                session->dispatch_references.fetch_add(1U, std::memory_order_acq_rel));
         }
         auto lease = std::make_unique<SessionLease>(session, std::unique_lock(session->mutex));
         if (lease->session->poisoned) {
-            return std::unexpected(make_error(ErrorCode::child_failure, "runtime session is poisoned pending cgroup cleanup"));
+            return std::unexpected(make_error(
+                ErrorCode::child_failure, "runtime session is poisoned pending cgroup cleanup"));
         }
         if (lease->session->activation == *typed_activation_id) {
             return lease;
@@ -2811,7 +3037,9 @@ Result<ExecutionResult> Broker::dispatch(const ExecuteRequest& request) {
         }
         return std::unexpected(error);
     };
-    if (const auto deadline = configure_control_socket(session.control_fd, request.timeout + std::chrono::seconds(5)); !deadline) {
+    if (const auto deadline =
+            configure_control_socket(session.control_fd, request.timeout + std::chrono::seconds(5));
+        !deadline) {
         return fail_session(deadline.error());
     }
     const auto payload = encode_execute_request(request);
@@ -2844,11 +3072,13 @@ Result<ExecutionResult> Broker::dispatch(const ExecuteRequest& request) {
         return fail_session(*error);
     }
     if (frame->kind != MessageKind::result) {
-        return fail_session(make_error(ErrorCode::protocol_violation, "supervisor returned non-result frame"));
+        return fail_session(
+            make_error(ErrorCode::protocol_violation, "supervisor returned non-result frame"));
     }
     const auto result = decode_execution_result(frame->payload);
     if (!result || result->request_id != request.request_id || result->replayed) {
-        return fail_session(make_error(ErrorCode::protocol_violation, "invalid supervisor result identity"));
+        return fail_session(
+            make_error(ErrorCode::protocol_violation, "invalid supervisor result identity"));
     }
     if (const auto finished = session.runtime.finish_execution(session.activation); !finished) {
         return fail_session(transport_error(finished.error()));
@@ -2869,7 +3099,7 @@ Result<RuntimeStatusResult> Broker::read_runtime_status(const RuntimeStatusReque
     }
     const application::RuntimeStatusQuery query(*runtime, *activation);
     BrokerRuntimeStatusPort port([this](const application::RuntimeStatusQuery& observed_query)
-        -> domain::Result<application::RuntimeStatus> {
+                                     -> domain::Result<application::RuntimeStatus> {
         std::shared_ptr<RuntimeSession> session;
         std::optional<domain::ActivationId> activating_owner;
         bool launch_quarantined = false;
@@ -2881,34 +3111,28 @@ Result<RuntimeStatusResult> Broker::read_runtime_status(const RuntimeStatusReque
             const auto existing = state_->sessions.find(observed_query.runtime().value());
             if (existing != state_->sessions.end()) {
                 session = existing->second;
-            } else if (const auto activating = state_->activating.find(observed_query.runtime().value());
+            } else if (const auto activating =
+                           state_->activating.find(observed_query.runtime().value());
                        activating != state_->activating.end()) {
                 activating_owner = activating->second;
             } else {
-                launch_quarantined = state_->launch_unknown.contains(observed_query.runtime().value());
+                launch_quarantined =
+                    state_->launch_unknown.contains(observed_query.runtime().value());
             }
         }
         if (!session) {
-            const domain::RuntimeState state = launch_quarantined
-                ? domain::RuntimeState::failed
-                : activating_owner.has_value()
-                ? domain::RuntimeState::activating
-                : domain::RuntimeState::dormant;
-            const auto snapshot = domain::RuntimeSnapshot::create(
-                observed_query.runtime(),
-                state,
-                std::move(activating_owner));
+            const domain::RuntimeState state = launch_quarantined ? domain::RuntimeState::failed
+                                               : activating_owner.has_value()
+                                                   ? domain::RuntimeState::activating
+                                                   : domain::RuntimeState::dormant;
+            const auto snapshot = domain::RuntimeSnapshot::create(observed_query.runtime(), state,
+                                                                  std::move(activating_owner));
             if (!snapshot) {
                 return std::unexpected(snapshot.error());
             }
-            return application::RuntimeStatus::create(
-                observed_query,
-                *snapshot,
-                false,
-                std::nullopt,
-                config_.idle_ttl,
-                0U,
-                launch_quarantined);
+            return application::RuntimeStatus::create(observed_query, *snapshot, false,
+                                                      std::nullopt, config_.idle_ttl, 0U,
+                                                      launch_quarantined);
         }
 
         std::lock_guard session_lock(session->mutex);
@@ -2916,21 +3140,19 @@ Result<RuntimeStatusResult> Broker::read_runtime_status(const RuntimeStatusReque
         std::optional<std::chrono::milliseconds> idle_for;
         if (snapshot.state() == domain::RuntimeState::ready) {
             const auto now = std::chrono::steady_clock::now();
-            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - session->last_used);
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - session->last_used);
             idle_for = std::max(std::chrono::milliseconds::zero(), elapsed);
         }
         // "alive" means healthy and reusable, not merely that an untrusted PID might still exist
         // during a failed cleanup. `cleanup_pending` is the explicit signal for that latter case.
         const bool supervisor_alive = !session->poisoned &&
-            snapshot.state() != domain::RuntimeState::failed &&
-            !launcher_exited(session->launcher_pidfd);
+                                      snapshot.state() != domain::RuntimeState::failed &&
+                                      !launcher_exited(session->launcher_pidfd);
         return application::RuntimeStatus::create(
-            observed_query,
-            snapshot,
-            supervisor_alive,
-            idle_for,
-            config_.idle_ttl,
-            static_cast<std::uint64_t>(session->dispatch_references.load(std::memory_order_acquire)),
+            observed_query, snapshot, supervisor_alive, idle_for, config_.idle_ttl,
+            static_cast<std::uint64_t>(
+                session->dispatch_references.load(std::memory_order_acquire)),
             session->poisoned);
     });
     application::RuntimeStatusService service;
@@ -2958,8 +3180,8 @@ Result<RuntimeStatusResult> Broker::read_runtime_status(const RuntimeStatusReque
     return result;
 }
 
-application::OperatorWorkspaceQueryResult<domain::OperatorWorkspaceStatus> Broker::status(
-    const domain::RuntimeId& runtime) const {
+application::OperatorWorkspaceQueryResult<domain::OperatorWorkspaceStatus>
+Broker::status(const domain::RuntimeId& runtime) const {
     if (!state_) {
         return std::unexpected(application::make_operator_workspace_query_error(
             application::OperatorWorkspaceQueryErrorCode::unavailable,
@@ -2981,18 +3203,16 @@ application::OperatorWorkspaceQueryResult<domain::OperatorWorkspaceStatus> Broke
     if (session) {
         std::lock_guard session_lock(session->mutex);
         activity = session->poisoned
-            ? domain::WorkspaceActivity::failed
-            : workspace_activity_from_runtime_state(session->runtime.state());
+                       ? domain::WorkspaceActivity::failed
+                       : workspace_activity_from_runtime_state(session->runtime.state());
     }
 
     const auto binding = quota_.find_ready_runtime(runtime.value());
     if (!binding) {
-        if (binding.error().code == ErrorCode::not_found && activity == domain::WorkspaceActivity::inactive) {
+        if (binding.error().code == ErrorCode::not_found &&
+            activity == domain::WorkspaceActivity::inactive) {
             const auto status = domain::OperatorWorkspaceStatus::create(
-                runtime,
-                domain::WorkspacePersistence::absent,
-                activity,
-                std::nullopt);
+                runtime, domain::WorkspacePersistence::absent, activity, std::nullopt);
             if (!status) {
                 return std::unexpected(application::make_operator_workspace_query_error(
                     application::OperatorWorkspaceQueryErrorCode::inconsistent,
@@ -3012,10 +3232,7 @@ application::OperatorWorkspaceQueryResult<domain::OperatorWorkspaceStatus> Broke
         return std::unexpected(normalize_operator_read_error(quota_usage.error()));
     }
     const auto status = domain::OperatorWorkspaceStatus::create(
-        runtime,
-        domain::WorkspacePersistence::ready,
-        activity,
-        *quota_usage);
+        runtime, domain::WorkspacePersistence::ready, activity, *quota_usage);
     if (!status) {
         return std::unexpected(application::make_operator_workspace_query_error(
             application::OperatorWorkspaceQueryErrorCode::inconsistent,
@@ -3024,9 +3241,8 @@ application::OperatorWorkspaceQueryResult<domain::OperatorWorkspaceStatus> Broke
     return *status;
 }
 
-application::OperatorWorkspaceQueryResult<domain::WorkspaceListing> Broker::list(
-    const domain::RuntimeId& runtime,
-    const domain::OperatorWorkspacePath& path) const {
+application::OperatorWorkspaceQueryResult<domain::WorkspaceListing>
+Broker::list(const domain::RuntimeId& runtime, const domain::OperatorWorkspacePath& path) const {
     const auto binding = quota_.find_ready_runtime(runtime.value());
     if (!binding) {
         return std::unexpected(normalize_operator_read_error(binding.error()));
@@ -3065,17 +3281,18 @@ Result<PayloadResult> Broker::replay_payload(const PayloadReplayRequest& request
     if (!binding) {
         return std::unexpected(make_error(
             ErrorCode::invocation_in_doubt,
-            "completed file receipt exists but its persistent quota binding cannot be proven: " + binding.error().message));
+            "completed file receipt exists but its persistent quota binding cannot be proven: " +
+                binding.error().message));
     }
-    if (const auto object = detail::verify_replayable_payload_object(*binding, request, *receipt); !object) {
+    if (const auto object = detail::verify_replayable_payload_object(*binding, request, *receipt);
+        !object) {
         return std::unexpected(object.error());
     }
     return *receipt;
 }
 
-Result<void> Broker::dispatch_payload_stream(
-    const int client_fd,
-    const PayloadBeginRequest& request) {
+Result<void> Broker::dispatch_payload_stream(const int client_fd,
+                                             const PayloadBeginRequest& request) {
     /** @brief 单个本机文件流 I/O 的最长等待时间 / Maximum wait for one local file-stream I/O. */
     constexpr auto kPayloadIoDeadline = std::chrono::seconds(30);
     // The caller owns RuntimeExecutionGate for the complete transfer. Re-read durable state
@@ -3099,10 +3316,13 @@ Result<void> Broker::dispatch_payload_stream(
         }
         return std::unexpected(error);
     };
-    if (const auto client_deadline = configure_control_socket(client_fd, kPayloadIoDeadline); !client_deadline) {
+    if (const auto client_deadline = configure_control_socket(client_fd, kPayloadIoDeadline);
+        !client_deadline) {
         return std::unexpected(client_deadline.error());
     }
-    if (const auto supervisor_deadline = configure_control_socket(session.control_fd, kPayloadIoDeadline); !supervisor_deadline) {
+    if (const auto supervisor_deadline =
+            configure_control_socket(session.control_fd, kPayloadIoDeadline);
+        !supervisor_deadline) {
         return fail_session(supervisor_deadline.error());
     }
     if (const auto executing = session.runtime.begin_execution(session.activation); !executing) {
@@ -3124,7 +3344,8 @@ Result<void> Broker::dispatch_payload_stream(
         session.last_used = std::chrono::steady_clock::now();
         return {};
     };
-    const auto exchange_supervisor = [&](const MessageKind kind, const std::vector<std::byte>& payload) -> Result<Frame> {
+    const auto exchange_supervisor = [&](const MessageKind kind,
+                                         const std::vector<std::byte>& payload) -> Result<Frame> {
         const auto outbound = encode_frame(kind, payload);
         if (!outbound) {
             return std::unexpected(outbound.error());
@@ -3149,20 +3370,26 @@ Result<void> Broker::dispatch_payload_stream(
         }
         return *frame;
     };
-    const auto expect_ack = [&](const Frame& frame, const PayloadAckStage stage, const std::size_t expected_bytes) -> Result<PayloadAck> {
+    const auto expect_ack = [&](const Frame& frame, const PayloadAckStage stage,
+                                const std::size_t expected_bytes) -> Result<PayloadAck> {
         if (frame.kind != MessageKind::payload_ack) {
-            return std::unexpected(make_error(ErrorCode::protocol_violation, "supervisor returned a non-acknowledgement file frame"));
+            return std::unexpected(
+                make_error(ErrorCode::protocol_violation,
+                           "supervisor returned a non-acknowledgement file frame"));
         }
         const auto acknowledgement = decode_payload_ack(frame.payload);
-        if (!acknowledgement || acknowledgement->request_id != request.request_id || acknowledgement->stage != stage ||
-            acknowledgement->received_bytes != expected_bytes) {
-            return std::unexpected(make_error(ErrorCode::protocol_violation, "supervisor returned an invalid file acknowledgement"));
+        if (!acknowledgement || acknowledgement->request_id != request.request_id ||
+            acknowledgement->stage != stage || acknowledgement->received_bytes != expected_bytes) {
+            return std::unexpected(
+                make_error(ErrorCode::protocol_violation,
+                           "supervisor returned an invalid file acknowledgement"));
         }
         return *acknowledgement;
     };
     const auto abort_unpublished = [&]() -> Result<PayloadAck> {
         if (!payload_active) {
-            return std::unexpected(make_error(ErrorCode::protocol_violation, "cannot abort an inactive file ingress"));
+            return std::unexpected(
+                make_error(ErrorCode::protocol_violation, "cannot abort an inactive file ingress"));
         }
         const PayloadControlRequest control{.request_id = request.request_id};
         const auto encoded = encode_payload_control_request(control);
@@ -3173,7 +3400,8 @@ Result<void> Broker::dispatch_payload_stream(
         if (!response) {
             return std::unexpected(response.error());
         }
-        const auto acknowledgement = expect_ack(*response, PayloadAckStage::aborted, received_bytes);
+        const auto acknowledgement =
+            expect_ack(*response, PayloadAckStage::aborted, received_bytes);
         if (!acknowledgement) {
             return std::unexpected(acknowledgement.error());
         }
@@ -3186,9 +3414,9 @@ Result<void> Broker::dispatch_payload_stream(
     const auto cleanup_unpublished = [&](const Error& cause) -> Result<void> {
         const auto aborted = abort_unpublished();
         if (!aborted) {
-            return fail_session(make_error(
-                ErrorCode::invocation_in_doubt,
-                "unpublished file cleanup could not be proven: " + aborted.error().message));
+            return fail_session(make_error(ErrorCode::invocation_in_doubt,
+                                           "unpublished file cleanup could not be proven: " +
+                                               aborted.error().message));
         }
         return std::unexpected(cause);
     };
@@ -3197,7 +3425,8 @@ Result<void> Broker::dispatch_payload_stream(
         if (!aborted) {
             return fail_session(make_error(
                 ErrorCode::invocation_in_doubt,
-                "client disconnected and unpublished file cleanup could not be proven: " + aborted.error().message));
+                "client disconnected and unpublished file cleanup could not be proven: " +
+                    aborted.error().message));
         }
         return {};
     };
@@ -3208,15 +3437,15 @@ Result<void> Broker::dispatch_payload_stream(
     }
     const auto begin_response = exchange_supervisor(MessageKind::payload_begin, *encoded_begin);
     if (!begin_response) {
-        return fail_session(make_error(
-            ErrorCode::invocation_in_doubt,
-            "file begin outcome is unknown: " + begin_response.error().message));
+        return fail_session(
+            make_error(ErrorCode::invocation_in_doubt,
+                       "file begin outcome is unknown: " + begin_response.error().message));
     }
     const auto begin_acknowledgement = expect_ack(*begin_response, PayloadAckStage::begun, 0U);
     if (!begin_acknowledgement) {
-        return fail_session(make_error(
-            ErrorCode::invocation_in_doubt,
-            "file begin acknowledgement is invalid: " + begin_acknowledgement.error().message));
+        return fail_session(
+            make_error(ErrorCode::invocation_in_doubt, "file begin acknowledgement is invalid: " +
+                                                           begin_acknowledgement.error().message));
     }
     payload_active = true;
     if (const auto sent = send_payload_ack_frame(client_fd, *begin_acknowledgement); !sent) {
@@ -3234,9 +3463,11 @@ Result<void> Broker::dispatch_payload_stream(
         }
         if (client_frame->kind == MessageKind::payload_chunk) {
             const auto chunk = decode_payload_chunk(client_frame->payload);
-            if (!chunk || chunk->request_id != request.request_id || sealed || received_bytes > request.byte_size ||
+            if (!chunk || chunk->request_id != request.request_id || sealed ||
+                received_bytes > request.byte_size ||
                 chunk->bytes.size() > request.byte_size - received_bytes) {
-                return cleanup_unpublished(make_error(ErrorCode::protocol_violation, "invalid file chunk sequence"));
+                return cleanup_unpublished(
+                    make_error(ErrorCode::protocol_violation, "invalid file chunk sequence"));
             }
             const auto encoded_chunk = encode_payload_chunk(*chunk);
             if (!encoded_chunk) {
@@ -3247,7 +3478,8 @@ Result<void> Broker::dispatch_payload_stream(
                 return cleanup_unpublished(response.error());
             }
             const std::size_t next_received_bytes = received_bytes + chunk->bytes.size();
-            const auto acknowledgement = expect_ack(*response, PayloadAckStage::chunk_written, next_received_bytes);
+            const auto acknowledgement =
+                expect_ack(*response, PayloadAckStage::chunk_written, next_received_bytes);
             if (!acknowledgement) {
                 return cleanup_unpublished(acknowledgement.error());
             }
@@ -3260,7 +3492,8 @@ Result<void> Broker::dispatch_payload_stream(
         if (client_frame->kind == MessageKind::payload_seal) {
             const auto control = decode_payload_control_request(client_frame->payload);
             if (!control || control->request_id != request.request_id || sealed) {
-                return cleanup_unpublished(make_error(ErrorCode::protocol_violation, "invalid file seal sequence"));
+                return cleanup_unpublished(
+                    make_error(ErrorCode::protocol_violation, "invalid file seal sequence"));
             }
             const auto encoded = encode_payload_control_request(*control);
             if (!encoded) {
@@ -3270,7 +3503,8 @@ Result<void> Broker::dispatch_payload_stream(
             if (!response) {
                 return cleanup_unpublished(response.error());
             }
-            const auto acknowledgement = expect_ack(*response, PayloadAckStage::sealed, request.byte_size);
+            const auto acknowledgement =
+                expect_ack(*response, PayloadAckStage::sealed, request.byte_size);
             if (!acknowledgement) {
                 return cleanup_unpublished(acknowledgement.error());
             }
@@ -3284,23 +3518,27 @@ Result<void> Broker::dispatch_payload_stream(
         if (client_frame->kind == MessageKind::payload_abort) {
             const auto control = decode_payload_control_request(client_frame->payload);
             if (!control || control->request_id != request.request_id) {
-                return cleanup_unpublished(make_error(ErrorCode::protocol_violation, "invalid file abort sequence"));
+                return cleanup_unpublished(
+                    make_error(ErrorCode::protocol_violation, "invalid file abort sequence"));
             }
             const auto acknowledgement = abort_unpublished();
             if (!acknowledgement) {
-                return fail_session(make_error(
-                    ErrorCode::invocation_in_doubt,
-                    "file abort could not be proven: " + acknowledgement.error().message));
+                return fail_session(make_error(ErrorCode::invocation_in_doubt,
+                                               "file abort could not be proven: " +
+                                                   acknowledgement.error().message));
             }
             static_cast<void>(send_payload_ack_frame(client_fd, *acknowledgement));
             return {};
         }
         if (client_frame->kind != MessageKind::payload_publish) {
-            return cleanup_unpublished(make_error(ErrorCode::protocol_violation, "unexpected file-transfer frame"));
+            return cleanup_unpublished(
+                make_error(ErrorCode::protocol_violation, "unexpected file-transfer frame"));
         }
         const auto control = decode_payload_control_request(client_frame->payload);
-        if (!control || control->request_id != request.request_id || !sealed || received_bytes != request.byte_size) {
-            return cleanup_unpublished(make_error(ErrorCode::protocol_violation, "invalid file publish sequence"));
+        if (!control || control->request_id != request.request_id || !sealed ||
+            received_bytes != request.byte_size) {
+            return cleanup_unpublished(
+                make_error(ErrorCode::protocol_violation, "invalid file publish sequence"));
         }
         // The pending marker is intentionally created only after PID 1 sealed+fdatasynced the
         // exact declared bytes, and immediately before the one irreversible rename operation.
@@ -3308,47 +3546,47 @@ Result<void> Broker::dispatch_payload_stream(
         if (!begun) {
             const auto aborted = abort_unpublished();
             if (!aborted || begun.error().code != ErrorCode::already_exists) {
-                return fail_session(make_error(
-                    ErrorCode::invocation_in_doubt,
-                    "file journal begin outcome is unknown: " + begun.error().message));
+                return fail_session(
+                    make_error(ErrorCode::invocation_in_doubt,
+                               "file journal begin outcome is unknown: " + begun.error().message));
             }
             return std::unexpected(begun.error());
         }
         const auto encoded = encode_payload_control_request(*control);
         if (!encoded) {
-            return fail_session(make_error(
-                ErrorCode::invocation_in_doubt,
-                "file journal is pending but publish encoding failed: " + encoded.error().message));
+            return fail_session(make_error(ErrorCode::invocation_in_doubt,
+                                           "file journal is pending but publish encoding failed: " +
+                                               encoded.error().message));
         }
         const auto response = exchange_supervisor(MessageKind::payload_publish, *encoded);
         if (!response) {
-            return fail_session(make_error(
-                ErrorCode::invocation_in_doubt,
-                "file publish outcome is unknown: " + response.error().message));
+            return fail_session(
+                make_error(ErrorCode::invocation_in_doubt,
+                           "file publish outcome is unknown: " + response.error().message));
         }
         if (response->kind != MessageKind::payload_result) {
-            return fail_session(make_error(
-                ErrorCode::invocation_in_doubt,
-                "file publish returned an unexpected supervisor frame"));
+            return fail_session(make_error(ErrorCode::invocation_in_doubt,
+                                           "file publish returned an unexpected supervisor frame"));
         }
         const auto result = decode_payload_result(response->payload);
         const std::string expected_path = "/workspace/uploads/" + request.opaque_id + "/payload";
-        if (!result || result->replayed || result->request_id != request.request_id || result->path != expected_path ||
-            result->byte_size != request.byte_size || result->sha256 != request.sha256) {
-            return fail_session(make_error(
-                ErrorCode::invocation_in_doubt,
-                "file publish returned an invalid receipt"));
+        if (!result || result->replayed || result->request_id != request.request_id ||
+            result->path != expected_path || result->byte_size != request.byte_size ||
+            result->sha256 != request.sha256) {
+            return fail_session(make_error(ErrorCode::invocation_in_doubt,
+                                           "file publish returned an invalid receipt"));
         }
         payload_active = false;
         if (const auto completed = journal_.complete_payload(request, *result); !completed) {
             if (const auto finished = finish_execution(); !finished) {
-                return fail_session(make_error(
-                    ErrorCode::invocation_in_doubt,
-                    "file published but lifecycle completion failed: " + finished.error().message));
+                return fail_session(make_error(ErrorCode::invocation_in_doubt,
+                                               "file published but lifecycle completion failed: " +
+                                                   finished.error().message));
             }
-            return std::unexpected(make_error(
-                ErrorCode::invocation_in_doubt,
-                "file published but durable journal completion failed: " + completed.error().message));
+            return std::unexpected(
+                make_error(ErrorCode::invocation_in_doubt,
+                           "file published but durable journal completion failed: " +
+                               completed.error().message));
         }
         if (const auto finished = finish_execution(); !finished) {
             return fail_session(finished.error());
@@ -3359,25 +3597,27 @@ Result<void> Broker::dispatch_payload_stream(
 }
 
 Result<void> Broker::serve_operator_client(const int client_fd) {
-    ucred credentials {};
+    ucred credentials{};
     socklen_t credential_size = sizeof(credentials);
     if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &credentials, &credential_size) != 0 ||
         credential_size != sizeof(credentials) ||
         !is_authorized_operator_peer(credentials.uid, config_.operator_uid)) {
-        return std::unexpected(make_error(ErrorCode::authentication_failed, "operator client UID is not authorized"));
+        return std::unexpected(
+            make_error(ErrorCode::authentication_failed, "operator client UID is not authorized"));
     }
-    if (const auto configured = configure_control_socket(client_fd, std::chrono::seconds(5)); !configured) {
+    if (const auto configured = configure_control_socket(client_fd, std::chrono::seconds(5));
+        !configured) {
         return std::unexpected(configured.error());
     }
     const auto wire = operator_protocol::receive_operator_frame(client_fd);
     if (!wire) {
-        return wire.error().code == ErrorCode::io_failure ? Result<void>{} : std::unexpected(wire.error());
+        return wire.error().code == ErrorCode::io_failure ? Result<void>{}
+                                                          : std::unexpected(wire.error());
     }
     const auto frame = operator_protocol::decode_operator_frame(*wire);
     if (!frame) {
         if (const auto sent = send_operator_error_frame(
-                client_fd,
-                operator_protocol::OperatorErrorCode::protocol_violation);
+                client_fd, operator_protocol::OperatorErrorCode::protocol_violation);
             !sent) {
             return std::unexpected(sent.error());
         }
@@ -3388,8 +3628,7 @@ Result<void> Broker::serve_operator_client(const int client_fd) {
         const auto request = operator_protocol::decode_status_request(frame->payload);
         if (!request) {
             if (const auto sent = send_operator_error_frame(
-                    client_fd,
-                    operator_protocol::OperatorErrorCode::invalid_request);
+                    client_fd, operator_protocol::OperatorErrorCode::invalid_request);
                 !sent) {
                 return std::unexpected(sent.error());
             }
@@ -3398,8 +3637,7 @@ Result<void> Broker::serve_operator_client(const int client_fd) {
         const auto runtime = domain::RuntimeId::parse(request->runtime_key);
         if (!runtime) {
             if (const auto sent = send_operator_error_frame(
-                    client_fd,
-                    operator_protocol::OperatorErrorCode::invalid_request);
+                    client_fd, operator_protocol::OperatorErrorCode::invalid_request);
                 !sent) {
                 return std::unexpected(sent.error());
             }
@@ -3407,7 +3645,9 @@ Result<void> Broker::serve_operator_client(const int client_fd) {
         }
         const auto status = service.status(*runtime, *this);
         if (!status) {
-            if (const auto sent = send_operator_error_frame(client_fd, operator_error_code(status.error())); !sent) {
+            if (const auto sent =
+                    send_operator_error_frame(client_fd, operator_error_code(status.error()));
+                !sent) {
                 return std::unexpected(sent.error());
             }
             return {};
@@ -3418,8 +3658,7 @@ Result<void> Broker::serve_operator_client(const int client_fd) {
         const auto request = operator_protocol::decode_list_request(frame->payload);
         if (!request) {
             if (const auto sent = send_operator_error_frame(
-                    client_fd,
-                    operator_protocol::OperatorErrorCode::invalid_request);
+                    client_fd, operator_protocol::OperatorErrorCode::invalid_request);
                 !sent) {
                 return std::unexpected(sent.error());
             }
@@ -3429,8 +3668,7 @@ Result<void> Broker::serve_operator_client(const int client_fd) {
         const auto path = domain::OperatorWorkspacePath::parse(request->path);
         if (!runtime || !path) {
             if (const auto sent = send_operator_error_frame(
-                    client_fd,
-                    operator_protocol::OperatorErrorCode::invalid_request);
+                    client_fd, operator_protocol::OperatorErrorCode::invalid_request);
                 !sent) {
                 return std::unexpected(sent.error());
             }
@@ -3438,7 +3676,9 @@ Result<void> Broker::serve_operator_client(const int client_fd) {
         }
         const auto listing = service.list(*runtime, *path, *this);
         if (!listing) {
-            if (const auto sent = send_operator_error_frame(client_fd, operator_error_code(listing.error())); !sent) {
+            if (const auto sent =
+                    send_operator_error_frame(client_fd, operator_error_code(listing.error()));
+                !sent) {
                 return std::unexpected(sent.error());
             }
             return {};
@@ -3446,8 +3686,7 @@ Result<void> Broker::serve_operator_client(const int client_fd) {
         return send_operator_list_frame(client_fd, *listing);
     }
     if (const auto sent = send_operator_error_frame(
-            client_fd,
-            operator_protocol::OperatorErrorCode::protocol_violation);
+            client_fd, operator_protocol::OperatorErrorCode::protocol_violation);
         !sent) {
         return std::unexpected(sent.error());
     }
@@ -3455,13 +3694,15 @@ Result<void> Broker::serve_operator_client(const int client_fd) {
 }
 
 Result<void> Broker::serve_client(const int client_fd) {
-    ucred credentials {};
+    ucred credentials{};
     socklen_t credential_size = sizeof(credentials);
     if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &credentials, &credential_size) != 0 ||
         credential_size != sizeof(credentials) || credentials.uid != config_.client_uid) {
-        return std::unexpected(make_error(ErrorCode::authentication_failed, "broker client UID is not authorized"));
+        return std::unexpected(
+            make_error(ErrorCode::authentication_failed, "broker client UID is not authorized"));
     }
-    if (const auto configured = configure_control_socket(client_fd, std::chrono::seconds(5)); !configured) {
+    if (const auto configured = configure_control_socket(client_fd, std::chrono::seconds(5));
+        !configured) {
         return std::unexpected(configured.error());
     }
     for (bool one_request = true; one_request; one_request = false) {
@@ -3536,7 +3777,8 @@ Result<void> Broker::serve_client(const int client_fd) {
             }
             // As for execute, quota provisioning is an admission prerequisite: journal records
             // are allowed only under this runtime's verified control project.
-            if (const auto quota_binding = quota_.ensure_runtime(admission->runtime.value()); !quota_binding) {
+            if (const auto quota_binding = quota_.ensure_runtime(admission->runtime.value());
+                !quota_binding) {
                 if (const auto sent = send_error_frame(client_fd, quota_binding.error()); !sent) {
                     return std::unexpected(sent.error());
                 }
@@ -3544,13 +3786,15 @@ Result<void> Broker::serve_client(const int client_fd) {
             }
             const auto journal_decision = resolve_payload_journal(journal_, *request);
             if (!journal_decision) {
-                if (const auto sent = send_error_frame(client_fd, journal_decision.error()); !sent) {
+                if (const auto sent = send_error_frame(client_fd, journal_decision.error());
+                    !sent) {
                     return std::unexpected(sent.error());
                 }
                 continue;
             }
             if (journal_decision->has_value()) {
-                if (const auto sent = send_payload_result_frame(client_fd, **journal_decision); !sent) {
+                if (const auto sent = send_payload_result_frame(client_fd, **journal_decision);
+                    !sent) {
                     return std::unexpected(sent.error());
                 }
                 continue;
@@ -3575,7 +3819,11 @@ Result<void> Broker::serve_client(const int client_fd) {
             return {};
         }
         if (frame->kind != MessageKind::execute) {
-            if (const auto sent = send_error_frame(client_fd, make_error(ErrorCode::protocol_violation, "broker accepts execute, file ingress, file replay, or runtime status only")); !sent) {
+            if (const auto sent =
+                    send_error_frame(client_fd, make_error(ErrorCode::protocol_violation,
+                                                           "broker accepts execute, file ingress, "
+                                                           "file replay, or runtime status only"));
+                !sent) {
                 return std::unexpected(sent.error());
             }
             continue;
@@ -3597,7 +3845,8 @@ Result<void> Broker::serve_client(const int client_fd) {
         // The per-runtime control project must exist before any journal lookup/begin.  This
         // makes a missing/changed quota binding a storage admission failure rather than a
         // chance to create a global journal outside the runtime's control hard limit.
-        if (const auto quota_binding = quota_.ensure_runtime(admission->runtime.value()); !quota_binding) {
+        if (const auto quota_binding = quota_.ensure_runtime(admission->runtime.value());
+            !quota_binding) {
             if (const auto sent = send_error_frame(client_fd, quota_binding.error()); !sent) {
                 return std::unexpected(sent.error());
             }
@@ -3646,14 +3895,18 @@ Result<void> Broker::serve_client(const int client_fd) {
         }
         const auto result = dispatch(*request);
         if (!result) {
-            // Pending is intentionally retained: a crash or partially-started task is never retried unsafely.
+            // Pending is intentionally retained: a crash or partially-started task is never retried
+            // unsafely.
             if (const auto sent = send_error_frame(client_fd, result.error()); !sent) {
                 return std::unexpected(sent.error());
             }
             continue;
         }
         if (const auto completed = journal_.complete(*request, *result); !completed) {
-            if (const auto sent = send_error_frame(client_fd, make_error(ErrorCode::invocation_in_doubt, "result exists but durable journal completion failed")); !sent) {
+            if (const auto sent = send_error_frame(
+                    client_fd, make_error(ErrorCode::invocation_in_doubt,
+                                          "result exists but durable journal completion failed"));
+                !sent) {
                 return std::unexpected(sent.error());
             }
             continue;
@@ -3697,7 +3950,8 @@ void Broker::reap_expired_sessions() noexcept {
         if (!dead) {
             const auto shutdown = encode_frame(MessageKind::shutdown, {});
             if (shutdown) {
-                static_cast<void>(configure_control_socket(session->control_fd, std::chrono::seconds(1)));
+                static_cast<void>(
+                    configure_control_socket(session->control_fd, std::chrono::seconds(1)));
                 static_cast<void>(send_frame(session->control_fd, *shutdown));
             }
         }
@@ -3712,16 +3966,19 @@ void Broker::reap_expired_sessions() noexcept {
 
 Result<void> Broker::serve_forever(const ReadyCallback ready_callback) {
     if (listen_fd_ < 0 || operator_listen_fd_ < 0) {
-        return std::unexpected(make_error(ErrorCode::internal, "Bot or operator broker listener is not bound"));
+        return std::unexpected(
+            make_error(ErrorCode::internal, "Bot or operator broker listener is not bound"));
     }
-    /** @brief 已 accept client 所属 control-plane endpoint / Control-plane endpoint of one accepted client. */
+    /** @brief 已 accept client 所属 control-plane endpoint / Control-plane endpoint of one accepted
+     * client. */
     enum class ClientEndpoint : std::uint8_t {
         /** @brief Bot 专属 endpoint / Bot-exclusive endpoint. */
         bot,
         /** @brief 独立 operator endpoint / Independent operator endpoint. */
         operator_plane,
     };
-    /** @brief 等待专属 worker 的已 accept client / Accepted client waiting for its dedicated worker pool. */
+    /** @brief 等待专属 worker 的已 accept client / Accepted client waiting for its dedicated worker
+     * pool. */
     struct QueuedClient final {
         /** @brief 已 accept 的 client FD / Accepted client FD. */
         int fd{-1};
@@ -3737,16 +3994,14 @@ Result<void> Broker::serve_forever(const ReadyCallback ready_callback) {
     // Do not share this pool with the Bot endpoint. A Bot connection can deliberately withhold
     // its first packet until the five-second I/O deadline, or run a much longer task dispatch;
     // queue priority cannot recover an operator worker after every shared worker is blocked.
-    const auto bot_worker = [this,
-                             &queue_mutex,
-                             &bot_queue_ready,
-                             &queued_bot_clients,
+    const auto bot_worker = [this, &queue_mutex, &bot_queue_ready, &queued_bot_clients,
                              &stopping]() {
         for (;;) {
             QueuedClient client;
             {
                 std::unique_lock queue_lock(queue_mutex);
-                bot_queue_ready.wait(queue_lock, [&]() { return stopping || !queued_bot_clients.empty(); });
+                bot_queue_ready.wait(queue_lock,
+                                     [&]() { return stopping || !queued_bot_clients.empty(); });
                 if (queued_bot_clients.empty()) {
                     return;
                 }
@@ -3762,16 +4017,14 @@ Result<void> Broker::serve_forever(const ReadyCallback ready_callback) {
     };
     // This separately reserved pool is the liveness boundary for recovery and inspection. Its
     // work is one bounded WOP1 read-only request, and Bot-originated work cannot occupy it.
-    const auto operator_worker = [this,
-                                  &queue_mutex,
-                                  &operator_queue_ready,
-                                  &queued_operator_clients,
-                                  &stopping]() {
+    const auto operator_worker = [this, &queue_mutex, &operator_queue_ready,
+                                  &queued_operator_clients, &stopping]() {
         for (;;) {
             QueuedClient client;
             {
                 std::unique_lock queue_lock(queue_mutex);
-                operator_queue_ready.wait(queue_lock, [&]() { return stopping || !queued_operator_clients.empty(); });
+                operator_queue_ready.wait(
+                    queue_lock, [&]() { return stopping || !queued_operator_clients.empty(); });
                 if (queued_operator_clients.empty()) {
                     return;
                 }
@@ -3805,9 +4058,11 @@ Result<void> Broker::serve_forever(const ReadyCallback ready_callback) {
                 thread.join();
             }
         }
-        return std::unexpected(make_error(ErrorCode::internal, "create bounded broker worker pool"));
+        return std::unexpected(
+            make_error(ErrorCode::internal, "create bounded broker worker pool"));
     }
-    /** @brief accept loop 或 readiness callback 的终止状态 / Terminal state from the accept loop or readiness callback. */
+    /** @brief accept loop 或 readiness callback 的终止状态 / Terminal state from the accept loop or
+     * readiness callback. */
     Result<void> terminal{};
     if (ready_callback != nullptr) {
         terminal = ready_callback();
@@ -3832,7 +4087,8 @@ Result<void> Broker::serve_forever(const ReadyCallback ready_callback) {
         for (std::size_t index = 0U; index < listening.size(); ++index) {
             const short events = listening[index].revents;
             if ((events & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
-                terminal = std::unexpected(make_error(ErrorCode::io_failure, "broker listener became unusable"));
+                terminal = std::unexpected(
+                    make_error(ErrorCode::io_failure, "broker listener became unusable"));
                 break;
             }
             if ((events & POLLIN) == 0) {
@@ -3843,19 +4099,21 @@ Result<void> Broker::serve_forever(const ReadyCallback ready_callback) {
                 if (errno == EINTR || errno == ECONNABORTED) {
                     continue;
                 }
-                terminal = std::unexpected(errno_error(ErrorCode::io_failure, "accept broker client"));
+                terminal =
+                    std::unexpected(errno_error(ErrorCode::io_failure, "accept broker client"));
                 break;
             }
-            const ClientEndpoint endpoint = index == 0U ? ClientEndpoint::bot : ClientEndpoint::operator_plane;
+            const ClientEndpoint endpoint =
+                index == 0U ? ClientEndpoint::bot : ClientEndpoint::operator_plane;
             bool queued = false;
             {
                 std::lock_guard queue_lock(queue_mutex);
                 std::deque<QueuedClient>& queue = endpoint == ClientEndpoint::operator_plane
-                    ? queued_operator_clients
-                    : queued_bot_clients;
+                                                      ? queued_operator_clients
+                                                      : queued_bot_clients;
                 const std::size_t limit = endpoint == ClientEndpoint::operator_plane
-                    ? kMaxQueuedOperatorClients
-                    : kMaxQueuedClients;
+                                              ? kMaxQueuedOperatorClients
+                                              : kMaxQueuedClients;
                 if (queue.size() < limit) {
                     queue.push_back(QueuedClient{.fd = accepted});
                     queued = true;
@@ -3899,4 +4157,4 @@ Result<void> Broker::serve_forever(const ReadyCallback ready_callback) {
     return terminal;
 }
 
-}  // namespace wspctl
+} // namespace wspctl
