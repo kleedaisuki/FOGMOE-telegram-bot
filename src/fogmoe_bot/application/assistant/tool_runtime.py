@@ -21,6 +21,7 @@ from fogmoe_bot.domain.conversation.identity import (
     DeliveryStreamId,
     TurnId,
 )
+from fogmoe_bot.domain.conversation.inference import InferenceGenerationFence
 from fogmoe_bot.domain.conversation.payloads import (
     JsonObject,
     JsonValue,
@@ -108,6 +109,8 @@ class ToolExecutionContext:
     @param execution_deadline_monotonic 本次推理 attempt 的易失单调时钟截止点；None 表示
         调用方没有提供整体预算 / Ephemeral monotonic-clock deadline for this inference
         attempt; ``None`` means the caller did not provide an overall budget.
+    @param generation_fence 当前 activity claim 的跨进程 generation fence /
+        Cross-process generation fence of the current activity claim.
     @note 截止点是 attempt-local 控制信息，不是用户授权或持久化请求语义；它绝不能进入
         receipt/request hash。/ The deadline is attempt-local control information, not user
         authorization or persistent request semantics; it must never enter a receipt/request hash.
@@ -124,6 +127,7 @@ class ToolExecutionContext:
     message_thread_id: int | None = None
     allowed_tools: frozenset[str] | None = None
     execution_deadline_monotonic: float | None = None
+    generation_fence: InferenceGenerationFence | None = None
 
     def __post_init__(self) -> None:
         """@brief 校验可选 attempt 单调截止点 / Validate the optional attempt monotonic deadline.
@@ -135,11 +139,16 @@ class ToolExecutionContext:
 
         deadline = self.execution_deadline_monotonic
         if deadline is None:
-            return
-        if isinstance(deadline, bool) or not isinstance(deadline, float):
+            pass
+        elif isinstance(deadline, bool) or not isinstance(deadline, float):
             raise TypeError("execution_deadline_monotonic must be a float or None")
-        if not math.isfinite(deadline) or deadline <= 0.0:
+        elif not math.isfinite(deadline) or deadline <= 0.0:
             raise ValueError("execution_deadline_monotonic must be finite and positive")
+        if (
+            self.generation_fence is not None
+            and self.generation_fence.turn_id != self.turn_id
+        ):
+            raise ValueError("Tool generation fence must belong to the same Turn")
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,7 +287,16 @@ class AgentRuntime:
 
         if step < 0 or ordinal < 0:
             raise ValueError("step and ordinal must be non-negative")
-        invocation_id = f"step:{step}:call:{ordinal}"
+        revision = (
+            0
+            if context.generation_fence is None
+            else int(context.generation_fence.input_revision)
+        )
+        invocation_id = (
+            f"step:{step}:call:{ordinal}"
+            if revision == 0
+            else f"generation:{revision}:step:{step}:call:{ordinal}"
+        )
         correlation_id = provider_call_id or invocation_id
         if context.allowed_tools is not None and tool_name not in context.allowed_tools:
             return ToolRuntimeResult(
@@ -412,6 +430,11 @@ def _request_hash(
         "message_thread_id": context.message_thread_id,
         "allowed_tools": (
             None if context.allowed_tools is None else sorted(context.allowed_tools)
+        ),
+        "input_revision": (
+            0
+            if context.generation_fence is None
+            else int(context.generation_fence.input_revision)
         ),
         "invocation_id": invocation_id,
         "tool_name": tool_name,

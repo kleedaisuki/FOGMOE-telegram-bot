@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0072_workspace_attachment_import_intents
--- Alembic head: 0072_workspace_attachment_import_intents
+-- Source migrations: 0001_initial through 0073_streaming_turn_steering
+-- Alembic head: 0073_streaming_turn_steering
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and retired user-plan backfill) and the
@@ -249,10 +249,20 @@ CREATE TABLE conversation.inference_activities (
   ),
   request JSONB NOT NULL CHECK (jsonb_typeof(request) = 'object'),
   status TEXT NOT NULL DEFAULT 'pending' CHECK (
-    status IN ('pending', 'processing', 'retry', 'completed', 'failed', 'cancelled')
+    status IN (
+      'pending',
+      'processing',
+      'steer_pending',
+      'retry',
+      'completed',
+      'failed',
+      'cancelled'
+    )
   ),
+  input_revision BIGINT NOT NULL DEFAULT 0 CHECK (input_revision >= 0),
   version BIGINT NOT NULL DEFAULT 0 CHECK (version >= 0),
   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  retry_budget_used INTEGER NOT NULL DEFAULT 0,
   next_attempt_at TIMESTAMPTZ,
   claim_token UUID,
   lease_expires_at TIMESTAMPTZ,
@@ -263,7 +273,8 @@ CREATE TABLE conversation.inference_activities (
   completed_at TIMESTAMPTZ,
   traceparent VARCHAR(55) NOT NULL,
   CONSTRAINT inference_activities_claimable_time_ck CHECK (
-    (status IN ('pending', 'retry')) = (next_attempt_at IS NOT NULL)
+    (status IN ('pending', 'steer_pending', 'retry')) =
+    (next_attempt_at IS NOT NULL)
   ),
   CONSTRAINT inference_activities_lease_ck CHECK (
     (status = 'processing') = (
@@ -279,6 +290,14 @@ CREATE TABLE conversation.inference_activities (
   CONSTRAINT inference_activities_completion_token_ck CHECK (
     (status = 'completed') = (completion_token IS NOT NULL)
   ),
+  CONSTRAINT inference_activities_retry_budget_used_ck CHECK (
+    retry_budget_used >= 0
+    AND retry_budget_used <= attempt_count
+    AND (
+      status <> 'processing'
+      OR retry_budget_used < attempt_count
+    )
+  ),
   CONSTRAINT inference_activities_traceparent_ck CHECK (
     traceparent IS NULL OR traceparent ~ '^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'
   )
@@ -286,7 +305,7 @@ CREATE TABLE conversation.inference_activities (
 
 CREATE INDEX idx_inference_activities_ready
   ON conversation.inference_activities (next_attempt_at, activity_id)
-  WHERE status IN ('pending', 'retry');
+  WHERE status IN ('pending', 'steer_pending', 'retry');
 
 CREATE INDEX idx_inference_activities_expired_lease
   ON conversation.inference_activities (lease_expires_at, activity_id)
@@ -325,6 +344,11 @@ CREATE INDEX idx_conversation_messages_turn
 CREATE INDEX idx_conversation_messages_source_update
   ON conversation.conversation_messages (source_update_id)
   WHERE source_update_id IS NOT NULL;
+
+CREATE UNIQUE INDEX conversation_messages_steer_source_uq
+  ON conversation.conversation_messages (source_update_id)
+  WHERE source_update_id IS NOT NULL
+    AND content ->> 'input_kind' = 'steer';
 
 -- History reset is an append-only visibility boundary.  It preserves audit
 -- rows and lets already accepted Turns retain their pre-reset history snapshot.
@@ -1516,12 +1540,13 @@ CREATE UNIQUE INDEX scheduling_assistant_schedules_processing_target_uq
 CREATE TABLE assistant.tool_agent_steps (
   turn_id UUID NOT NULL
     REFERENCES conversation.conversation_turns(turn_id) ON DELETE CASCADE,
+  generation BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0),
   step_no SMALLINT NOT NULL CHECK (step_no BETWEEN 0 AND 32),
   request_hash CHAR(64) NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
   route_key VARCHAR(512) NOT NULL CHECK (char_length(btrim(route_key)) > 0),
   response JSONB NOT NULL CHECK (jsonb_typeof(response) = 'object'),
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (turn_id, step_no)
+  PRIMARY KEY (turn_id, generation, step_no)
 );
 
 CREATE TABLE assistant.tool_effect_receipts (
@@ -2721,11 +2746,13 @@ SELECT 'inbox'::TEXT AS stage,
 FROM conversation.inbound_updates
 UNION ALL
 SELECT 'inference',
-       count(*) FILTER (WHERE status = 'pending'),
+       count(*) FILTER (WHERE status IN ('pending', 'steer_pending')),
        count(*) FILTER (WHERE status = 'processing'),
        count(*) FILTER (WHERE status = 'retry'),
        count(*) FILTER (WHERE status = 'failed'),
-       min(next_attempt_at) FILTER (WHERE status IN ('pending', 'retry')),
+       min(next_attempt_at) FILTER (
+         WHERE status IN ('pending', 'steer_pending', 'retry')
+       ),
        count(*) FILTER (
          WHERE status = 'processing' AND lease_expires_at <= CURRENT_TIMESTAMP
        )

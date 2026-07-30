@@ -15,7 +15,11 @@ import hashlib
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import timedelta
 
+from fogmoe_bot.application.conversation.inference_worker import (
+    InferenceDependencyPending,
+)
 from fogmoe_bot.application.workspace.errors import (
     WorkspaceFileReplayNotFoundError,
     WorkspaceRuntimeProtocolError,
@@ -62,6 +66,30 @@ from .workspace_attachment_intent import (
 
 _ATTACHMENT_REQUEST_SUFFIX = "attachment-import"
 """@brief 一个 Turn 内当前附件导入的稳定 request-ID 后缀 / Stable request-ID suffix for a current-Turn attachment import."""
+
+
+class WorkspaceAttachmentImportPendingError(InferenceDependencyPending):
+    """@brief 已持久化附件导入仍等待 receipt 的 durable dependency / Durable dependency for a persisted attachment import still awaiting its receipt.
+
+    @note 一旦 immutable import intent 已提交，推理 finalizer 就不能把附件 marker 转为
+        ``unavailable``；它必须通过相同 native journal 向前恢复，直到 receipt 成为 durable
+        witness。该错误使用固定安全消息，底层异常仅保留在 exception chain 中供观测。/
+        Once the immutable import intent is committed, the inference finalizer cannot transition
+        the attachment marker to ``unavailable``; it must recover forward through the same native
+        journal until a receipt becomes the durable witness. This error uses a fixed safe message,
+        retaining the underlying failure only in the exception chain for observability.
+    """
+
+    def __init__(self) -> None:
+        """@brief 创建固定五秒的附件恢复 gate / Create the attachment-recovery gate with a fixed five-second delay.
+
+        @return None / None.
+        """
+
+        super().__init__(
+            "Current-turn attachment import is awaiting durable receipt reconciliation",
+            retry_after=timedelta(seconds=5),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,19 +275,69 @@ class CurrentTurnWorkspaceAttachmentPreprocessor:
                     downloaded=downloaded,
                 ),
             )
-        intent = _validate_intent_for_command(
+        try:
+            imported = await self._resume_prepared_import(
+                command=command,
+                reference=reference,
+                intent=intent,
+                downloaded=downloaded,
+            )
+        except WorkspaceAttachmentImportPendingError:
+            raise
+        except Exception as error:
+            # ``prepare`` promises that the intent committed before returning.  From this point
+            # onward a final inference failure is not a legal compensation: PostgreSQL correctly
+            # rejects pending→unavailable while that immutable recovery fact exists.  Treat every
+            # incomplete forward-recovery path as a dependency gate instead of exhausting the
+            # ordinary provider-attempt budget. ``prepare`` 保证返回前 intent 已提交；此后 inference
+            # final failure 不是合法补偿，PostgreSQL 会正确拒绝在 immutable 恢复事实仍存在时
+            # pending→unavailable。所有未完成的向前恢复路径都必须成为 dependency gate。
+            raise WorkspaceAttachmentImportPendingError() from error
+        try:
+            self._history_invalidator.invalidate(command.typed_conversation_id)
+        except Exception as error:
+            # The receipt is already durable, so this is no longer an unresolved import
+            # dependency.  A bounded ordinary retry may safely replay the native journal and
+            # idempotent receipt before invalidating the cache again. receipt 已经持久化，因此
+            # 这不再是未解决的导入依赖；普通有界重试可安全回放 native journal 与幂等 receipt，
+            # 再次失效 cache。
+            raise WorkspaceAttachmentReceiptUnavailableError(
+                "Conversation history cache invalidation failed after attachment receipt"
+            ) from error
+        return imported
+
+    async def _resume_prepared_import(
+        self,
+        *,
+        command: DurableAssistantInferenceCommand,
+        reference: CurrentTurnUploadReference,
+        intent: object,
+        downloaded: DownloadedCurrentTurnUpload | None,
+    ) -> ImportedCurrentTurnAttachment:
+        """@brief 从已提交 intent 向前恢复直至 receipt 发布 / Recover forward from a committed intent through receipt publication.
+
+        @param command 当前严格 durable command / Current strict durable command.
+        @param reference command 唯一授权的附件引用 / Sole attachment reference authorized by the command.
+        @param intent intent store 返回且已确定提交的候选 aggregate /
+            Candidate aggregate returned by the intent store and known to be committed.
+        @param downloaded 本次 prepare 前已下载的可选 bytes / Optional bytes downloaded before this attempt prepared the intent.
+        @return receipt 已发布的模型安全附件投影 / Model-safe attachment projection whose receipt has been published.
+        @raise Exception receipt 发布前的任何故障；调用方将其包装为 durable dependency /
+            Any failure before receipt publication; the caller wraps it as a durable dependency.
+        """
+
+        prepared = _validate_intent_for_command(
             intent,
             command=command,
             reference=reference,
         )
-
         replay = ReplayFileCommand(
-            scope=intent.scope,
-            opaque_id=intent.opaque_id,
-            byte_size=intent.byte_size,
-            sha256=intent.sha256,
-            request_id=intent.request_id,
-            request_hash=intent.request_hash,
+            scope=prepared.scope,
+            opaque_id=prepared.opaque_id,
+            byte_size=prepared.byte_size,
+            sha256=prepared.sha256,
+            request_id=prepared.request_id,
+            request_hash=prepared.request_hash,
         )
         try:
             result = await self._runtime_process.replay_file(replay)
@@ -273,17 +351,17 @@ class CurrentTurnWorkspaceAttachmentPreprocessor:
                 )
             _validate_download_matches_intent(
                 downloaded,
-                intent=intent,
+                intent=prepared,
                 reference=reference,
             )
             add_file = AddFileCommand(
-                scope=intent.scope,
-                opaque_id=intent.opaque_id,
+                scope=prepared.scope,
+                opaque_id=prepared.opaque_id,
                 chunks=_chunks(downloaded.content),
-                byte_size=intent.byte_size,
-                sha256=intent.sha256,
-                request_id=intent.request_id,
-                request_hash=intent.request_hash,
+                byte_size=prepared.byte_size,
+                sha256=prepared.sha256,
+                request_id=prepared.request_id,
+                request_hash=prepared.request_hash,
             )
             result = await self._runtime_process.add_file(add_file)
             _validate_native_receipt(result, command=add_file)
@@ -292,9 +370,9 @@ class CurrentTurnWorkspaceAttachmentPreprocessor:
         receipt = WorkspaceAttachmentImportReceipt(
             turn_id=command.typed_turn_id,
             conversation_id=command.typed_conversation_id,
-            scope=intent.scope,
-            request_id=intent.request_id,
-            request_hash=intent.request_hash,
+            scope=prepared.scope,
+            request_id=prepared.request_id,
+            request_hash=prepared.request_hash,
             path=result.path,
             byte_size=result.byte_size,
             sha256=result.sha256,
@@ -303,16 +381,6 @@ class CurrentTurnWorkspaceAttachmentPreprocessor:
         # see the path after this second, transactional witness succeeds.  native journal 在 DB
         # 中断后可安全回放，但只有这第二个事务性见证成功后 Agent 才能看到路径。
         await self._receipts.record_import(command, receipt)
-        try:
-            self._history_invalidator.invalidate(command.typed_conversation_id)
-        except Exception as error:
-            # Do not let this attempt use a stale pending cache after the receipt is durable.
-            # A retry is safe: native replays the file journal and receipt publication is
-            # idempotent. receipt 已持久化后，本次不能继续使用 stale pending cache；重试会
-            # 安全回放 native journal，而 receipt publish 是幂等的。
-            raise WorkspaceAttachmentReceiptUnavailableError(
-                "Conversation history cache invalidation failed after attachment receipt"
-            ) from error
         return ImportedCurrentTurnAttachment(
             receipt=receipt,
             replayed=result.replayed,
@@ -598,4 +666,5 @@ def _validate_native_receipt(
 __all__ = [
     "CurrentTurnWorkspaceAttachmentPreprocessor",
     "ImportedCurrentTurnAttachment",
+    "WorkspaceAttachmentImportPendingError",
 ]

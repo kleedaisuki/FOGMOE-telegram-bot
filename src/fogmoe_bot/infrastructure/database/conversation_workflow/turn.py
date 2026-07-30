@@ -493,7 +493,8 @@ class PostgresTurnRepository:
                 "SET status = 'cancelled', version = version + 1, "
                 "next_attempt_at = NULL, updated_at = %s, claim_token = NULL, "
                 "lease_expires_at = NULL, completion_token = NULL "
-                "WHERE turn_id = CAST(%s AS UUID) AND status IN ('pending', 'retry')",
+                "WHERE turn_id = CAST(%s AS UUID) "
+                "AND status IN ('pending', 'steer_pending', 'retry')",
                 (timestamp, str(turn_id)),
                 connection=connection,
             )
@@ -533,7 +534,8 @@ class PostgresTurnRepository:
         rows: Sequence[object] = await db.fetch_all(
             "SELECT status FROM conversation.inference_activities "
             "WHERE turn_id = CAST(%s AS UUID) "
-            "AND status IN ('pending', 'processing', 'retry') FOR UPDATE",
+            "AND status IN "
+            "('pending', 'processing', 'steer_pending', 'retry') FOR UPDATE",
             (str(turn_id),),
             connection=connection,
         )

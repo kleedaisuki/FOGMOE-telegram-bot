@@ -13,6 +13,7 @@ from fogmoe_bot.application.assistant.durable_inference import (
     DurableAssistantInferenceAdapter,
 )
 from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
+from fogmoe_bot.application.assistant.streaming import AssistantStreamProjection
 from fogmoe_bot.application.assistant.tool_runtime import AgentRuntime
 from fogmoe_bot.application.assistant.tools.catalog import DEFAULT_TOOL_CATALOG
 from fogmoe_bot.application.assistant.workspace_attachment_preprocessor import (
@@ -146,6 +147,7 @@ def build_durable_assistant(
     context_window: PostgresContextWindowStore | None = None,
     telemetry: Telemetry,
     current_turn_upload_source: CurrentTurnUploadSource | None = None,
+    assistant_stream_projection: AssistantStreamProjection | None = None,
 ) -> DurableAssistantComposition:
     """@brief 装配 durable Assistant 及其外部 adapters / Compose the durable Assistant and its external adapters.
 
@@ -157,6 +159,8 @@ def build_durable_assistant(
     @param current_turn_upload_source 已初始化 Telegram Bot 的当前附件下载端口；None 仅允许
         没有附件的旧 durable activity / Current-attachment download port backed by the
         initialized Telegram Bot; None permits only legacy durable activities without attachments.
+    @param assistant_stream_projection typing 与私聊 draft 的最佳努力投影 /
+        Best-effort projection for typing and private-chat drafts.
     @return 推理、后台 worker 与需关停资源 / Inference, background workers, and resources requiring shutdown.
     @note 本函数是外层 composition，不读取文件或环境；secret 仅在第三方 SDK 边界揭示。/
         This outer composition reads no files or environment; secrets are revealed only at third-party SDK boundaries.
@@ -328,6 +332,7 @@ def build_durable_assistant(
         checkpoints=store,
         memory=working_memory,
         telemetry=telemetry,
+        generation_fence=store,
     )
     circuit = FailureCircuit[str](
         FailureCircuitPolicy(
@@ -416,6 +421,7 @@ def build_durable_assistant(
             inference=service,
             translation_inference=translation_service,
             attachment_preprocessor=attachment_preprocessor,
+            stream_projection=assistant_stream_projection,
         ),
         compaction=compaction,
         retrieval=retrieval,

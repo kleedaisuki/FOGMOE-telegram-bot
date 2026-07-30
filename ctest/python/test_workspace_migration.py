@@ -177,9 +177,9 @@ class WorkspaceMigrationTests(unittest.TestCase):
         """
 
         snapshot = _SCHEMA_PATH.read_text(encoding="utf-8")
-        self.assertIn("through 0072_workspace_attachment_import_intents", snapshot)
+        self.assertIn("through 0073_streaming_turn_steering", snapshot)
         self.assertIn(
-            "Alembic head: 0072_workspace_attachment_import_intents", snapshot
+            "Alembic head: 0073_streaming_turn_steering", snapshot
         )
         self.assertIn("CREATE SCHEMA IF NOT EXISTS workspace", snapshot)
         self.assertIn("CREATE TABLE workspace.runtimes", snapshot)

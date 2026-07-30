@@ -645,3 +645,101 @@ def test_cancel_turn_rechecks_outbox_after_acquiring_turn_lock(
     assert cancelled.state.value == "cancelled"
     assert captured["outbox_connection"] is connection
     assert captured["turn_connection"] is connection
+
+
+def test_cancel_turn_fences_a_steer_pending_generation(
+    monkeypatch: Any,
+) -> None:
+    """@brief cancel 将 steer_pending 代纳入活动锁与取消更新 / Cancellation includes a steer-pending generation in both its active lock and update."""
+
+    connection = object()
+    repository = PostgresTurnRepository()
+    writes: list[str] = []
+
+    async def fake_lock_inference(
+        turn_id: TurnId,
+        *,
+        connection: object,
+    ) -> list[tuple[str]]:
+        """@brief 返回一个尚未重新领取的 steer generation / Return one steer generation awaiting reclaim."""
+
+        return [("steer_pending",)]
+
+    async def fake_lock_outbound(
+        turn_id: TurnId,
+        *,
+        connection: object,
+    ) -> list[tuple[str]]:
+        """@brief 此 Turn 尚未形成 outbox / This Turn has not produced an outbox."""
+
+        return []
+
+    async def fake_load_turn(
+        turn_id: TurnId,
+        *,
+        connection: object,
+    ) -> object:
+        """@brief 返回等待新 generation 的 Turn / Return a Turn awaiting its new generation."""
+
+        return turn_uow._map_turn(
+            _turn_row(
+                state="waiting_inference",
+                version=1,
+                inference_attempts=1,
+            )
+        )
+
+    async def fake_execute(
+        sql: str,
+        params: tuple[object, ...],
+        *,
+        connection: object,
+    ) -> int:
+        """@brief 捕获原子取消语句 / Capture atomic cancellation statements."""
+
+        del params, connection
+        writes.append(sql)
+        return 1
+
+    async def fake_persist(
+        turn: object,
+        *,
+        expected_version: int,
+        connection: object,
+    ) -> None:
+        """@brief 接受已验证的 Turn 转移 / Accept the validated Turn transition."""
+
+        del turn, expected_version, connection
+
+    monkeypatch.setattr(
+        db,
+        "transaction",
+        lambda: _TransactionContext(connection),
+    )
+    monkeypatch.setattr(
+        repository,
+        "_lock_active_inference_for_turn",
+        fake_lock_inference,
+    )
+    monkeypatch.setattr(
+        repository,
+        "_lock_active_outbound_for_turn",
+        fake_lock_outbound,
+    )
+    monkeypatch.setattr(turn_repository, "_load_turn_for_mutation", fake_load_turn)
+    monkeypatch.setattr(db, "execute", fake_execute)
+    monkeypatch.setattr(turn_repository, "_persist_turn", fake_persist)
+
+    cancelled = asyncio.run(
+        repository.cancel_turn(
+            TurnId(TURN_UUID),
+            expected_version=1,
+            cancelled_at=NOW + timedelta(seconds=1),
+        )
+    )
+
+    inference_update = next(
+        sql for sql in writes if "inference_activities" in sql
+    )
+    assert "steer_pending" in inference_update
+    assert cancelled.state.value == "cancelled"

@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import cast
 
+from fogmoe_bot.application.assistant.completion import PromptCacheDirective
 from fogmoe_bot.application.assistant.tools.catalog import ToolDefinition
 from fogmoe_bot.domain.assistant.messages import CanonicalMessage
 from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
@@ -42,6 +43,7 @@ def encode_anthropic_request(
     temperature: float | None,
     top_p: float | None,
     stop_sequences: tuple[str, ...],
+    prompt_cache: PromptCacheDirective | None = None,
 ) -> ProviderPayload:
     """@brief 构造原生 Anthropic Messages payload / Build a native Anthropic Messages payload.
 
@@ -55,12 +57,44 @@ def encode_anthropic_request(
     @param temperature 可选采样温度 / Optional sampling temperature.
     @param top_p 可选 nucleus 采样阈值 / Optional nucleus sampling threshold.
     @param stop_sequences 可选停止序列 / Optional stop sequences.
+    @param prompt_cache 已由 model capability 门控的缓存指令 /
+        Cache directive already gated by model capabilities.
     @return 新建的 Anthropic payload / Fresh Anthropic payload.
     @raise MessageContractError canonical message、metadata 或 tool choice 非法时抛出 /
         Raised for invalid canonical messages, metadata, or tool choice.
     """
 
-    system, rendered_messages = _render_anthropic_messages(messages)
+    cache_control: ProviderPayload | None = None
+    stable_prefix_message_count: int | None = None
+    if prompt_cache is not None:
+        if not isinstance(prompt_cache, PromptCacheDirective):
+            raise MessageContractError(
+                "Anthropic prompt_cache must be PromptCacheDirective"
+            )
+        if prompt_cache.mode == "explicit":
+            if prompt_cache.ttl not in {"5m", "1h"}:
+                raise MessageContractError(
+                    "Anthropic explicit prompt caching requires a 5m or 1h TTL"
+                )
+            if (
+                prompt_cache.stable_prefix_message_count < 1
+                or prompt_cache.stable_prefix_message_count > len(messages)
+            ):
+                raise MessageContractError(
+                    "Anthropic stable prompt-cache prefix must identify existing messages"
+                )
+            cache_control = {
+                "type": "ephemeral",
+                "ttl": prompt_cache.ttl,
+            }
+            stable_prefix_message_count = (
+                prompt_cache.stable_prefix_message_count
+            )
+    system, rendered_messages = _render_anthropic_messages(
+        messages,
+        cache_control=cache_control,
+        stable_prefix_message_count=stable_prefix_message_count,
+    )
     payload: ProviderPayload = {
         "model": _nonblank(model, context="Anthropic model"),
         "max_tokens": _positive_integer(max_tokens, context="Anthropic max_tokens"),
@@ -156,15 +190,29 @@ def decode_anthropic_response(
         message=CanonicalMessage.from_json(make_assistant_message(parts)),
         input_tokens=_usage_tokens(payload.get("usage"), "input_tokens"),
         output_tokens=_usage_tokens(payload.get("usage"), "output_tokens"),
+        cached_input_tokens=_usage_tokens(
+            payload.get("usage"),
+            "cache_read_input_tokens",
+        ),
+        cache_write_input_tokens=_usage_tokens(
+            payload.get("usage"),
+            "cache_creation_input_tokens",
+        ),
     )
 
 
 def _render_anthropic_messages(
     messages: Sequence[JsonObject],
+    *,
+    cache_control: ProviderPayload | None = None,
+    stable_prefix_message_count: int | None = None,
 ) -> tuple[list[ProviderPayload], list[ProviderPayload]]:
     """@brief 将 V2 history 拆为 Anthropic system 与 messages / Split V2 history into Anthropic system and messages.
 
     @param messages canonical history / Canonical history.
+    @param cache_control 可选显式 cache-control block / Optional explicit cache-control block.
+    @param stable_prefix_message_count cache-control 对应的 canonical 前缀长度 /
+        Canonical prefix length addressed by cache_control.
     @return system blocks 与 conversation messages / System blocks and conversation messages.
     @raise MessageContractError role/part 组合不符合 Anthropic 语义时抛出 /
         Raised when role/part combinations violate Anthropic semantics.
@@ -173,24 +221,26 @@ def _render_anthropic_messages(
     system: list[ProviderPayload] = []
     rendered: list[ProviderPayload] = []
     pending_tool_results: list[ProviderPayload] = []
+    cache_target: ProviderPayload | None = None
+    cache_target_is_message = False
 
-    def flush_tool_results() -> None:
+    def flush_tool_results() -> ProviderPayload | None:
         """@brief 将连续 canonical tool 消息聚合为一个 Anthropic user turn / Aggregate consecutive canonical tool messages into one Anthropic user turn.
 
-        @return None / None.
+        @return 新追加的 user turn，或 None / Newly appended user turn, or None.
         """
 
         if not pending_tool_results:
-            return
-        rendered.append(
-            {
-                "role": "user",
-                "content": payload_array(
-                    _anthropic_tool_result_blocks(pending_tool_results)
-                ),
-            }
-        )
+            return None
+        message: ProviderPayload = {
+            "role": "user",
+            "content": payload_array(
+                _anthropic_tool_result_blocks(pending_tool_results)
+            ),
+        }
+        rendered.append(message)
         pending_tool_results.clear()
+        return message
 
     for ordinal, value in enumerate(messages):
         if not isinstance(value, Mapping):
@@ -198,33 +248,105 @@ def _render_anthropic_messages(
         role, parts = canonical_message_parts(cast(Mapping[str, object], value))
         if role == "tool":
             pending_tool_results.extend(parts)
+            if (
+                cache_control is not None
+                and ordinal + 1 == stable_prefix_message_count
+            ):
+                flushed = flush_tool_results()
+                if flushed is None:
+                    raise MessageContractError(
+                        "Anthropic tool cache boundary produced no content"
+                    )
+                cache_target = _last_anthropic_content_block(flushed)
+                cache_target_is_message = True
             continue
         flush_tool_results()
         if role == "system":
+            if (
+                cache_control is not None
+                and cache_target_is_message
+                and ordinal + 1 > cast(int, stable_prefix_message_count)
+            ):
+                raise MessageContractError(
+                    "Anthropic dynamic system content cannot precede a message cache boundary"
+                )
             if any(part.get("type") != "text" for part in parts):
                 raise MessageContractError(
                     "Anthropic system messages may contain only text parts"
                 )
             system.extend(_anthropic_text_blocks(parts))
+            if (
+                cache_control is not None
+                and ordinal + 1 == stable_prefix_message_count
+            ):
+                if not system:
+                    raise MessageContractError(
+                        "Anthropic system cache boundary produced no content"
+                    )
+                cache_target = system[-1]
             continue
         if role == "assistant":
-            rendered.append(
-                {
-                    "role": "assistant",
-                    "content": payload_array(_anthropic_assistant_blocks(parts)),
-                }
-            )
-            continue
-        rendered.append(
-            {
-                "role": "user",
-                "content": payload_array(_anthropic_user_blocks(parts)),
+            message: ProviderPayload = {
+                "role": "assistant",
+                "content": payload_array(_anthropic_assistant_blocks(parts)),
             }
-        )
+            rendered.append(message)
+            if (
+                cache_control is not None
+                and ordinal + 1 == stable_prefix_message_count
+            ):
+                cache_target = _last_anthropic_content_block(message)
+                cache_target_is_message = True
+            continue
+        message = {
+            "role": "user",
+            "content": payload_array(_anthropic_user_blocks(parts)),
+        }
+        rendered.append(message)
+        if (
+            cache_control is not None
+            and ordinal + 1 == stable_prefix_message_count
+        ):
+            cache_target = _last_anthropic_content_block(message)
+            cache_target_is_message = True
     flush_tool_results()
+    if cache_control is not None:
+        if cache_target is None:
+            raise MessageContractError(
+                "Anthropic stable prompt-cache prefix is not cacheable"
+            )
+        if cache_target.get("type") == "text" and not cache_target.get("text"):
+            raise MessageContractError(
+                "Anthropic cache breakpoint cannot target empty text"
+            )
+        cache_target["cache_control"] = dict(cache_control)
     if not rendered:
         raise MessageContractError("Anthropic request must contain at least one user or assistant message")
     return system, rendered
+
+
+def _last_anthropic_content_block(message: ProviderPayload) -> ProviderPayload:
+    """@brief 读取已渲染 Anthropic message 的最后 content block / Read the final content block of a rendered Anthropic message.
+
+    @param message 已渲染 wire message / Rendered wire message.
+    @return 可变的最后 content block / Mutable final content block.
+    @raise MessageContractError message 无可缓存 content 时抛出 /
+        Raised when the message has no cacheable content.
+    """
+
+    content = message.get("content")
+    if not isinstance(content, list) or not content:
+        raise MessageContractError(
+            "Anthropic cache boundary requires a non-empty content block"
+        )
+    target = content[-1]
+    if not isinstance(target, dict):
+        raise MessageContractError("Anthropic cache target must be an object")
+    if target.get("type") in {"thinking", "redacted_thinking"}:
+        raise MessageContractError(
+            "Anthropic thinking blocks cannot carry cache_control"
+        )
+    return target
 
 
 def _anthropic_text_blocks(parts: Sequence[ProviderPayload]) -> list[ProviderPayload]:

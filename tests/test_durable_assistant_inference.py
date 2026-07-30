@@ -24,6 +24,12 @@ from fogmoe_bot.application.assistant.inference_command import (
     DurableProfileClaim,
     DurableUserProfile,
 )
+from fogmoe_bot.application.assistant.streaming import (
+    AssistantStreamFrame,
+    AssistantStreamKind,
+    AssistantStreamSession,
+)
+from fogmoe_bot.application.assistant.tool_runtime import ToolExecutionContext
 from fogmoe_bot.application.context_window.projection import (
     CompactionPending,
     ContextWindowBounds,
@@ -54,9 +60,16 @@ from fogmoe_bot.domain.context_window.compaction import CompactionId
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     ConversationMessageId,
+    InferenceActivityId,
+    LeaseToken,
     MessageSequence,
     TurnId,
+    TurnRevision,
     UpdateId,
+)
+from fogmoe_bot.domain.conversation.inference import (
+    InferenceGenerationCause,
+    InferenceGenerationFence,
 )
 from fogmoe_bot.domain.conversation.message import (
     ConversationMessage,
@@ -288,6 +301,7 @@ class _Inference:
         request_timeout: float | None = None,
         request_meta: RequestMeta | None = None,
         tool_context: object | None = None,
+        stream: AssistantStreamSession | None = None,
     ) -> AgentResponse:
         """@brief 记录纯推理调用 / Record the pure inference call.
 
@@ -296,6 +310,7 @@ class _Inference:
         @param request_timeout 单调用超时 / Per-call timeout.
         @param request_meta 显式请求 metadata / Explicit request metadata.
         @param tool_context 工具授权上下文 / Tool authorization context.
+        @param stream 可选 provider delta 流会话 / Optional provider-delta stream session.
         @return 固定 Agent 响应 / Fixed Agent response.
         """
 
@@ -306,6 +321,9 @@ class _Inference:
             "request_meta": dict(request_meta or {}),
             "tool_context": tool_context,
         }
+        if stream is not None:
+            self.kwargs["stream"] = stream
+            await stream.append("streamed ", emitted_at=NOW)
         if isinstance(self.result, Exception):
             raise self.result
         context_state.messages.extend(
@@ -344,6 +362,89 @@ def _adapter(
         ),
         inference=inference,
     )
+
+
+class _RecordingStreamProjection:
+    """@brief 记录 durable adapter 的流生命周期 / Record the durable adapter stream lifecycle."""
+
+    def __init__(self) -> None:
+        """@brief 初始化 frame 日志 / Initialize the frame log."""
+
+        self.frames: list[AssistantStreamFrame] = []
+
+    async def project(self, frame: AssistantStreamFrame) -> None:
+        """@brief 记录流 frame / Record one stream frame.
+
+        @param frame 当前累计状态 / Current cumulative state.
+        @return None / None.
+        """
+
+        self.frames.append(frame)
+
+
+def test_configured_stream_reaches_inference_without_precommitting_a_terminal() -> None:
+    """@brief adapter 投影 delta 但不抢在 durable commit 前发送终态 /
+    The adapter projects deltas without emitting a terminal before the durable commit.
+    """
+
+    async def scenario() -> None:
+        """@brief 执行带 generation fence 的配置流 / Exercise a configured stream with a generation fence."""
+
+        turn_id = TurnId.new()
+        history = _History(
+            (
+                _message(
+                    sequence=1,
+                    turn_id=turn_id,
+                    role=MessageRole.USER,
+                    content={"text": "hello"},
+                ),
+            )
+        )
+        inference = _Inference(AgentResponse("final answer", []))
+        projection = _RecordingStreamProjection()
+        fence = InferenceGenerationFence(
+            activity_id=InferenceActivityId.for_turn(turn_id),
+            turn_id=turn_id,
+            claim_token=LeaseToken.new(),
+            attempt=2,
+            input_revision=TurnRevision.initial(),
+            cause=InferenceGenerationCause.RETRY,
+        )
+        adapter = DurableAssistantInferenceAdapter(
+            history=history,
+            system_prompt="You are a careful assistant.",
+            runtime_limits=InferenceRuntimeLimits(
+                provider_timeout=timedelta(seconds=20),
+                attempt_timeout=timedelta(seconds=30),
+                lease_for=timedelta(seconds=45),
+            ),
+            inference=inference,
+            stream_projection=projection,
+        )
+
+        stream = await adapter.start_stream(
+            _request(turn_id),
+            generation_fence=fence,
+        )
+        assert isinstance(stream, AssistantStreamSession)
+        result = await adapter.infer(
+            _request(turn_id),
+            generation_fence=fence,
+            stream=stream,
+        )
+
+        assert result.assistant_content["text"] == "final answer"
+        assert inference.context is not None
+        assert isinstance(inference.kwargs["stream"], AssistantStreamSession)
+        assert [frame.kind for frame in projection.frames] == [
+            AssistantStreamKind.STARTED,
+            AssistantStreamKind.DELTA,
+        ]
+        assert projection.frames[-1].cumulative_text == "streamed "
+        assert all(frame.generation == 2 for frame in projection.frames)
+
+    asyncio.run(scenario())
 
 
 def test_persisted_json_strictly_restores_profile_datetimes_and_tuples() -> None:
@@ -535,11 +636,14 @@ def test_translation_uses_dedicated_prompt_without_tools_and_marks_output_exclud
             text_message(MessageRole.SYSTEM, TRANSLATION_SYSTEM_PROMPT),
             text_message(MessageRole.USER, "你好"),
         ]
+        translation_tool_context = translation_inference.kwargs["tool_context"]
+        assert isinstance(translation_tool_context, ToolExecutionContext)
+        assert translation_tool_context.allowed_tools == frozenset()
         assert translation_inference.kwargs == {
             "allow_tools": False,
             "request_timeout": 20.0,
             "request_meta": {},
-            "tool_context": None,
+            "tool_context": translation_tool_context,
         }
         assert result.assistant_content["task_kind"] == "translation"
         assert result.assistant_content["exclude_from_assistant"] is True

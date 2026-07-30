@@ -120,8 +120,8 @@ class WorkspaceAttachmentIntentMigrationTests(unittest.TestCase):
 
         snapshot = _SCHEMA_PATH.read_text(encoding="utf-8")
         for fragment in (
-            "through 0072_workspace_attachment_import_intents",
-            "Alembic head: 0072_workspace_attachment_import_intents",
+            "through 0073_streaming_turn_steering",
+            "Alembic head: 0073_streaming_turn_steering",
             "CREATE TABLE workspace.attachment_import_intents",
             "workspace_attachment_import_intents_validate_tr",
             "workspace_attachment_import_intents_immutable_tr",

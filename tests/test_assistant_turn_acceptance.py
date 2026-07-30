@@ -13,6 +13,7 @@ import pytest
 from fogmoe_bot.application.conversation.assistant_ingress import (
     AssistantTurnAccepted,
     AssistantTurnRequest,
+    AssistantTurnSteered,
     AssistantUserNotRegistered,
 )
 from fogmoe_bot.domain.accounts.plan import AccountPlan
@@ -20,7 +21,9 @@ from fogmoe_bot.domain.assistant.messages import text_message
 from fogmoe_bot.domain.conversation.errors import IdempotencyConflictError
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
+    ConversationMessageId,
     DeliveryStreamId,
+    InferenceActivityId,
     TurnId,
     TurnSource,
     UpdateId,
@@ -585,6 +588,318 @@ def test_missing_identity_is_a_business_rejection(
         ).accept(_request(), accepted_at=NOW)
 
         assert isinstance(result, AssistantUserNotRegistered)
+        assert workflow.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_active_generation_accepts_text_as_same_turn_steer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief 运行中的 generation 原子吸收 steer 并为新 revision 重置失败预算 /
+    A running generation atomically absorbs a steer and resets failure budget for the new revision.
+    """
+
+    async def scenario() -> None:
+        """@brief 执行 active-generation steer 场景 / Exercise active-generation steering.
+
+        @return None / None.
+        """
+
+        transaction = RecordingTransaction()
+        workflow = FakeWorkflowRepository()
+        active_turn_id = TurnId.for_source(TurnSource.telegram(UpdateId(99)))
+        activity_id = InferenceActivityId.for_turn(active_turn_id)
+        request = _request(update_id=100)
+        executed: list[tuple[str, tuple[object, ...]]] = []
+        active_queries: list[tuple[str, tuple[object, ...]]] = []
+
+        async def fake_fetch_one(
+            sql: str,
+            params: tuple[object, ...],
+            *,
+            connection: object,
+        ) -> tuple[object, ...] | None:
+            """@brief 模拟 steer acceptance 所需行锁与 append / Simulate row locks and append for steer acceptance.
+
+            @return 与 SQL 对应的数据库行 / Database row corresponding to the SQL.
+            """
+
+            del connection
+            if "inbound_updates" in sql:
+                return (str(request.conversation_id),)
+            if (
+                "FROM conversation.conversation_turns " in sql
+                and "source_update_id" in sql
+            ):
+                return None
+            if "content ->> 'input_kind'" in sql:
+                return None
+            if "FROM conversation.inference_activities AS activity" in sql:
+                active_queries.append((sql, params))
+                return (str(activity_id), str(active_turn_id), 0, "processing")
+            if "WHERE message_id = CAST" in sql:
+                return None
+            if "COALESCE(MAX(sequence)" in sql:
+                return (4,)
+            if "INSERT INTO conversation.conversation_messages" in sql:
+                content = dict(request.user_content)
+                content["input_kind"] = "steer"
+                content["input_revision"] = 1
+                return (
+                    params[0],
+                    params[1],
+                    params[2],
+                    params[3],
+                    params[4],
+                    params[5],
+                    content,
+                    params[7],
+                    params[8],
+                )
+            return (None,)
+
+        async def fake_execute(
+            sql: str,
+            params: tuple[object, ...],
+            *,
+            connection: object,
+        ) -> int:
+            """@brief 记录 revision-fenced activity 更新 / Record the revision-fenced activity update.
+
+            @return 单行更新 / One updated row.
+            """
+
+            del connection
+            executed.append((sql, params))
+            return 1
+
+        async def fake_identity(
+            *args: object, **kwargs: object
+        ) -> AssistantIdentityContext:
+            """@brief 返回存在的身份 / Return an existing identity.
+
+            @return 身份上下文 / Identity context.
+            """
+
+            del args, kwargs
+            return _identity_context()
+
+        monkeypatch.setattr(
+            assistant_turn_acceptance.db, "transaction", lambda: transaction
+        )
+        monkeypatch.setattr(assistant_turn_acceptance.db, "fetch_one", fake_fetch_one)
+        monkeypatch.setattr(assistant_turn_acceptance.db, "execute", fake_execute)
+        monkeypatch.setattr(
+            assistant_turn_acceptance.assistant_user_context,
+            "lock_assistant_identity_context_in_transaction",
+            fake_identity,
+        )
+
+        result = await PostgresAssistantTurnAcceptanceUoW(
+            workflow,  # type: ignore[arg-type]
+            plans=FixedPlanResolver(),  # type: ignore[arg-type]
+        ).accept(request, accepted_at=NOW)
+
+        assert isinstance(result, AssistantTurnSteered)
+        assert not result.replayed
+        assert result.steer.turn_id == active_turn_id
+        assert int(result.steer.revision) == 1
+        assert result.steer.query_text == "hello"
+        assert result.steer.message.draft.source_update_id == request.update_id
+        assert result.steer.message.draft.content["input_kind"] == "steer"
+        assert workflow.calls == []
+        assert len(active_queries) == 1
+        active_sql, active_params = active_queries[0]
+        assert "activity.request #>> '{user,user_id}' = %s" in active_sql
+        assert active_params == (str(request.conversation_id), str(request.user_id))
+        assert len(executed) == 1
+        update_sql, update_params = executed[0]
+        assert "status = 'steer_pending'" in update_sql
+        assert "input_revision = %s" in update_sql
+        assert "retry_budget_used = 0" in update_sql
+        assert update_params[0] == 1
+        assert update_params[-1] == 0
+        assert transaction.exit_exception is None
+
+    asyncio.run(scenario())
+
+
+def test_active_attachment_turn_does_not_absorb_plain_text_as_steer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief 活动附件 Turn 不吸收新文本，文本建立独立正常 Turn / An active attachment Turn does not absorb new text; the text creates an independent normal Turn."""
+
+    async def scenario() -> None:
+        """@brief 模拟 SQL 排除 current_turn_upload 后的正常 acceptance / Simulate normal acceptance after SQL excludes current_turn_upload."""
+
+        transaction = RecordingTransaction()
+        workflow = FakeWorkflowRepository()
+        profiles = NullProfileReader()
+        plans = FixedPlanResolver()
+        request = _request(update_id=102)
+        active_query_seen = False
+
+        async def fake_fetch_one(
+            sql: str,
+            params: tuple[object, ...],
+            *,
+            connection: object,
+        ) -> tuple[object, ...] | None:
+            """@brief 返回 inbox，并让附件 activity 被查询谓词排除 / Return the inbox while the query predicate excludes the attachment activity."""
+
+            nonlocal active_query_seen
+            del params, connection
+            if "inbound_updates" in sql:
+                return (str(request.conversation_id),)
+            if "FROM conversation.inference_activities AS activity" in sql:
+                active_query_seen = True
+                assert "current_turn_upload" in sql
+                assert "jsonb_typeof" in sql
+                return None
+            return None
+
+        async def fake_identity(
+            *args: object,
+            **kwargs: object,
+        ) -> AssistantIdentityContext:
+            """@brief 返回已注册身份 / Return a registered identity."""
+
+            del args, kwargs
+            return _identity_context()
+
+        async def fake_diary(
+            user_id: int,
+            *,
+            connection: object,
+        ) -> bool:
+            """@brief 返回无 diary / Return no diary."""
+
+            del user_id, connection
+            return False
+
+        monkeypatch.setattr(
+            assistant_turn_acceptance.db,
+            "transaction",
+            lambda: transaction,
+        )
+        monkeypatch.setattr(
+            assistant_turn_acceptance.db,
+            "fetch_one",
+            fake_fetch_one,
+        )
+        monkeypatch.setattr(
+            assistant_turn_acceptance.assistant_user_context,
+            "lock_assistant_identity_context_in_transaction",
+            fake_identity,
+        )
+        monkeypatch.setattr(
+            assistant_turn_acceptance.assistant_user_context,
+            "assistant_diary_exists",
+            fake_diary,
+        )
+
+        result = await PostgresAssistantTurnAcceptanceUoW(
+            workflow,  # type: ignore[arg-type]
+            plans=plans,  # type: ignore[arg-type]
+            profiles=profiles,  # type: ignore[arg-type]
+        ).accept(request, accepted_at=NOW)
+
+        assert active_query_seen
+        assert isinstance(result, AssistantTurnAccepted)
+        assert len(workflow.calls) == 1
+        _, new_turn, _, new_activity = workflow.calls[0]
+        expected_turn_id = TurnId.for_source(
+            TurnSource.telegram(request.update_id)
+        )
+        assert new_turn.turn_id == expected_turn_id  # type: ignore[attr-defined]
+        assert new_activity.turn_id == expected_turn_id  # type: ignore[attr-defined]
+
+    asyncio.run(scenario())
+
+
+def test_steer_update_replay_returns_canonical_row_before_identity_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief steer Update 重放直接返回 canonical row / A steer-Update replay returns its canonical row directly."""
+
+    async def scenario() -> None:
+        """@brief 执行 steer replay 场景 / Exercise steer replay.
+
+        @return None / None.
+        """
+
+        transaction = RecordingTransaction()
+        workflow = FakeWorkflowRepository()
+        active_turn_id = TurnId.for_source(TurnSource.telegram(UpdateId(99)))
+        request = _request(update_id=100)
+        semantic_key = f"steer.update.{request.update_id.value}"
+        message_id = ConversationMessageId.for_turn(active_turn_id, semantic_key)
+        content = dict(request.user_content)
+        content["input_kind"] = "steer"
+        content["input_revision"] = 1
+
+        async def fake_fetch_one(
+            sql: str,
+            params: tuple[object, ...],
+            *,
+            connection: object,
+        ) -> tuple[object, ...] | None:
+            """@brief 返回 inbox 与已存在 steer row / Return the inbox and existing steer row.
+
+            @return 与查询对应的行 / Row corresponding to the query.
+            """
+
+            del params, connection
+            if "inbound_updates" in sql:
+                return (str(request.conversation_id),)
+            if (
+                "FROM conversation.conversation_turns " in sql
+                and "source_update_id" in sql
+            ):
+                return None
+            if "content ->> 'input_kind'" in sql:
+                return (
+                    str(message_id),
+                    str(request.conversation_id),
+                    4,
+                    str(active_turn_id),
+                    request.update_id.value,
+                    "user",
+                    content,
+                    f"turn:{active_turn_id}:{semantic_key}",
+                    NOW,
+                )
+            return (None,)
+
+        async def forbidden_identity(*args: object, **kwargs: object) -> None:
+            """@brief 证明 replay 不访问身份 / Prove replay skips identity lookup.
+
+            @return 永不返回 / Never returns.
+            """
+
+            del args, kwargs
+            raise AssertionError("steer replay reached identity lookup")
+
+        monkeypatch.setattr(
+            assistant_turn_acceptance.db, "transaction", lambda: transaction
+        )
+        monkeypatch.setattr(assistant_turn_acceptance.db, "fetch_one", fake_fetch_one)
+        monkeypatch.setattr(
+            assistant_turn_acceptance.assistant_user_context,
+            "lock_assistant_identity_context_in_transaction",
+            forbidden_identity,
+        )
+
+        result = await PostgresAssistantTurnAcceptanceUoW(
+            workflow,  # type: ignore[arg-type]
+            plans=FixedPlanResolver(),  # type: ignore[arg-type]
+        ).accept(request, accepted_at=NOW)
+
+        assert isinstance(result, AssistantTurnSteered)
+        assert result.replayed
+        assert result.steer.turn_id == active_turn_id
+        assert int(result.steer.revision) == 1
         assert workflow.calls == []
 
     asyncio.run(scenario())

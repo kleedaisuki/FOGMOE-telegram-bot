@@ -46,6 +46,7 @@ from fogmoe_bot.domain.conversation.identity import (
 )
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
 from fogmoe_bot.domain.conversation.payloads import JsonObject
+from fogmoe_bot.domain.conversation.steering import TurnSteer
 from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.conversation.workflow_results import TurnAcceptanceResult
 from fogmoe_bot.domain.observability.trace import TraceContext
@@ -344,11 +345,25 @@ class AssistantTurnAccepted:
 
 
 @dataclass(frozen=True, slots=True)
+class AssistantTurnSteered:
+    """@brief 新普通消息已修订同一 active Turn / A new ordinary message revised the same active Turn.
+
+    @param steer 已追加的 canonical steer / Appended canonical steer.
+    @param replayed 本次是否重放同一来源 Update / Whether this is a replay of the same source Update.
+    """
+
+    steer: TurnSteer
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class AssistantUserNotRegistered:
     """@brief 用户尚未注册，未产生任何写入 / User is not registered and no writes were made."""
 
 
-type AssistantTurnAcceptanceResult = AssistantTurnAccepted | AssistantUserNotRegistered
+type AssistantTurnAcceptanceResult = (
+    AssistantTurnAccepted | AssistantTurnSteered | AssistantUserNotRegistered
+)
 """@brief 无计费 Assistant acceptance 的穷尽结果 / Exhaustive no-charge Assistant-acceptance result."""
 
 
@@ -523,6 +538,7 @@ __all__ = [
     "AssistantTurnAcceptanceResult",
     "AssistantTurnAcceptanceUoW",
     "AssistantTurnAccepted",
+    "AssistantTurnSteered",
     "AssistantTurnRequest",
     "AssistantUserNotRegistered",
     "normalize_assistant_personal_info",

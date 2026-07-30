@@ -194,11 +194,20 @@ class WorkspaceAttachmentReceiptMigrationTests(unittest.TestCase):
             self.assertIn(fragment, upgrade)
         self.assertIn("without a receipt", upgrade)
         self.assertIn("_terminalize_pending_current_attachment", repository)
+        failure_start = repository.index("async def fail_inference_activity")
+        terminalize = repository.index(
+            "_terminalize_pending_current_attachment(",
+            failure_start,
+        )
         self.assertLess(
-            repository.index("_terminalize_pending_current_attachment("),
+            terminalize,
+            repository.index("message_result = await _append_message", failure_start),
+        )
+        self.assertLess(
+            terminalize,
             repository.index(
-                "failed = turn.transition",
-                repository.index("async def fail_inference_activity"),
+                "TurnEvent.REQUEST_FAILURE_DELIVERY",
+                failure_start,
             ),
         )
         terminalizer_start = repository.index(
@@ -302,8 +311,8 @@ class WorkspaceAttachmentReceiptMigrationTests(unittest.TestCase):
 
         snapshot = _SCHEMA_PATH.read_text(encoding="utf-8")
         for fragment in (
-            "through 0072_workspace_attachment_import_intents",
-            "Alembic head: 0072_workspace_attachment_import_intents",
+            "through 0073_streaming_turn_steering",
+            "Alembic head: 0073_streaming_turn_steering",
             "CREATE TABLE workspace.attachment_import_receipts",
             "workspace_attachment_import_receipts_commit_tr",
             "workspace.guard_attachment_visibility_transition",

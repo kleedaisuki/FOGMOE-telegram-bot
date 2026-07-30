@@ -11,6 +11,7 @@ skips with 77 and must not mistake static SQL assertions for runtime validation.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -23,7 +24,9 @@ import unittest
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Never
 from uuid import NAMESPACE_URL, uuid5
 
 from alembic import command as alembic_command
@@ -38,7 +41,32 @@ _SOURCE_ROOT = _PROJECT_ROOT / "src"
 if str(_SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(_SOURCE_ROOT))
 
-from fogmoe_dbctl.commands import bootstrap, migration_execution  # noqa: E402
+from fogmoe_bot.application.assistant.workspace_attachment_preprocessor import (  # noqa: E402
+    WorkspaceAttachmentImportPendingError,
+)
+from fogmoe_bot.application.conversation.inference_worker import (  # noqa: E402
+    FullJitterInferenceRetryPolicy,
+    InferenceRuntimeLimits,
+    InferenceWorker,
+)
+from fogmoe_bot.application.observability.telemetry import (  # noqa: E402
+    Telemetry,
+    TelemetryBuffer,
+)
+from fogmoe_bot.application.runtime import AdaptivePollingPolicy  # noqa: E402
+from fogmoe_bot.config import BotDatabaseSettings  # noqa: E402
+from fogmoe_bot.infrastructure.database import db  # noqa: E402
+from fogmoe_bot.infrastructure.database.conversation_workflow.inference import (  # noqa: E402
+    PostgresInferenceRepository,
+)
+from fogmoe_dbctl.commands import (  # noqa: E402
+    access_sql,
+    bootstrap,
+    migration_execution,
+)
+from fogmoe_dbctl.commands.access_policy import (  # noqa: E402
+    DEFAULT_ACCESS_POLICY,
+)
 from fogmoe_dbctl.commands.migration_execution import (  # noqa: E402
     maintenance_database_url,
 )
@@ -72,7 +100,7 @@ _PASSWORD = "fogmoe-ctest-attachment-only"
 _ADMIN_USER_ID = 4242
 """@brief 个人 Workspace scope 的测试 user ID / Test user ID for the personal Workspace scope."""
 
-_TRACEPARENT = "00-00000000000000000000000000000000-0000000000000000-01"
+_TRACEPARENT = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
 """@brief 符合 inference 活动约束的固定 traceparent / Fixed traceparent satisfying the inference-activity constraint."""
 
 
@@ -136,6 +164,42 @@ class _AttachmentFixture:
     """@brief Telegram current upload/source message ID / Telegram current-upload/source message ID."""
     runtime_path: str
     """@brief 固定 Workspace 内 payload 路径 / Fixed payload path inside the Workspace."""
+
+
+class _PreparedAttachmentDependencyInference:
+    """@brief 始终报告 prepared-attachment durable dependency 的推理替身 / Inference double always reporting a prepared-attachment durable dependency."""
+
+    async def infer(
+        self,
+        request: Mapping[str, object],
+        **options: object,
+    ) -> Never:
+        """@brief 在 provider 调用前报告附件恢复依赖 / Report the attachment recovery dependency before a provider call.
+
+        @param request 已领取活动的 durable request / Durable request of the claimed activity.
+        @param options 跨 worker 版本的可选 generation 参数 /
+            Optional generation arguments across worker versions.
+        @return 永不返回 / Never returns.
+        """
+
+        del request, options
+        raise WorkspaceAttachmentImportPendingError()
+
+
+@dataclass(frozen=True, slots=True)
+class _AfterClaimClock:
+    """@brief 返回 claim 之后固定时刻的 worker clock / Worker clock returning a fixed instant after the claim."""
+
+    claimed_at: datetime
+    """@brief claim 的 durable 更新时间 / Durable update time of the claim."""
+
+    def now(self) -> datetime:
+        """@brief 返回严格晚于 claim 的 UTC 时刻 / Return a UTC instant strictly after the claim.
+
+        @return claim 后一秒 / One second after the claim.
+        """
+
+        return self.claimed_at + timedelta(seconds=1)
 
 
 def _postgres_gate_reason() -> str | None:
@@ -364,6 +428,56 @@ def _bootstrap_database(
         sql="CREATE EXTENSION vector;",
     )
     return settings
+
+
+def _bot_database_settings(
+    cluster: _EphemeralPostgres,
+    settings: DbctlSettings,
+) -> BotDatabaseSettings:
+    """@brief 将私有集群映射为 Bot application-role 设置 / Map the private cluster to Bot application-role settings.
+
+    @param cluster 私有 PostgreSQL 连接坐标 / Private PostgreSQL connection coordinates.
+    @param settings 已 bootstrap 的 dbctl 设置 / Bootstrapped dbctl settings.
+    @return 仅使用临时 application role 的 Bot 数据库设置 /
+        Bot database settings using only the ephemeral application role.
+    """
+
+    return BotDatabaseSettings.model_validate(
+        {
+            "endpoint": {
+                "host": "127.0.0.1",
+                "port": cluster.port,
+                "name": settings.endpoint.name,
+            },
+            "application": {
+                "username": settings.application.username,
+                "password": _PASSWORD,
+            },
+        }
+    )
+
+
+def _apply_runtime_grants(settings: DbctlSettings) -> None:
+    """@brief 通过生产同款 allow-list 收敛 application role 授权 / Converge application-role grants through the production allow-list.
+
+    @param settings 已迁移到 head 的显式 dbctl 设置 / Explicit dbctl settings migrated to head.
+    @return None / None.
+    @note 不能手写测试专用 GRANT；真实 repository 回归必须经过与 ``fogmoe-dbctl
+        migrate`` 相同的最小权限生成器。/ A test-only GRANT must not be handwritten; the
+        real-repository regression must pass through the same least-privilege generator as
+        ``fogmoe-dbctl migrate``.
+    """
+
+    migration_execution.run_psql_grants(
+        settings=settings,
+        sql=access_sql.build_runtime_grant_sql(
+            database=settings.endpoint.name,
+            policy=DEFAULT_ACCESS_POLICY,
+            application_role=settings.application.username,
+            owner_role=settings.maintenance.username,
+        ),
+        dry_run=False,
+    )
 
 
 def _uuid_for(label: str, kind: str) -> str:
@@ -979,6 +1093,154 @@ class WorkspaceAttachmentReceiptPostgresTests(unittest.TestCase):
                     "SELECT to_regclass('workspace.attachment_import_receipts') IS NOT NULL;",
                 ),
                 "t",
+            )
+
+    def test_prepared_intent_dependency_preserves_retry_budget_in_postgres(
+        self,
+    ) -> None:
+        """@brief 真实 worker/repository 重试不让 prepared intent 消耗普通预算 / Real worker/repository retries do not let a prepared intent consume ordinary budget.
+
+        @return None / None.
+        @note fixture 先作为 0072 存量业务数据提交，再升级到 0073。``max_attempts=1``
+            故意位于边界；连续 dependency claim 必须继续 retry，同时 ``attempt_count``
+            单调增加而 ``retry_budget_used`` 保持零。若错误地进入 final，0072 的 intent
+            fence 会让真实 PostgreSQL 事务回滚并使测试失败。/ The fixture is committed as
+            legacy 0072 business data before upgrading to 0073. ``max_attempts=1`` deliberately
+            sits at the boundary. Consecutive dependency claims must keep retrying while
+            ``attempt_count`` grows monotonically and ``retry_budget_used`` remains zero. If the
+            flow incorrectly finalizes, the 0072 intent fence makes the real PostgreSQL
+            transaction roll back and fails this test.
+        """
+
+        with _postgres_cluster() as cluster:
+            settings = _bootstrap_database(cluster)
+            migration_execution.run_alembic(
+                settings=settings,
+                revision="0072_workspace_attachment_import_intents",
+                dry_run=False,
+            )
+            fixture = _seed_pending_attachment(
+                cluster,
+                settings,
+                label="prepared-intent-dependency-budget",
+                activity_status="pending",
+                request=_valid_current_upload_request(
+                    70_000 + len("prepared-intent-dependency-budget")
+                ),
+            )
+            _psql(
+                cluster,
+                database=settings.endpoint.name,
+                user=settings.maintenance.username,
+                password=_PASSWORD,
+                sql=_intent_insert_sql(fixture),
+            )
+            migration_execution.run_alembic(
+                settings=settings,
+                revision="head",
+                dry_run=False,
+            )
+            _apply_runtime_grants(settings)
+
+            async def scenario() -> None:
+                """@brief 连续两次领取并持久化 dependency retry / Claim and persist two consecutive dependency retries.
+
+                @return None / None.
+                """
+
+                db.configure_database(_bot_database_settings(cluster, settings))
+                repository = PostgresInferenceRepository()
+                claim_at = datetime.now(UTC) + timedelta(seconds=1)
+                try:
+                    for expected_attempt in (1, 2):
+                        claims = await repository.claim_inference_activities(
+                            now=claim_at,
+                            limit=1,
+                            lease_for=timedelta(seconds=30),
+                        )
+                        self.assertEqual(len(claims), 1)
+                        claim = claims[0]
+                        self.assertEqual(
+                            str(claim.activity.activity_id),
+                            fixture.activity_id,
+                        )
+                        self.assertEqual(
+                            claim.activity.attempt_count,
+                            expected_attempt,
+                        )
+                        self.assertEqual(claim.activity.retry_budget_used, 0)
+                        worker = InferenceWorker(
+                            repository=repository,
+                            inference=_PreparedAttachmentDependencyInference(),
+                            worker_count=1,
+                            polling_policy=AdaptivePollingPolicy(0.01, 0.1),
+                            runtime_limits=InferenceRuntimeLimits(
+                                provider_timeout=timedelta(seconds=1),
+                                attempt_timeout=timedelta(seconds=2),
+                                lease_for=timedelta(seconds=30),
+                            ),
+                            retry_policy=FullJitterInferenceRetryPolicy(max_attempts=1),
+                            clock=_AfterClaimClock(claim.activity.updated_at),
+                            telemetry=Telemetry(TelemetryBuffer(64)),
+                        )
+                        await worker.process_claim(claim)
+                        persisted = await repository.get_inference_activity(
+                            claim.activity.activity_id
+                        )
+                        self.assertIsNotNone(persisted)
+                        assert persisted is not None
+                        self.assertEqual(persisted.status.value, "retry")
+                        self.assertEqual(persisted.retry_budget_used, 0)
+                        self.assertEqual(
+                            persisted.attempt_count,
+                            expected_attempt,
+                        )
+                        self.assertIsNotNone(persisted.next_attempt_at)
+                        assert persisted.next_attempt_at is not None
+                        claim_at = persisted.next_attempt_at
+                finally:
+                    await db.dispose_current_engine()
+
+            asyncio.run(scenario())
+
+            self.assertEqual(_marker_state(cluster, settings, fixture), "pending")
+            self.assertEqual(
+                _scalar(
+                    cluster,
+                    settings,
+                    "SELECT status || '|' || attempt_count::TEXT || '|' || "
+                    "retry_budget_used::TEXT "
+                    "FROM conversation.inference_activities "
+                    f"WHERE activity_id = {quote_literal(fixture.activity_id)}::UUID;",
+                ),
+                "retry|2|0",
+            )
+            self.assertEqual(
+                _scalar(
+                    cluster,
+                    settings,
+                    "SELECT count(*) FROM workspace.attachment_import_intents "
+                    f"WHERE turn_id = {quote_literal(fixture.turn_id)}::UUID;",
+                ),
+                "1",
+            )
+            self.assertEqual(
+                _scalar(
+                    cluster,
+                    settings,
+                    "SELECT count(*) FROM workspace.attachment_import_receipts "
+                    f"WHERE turn_id = {quote_literal(fixture.turn_id)}::UUID;",
+                ),
+                "0",
+            )
+            self.assertEqual(
+                _scalar(
+                    cluster,
+                    settings,
+                    "SELECT count(*) FROM conversation.conversation_messages "
+                    f"WHERE turn_id = {quote_literal(fixture.turn_id)}::UUID;",
+                ),
+                "1",
             )
 
     def test_0072_intent_backfill_receipt_gate_and_unavailable_fence(self) -> None:

@@ -109,6 +109,8 @@ def _to_provider_route(
             RouteModel(
                 name=model.name,
                 accepts_images=model.accepts_images,
+                prompt_cache_policy=model.prompt_cache_policy,
+                prompt_cache_retention=model.prompt_cache_retention,
             )
             for model in models
         ),

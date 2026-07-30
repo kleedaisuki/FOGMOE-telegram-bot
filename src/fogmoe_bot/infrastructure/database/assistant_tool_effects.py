@@ -29,7 +29,9 @@ from fogmoe_bot.domain.assistant.messages import (
     CanonicalMessage,
     CanonicalMessageError,
 )
+from fogmoe_bot.domain.conversation.errors import StaleClaimError
 from fogmoe_bot.domain.conversation.identity import TurnId
+from fogmoe_bot.domain.conversation.inference import InferenceGenerationFence
 from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
 from fogmoe_bot.infrastructure.database import db
 
@@ -146,23 +148,32 @@ class PostgresAssistantToolStore:
         """@brief fault hook / Fault hook."""
 
     async def load_step(
-        self, turn_id: TurnId, step_no: int
+        self,
+        turn_id: TurnId,
+        step_no: int,
+        *,
+        generation: int = 0,
     ) -> AgentStepCheckpoint | None:
         """@brief 读取 Agent step checkpoint / Load an Agent-step checkpoint.
 
         @param turn_id Turn ID / Turn identifier.
         @param step_no step 序号 / Step number.
+        @param generation input-revision effect generation / Input-revision effect generation.
         @return checkpoint 或 None / Checkpoint or None.
         """
 
-        if step_no < 0:
-            raise ValueError("step_no must be non-negative")
+        if step_no < 0 or generation < 0:
+            raise ValueError("step_no and generation must be non-negative")
         row = await db.fetch_one(
             "SELECT request_hash, route_key, response FROM assistant.tool_agent_steps "
-            "WHERE turn_id = CAST(%s AS UUID) AND step_no = %s",
-            (str(turn_id), step_no),
+            "WHERE turn_id = CAST(%s AS UUID) AND generation = %s AND step_no = %s",
+            (str(turn_id), generation, step_no),
         )
-        return None if row is None else _checkpoint(turn_id, step_no, row)
+        return (
+            None
+            if row is None
+            else _checkpoint(turn_id, generation, step_no, row)
+        )
 
     async def save_step(self, checkpoint: AgentStepCheckpoint) -> AgentStepCheckpoint:
         """@brief 幂等保存 Agent step / Idempotently persist an Agent step.
@@ -175,13 +186,19 @@ class PostgresAssistantToolStore:
             raise ValueError("step_no must be non-negative")
         payload = _encode_completion(checkpoint.completion)
         async with db.transaction() as connection:
+            if checkpoint.generation_fence is not None:
+                await _assert_current_generation(
+                    checkpoint.generation_fence,
+                    connection=connection,
+                )
             await db.execute(
                 "INSERT INTO assistant.tool_agent_steps "
-                "(turn_id, step_no, request_hash, route_key, response) "
-                "VALUES (CAST(%s AS UUID), %s, %s, %s, CAST(%s AS JSONB)) "
-                "ON CONFLICT (turn_id, step_no) DO NOTHING",
+                "(turn_id, generation, step_no, request_hash, route_key, response) "
+                "VALUES (CAST(%s AS UUID), %s, %s, %s, %s, CAST(%s AS JSONB)) "
+                "ON CONFLICT (turn_id, generation, step_no) DO NOTHING",
                 (
                     str(checkpoint.turn_id),
+                    checkpoint.generation,
                     checkpoint.step_no,
                     checkpoint.request_hash,
                     checkpoint.route_key,
@@ -191,13 +208,23 @@ class PostgresAssistantToolStore:
             )
             row = await db.fetch_one(
                 "SELECT request_hash, route_key, response FROM assistant.tool_agent_steps "
-                "WHERE turn_id = CAST(%s AS UUID) AND step_no = %s FOR UPDATE",
-                (str(checkpoint.turn_id), checkpoint.step_no),
+                "WHERE turn_id = CAST(%s AS UUID) AND generation = %s "
+                "AND step_no = %s FOR UPDATE",
+                (
+                    str(checkpoint.turn_id),
+                    checkpoint.generation,
+                    checkpoint.step_no,
+                ),
                 connection=connection,
             )
             if row is None:
                 raise RuntimeError("Agent checkpoint insert returned no row")
-            canonical = _checkpoint(checkpoint.turn_id, checkpoint.step_no, row)
+            canonical = _checkpoint(
+                checkpoint.turn_id,
+                checkpoint.generation,
+                checkpoint.step_no,
+                row,
+            )
             if (
                 canonical.request_hash != checkpoint.request_hash
                 or canonical.route_key != checkpoint.route_key
@@ -208,6 +235,20 @@ class PostgresAssistantToolStore:
                 )
             return canonical
 
+    async def assert_current_generation(
+        self,
+        fence: InferenceGenerationFence,
+    ) -> None:
+        """@brief 验证 processing claim/revision 仍是当前 generation / Verify the processing claim and revision are still current.
+
+        @param fence worker 传入的跨进程 generation fence / Cross-process generation fence supplied by the worker.
+        @return None / None.
+        @raise StaleClaimError claim 已被 steer、恢复或完成时抛出 /
+            Raised when the claim was steered, recovered, or completed.
+        """
+
+        await _assert_current_generation(fence)
+
     async def execute(self, request: ToolEffectRequest) -> PersistedToolResult:
         """@brief 领取、执行并终结一个工具 receipt / Claim, execute, and finalize one tool receipt.
 
@@ -215,6 +256,9 @@ class PostgresAssistantToolStore:
         @return 规范 receipt 结果 / Canonical receipt result.
         """
 
+        fence = request.context.generation_fence
+        if fence is not None:
+            await self.assert_current_generation(fence)
         if not request.result_cacheable:
             if request.mutating:
                 raise ValueError(
@@ -237,6 +281,12 @@ class PostgresAssistantToolStore:
         try:
             if mode is ToolTransactionMode.ATOMIC_MUTATION:
                 return await self._execute_atomic(request, token=token)
+            if fence is not None:
+                # This is the narrowest possible preflight before an out-of-transaction
+                # operation. External mutations must additionally use a destination
+                # idempotency key or create a durable downstream activity, because no
+                # PostgreSQL row lock can span the remote effect safely.
+                await self.assert_current_generation(fence)
             result = await self._operations.execute(request, connection=None)
             await self._after_operation(request, result)
             return await self._finalize(request, token=token, result=result)
@@ -263,6 +313,11 @@ class PostgresAssistantToolStore:
 
         now = _aware(self._now())
         async with db.transaction() as connection:
+            if request.context.generation_fence is not None:
+                await _assert_current_generation(
+                    request.context.generation_fence,
+                    connection=connection,
+                )
             await db.execute(
                 "INSERT INTO assistant.tool_effect_receipts "
                 "(turn_id, invocation_id, effect_kind, tool_name, provider_call_id, "
@@ -346,6 +401,11 @@ class PostgresAssistantToolStore:
 
         async with db.transaction() as connection:
             await _lock_claim(request, token=token, connection=connection)
+            if request.context.generation_fence is not None:
+                await _assert_current_generation(
+                    request.context.generation_fence,
+                    connection=connection,
+                )
             result = await self._operations.execute(request, connection=connection)
             await self._after_operation(request, result)
             await self._operations.finalize(request, result, connection=connection)
@@ -375,6 +435,11 @@ class PostgresAssistantToolStore:
 
         async with db.transaction() as connection:
             await _lock_claim(request, token=token, connection=connection)
+            if request.context.generation_fence is not None:
+                await _assert_current_generation(
+                    request.context.generation_fence,
+                    connection=connection,
+                )
             await self._operations.finalize(request, result, connection=connection)
             await _mark_succeeded(
                 request,
@@ -500,6 +565,41 @@ async def _mark_succeeded(
         )
 
 
+async def _assert_current_generation(
+    fence: InferenceGenerationFence,
+    *,
+    connection: AsyncConnection | None = None,
+) -> None:
+    """@brief 以 activity claim token 与 revision fencing 副作用 / Fence effects by activity claim token and revision.
+
+    @param fence 当前 generation identity / Current generation identity.
+    @param connection 可选活动事务 / Optional active transaction.
+    @return None / None.
+    @raise StaleClaimError generation 不再 processing 时抛出 /
+        Raised when the generation is no longer processing.
+    """
+
+    lock_clause = " FOR SHARE" if connection is not None else ""
+    row = await db.fetch_one(
+        "SELECT 1 FROM conversation.inference_activities "
+        "WHERE activity_id = CAST(%s AS UUID) "
+        "AND turn_id = CAST(%s AS UUID) AND status = 'processing' "
+        "AND claim_token = CAST(%s AS UUID) AND input_revision = %s"
+        + lock_clause,
+        (
+            str(fence.activity_id),
+            str(fence.turn_id),
+            str(fence.claim_token),
+            int(fence.input_revision),
+        ),
+        connection=connection,
+    )
+    if row is None:
+        raise StaleClaimError(
+            f"Inference generation {fence.activity_id} is no longer current"
+        )
+
+
 def _safe_failure_detail(error: Exception) -> str:
     """@brief 为 receipt 选择不含请求载荷的失败摘要 / Select a receipt failure summary without request payloads.
 
@@ -519,12 +619,14 @@ def _safe_failure_detail(error: Exception) -> str:
 
 def _checkpoint(
     turn_id: TurnId,
+    generation: int,
     step_no: int,
     row: Sequence[object],
 ) -> AgentStepCheckpoint:
     """@brief 映射数据库 checkpoint 行 / Map a database checkpoint row.
 
     @param turn_id Turn ID / Turn identifier.
+    @param generation input-revision effect generation / Input-revision effect generation.
     @param step_no step 序号 / Step number.
     @param row 数据库行 / Database row.
     @return checkpoint / Checkpoint.
@@ -539,6 +641,7 @@ def _checkpoint(
         request_hash=str(values[0]),
         route_key=str(values[1]),
         completion=_decode_completion(values[2]),
+        generation=generation,
     )
 
 

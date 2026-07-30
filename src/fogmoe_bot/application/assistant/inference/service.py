@@ -14,6 +14,7 @@ from fogmoe_bot.domain.assistant.request_metadata import (
 )
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute, RouteModel
 from fogmoe_bot.domain.context import ContextState
+from fogmoe_bot.domain.conversation.errors import StaleClaimError
 from fogmoe_bot.domain.memory.models import MAX_WORKING_MEMORY_MESSAGES
 
 from ..agent_loop import AgentExecutionConfig, AgentResponse
@@ -22,6 +23,7 @@ from ..errors import (
     ResumableAgentInterruptedError,
     SafetyBlockError,
 )
+from ..streaming import AssistantStreamSession
 from ..tool_runtime import ToolExecutionContext
 from .message_content import messages_have_images, strip_image_content
 
@@ -35,12 +37,14 @@ class AgentRunner(Protocol):
         config: AgentExecutionConfig,
         *,
         tool_context: ToolExecutionContext | None = None,
+        stream: AssistantStreamSession | None = None,
     ) -> AgentResponse:
         """@brief 运行一个 route / Run one route.
 
         @param context route-local context / Route-local context.
         @param config route 配置 / Route configuration.
         @param tool_context 可选 durable identity / Optional durable identity.
+        @param stream 可选易失流投影 / Optional ephemeral stream projection.
         @return Agent response / Agent response.
         """
 
@@ -104,6 +108,7 @@ class AssistantInferenceService:
         request_timeout: float | None = None,
         request_meta: RequestMeta | None = None,
         tool_context: ToolExecutionContext | None = None,
+        stream: AssistantStreamSession | None = None,
     ) -> AgentResponse:
         """@brief 执行一次可回退推理 / Execute one fallback-capable inference.
 
@@ -113,6 +118,7 @@ class AssistantInferenceService:
         @param request_meta 调用方显式请求 metadata；缺省为空 /
             Explicit caller request metadata; defaults to empty.
         @param tool_context durable tool identity / Durable tool identity.
+        @param stream 易失 provider delta 投影 / Ephemeral provider-delta projection.
         @return Agent response / Agent response.
         """
 
@@ -129,6 +135,7 @@ class AssistantInferenceService:
             request_timeout=request_timeout,
             request_meta=normalized_meta,
             tool_context=tool_context,
+            stream=stream,
         )
         if response is not None:
             return response
@@ -145,6 +152,7 @@ class AssistantInferenceService:
                 request_timeout=request_timeout,
                 request_meta=normalized_meta,
                 tool_context=tool_context,
+                stream=stream,
             )
             if response is not None:
                 return response
@@ -162,6 +170,7 @@ class AssistantInferenceService:
         request_timeout: float | None,
         request_meta: RequestMeta,
         tool_context: ToolExecutionContext | None,
+        stream: AssistantStreamSession | None,
     ) -> tuple[AgentResponse | None, Exception | None]:
         """@brief 按 policy 尝试 routes / Try routes in policy order.
 
@@ -171,6 +180,7 @@ class AssistantInferenceService:
         @param request_timeout timeout / Timeout.
         @param request_meta 调用方显式 metadata / Explicit caller metadata.
         @param tool_context durable identity / Durable identity.
+        @param stream 易失 provider delta 投影 / Ephemeral provider-delta projection.
         @return response 与最后错误 / Response and last error.
         """
 
@@ -190,6 +200,9 @@ class AssistantInferenceService:
                 tool_context=context_state.tool_context,
                 text_fallback_messages=context_state.text_fallback_messages,
                 current_user_text=context_state.current_user_text,
+                stable_prefix_message_count=(
+                    context_state.stable_prefix_message_count
+                ),
             )
             outcome_recorded = False
             try:
@@ -200,8 +213,9 @@ class AssistantInferenceService:
                     request_timeout=request_timeout,
                     request_meta=request_meta,
                     tool_context=tool_context,
+                    stream=stream,
                 )
-            except ResumableAgentInterruptedError:
+            except (ResumableAgentInterruptedError, StaleClaimError):
                 raise
             except SafetyBlockError as error:
                 if route.safety_block_is_terminal:
@@ -243,6 +257,7 @@ class AssistantInferenceService:
         request_timeout: float | None,
         request_meta: RequestMeta,
         tool_context: ToolExecutionContext | None,
+        stream: AssistantStreamSession | None,
     ) -> AgentResponse:
         """@brief 尝试 route 内模型链 / Try the model chain within a route.
 
@@ -252,6 +267,7 @@ class AssistantInferenceService:
         @param request_timeout timeout / Timeout.
         @param request_meta 调用方显式 metadata / Explicit caller metadata.
         @param tool_context durable identity / Durable identity.
+        @param stream 易失 provider delta 投影 / Ephemeral provider-delta projection.
         @return Agent response / Agent response.
         """
 
@@ -271,22 +287,32 @@ class AssistantInferenceService:
                 context_state.text_fallback_messages,
             )
             try:
+                config = AgentExecutionConfig(
+                    route=route,
+                    model=model.name,
+                    skip_tools=frozenset(route.disabled_tools),
+                    allow_tools=allow_tools and route.supports_tools,
+                    timeout_seconds=request_timeout,
+                    request_meta=request_meta,
+                    working_memory_limit=self._working_memory_limit,
+                    working_memory_max_tokens=self._working_memory_max_tokens,
+                    working_memory_enabled=self._working_memory_enabled,
+                    prompt_cache_policy=model.prompt_cache_policy,
+                    prompt_cache_retention=model.prompt_cache_retention,
+                )
+                if stream is None:
+                    return await self._agent_loop.run(
+                        context_state,
+                        config,
+                        tool_context=tool_context,
+                    )
                 return await self._agent_loop.run(
                     context_state,
-                    AgentExecutionConfig(
-                        route=route,
-                        model=model.name,
-                        skip_tools=frozenset(route.disabled_tools),
-                        allow_tools=allow_tools and route.supports_tools,
-                        timeout_seconds=request_timeout,
-                        request_meta=request_meta,
-                        working_memory_limit=self._working_memory_limit,
-                        working_memory_max_tokens=self._working_memory_max_tokens,
-                        working_memory_enabled=self._working_memory_enabled,
-                    ),
+                    config,
                     tool_context=tool_context,
+                    stream=stream,
                 )
-            except ResumableAgentInterruptedError:
+            except (ResumableAgentInterruptedError, StaleClaimError):
                 raise
             except Exception as error:
                 last_error = error

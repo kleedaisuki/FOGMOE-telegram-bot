@@ -14,6 +14,7 @@ from fogmoe_bot.application.assistant.errors import (
     AssistantInferenceUnavailableError,
     ProviderFailure,
     ProviderFailureKind,
+    ResumableAgentInterruptedError,
     SafetyBlockError,
 )
 from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
@@ -30,6 +31,7 @@ from fogmoe_bot.domain.assistant.routing.models import (
     RouteModel,
 )
 from fogmoe_bot.domain.context import ContextState, ConversationScope, UserState
+from fogmoe_bot.domain.conversation.errors import StaleClaimError
 from fogmoe_bot.domain.conversation.message import MessageRole
 
 
@@ -316,6 +318,92 @@ def test_image_messages_prioritize_the_image_capable_model_within_one_route() ->
 
     assert response.text == "ok"
     assert calls == [("qwen-vision", image_messages)]
+
+
+def test_resumable_partial_stream_failure_does_not_run_model_b_in_generation() -> None:
+    """@brief 模型 A 已产生可见 partial 后中断时，同 generation 不运行模型 B / Model B is not run in the same generation after model A has a visible partial interruption."""
+
+    calls: list[str] = []
+
+    def runner(
+        provider: str,
+        model: str,
+        messages: object,
+        **_: object,
+    ) -> AgentResponse:
+        """@brief A 抛出 partial-stream 中断，B 若被调用则暴露错误 / Model A raises a partial-stream interruption; a call to B exposes the bug."""
+
+        del provider, messages
+        calls.append(model)
+        if model == "model-a":
+            raise ResumableAgentInterruptedError(
+                "model A emitted old before disconnecting"
+            )
+        return AgentResponse("new", [])
+
+    service = _service(
+        routes=(
+            _route(
+                "partial",
+                models=(
+                    RouteModel("model-a"),
+                    RouteModel("model-b"),
+                ),
+            ),
+        ),
+        runner=runner,
+    )
+
+    with pytest.raises(
+        ResumableAgentInterruptedError,
+        match="emitted old",
+    ):
+        asyncio.run(service.infer(_context([_user_message(TextPart("hello"))])))
+
+    assert calls == ["model-a"]
+
+
+def test_stale_generation_does_not_fall_back_to_another_model_or_route() -> None:
+    """@brief steer 失效的 generation 不得继续模型或 route fallback /
+    A generation invalidated by steering must not continue to another model or route.
+    """
+
+    calls: list[tuple[str, str]] = []
+
+    def runner(
+        provider: str,
+        model: str,
+        messages: object,
+        **_: object,
+    ) -> AgentResponse:
+        """@brief 首个候选抛出 generation fence / Raise the generation fence from the first candidate.
+
+        @param provider provider ID / Provider ID.
+        @param model 模型名 / Model name.
+        @param messages 未使用模型消息 / Unused model messages.
+        @return 永不返回 / Never returns.
+        @raise StaleClaimError 当前 generation 已被 steer / Current generation was steered.
+        """
+
+        del messages
+        calls.append((provider, model))
+        raise StaleClaimError("steered")
+
+    service = _service(
+        routes=(
+            _route(
+                "primary",
+                models=(RouteModel("model-a"), RouteModel("model-b")),
+            ),
+            _route("fallback"),
+        ),
+        runner=runner,
+    )
+
+    with pytest.raises(StaleClaimError, match="steered"):
+        asyncio.run(service.infer(_context([_user_message(TextPart("hello"))])))
+
+    assert calls == [("primary", "model-a")]
 
 
 def test_open_circuit_skips_to_next_route(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -12,6 +12,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import cast
 
+from fogmoe_bot.application.assistant.completion import PromptCacheDirective
 from fogmoe_bot.application.assistant.tools.catalog import ToolDefinition
 from fogmoe_bot.domain.assistant.messages import CanonicalMessage
 from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
@@ -47,6 +48,7 @@ def encode_openai_request(
     seed: int | None,
     reasoning_effort: str | None,
     parallel_tool_calls: bool | None,
+    prompt_cache: PromptCacheDirective | None = None,
 ) -> ProviderPayload:
     """@brief 构造 OpenAI-style Chat Completions payload / Build an OpenAI-style Chat Completions payload.
 
@@ -63,16 +65,31 @@ def encode_openai_request(
     @param seed 可选确定性 seed / Optional deterministic seed.
     @param reasoning_effort 可选 provider-neutral 推理档位 / Optional provider-neutral reasoning tier.
     @param parallel_tool_calls 是否允许并行工具调用 / Whether parallel tool calls are allowed.
+    @param prompt_cache 已由 model capability 门控的缓存指令 /
+        Cache directive already gated by model capabilities.
     @return 新建且无 provider 私有字段的 payload / Fresh payload without provider-private fields.
     @raise MessageContractError canonical message 或 tool choice 非法时抛出 /
         Raised for invalid canonical messages or tool choice.
     """
 
+    rendered_messages = _render_openai_messages(messages)
+    if prompt_cache is not None:
+        rendered_messages = _apply_openai_prompt_cache(
+            messages=messages,
+            rendered_messages=rendered_messages,
+            directive=prompt_cache,
+        )
     payload: ProviderPayload = {
         "model": _nonblank(model, context="OpenAI model"),
-        "messages": payload_array(_render_openai_messages(messages)),
+        "messages": payload_array(rendered_messages),
         "max_tokens": _positive_integer(max_tokens, context="OpenAI max_tokens"),
     }
+    if prompt_cache is not None and prompt_cache.mode == "explicit":
+        payload["prompt_cache_key"] = prompt_cache.cache_key.wire_value
+        payload["prompt_cache_options"] = {
+            "mode": "explicit",
+            "ttl": "30m",
+        }
     if tools:
         payload["tools"] = payload_array(
             _openai_tools(tools, strict_tools=strict_tools)
@@ -128,7 +145,103 @@ def decode_openai_response(payload: Mapping[str, object]) -> DecodedProviderComp
         output_tokens=_usage_tokens(
             payload.get("usage"), "completion_tokens", "output_tokens"
         ),
+        cached_input_tokens=_usage_detail_tokens(
+            payload.get("usage"),
+            "cached_tokens",
+        ),
+        cache_write_input_tokens=_usage_detail_tokens(
+            payload.get("usage"),
+            "cache_write_tokens",
+        ),
     )
+
+
+def _apply_openai_prompt_cache(
+    *,
+    messages: Sequence[JsonObject],
+    rendered_messages: list[ProviderPayload],
+    directive: PromptCacheDirective,
+) -> list[ProviderPayload]:
+    """@brief 将显式 OpenAI 缓存断点限制在稳定 canonical 前缀内 / Bound an explicit OpenAI cache breakpoint to the stable canonical prefix.
+
+    @param messages 完整 canonical 消息 / Complete canonical messages.
+    @param rendered_messages 无缓存字段的 wire 消息 / Wire messages without cache fields.
+    @param directive provider-neutral 缓存指令 / Provider-neutral cache directive.
+    @return 带受控缓存字段的新 wire 消息 / Fresh wire messages with controlled cache fields.
+    @raise MessageContractError TTL、边界或目标 block 不受协议支持时抛出 /
+        Raised when the TTL, boundary, or target block is unsupported.
+    """
+
+    if not isinstance(directive, PromptCacheDirective):
+        raise MessageContractError("OpenAI prompt_cache must be PromptCacheDirective")
+    if directive.mode == "automatic":
+        return rendered_messages
+    if directive.ttl != "30m":
+        raise MessageContractError("OpenAI explicit prompt caching requires a 30m TTL")
+    boundary = directive.stable_prefix_message_count
+    if boundary < 1 or boundary > len(messages):
+        raise MessageContractError(
+            "OpenAI stable prompt-cache prefix must identify existing messages"
+        )
+
+    # Render both sides independently so the cache marker is selected by canonical
+    # message count, never by a provider-specific expansion such as tool results.
+    stable_wire = _render_openai_messages(messages[:boundary])
+    dynamic_wire = _render_openai_messages(messages[boundary:])
+    if not stable_wire:
+        raise MessageContractError("OpenAI stable prompt-cache prefix is not cacheable")
+    target = dict(stable_wire[-1])
+    if target.get("role") == "assistant" and target.get("tool_calls"):
+        raise MessageContractError(
+            "OpenAI cache breakpoint cannot split assistant tool-call content"
+        )
+    target["content"] = _openai_content_with_cache_breakpoint(target.get("content"))
+    stable_wire[-1] = target
+    return [
+        *stable_wire,
+        *dynamic_wire,
+    ]
+
+
+def _openai_content_with_cache_breakpoint(value: object) -> JsonValue:
+    """@brief 在最后一个 OpenAI content block 上标记显式断点 / Mark the final OpenAI content block with an explicit breakpoint.
+
+    @param value wire message content / Wire-message content.
+    @return 新建的 content block 数组 / Fresh content-block array.
+    @raise MessageContractError content 为空或不是可缓存 block 时抛出 /
+        Raised when content is empty or not a cacheable block.
+    """
+
+    if isinstance(value, str):
+        if not value:
+            raise MessageContractError("OpenAI cache breakpoint cannot target empty text")
+        return [
+            {
+                "type": "text",
+                "text": value,
+                "prompt_cache_breakpoint": {"mode": "explicit"},
+            }
+        ]
+    if not isinstance(value, list) or not value:
+        raise MessageContractError(
+            "OpenAI cache breakpoint requires a non-empty content block"
+        )
+    blocks: list[ProviderPayload] = []
+    for ordinal, raw_block in enumerate(value):
+        if not isinstance(raw_block, Mapping):
+            raise MessageContractError(
+                f"OpenAI cache content block {ordinal} must be an object"
+            )
+        blocks.append(dict(cast(Mapping[str, JsonValue], raw_block)))
+    target = blocks[-1]
+    if target.get("type") not in {"text", "image_url"}:
+        raise MessageContractError(
+            "OpenAI cache breakpoint target is not a cacheable content block"
+        )
+    if target.get("type") == "text" and not target.get("text"):
+        raise MessageContractError("OpenAI cache breakpoint cannot target empty text")
+    target["prompt_cache_breakpoint"] = {"mode": "explicit"}
+    return cast(JsonValue, blocks)
 
 
 def _render_openai_messages(messages: Sequence[JsonObject]) -> list[ProviderPayload]:
@@ -476,6 +589,27 @@ def _usage_tokens(value: object, *keys: str) -> int | None:
     usage = cast(Mapping[str, object], value)
     for key in keys:
         raw = usage.get(key)
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+            return raw
+    return None
+
+
+def _usage_detail_tokens(value: object, key: str) -> int | None:
+    """@brief 从 OpenAI prompt-token details 读取缓存 token / Read cache tokens from OpenAI prompt-token details.
+
+    @param value 原始 usage 对象 / Raw usage object.
+    @param key ``cached_tokens`` 或 ``cache_write_tokens`` / ``cached_tokens`` or ``cache_write_tokens``.
+    @return 非负 token 数或 None / Non-negative token count or None.
+    """
+
+    if not isinstance(value, Mapping):
+        return None
+    usage = cast(Mapping[str, object], value)
+    for details_key in ("prompt_tokens_details", "input_tokens_details"):
+        details = usage.get(details_key)
+        if not isinstance(details, Mapping):
+            continue
+        raw = cast(Mapping[str, object], details).get(key)
         if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
             return raw
     return None

@@ -53,7 +53,7 @@ def test_reset_cancels_active_workflow_without_legacy_billing_reads(
 
             del params, connection
             reads.append(sql)
-            return [("activity-1", str(TURN_ID), "pending")]
+            return [("activity-1", str(TURN_ID), "steer_pending")]
 
         async def fetch_one(
             sql: str,
@@ -105,6 +105,15 @@ def test_reset_cancels_active_workflow_without_legacy_billing_reads(
         assert len(reads) == 2
         assert len(writes) == 2
         assert all("assistant.billing_reservations" not in sql for sql in reads)
+        inference_reads = [
+            sql for sql in reads if "inference_activities" in sql
+        ]
+        inference_writes = [
+            sql for sql in writes if "inference_activities" in sql
+        ]
+        assert inference_reads and inference_writes
+        assert all("steer_pending" in sql for sql in inference_reads)
+        assert all("steer_pending" in sql for sql in inference_writes)
         assert any("status = 'cancelled'" in sql for sql in writes)
         assert any("state = 'cancelled'" in sql for sql in writes)
 

@@ -11,12 +11,14 @@ crosses this boundary.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import math
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import cast
 
 from fogmoe_bot.application.memory.ports import (
@@ -38,8 +40,13 @@ from fogmoe_bot.domain.assistant.request_metadata import (
     normalize_request_meta,
     request_meta_to_json,
 )
-from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
+from fogmoe_bot.domain.assistant.routing.models import (
+    PromptCachePolicy,
+    PromptCacheRetention,
+    ProviderRoute,
+)
 from fogmoe_bot.domain.context import ContextState
+from fogmoe_bot.domain.conversation.errors import StaleClaimError
 from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
 from fogmoe_bot.domain.memory.models import (
@@ -55,9 +62,17 @@ from .completion import (
     AgentCheckpointPersistence,
     AgentStepCheckpoint,
     AssistantCompletion,
+    AssistantCompletionStreamEvent,
     AssistantCompletionPort,
+    AssistantStreamingCompletionPort,
+    CompletionFinished,
+    CompletionTextDelta,
+    InferenceGenerationFencePort,
+    PromptCacheDirective,
+    PromptCacheKey,
 )
 from .errors import ResumableAgentInterruptedError
+from .streaming import AssistantStreamSession
 from .tool_runtime import (
     AgentRuntime,
     AssistantToolCallEvent,
@@ -66,7 +81,44 @@ from .tool_runtime import (
     ToolResultEvent,
     ToolRuntimeResult,
 )
-from .tools.catalog import ToolResultResidency
+from .tools.catalog import ToolDefinition, ToolResultResidency
+
+_STREAM_GENERATION_FENCE_INTERVAL_SECONDS = 0.2
+"""@brief 流中代际检查的最大间隔 / Maximum interval between in-stream generation-fence checks."""
+
+
+async def _close_completion_stream(events: object) -> None:
+    """@brief 立即关闭支持 aclose 的 provider 流 / Promptly close a provider stream that supports aclose.
+
+    @param events provider 返回的异步 iterator / Async iterator returned by the provider.
+    @return None / None.
+    @note 关闭失败只影响资源回收，不能覆盖原始 generation/protocol 异常。/
+        A close failure affects resource cleanup only and must not mask the original
+        generation or protocol error.
+    """
+
+    close = getattr(events, "aclose", None)
+    if not callable(close):
+        return
+    try:
+        await close()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.warning("Provider completion stream close failed", exc_info=True)
+
+
+async def _next_completion_stream_event(
+    events: AsyncIterator[AssistantCompletionStreamEvent],
+) -> AssistantCompletionStreamEvent:
+    """@brief 读取一个 provider 流事件 / Read one provider stream event.
+
+    @param events provider 异步流 / Provider async stream.
+    @return 下一个 provider-neutral 事件 / Next provider-neutral event.
+    @raise StopAsyncIteration 流正常结束 / Raised when the stream ends normally.
+    """
+
+    return await anext(events)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +154,9 @@ class AgentExecutionConfig:
     @param working_memory_limit 每次检索的消息数上限 / Max retrieved messages per query.
     @param working_memory_max_tokens 注入 Memory token 上限 / Working-memory injection token ceiling.
     @param working_memory_enabled 是否注入 WorkingMemory / Whether WorkingMemory is injected.
+    @param prompt_cache_policy 当前模型经 route 门控的缓存策略 /
+        Cache policy gated by the selected route model.
+    @param prompt_cache_retention 显式缓存保留期 / Explicit-cache retention.
     """
 
     route: ProviderRoute
@@ -116,6 +171,8 @@ class AgentExecutionConfig:
     working_memory_limit: int = 64
     working_memory_max_tokens: int = 16_384
     working_memory_enabled: bool = True
+    prompt_cache_policy: PromptCachePolicy = "automatic"
+    prompt_cache_retention: PromptCacheRetention | None = None
 
     def __post_init__(self) -> None:
         """@brief 校验显式容量、route 与请求边界 / Validate explicit bounds, route, and request boundary.
@@ -142,6 +199,20 @@ class AgentExecutionConfig:
             )
         if self.working_memory_max_tokens < 256:
             raise ValueError("working_memory_max_tokens must be at least 256")
+        if (
+            self.prompt_cache_policy == "explicit"
+            and self.prompt_cache_retention is None
+        ):
+            raise ValueError(
+                "explicit prompt_cache_policy requires prompt_cache_retention"
+            )
+        if (
+            self.prompt_cache_policy != "explicit"
+            and self.prompt_cache_retention is not None
+        ):
+            raise ValueError(
+                "prompt_cache_retention requires explicit prompt_cache_policy"
+            )
         object.__setattr__(self, "model", self.model.strip())
         object.__setattr__(self, "request_meta", normalize_request_meta(self.request_meta))
 
@@ -193,6 +264,12 @@ class AgentExecutionState:
 _LOGGER = logging.getLogger(__name__)
 """@brief Agent 工具执行诊断日志器 / Diagnostic logger for Agent tool execution."""
 
+_PROMPT_CACHE_POLICY_REVISION = "assistant-system-memory-tools-v1"
+"""@brief 静态 system/memory/tool policy cache namespace / Static cache namespace for system, memory, and tool policies."""
+
+_PROMPT_CACHE_DEPLOYMENT_NAMESPACE = "fogmoe-bot"
+"""@brief 跨 route 隔离的静态部署 namespace / Static deployment namespace isolating routes."""
+
 
 class AgentLoop:
     """@brief Provider completion 与 durable tools 的异步状态机 / Async state machine for provider completion and durable tools."""
@@ -205,6 +282,7 @@ class AgentLoop:
         checkpoints: AgentCheckpointPersistence,
         memory: WorkingMemoryReader,
         telemetry: Telemetry,
+        generation_fence: InferenceGenerationFencePort | None = None,
     ) -> None:
         """@brief 注入全部外部端口 / Inject every external port.
 
@@ -214,6 +292,8 @@ class AgentLoop:
         @param memory 每次模型 Query fresh retrieve 的 WorkingMemory /
             WorkingMemory freshly retrieved for each model query.
         @param telemetry 进程 typed telemetry / Process typed telemetry.
+        @param generation_fence checkpoint 与工具副作用前的跨进程 revision fence /
+            Cross-process revision fence before checkpoints and tool effects.
         @return None / None.
         """
 
@@ -222,6 +302,7 @@ class AgentLoop:
         self._checkpoints = checkpoints
         self._memory = memory
         self._telemetry = telemetry
+        self._generation_fence = generation_fence
 
     async def run(
         self,
@@ -229,6 +310,7 @@ class AgentLoop:
         config: AgentExecutionConfig,
         *,
         tool_context: ToolExecutionContext | None = None,
+        stream: AssistantStreamSession | None = None,
         state: AgentExecutionState | None = None,
     ) -> AgentResponse:
         """@brief 运行或恢复一个 Agent Turn / Run or resume one Agent Turn.
@@ -237,6 +319,7 @@ class AgentLoop:
         @param config route 配置 / Route configuration.
         @param tool_context durable 工具身份；禁用工具时可省略 /
             Durable tool identity; optional when tools are disabled.
+        @param stream 可选 provider 文本 delta 投影 / Optional provider text-delta projection.
         @param state 测试用可选状态 / Optional state for tests.
         @return 最终响应 / Final response.
         """
@@ -253,8 +336,10 @@ class AgentLoop:
                 current,
                 tool_context=tool_context,
                 expose_tools=config.allow_tools,
+                stream=stream,
             )
             if not completion.tool_calls:
+                await self._assert_current_generation(tool_context)
                 return _final_response(current, completion)
             if not config.allow_tools:
                 raise ValueError("provider returned tool calls while tools were disabled")
@@ -270,9 +355,11 @@ class AgentLoop:
             current,
             tool_context=tool_context,
             expose_tools=False,
+            stream=stream,
         )
         if completion.tool_calls:
             raise ValueError("provider returned tool calls after the tool iteration limit")
+        await self._assert_current_generation(tool_context)
         return _final_response(current, completion)
 
     async def _complete_step(
@@ -281,12 +368,14 @@ class AgentLoop:
         *,
         tool_context: ToolExecutionContext | None,
         expose_tools: bool,
+        stream: AssistantStreamSession | None,
     ) -> AssistantCompletion:
         """@brief 读取 checkpoint 或先调用 provider 再保存 / Load a checkpoint or call and then persist the provider.
 
         @param state 当前状态 / Current state.
         @param tool_context durable identity / Durable identity.
         @param expose_tools 是否暴露目录 / Whether to expose the catalog.
+        @param stream 可选文本 delta 投影 / Optional text-delta projection.
         @return 规范完成 / Canonical completion.
         """
 
@@ -297,8 +386,18 @@ class AgentLoop:
             expose_tools=expose_tools,
             allowed_tools=allowed_tools,
         )
+        generation = (
+            0
+            if tool_context is None or tool_context.generation_fence is None
+            else int(tool_context.generation_fence.input_revision)
+        )
         if tool_context is not None:
-            existing = await self._checkpoints.load_step(tool_context.turn_id, state.step)
+            await self._assert_current_generation(tool_context)
+            existing = await self._checkpoints.load_step(
+                tool_context.turn_id,
+                state.step,
+                generation=generation,
+            )
             if existing is not None:
                 _validate_checkpoint(
                     existing,
@@ -339,6 +438,9 @@ class AgentLoop:
                 state.messages,
                 working_memory,
                 maximum_tokens=state.config.working_memory_max_tokens,
+                stable_prefix_message_count=(
+                    state.context.stable_prefix_message_count
+                ),
             )
 
         definitions = (
@@ -351,17 +453,22 @@ class AgentLoop:
             if expose_tools
             else ()
         )
+        prompt_cache = _prompt_cache_directive(
+            state,
+            message_count=len(model_messages),
+        )
         try:
-            completion = await self._completion.complete(
-                route=state.config.route,
-                model=state.config.model,
+            completion = await self._request_completion(
+                state,
                 messages=model_messages,
-                tools=definitions,
-                tool_choice=(state.config.tool_choice if expose_tools else None),
-                max_tokens=state.config.max_tokens,
-                timeout_seconds=state.config.timeout_seconds,
-                request_meta=state.config.request_meta,
+                definitions=definitions,
+                expose_tools=expose_tools,
+                tool_context=tool_context,
+                stream=stream,
+                prompt_cache=prompt_cache,
             )
+        except StaleClaimError:
+            raise
         except Exception as error:
             if state.step > 0 or state.events:
                 raise ResumableAgentInterruptedError(
@@ -370,16 +477,184 @@ class AgentLoop:
             raise
         if tool_context is None:
             return completion
+        await self._assert_current_generation(tool_context)
         checkpoint = AgentStepCheckpoint(
             turn_id=tool_context.turn_id,
             step_no=state.step,
             request_hash=request_hash,
             route_key=route_key,
             completion=completion,
+            generation=generation,
+            generation_fence=tool_context.generation_fence,
         )
         canonical = await self._checkpoints.save_step(checkpoint)
         _validate_checkpoint(canonical, request_hash=request_hash, route_key=route_key)
+        await self._assert_current_generation(tool_context)
         return canonical.completion
+
+    async def _request_completion(
+        self,
+        state: AgentExecutionState,
+        *,
+        messages: Sequence[CanonicalMessage],
+        definitions: Sequence[ToolDefinition],
+        expose_tools: bool,
+        tool_context: ToolExecutionContext | None,
+        stream: AssistantStreamSession | None,
+        prompt_cache: PromptCacheDirective | None,
+    ) -> AssistantCompletion:
+        """@brief 选择流式或普通 provider 端口并收敛为完整 completion / Select a streaming or ordinary provider port and converge on one complete completion.
+
+        @param state 当前 Agent 状态 / Current Agent state.
+        @param messages 已注入动态 WorkingMemory 的模型消息 / Model messages including dynamic WorkingMemory.
+        @param definitions 当前 step 暴露的 typed tools / Typed tools exposed for this step.
+        @param expose_tools 是否允许工具 / Whether tools are exposed.
+        @param tool_context 当前 durable generation fence / Current durable generation fence.
+        @param stream 可选用户可见 delta session / Optional user-visible delta session.
+        @param prompt_cache 稳定前缀缓存指令 / Stable-prefix cache directive.
+        @return 完整且可 checkpoint 的 completion / Complete checkpointable completion.
+        @raise ResumableAgentInterruptedError 已输出可见 delta 后流失败 /
+            Raised when a stream fails after emitting a visible delta.
+        """
+
+        tool_choice = state.config.tool_choice if expose_tools else None
+        stream_method = getattr(self._completion, "stream", None)
+        if stream is None or not callable(stream_method):
+            if prompt_cache is None:
+                return await self._completion.complete(
+                    route=state.config.route,
+                    model=state.config.model,
+                    messages=messages,
+                    tools=definitions,
+                    tool_choice=tool_choice,
+                    max_tokens=state.config.max_tokens,
+                    timeout_seconds=state.config.timeout_seconds,
+                    request_meta=state.config.request_meta,
+                )
+            return await self._completion.complete(
+                route=state.config.route,
+                model=state.config.model,
+                messages=messages,
+                tools=definitions,
+                tool_choice=tool_choice,
+                max_tokens=state.config.max_tokens,
+                timeout_seconds=state.config.timeout_seconds,
+                request_meta=state.config.request_meta,
+                prompt_cache=prompt_cache,
+            )
+
+        streaming = cast(AssistantStreamingCompletionPort, self._completion)
+        emitted_visible_delta = False
+        finished: AssistantCompletion | None = None
+        events = streaming.stream(
+            route=state.config.route,
+            model=state.config.model,
+            messages=messages,
+            tools=definitions,
+            tool_choice=tool_choice,
+            max_tokens=state.config.max_tokens,
+            timeout_seconds=state.config.timeout_seconds,
+            request_meta=state.config.request_meta,
+            prompt_cache=prompt_cache,
+        )
+        generation_watch = (
+            asyncio.create_task(
+                self._watch_stream_generation(tool_context),
+                name=f"assistant-stream-generation-fence-{state.step}",
+            )
+            if (
+                tool_context is not None
+                and tool_context.generation_fence is not None
+                and self._generation_fence is not None
+            )
+            else None
+        )
+        """@brief 在 provider 静默输出时仍按上限周期检查 steer / Check steering at a bounded cadence even while the provider is silent."""
+        next_event_task: asyncio.Task[AssistantCompletionStreamEvent] | None = None
+        """@brief 当前等待中的单个 ``anext`` / The single currently pending ``anext``."""
+        try:
+            while True:
+                next_event_task = asyncio.create_task(
+                    _next_completion_stream_event(events),
+                    name=f"assistant-stream-next-event-{state.step}",
+                )
+                if generation_watch is not None:
+                    done, _ = await asyncio.wait(
+                        (next_event_task, generation_watch),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if generation_watch in done:
+                        next_event_task.cancel()
+                        await asyncio.gather(next_event_task, return_exceptions=True)
+                        next_event_task = None
+                        await generation_watch
+                        raise RuntimeError(
+                            "generation watch stopped without invalidating the stream"
+                        )
+                try:
+                    event = await next_event_task
+                except StopAsyncIteration:
+                    next_event_task = None
+                    break
+                next_event_task = None
+                if isinstance(event, CompletionTextDelta):
+                    if finished is not None:
+                        raise ValueError(
+                            "provider stream emitted a delta after its terminal completion"
+                        )
+                    await stream.append(event.text, emitted_at=datetime.now(UTC))
+                    emitted_visible_delta = True
+                    continue
+                if not isinstance(event, CompletionFinished):
+                    raise TypeError(
+                        "provider stream emitted an unsupported completion event"
+                    )
+                if finished is not None:
+                    raise ValueError(
+                        "provider stream emitted more than one terminal completion"
+                    )
+                finished = event.completion
+        except StaleClaimError:
+            raise
+        except Exception as error:
+            if emitted_visible_delta:
+                raise ResumableAgentInterruptedError(
+                    str(error) or error.__class__.__name__
+                ) from error
+            raise
+        finally:
+            if next_event_task is not None:
+                next_event_task.cancel()
+                await asyncio.gather(next_event_task, return_exceptions=True)
+            if generation_watch is not None:
+                generation_watch.cancel()
+                await asyncio.gather(generation_watch, return_exceptions=True)
+            await _close_completion_stream(events)
+        if finished is None:
+            missing_terminal = ValueError(
+                "provider stream ended without a terminal completion"
+            )
+            if emitted_visible_delta:
+                raise ResumableAgentInterruptedError(
+                    str(missing_terminal)
+                ) from missing_terminal
+            raise missing_terminal
+        return finished
+
+    async def _watch_stream_generation(
+        self,
+        tool_context: ToolExecutionContext,
+    ) -> None:
+        """@brief provider 流存活期间定期验证 generation / Periodically validate the generation while a provider stream is alive.
+
+        @param tool_context 当前 durable generation identity / Current durable generation identity.
+        @return 正常情况下不返回 / Does not return normally.
+        @raise StaleClaimError steer/reset 已取代该 generation / Raised when steer/reset supersedes this generation.
+        """
+
+        while True:
+            await asyncio.sleep(_STREAM_GENERATION_FENCE_INTERVAL_SECONDS)
+            await self._assert_current_generation(tool_context)
 
     async def _execute_calls(
         self,
@@ -411,6 +686,7 @@ class AgentLoop:
                 },
             ) as span:
                 try:
+                    await self._assert_current_generation(tool_context)
                     result = await self._runtime.execute(
                         context=tool_context,
                         step=state.step,
@@ -455,6 +731,26 @@ class AgentLoop:
             state,
             completion=completion,
             results=tuple(results),
+        )
+
+    async def _assert_current_generation(
+        self,
+        tool_context: ToolExecutionContext | None,
+    ) -> None:
+        """@brief 在 checkpoint/final/tool 边界验证 generation / Validate the generation at checkpoint, final, and tool boundaries.
+
+        @param tool_context 当前 durable tool context / Current durable tool context.
+        @return None / None.
+        """
+
+        if (
+            tool_context is None
+            or tool_context.generation_fence is None
+            or self._generation_fence is None
+        ):
+            return
+        await self._generation_fence.assert_current_generation(
+            tool_context.generation_fence
         )
 
     @staticmethod
@@ -549,6 +845,11 @@ def _completion_request_hash(
             JsonObject,
             request_meta_to_json(state.config.request_meta),
         ),
+        "prompt_cache_policy": state.config.prompt_cache_policy,
+        "prompt_cache_retention": state.config.prompt_cache_retention,
+        "stable_prefix_message_count": (
+            state.context.stable_prefix_message_count
+        ),
     }
     canonical = json.dumps(
         payload,
@@ -557,6 +858,57 @@ def _completion_request_hash(
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _prompt_cache_directive(
+    state: AgentExecutionState,
+    *,
+    message_count: int,
+) -> PromptCacheDirective | None:
+    """@brief 从模型 capability 与稳定前缀边界构造 cache 指令 / Build a cache directive from model capability and the stable-prefix boundary.
+
+    @param state 当前 Agent 状态 / Current Agent state.
+    @param message_count 注入 WorkingMemory 后的完整消息数 / Full message count after WorkingMemory injection.
+    @return 已 capability-gated 指令；禁用或没有可缓存前缀时为 None /
+        Capability-gated directive, or None when disabled or no reusable prefix exists.
+    @note cache key 只来自静态 deployment/route/model/policy namespace；Turn、用户文本与
+        WorkingMemory 永远不参与 key。provider 仍会逐字节验证实际 prefix。/
+        The cache key comes only from static deployment/route/model/policy namespaces. Turn,
+        user text, and WorkingMemory never enter the key; the provider still byte-validates the
+        actual prefix.
+    """
+
+    if message_count < 0:
+        raise ValueError("message_count cannot be negative")
+    policy = state.config.prompt_cache_policy
+    boundary = state.context.stable_prefix_message_count
+    if policy == "disabled" or boundary is None or boundary < 1:
+        return None
+    if boundary > message_count:
+        raise ValueError(
+            "stable prompt-cache prefix exceeds the rendered message count"
+        )
+    cache_key = PromptCacheKey.for_route_model(
+        deployment_namespace=_PROMPT_CACHE_DEPLOYMENT_NAMESPACE,
+        route_id=state.config.route.route_id,
+        model=state.config.model,
+        policy_revision=_PROMPT_CACHE_POLICY_REVISION,
+    )
+    if policy == "automatic":
+        return PromptCacheDirective(
+            stable_prefix_message_count=boundary,
+            cache_key=cache_key,
+            mode="automatic",
+        )
+    retention = state.config.prompt_cache_retention
+    if retention is None:  # AgentExecutionConfig validates this; retain fail-closed locality.
+        raise ValueError("explicit prompt caching lost its retention")
+    return PromptCacheDirective(
+        stable_prefix_message_count=boundary,
+        cache_key=cache_key,
+        mode="explicit",
+        ttl=retention,
+    )
 
 
 def _annotate_workspace_failure(span: SpanScope, error: Exception) -> None:

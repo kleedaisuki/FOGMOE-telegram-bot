@@ -38,6 +38,7 @@ class TurnEvent(StrEnum):
     SCHEDULE_INFERENCE_RETRY = "schedule_inference_retry"
     RETRY_INFERENCE = "retry_inference"
     REQUEST_DELIVERY = "request_delivery"
+    REQUEST_FAILURE_DELIVERY = "request_failure_delivery"
     DELIVERY_SUCCEEDED = "delivery_succeeded"
     SCHEDULE_DELIVERY_RETRY = "schedule_delivery_retry"
     RETRY_DELIVERY = "retry_delivery"
@@ -93,6 +94,7 @@ _TURN_TRANSITIONS: Mapping[
             {
                 TurnEvent.INFERENCE_SUCCEEDED: TurnState.INFERENCE_COMPLETED,
                 TurnEvent.SCHEDULE_INFERENCE_RETRY: TurnState.INFERENCE_RETRY_WAIT,
+                TurnEvent.REQUEST_FAILURE_DELIVERY: TurnState.WAITING_DELIVERY,
             }
         ),
         TurnState.INFERENCE_RETRY_WAIT: MappingProxyType(
@@ -267,13 +269,17 @@ class ConversationTurn:
                 raise ValueError("Non-retry transitions cannot carry retry_at")
             normalized_retry_at = None
 
-        if event is TurnEvent.FAIL_FINAL and normalized_error is None:
-            raise ValueError("Final failure requires an error")
+        if (
+            event in {TurnEvent.FAIL_FINAL, TurnEvent.REQUEST_FAILURE_DELIVERY}
+            and normalized_error is None
+        ):
+            raise ValueError("Failure transitions require an error")
         if (
             event
             not in {
                 TurnEvent.SCHEDULE_INFERENCE_RETRY,
                 TurnEvent.SCHEDULE_DELIVERY_RETRY,
+                TurnEvent.REQUEST_FAILURE_DELIVERY,
                 TurnEvent.FAIL_FINAL,
             }
             and normalized_error is not None
@@ -284,7 +290,11 @@ class ConversationTurn:
         delivery_attempts = self.delivery_attempts
         if event in {TurnEvent.REQUEST_INFERENCE, TurnEvent.RETRY_INFERENCE}:
             inference_attempts += 1
-        if event in {TurnEvent.REQUEST_DELIVERY, TurnEvent.RETRY_DELIVERY}:
+        if event in {
+            TurnEvent.REQUEST_DELIVERY,
+            TurnEvent.REQUEST_FAILURE_DELIVERY,
+            TurnEvent.RETRY_DELIVERY,
+        }:
             delivery_attempts += 1
 
         return replace(

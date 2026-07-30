@@ -189,6 +189,8 @@ class ContextState:
     @param text_fallback_messages 纯文本模型的 canonical 降级消息链 /
         Canonical fallback message chain for text-only models.
     @param current_user_text 当前 Turn 未改写的用户文本 / Unrewritten user text for the current Turn.
+    @param stable_prefix_message_count 可安全作为 provider KV cache 前缀的消息数量 /
+        Number of leading messages safe to reuse as a provider KV-cache prefix.
     """
 
     context_id: UUID
@@ -198,6 +200,7 @@ class ContextState:
     tool_context: dict[str, object]
     text_fallback_messages: list[CanonicalMessage] | None = None
     current_user_text: str | None = None
+    stable_prefix_message_count: int | None = None
 
     def __post_init__(self) -> None:
         """@brief 校验可变 ContextState 实体标识 / Validate the mutable ContextState entity identity.
@@ -210,6 +213,13 @@ class ContextState:
             raise ValueError("ContextState context_id cannot be nil")
         if self.current_user_text is not None and not self.current_user_text.strip():
             raise ValueError("ContextState current_user_text cannot be blank")
+        if self.stable_prefix_message_count is not None and (
+            isinstance(self.stable_prefix_message_count, bool)
+            or not 0 <= self.stable_prefix_message_count <= len(self.messages)
+        ):
+            raise ValueError(
+                "ContextState stable_prefix_message_count must be within messages"
+            )
         if not all(isinstance(message, CanonicalMessage) for message in self.messages):
             raise TypeError("ContextState messages must be canonical V2 messages")
         if self.text_fallback_messages is not None and not all(

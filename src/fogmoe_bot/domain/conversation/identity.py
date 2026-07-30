@@ -244,6 +244,51 @@ class UpdateId:
         return self.value
 
 
+@dataclass(frozen=True, slots=True, order=True)
+class TurnRevision:
+    """@brief 同一 Turn 内的用户输入 revision / User-input revision within one Turn.
+
+    @param value 初始输入为零，每次 steer 严格加一 / Zero for the initial input and incremented once per steer.
+    """
+
+    value: int
+
+    def __post_init__(self) -> None:
+        """@brief 校验 revision / Validate the revision.
+
+        @return None / None.
+        @raise ValueError revision 为负时抛出 / Raised when the revision is negative.
+        """
+
+        if isinstance(self.value, bool) or self.value < 0:
+            raise ValueError("Turn revision cannot be negative")
+
+    @classmethod
+    def initial(cls) -> Self:
+        """@brief 返回初始 revision / Return the initial revision.
+
+        @return revision zero / Revision zero.
+        """
+
+        return cls(0)
+
+    def next(self) -> Self:
+        """@brief 返回严格后继 revision / Return the strict successor revision.
+
+        @return 当前值加一 / Current value plus one.
+        """
+
+        return type(self)(self.value + 1)
+
+    def __int__(self) -> int:
+        """@brief 返回持久化整数 / Return the persistable integer.
+
+        @return revision integer / Revision integer.
+        """
+
+        return self.value
+
+
 TELEGRAM_UPDATE_SOURCE_KIND = "telegram.update"
 """@brief Telegram Update 的 Turn 来源 kind / Turn-source kind for Telegram updates."""
 

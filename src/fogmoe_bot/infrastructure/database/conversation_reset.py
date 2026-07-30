@@ -170,7 +170,8 @@ class PostgresConversationResetUoW:
                 "SELECT activity.activity_id, activity.turn_id, activity.status "
                 "FROM conversation.inference_activities AS activity "
                 "WHERE activity.conversation_id = %s "
-                "AND activity.status IN ('pending', 'processing', 'retry') "
+                "AND activity.status IN "
+                "('pending', 'processing', 'steer_pending', 'retry') "
                 "ORDER BY activity.activity_id FOR UPDATE OF activity",
                 (str(conversation_id),),
                 connection=connection,
@@ -225,7 +226,8 @@ class PostgresConversationResetUoW:
                 "next_attempt_at = NULL, claim_token = NULL, lease_expires_at = NULL, "
                 "completion_token = NULL, updated_at = %s "
                 "WHERE activity_id = CAST(%s AS UUID) "
-                "AND status IN ('pending', 'processing', 'retry')",
+                "AND status IN "
+                "('pending', 'processing', 'steer_pending', 'retry')",
                 (transition_at, activity_id),
                 connection=connection,
             )

@@ -21,6 +21,10 @@ from fogmoe_bot.domain.assistant.request_metadata import (
 
 #: @brief 已支持的 provider wire protocol 风格 / Supported provider wire-protocol styles.
 ProviderStyle: TypeAlias = Literal["openai", "anthropic"]
+#: @brief 模型级 Prompt Cache 策略 / Model-level prompt-cache policy.
+PromptCachePolicy: TypeAlias = Literal["disabled", "automatic", "explicit"]
+#: @brief 显式 Prompt Cache 保留期 / Explicit prompt-cache retention.
+PromptCacheRetention: TypeAlias = Literal["5m", "30m", "1h"]
 
 #: @brief 必须由 route 语义字段控制的 HTTP headers / HTTP headers controlled by route semantic fields.
 _RESERVED_HEADERS = frozenset({"authorization", "x-api-key", "anthropic-version"})
@@ -113,10 +117,15 @@ class RouteModel:
 
     @param name provider 可识别的模型名称 / Model name understood by the provider.
     @param accepts_images 是否可接收图像内容块 / Whether the model accepts image content blocks.
+    @param prompt_cache_policy 模型经 operator 明确声明的缓存能力 /
+        Operator-declared cache capability of this model.
+    @param prompt_cache_retention 显式缓存保留期 / Explicit-cache retention.
     """
 
     name: str
     accepts_images: bool = False
+    prompt_cache_policy: PromptCachePolicy = "automatic"
+    prompt_cache_retention: PromptCacheRetention | None = None
 
     def __post_init__(self) -> None:
         """@brief 校验模型名 / Validate the model name.
@@ -127,6 +136,28 @@ class RouteModel:
 
         if not isinstance(self.name, str) or not self.name.strip():
             raise ValueError("RouteModel.name must not be blank")
+        if self.prompt_cache_policy not in {
+            "disabled",
+            "automatic",
+            "explicit",
+        }:
+            raise ValueError(
+                "RouteModel.prompt_cache_policy must be disabled, automatic, or explicit"
+            )
+        if (
+            self.prompt_cache_policy == "explicit"
+            and self.prompt_cache_retention not in {"5m", "30m", "1h"}
+        ):
+            raise ValueError(
+                "Explicit prompt caching requires prompt_cache_retention"
+            )
+        if (
+            self.prompt_cache_policy != "explicit"
+            and self.prompt_cache_retention is not None
+        ):
+            raise ValueError(
+                "Only explicit prompt caching may set prompt_cache_retention"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +238,18 @@ class ProviderRoute:
         names = tuple(model.name for model in self.models)
         if len(set(names)) != len(names):
             raise ValueError("ProviderRoute.models must not contain duplicate names")
+        for model in self.models:
+            if model.prompt_cache_policy != "explicit":
+                continue
+            supported_retentions = (
+                {"30m"} if self.style == "openai" else {"5m", "1h"}
+            )
+            if model.prompt_cache_retention not in supported_retentions:
+                supported = ", ".join(sorted(supported_retentions))
+                raise ValueError(
+                    f"{self.style} explicit prompt caching requires retention: "
+                    f"{supported}"
+                )
         if self.strict_tools and not self.supports_tools:
             raise ValueError("ProviderRoute.strict_tools requires supports_tools")
         if not all(isinstance(tool, str) for tool in self.disabled_tools):
@@ -231,4 +274,11 @@ class ProviderRoute:
         object.__setattr__(self, "disabled_tools", normalized_disabled)
 
 
-__all__ = ["ProviderAuth", "ProviderRoute", "ProviderStyle", "RouteModel"]
+__all__ = [
+    "PromptCachePolicy",
+    "PromptCacheRetention",
+    "ProviderAuth",
+    "ProviderRoute",
+    "ProviderStyle",
+    "RouteModel",
+]

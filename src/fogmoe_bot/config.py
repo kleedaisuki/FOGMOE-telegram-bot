@@ -629,6 +629,8 @@ class AiRouteModelSettings(_FrozenSettings):
 
     name: str = Field(min_length=1, max_length=512)
     accepts_images: bool = False
+    prompt_cache_policy: Literal["disabled", "automatic", "explicit"] = "automatic"
+    prompt_cache_retention: Literal["5m", "30m", "1h"] | None = None
 
     @field_validator("name")
     @classmethod
@@ -640,6 +642,31 @@ class AiRouteModelSettings(_FrozenSettings):
         """
 
         return _non_blank(value, field_name="models.name")
+
+    @model_validator(mode="after")
+    def _validate_prompt_cache_policy(self) -> "AiRouteModelSettings":
+        """@brief 校验模型级 cache policy 与 retention 配对 / Validate model-level cache policy and retention pairing.
+
+        @return 已验证设置 / Validated settings.
+        @raise ValueError policy 与 retention 不一致时抛出 /
+            Raised when policy and retention disagree.
+        """
+
+        if (
+            self.prompt_cache_policy == "explicit"
+            and self.prompt_cache_retention is None
+        ):
+            raise ValueError(
+                "explicit prompt_cache_policy requires prompt_cache_retention"
+            )
+        if (
+            self.prompt_cache_policy != "explicit"
+            and self.prompt_cache_retention is not None
+        ):
+            raise ValueError(
+                "prompt_cache_retention requires explicit prompt_cache_policy"
+            )
+        return self
 
 
 #: @brief JSON 数组解码的不可变 route 模型列表 / Immutable route-model list decoded from a JSON array.

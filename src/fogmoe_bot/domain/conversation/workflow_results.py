@@ -14,6 +14,7 @@ from .turn import (
     POST_ACCEPTANCE_TURN_STATES,
     POST_INFERENCE_COMPLETION_TURN_STATES,
     ConversationTurn,
+    TurnState,
 )
 
 
@@ -78,4 +79,40 @@ class InferenceCompletionResult:
         if not self.outbounds:
             raise ValueError(
                 "Inference completion requires at least one outbound effect"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class InferenceFailureDeliveryResult:
+    """@brief 原子持久化安全失败上下文与投递的结果 / Result atomically persisting safe failure context and delivery.
+
+    @param turn 已进入 WAITING_DELIVERY 的回合 / Turn now in WAITING_DELIVERY.
+    @param activity 已被 fencing 为 failed 的活动 / Activity fenced as failed.
+    @param assistant_message 不含内部诊断的 canonical 失败消息 /
+        Canonical failure message containing no internal diagnostics.
+    @param outbounds 安全用户反馈的 durable outbox / Durable outbox for safe user feedback.
+    """
+
+    turn: ConversationTurn
+    activity: InferenceActivity
+    assistant_message: MessageAppendResult
+    outbounds: Sequence[OutboundEnqueueResult]
+
+    def __post_init__(self) -> None:
+        """@brief 校验失败反馈提交状态 / Validate failure-feedback commit state.
+
+        @return None / None.
+        """
+
+        if self.turn.state is not TurnState.WAITING_DELIVERY:
+            raise ValueError(
+                "Inference failure delivery requires a waiting_delivery turn"
+            )
+        if self.activity.status is not InferenceActivityStatus.FAILED:
+            raise ValueError("Inference failure delivery requires a failed activity")
+        if self.activity.turn_id != self.turn.turn_id:
+            raise ValueError("Failed activity must belong to the result turn")
+        if not self.outbounds:
+            raise ValueError(
+                "Inference failure delivery requires at least one outbound effect"
             )

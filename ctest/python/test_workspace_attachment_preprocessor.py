@@ -28,6 +28,7 @@ from fogmoe_bot.application.assistant.inference_command import (
 )
 from fogmoe_bot.application.assistant.workspace_attachment_preprocessor import (
     CurrentTurnWorkspaceAttachmentPreprocessor,
+    WorkspaceAttachmentImportPendingError,
 )
 from fogmoe_bot.application.assistant.workspace_attachment_intent import (
     WorkspaceAttachmentIntentConflictError,
@@ -43,6 +44,7 @@ from fogmoe_bot.application.context_window.projection import (
     ContextWindowResult,
 )
 from fogmoe_bot.application.conversation.inference_worker import (
+    InferenceDependencyPending,
     InferenceErrorCategory,
     InferenceRuntimeLimits,
     PermanentInferenceError,
@@ -51,6 +53,7 @@ from fogmoe_bot.application.conversation.inference_worker import (
 from fogmoe_bot.application.workspace.errors import (
     WorkspaceFileReplayNotFoundError,
     WorkspaceRuntimeProtocolError,
+    WorkspaceRuntimeUnavailableError,
 )
 from fogmoe_bot.application.workspace.models import (
     MAX_ADD_FILE_CHUNK_BYTES,
@@ -237,6 +240,34 @@ class _RuntimeProcess:
         )
         self._completed[command.request_id.value] = result
         return result
+
+
+class _FailingReplayRuntime(_RuntimeProcess):
+    """@brief 在只读 journal replay 阶段持续失败的 runtime 替身 / Runtime double persistently failing during read-only journal replay.
+
+    @param error replay 应抛出的受控错误 / Controlled error raised by replay.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        """@brief 保存固定 replay 错误 / Store the fixed replay error.
+
+        @param error 每次 replay 抛出的异常 / Exception raised by every replay.
+        @return None / None.
+        """
+
+        super().__init__()
+        self._error = error
+        """@brief 固定的恢复依赖故障 / Fixed recovery-dependency failure."""
+
+    async def replay_file(self, command: ReplayFileCommand) -> AddFileResult:
+        """@brief 记录 replay 后抛出固定错误 / Record replay and raise the fixed error.
+
+        @param command 绑定已提交 intent 的 replay 命令 / Replay command bound to the committed intent.
+        @return 永不返回 / Never returns.
+        """
+
+        self.replay_commands.append(command)
+        raise self._error
 
 
 class _IntentStore:
@@ -741,8 +772,14 @@ class WorkspaceAttachmentPreprocessorTests(unittest.TestCase):
                 history_invalidator=_HistoryInvalidator(),
             )
 
-            with self.assertRaises(WorkspaceAttachmentReceiptUnavailableError):
+            with self.assertRaises(WorkspaceAttachmentImportPendingError) as pending:
                 await preprocessor.preprocess(command)
+            self.assertIsInstance(pending.exception, InferenceDependencyPending)
+            self.assertEqual(pending.exception.retry_after, timedelta(seconds=5))
+            self.assertIsInstance(
+                pending.exception.__cause__,
+                WorkspaceAttachmentReceiptUnavailableError,
+            )
             self.assertEqual(len(intents.prepared), 1)
             self.assertEqual(len(runtime.commands), 1)
             self.assertEqual(len(runtime.replay_commands), 1)
@@ -769,8 +806,144 @@ class WorkspaceAttachmentPreprocessorTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_native_receipt_drift_is_rejected(self) -> None:
-        """@brief native 返回错误目标路径时不能制造模型占位符 / A native wrong target path cannot create a model placeholder.
+    def test_prepared_intent_runtime_failure_becomes_non_exhausting_dependency(
+        self,
+    ) -> None:
+        """@brief 已提交 intent 的 runtime 故障成为不耗尽普通预算的依赖 / A runtime failure after committed intent becomes a dependency that does not exhaust the ordinary budget.
+
+        @return None / None.
+        """
+
+        async def scenario() -> None:
+            """@brief 两次恢复同一无 receipt intent / Recover the same receipt-less intent twice.
+
+            @return None / None.
+            """
+
+            command = _command(upload=_reference())
+            source = _ExpiringUploadSource()
+            runtime = _FailingReplayRuntime(
+                WorkspaceRuntimeUnavailableError("test runtime unavailable")
+            )
+            intents = _IntentStore()
+            preprocessor = CurrentTurnWorkspaceAttachmentPreprocessor(
+                source=source,
+                runtime_process=runtime,
+                intents=intents,
+                receipts=_ReceiptStore(),
+                history_invalidator=_HistoryInvalidator(),
+            )
+
+            for _attempt in range(2):
+                with self.assertRaises(
+                    WorkspaceAttachmentImportPendingError
+                ) as pending:
+                    await preprocessor.preprocess(command)
+                self.assertIsInstance(pending.exception, InferenceDependencyPending)
+                self.assertEqual(
+                    pending.exception.retry_after,
+                    timedelta(seconds=5),
+                )
+                self.assertIsInstance(
+                    pending.exception.__cause__,
+                    WorkspaceRuntimeUnavailableError,
+                )
+            self.assertEqual(len(intents.prepared), 1)
+            self.assertEqual(source.references, [command.current_turn_upload])
+            self.assertEqual(len(runtime.replay_commands), 2)
+            self.assertEqual(runtime.commands, [])
+
+        asyncio.run(scenario())
+
+    def test_durable_adapter_preserves_prepared_import_dependency(self) -> None:
+        """@brief durable adapter 不得把附件恢复依赖降级为永久失败 / The durable adapter must not downgrade attachment recovery dependency to permanent failure.
+
+        @return None / None.
+        """
+
+        async def scenario() -> None:
+            """@brief 从真实 pre-Agent 边界观察强类型 dependency / Observe the typed dependency at the real pre-Agent boundary.
+
+            @return None / None.
+            """
+
+            command = _command(upload=_reference())
+            source = _ExpiringUploadSource()
+            runtime = _FailingReplayRuntime(
+                WorkspaceRuntimeUnavailableError("test runtime unavailable")
+            )
+            adapter = DurableAssistantInferenceAdapter(
+                history=_History(_anchor(command)),
+                system_prompt="system prompt",
+                runtime_limits=InferenceRuntimeLimits(
+                    provider_timeout=timedelta(seconds=10),
+                    attempt_timeout=timedelta(seconds=20),
+                    lease_for=timedelta(seconds=30),
+                ),
+                inference=_Inference(),
+                attachment_preprocessor=CurrentTurnWorkspaceAttachmentPreprocessor(
+                    source=source,
+                    runtime_process=runtime,
+                    intents=_IntentStore(),
+                    receipts=_ReceiptStore(),
+                    history_invalidator=_HistoryInvalidator(),
+                ),
+            )
+
+            with self.assertRaises(WorkspaceAttachmentImportPendingError) as pending:
+                await adapter.infer(command.to_json())
+
+            self.assertIsInstance(pending.exception, InferenceDependencyPending)
+            self.assertEqual(pending.exception.retry_after, timedelta(seconds=5))
+            self.assertIsInstance(
+                pending.exception.__cause__,
+                WorkspaceRuntimeUnavailableError,
+            )
+            self.assertEqual(source.references, [command.current_turn_upload])
+            self.assertEqual(len(runtime.replay_commands), 1)
+
+        asyncio.run(scenario())
+
+    def test_post_receipt_cache_failure_is_not_an_unresolved_import(self) -> None:
+        """@brief receipt 已提交后的 cache 故障保持普通重试语义 / A cache failure after committed receipt retains ordinary retry semantics.
+
+        @return None / None.
+        """
+
+        async def scenario() -> None:
+            """@brief 发布 receipt 后注入 history invalidation 故障 / Inject history invalidation failure after receipt publication.
+
+            @return None / None.
+            """
+
+            command = _command(upload=_reference())
+            receipts = _ReceiptStore()
+            with self.assertRaises(
+                WorkspaceAttachmentReceiptUnavailableError
+            ) as unavailable:
+                await CurrentTurnWorkspaceAttachmentPreprocessor(
+                    source=_UploadSource(),
+                    runtime_process=_RuntimeProcess(),
+                    intents=_IntentStore(),
+                    receipts=receipts,
+                    history_invalidator=_HistoryInvalidator(
+                        RuntimeError("test cache unavailable")
+                    ),
+                ).preprocess(command)
+
+            self.assertNotIsInstance(
+                unavailable.exception,
+                WorkspaceAttachmentImportPendingError,
+            )
+            self.assertEqual(len(receipts.published), 1)
+            self.assertIsInstance(unavailable.exception.__cause__, RuntimeError)
+
+        asyncio.run(scenario())
+
+    def test_native_receipt_drift_waits_for_prepared_intent_reconciliation(
+        self,
+    ) -> None:
+        """@brief 已有 intent 时错误 native receipt 进入恢复依赖且不制造路径 / With an intent, a wrong native receipt enters recovery dependency and creates no path.
 
         @return None / None.
         """
@@ -781,7 +954,7 @@ class WorkspaceAttachmentPreprocessorTests(unittest.TestCase):
             @return None / None.
             """
 
-            with self.assertRaises(WorkspaceRuntimeProtocolError):
+            with self.assertRaises(WorkspaceAttachmentImportPendingError) as pending:
                 await CurrentTurnWorkspaceAttachmentPreprocessor(
                     source=_UploadSource(),
                     runtime_process=_RuntimeProcess(mismatched_receipt=True),  # type: ignore[arg-type]
@@ -789,6 +962,10 @@ class WorkspaceAttachmentPreprocessorTests(unittest.TestCase):
                     receipts=_ReceiptStore(),
                     history_invalidator=_HistoryInvalidator(),
                 ).preprocess(_command(upload=_reference()))
+            self.assertIsInstance(
+                pending.exception.__cause__,
+                WorkspaceRuntimeProtocolError,
+            )
 
         asyncio.run(scenario())
 

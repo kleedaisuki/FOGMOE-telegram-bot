@@ -15,9 +15,11 @@ import asyncio
 import json
 import logging
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
+from typing import cast
 
 import aiohttp
 
@@ -26,7 +28,13 @@ from fogmoe_bot.application.assistant.errors import (
     ProviderFailure,
     ProviderFailureKind,
 )
-from fogmoe_bot.application.assistant.completion import AssistantCompletion
+from fogmoe_bot.application.assistant.completion import (
+    AssistantCompletion,
+    AssistantCompletionStreamEvent,
+    CompletionFinished,
+    CompletionTextDelta,
+    PromptCacheDirective,
+)
 from fogmoe_bot.application.assistant.tools.catalog import ToolDefinition
 from fogmoe_bot.application.observability.telemetry import SpanScope, Telemetry
 from fogmoe_bot.domain.assistant.messages import CanonicalMessage, CanonicalMessageError
@@ -44,7 +52,11 @@ from fogmoe_bot.infrastructure.network.proxy import create_aiohttp_session
 from .anthropic_codec import decode_anthropic_response, encode_anthropic_request
 from .messages import MessageContractError, ProviderPayload
 from .openai_codec import decode_openai_response, encode_openai_request
-from .provider_response import DecodedProviderCompletion
+from .provider_response import (
+    AnthropicMessagesStreamAccumulator,
+    DecodedProviderCompletion,
+    OpenAIChatStreamAccumulator,
+)
 
 type SessionFactory = Callable[[], aiohttp.ClientSession]
 """@brief 无参数 aiohttp session 工厂 / Zero-argument aiohttp session factory."""
@@ -137,6 +149,7 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
         max_tokens: int,
         timeout_seconds: float | None,
         request_meta: RequestMeta,
+        prompt_cache: PromptCacheDirective | None = None,
     ) -> AssistantCompletion:
         """@brief 发送一次原生 provider completion 请求 / Send one native provider completion request.
 
@@ -148,6 +161,8 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
         @param max_tokens 输出 token 上限 / Output-token limit.
         @param timeout_seconds 单次请求总 deadline / Per-request total deadline.
         @param request_meta 调用方显式 metadata / Explicit caller metadata.
+        @param prompt_cache 已由 route/model 能力门控的缓存指令 /
+            Cache directive already gated by route/model capabilities.
         @return provider-neutral completion / Provider-neutral completion.
         @raise ProviderFailure 传输、HTTP 或协议失败 / Transport, HTTP, or protocol failure.
         @note 本方法不自动重试；durable inference 层拥有 retry/fallback 决策 /
@@ -191,6 +206,7 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
                     tool_choice=tool_choice,
                     max_tokens=max_tokens,
                     metadata=metadata,
+                    prompt_cache=prompt_cache,
                 )
                 session = await self._get_session()
                 deadline = timeout_seconds or self._default_timeout_seconds
@@ -304,6 +320,229 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
             )
         return completion
 
+    async def stream(
+        self,
+        *,
+        route: ProviderRoute,
+        model: str,
+        messages: Sequence[CanonicalMessage],
+        tools: Sequence[ToolDefinition],
+        tool_choice: str | JsonObject | None,
+        max_tokens: int,
+        timeout_seconds: float | None,
+        request_meta: RequestMeta,
+        prompt_cache: PromptCacheDirective | None = None,
+    ) -> AsyncIterator[AssistantCompletionStreamEvent]:
+        """@brief 发送并严格聚合一次原生 provider SSE completion / Send and strictly aggregate one native provider SSE completion.
+
+        @param route 自包含的 provider route / Self-contained provider route.
+        @param model route 选中的模型 / Model selected by the route.
+        @param messages canonical V2 历史 / Canonical V2 history.
+        @param tools 应用层 typed tools / Application-layer typed tools.
+        @param tool_choice 工具选择 / Tool choice.
+        @param max_tokens 输出 token 上限 / Output-token limit.
+        @param timeout_seconds 单次请求总 deadline / Per-request total deadline.
+        @param request_meta 调用方显式 metadata / Explicit caller metadata.
+        @param prompt_cache 已由 route/model 能力门控的缓存指令 /
+            Cache directive already gated by route/model capabilities.
+        @return 非空文本增量，随后恰好一个完整 completion /
+            Non-empty text deltas followed by exactly one complete completion.
+        @raise ProviderFailure 传输、HTTP 或协议失败 / Transport, HTTP, or protocol failure.
+        @note ``CancelledError`` 原样传播；取消的流不会生成终态 /
+            ``CancelledError`` propagates unchanged; a cancelled stream emits no terminal event.
+        """
+
+        if not isinstance(route, ProviderRoute):
+            raise TypeError("route must be ProviderRoute")
+        if tools and not route.supports_tools:
+            raise ProviderContractError(
+                f"Route {route.route_id!r} does not support tools"
+            )
+        if timeout_seconds is not None and (
+            isinstance(timeout_seconds, bool)
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0.0
+        ):
+            raise ProviderContractError(
+                "timeout_seconds must be a positive finite number"
+            )
+
+        attributes = _completion_attributes(
+            route=route,
+            model=model,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+        )
+        with self._telemetry.span(
+            "chat",
+            kind=SpanKind.CLIENT,
+            attributes=attributes,
+        ) as span:
+            response_status: int | None = None
+            response_size: int | None = None
+            try:
+                metadata = _request_metadata(route, request_meta)
+                payload = self._encode_request(
+                    route=route,
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    max_tokens=max_tokens,
+                    metadata=metadata,
+                    prompt_cache=prompt_cache,
+                )
+                payload["stream"] = True
+                if route.style == "openai":
+                    payload["stream_options"] = {"include_usage": True}
+                    accumulator: (
+                        OpenAIChatStreamAccumulator
+                        | AnthropicMessagesStreamAccumulator
+                    ) = OpenAIChatStreamAccumulator()
+                else:
+                    accumulator = AnthropicMessagesStreamAccumulator()
+                session = await self._get_session()
+                deadline = timeout_seconds or self._default_timeout_seconds
+                headers = _request_headers(route)
+                _set_header(headers, "Accept", "text/event-stream")
+                logger.info(
+                    "LLM completion request started provider=%s model=%s route_id=%s style=%s",
+                    route.provider_id,
+                    model,
+                    route.route_id,
+                    route.style,
+                    extra=_log_extra(EventName.LLM_COMPLETION_STARTED, attributes),
+                )
+                async with session.post(
+                    route.endpoint,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=deadline),
+                ) as response:
+                    response_status = response.status
+                    span.set_attribute(
+                        "http.response.status_code",
+                        response_status,
+                    )
+                    if not 200 <= response.status < 300:
+                        raw = await _read_bounded(
+                            response,
+                            maximum_bytes=self._max_response_bytes,
+                        )
+                        response_size = len(raw)
+                        span.set_attribute(
+                            "http.response.body.size",
+                            response_size,
+                        )
+                        raise _http_failure(response, raw)
+
+                    parser = _SseDecoder(maximum_bytes=self._max_response_bytes)
+                    async for chunk in response.content.iter_chunked(64 * 1024):
+                        for event in parser.feed(chunk):
+                            for text_delta in _consume_provider_sse_event(
+                                route=route,
+                                accumulator=accumulator,
+                                event=event,
+                            ):
+                                yield CompletionTextDelta(text_delta)
+                    for event in parser.finish():
+                        for text_delta in _consume_provider_sse_event(
+                            route=route,
+                            accumulator=accumulator,
+                            event=event,
+                        ):
+                            yield CompletionTextDelta(text_delta)
+                    response_size = parser.byte_count
+                    span.set_attribute(
+                        "http.response.body.size",
+                        response_size,
+                    )
+                full_payload = accumulator.final_payload()
+                decoded = self._decode_response(route, full_payload)
+                completion = AssistantCompletion(decoded.message)
+            except asyncio.CancelledError:
+                raise
+            except ProviderFailure as error:
+                self._record_failure(
+                    route=route,
+                    model=model,
+                    error=error,
+                    span=span,
+                    attributes=attributes,
+                    response_status=response_status,
+                )
+                raise
+            except (aiohttp.ClientError, TimeoutError) as error:
+                failure = ProviderFailure(
+                    kind=(
+                        ProviderFailureKind.TIMEOUT
+                        if isinstance(error, TimeoutError)
+                        else ProviderFailureKind.TRANSPORT
+                    ),
+                    message=(
+                        f"LLM provider {route.provider_id!r} transport failed: "
+                        f"{type(error).__name__}"
+                    ),
+                )
+                self._record_failure(
+                    route=route,
+                    model=model,
+                    error=failure,
+                    span=span,
+                    attributes=attributes,
+                    response_status=response_status,
+                )
+                raise failure from error
+            except (
+                CanonicalMessageError,
+                MessageContractError,
+                RequestMetaError,
+                ValueError,
+            ) as error:
+                failure = ProviderContractError(
+                    "LLM request or response violated the provider contract"
+                )
+                self._record_failure(
+                    route=route,
+                    model=model,
+                    error=failure,
+                    span=span,
+                    attributes=attributes,
+                    response_status=response_status,
+                )
+                raise failure from error
+
+            self._record_usage(route, model, span, decoded)
+            self._telemetry.counter(
+                MetricName.LLM_OUTCOMES,
+                attributes={
+                    "outcome": Outcome.SUCCESS,
+                    "gen_ai.provider.name": route.provider_id,
+                    "gen_ai.request.model": model,
+                },
+            )
+            assert response_status is not None
+            assert response_size is not None
+            logger.info(
+                "LLM completion succeeded provider=%s model=%s route_id=%s style=%s http_status=%s",
+                route.provider_id,
+                model,
+                route.route_id,
+                route.style,
+                response_status,
+                extra=_log_extra(
+                    EventName.LLM_COMPLETION_SUCCEEDED,
+                    {
+                        **attributes,
+                        "outcome": Outcome.SUCCESS,
+                        "http.response.status_code": response_status,
+                        "http.response.body.size": response_size,
+                    },
+                ),
+            )
+            yield CompletionFinished(completion)
+
     async def _get_session(self) -> aiohttp.ClientSession:
         """@brief 懒创建当前 event loop 的共享 session / Lazily create the shared session for the current event loop.
 
@@ -335,6 +574,7 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
         tool_choice: str | JsonObject | None,
         max_tokens: int,
         metadata: Mapping[str, str],
+        prompt_cache: PromptCacheDirective | None = None,
     ) -> ProviderPayload:
         """@brief 按 route style 编码一个 request / Encode one request by route style.
 
@@ -345,9 +585,16 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
         @param tool_choice 工具选择 / Tool choice.
         @param max_tokens 输出上限 / Output limit.
         @param metadata 合并后的 metadata / Merged metadata.
+        @param prompt_cache 已由 route/model 能力门控的缓存指令 /
+            Cache directive already gated by route/model capabilities.
         @return provider wire payload / Provider wire payload.
         """
 
+        _validate_prompt_cache_capability(
+            route=route,
+            model=model,
+            directive=prompt_cache,
+        )
         projected_messages = tuple(message.to_json() for message in messages)
         if route.style == "openai":
             return encode_openai_request(
@@ -364,6 +611,7 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
                 seed=None,
                 reasoning_effort=None,
                 parallel_tool_calls=None,
+                prompt_cache=prompt_cache,
             )
         return encode_anthropic_request(
             model=model,
@@ -376,6 +624,7 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
             temperature=None,
             top_p=None,
             stop_sequences=(),
+            prompt_cache=prompt_cache,
         )
 
     @staticmethod
@@ -415,6 +664,16 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
         for token_type, value, attribute in (
             ("input", completion.input_tokens, "gen_ai.usage.input_tokens"),
             ("output", completion.output_tokens, "gen_ai.usage.output_tokens"),
+            (
+                "input_cache_read",
+                completion.cached_input_tokens,
+                "gen_ai.usage.cached_input_tokens",
+            ),
+            (
+                "input_cache_write",
+                completion.cache_write_input_tokens,
+                "gen_ai.usage.cache_write_input_tokens",
+            ),
         ):
             if value is None:
                 continue
@@ -486,6 +745,57 @@ Construction creates no socket; ``run`` or the first ``complete`` creates one sh
             status,
             extra=_log_extra(EventName.LLM_COMPLETION_FAILED, log_attributes),
         )
+
+
+def _validate_prompt_cache_capability(
+    *,
+    route: ProviderRoute,
+    model: str,
+    directive: PromptCacheDirective | None,
+) -> None:
+    """@brief 在 wire 编码前二次验证选中模型的显式缓存能力 / Revalidate the selected model's explicit-cache capability before wire encoding.
+
+    @param route 当前完整 route / Current complete route.
+    @param model 当前选中的 model name / Currently selected model name.
+    @param directive 调用方缓存指令 / Caller cache directive.
+    @return None / None.
+    @raise MessageContractError model 不属于 route 或指令超过 operator 声明能力时抛出 /
+        Raised when the model is absent from the route or the directive exceeds
+        operator-declared capabilities.
+    @note 默认 ``automatic`` 的 OpenAI-compatible gateway 永远不能收到显式私有字段 /
+        An OpenAI-compatible gateway left at the ``automatic`` default can never receive
+        explicit private fields.
+    """
+
+    selected = next(
+        (candidate for candidate in route.models if candidate.name == model),
+        None,
+    )
+    if selected is None:
+        raise MessageContractError("Selected model is not present in its provider route")
+    if directive is None:
+        return
+    if selected.prompt_cache_policy == "disabled":
+        raise MessageContractError(
+            "Selected model has prompt caching disabled"
+        )
+    if directive.mode != selected.prompt_cache_policy:
+        raise MessageContractError(
+            "Prompt-cache directive exceeds the selected model capability"
+        )
+    if directive.mode == "explicit":
+        if directive.ttl != selected.prompt_cache_retention:
+            raise MessageContractError(
+                "Prompt-cache TTL differs from the selected model capability"
+            )
+        if route.style == "openai" and directive.ttl != "30m":
+            raise MessageContractError(
+                "OpenAI explicit prompt caching requires a 30m TTL"
+            )
+        if route.style == "anthropic" and directive.ttl not in {"5m", "1h"}:
+            raise MessageContractError(
+                "Anthropic explicit prompt caching requires a 5m or 1h TTL"
+            )
 
 
 def _completion_attributes(
@@ -606,6 +916,194 @@ def _set_header(headers: dict[str, str], name: str, value: str) -> None:
         if existing.casefold() == normalized:
             del headers[existing]
     headers[name] = value
+
+
+@dataclass(frozen=True, slots=True)
+class _SseEvent:
+    """@brief 一个已分帧、尚未解释的 SSE event / One framed but uninterpreted SSE event.
+
+    @param name SSE event 名，缺省为 ``message`` / SSE event name, defaulting to ``message``.
+    @param data 按规范以换行连接的 data 字段 / Data fields joined with newlines per the specification.
+    """
+
+    name: str
+    data: str
+
+
+@dataclass(slots=True)
+class _SseDecoder:
+    """@brief 有硬字节上限的增量 SSE framing decoder / Incremental SSE framing decoder with a hard byte limit.
+
+    @param maximum_bytes 整个 response stream 的字节上限 / Byte limit for the entire response stream.
+    """
+
+    maximum_bytes: int
+    byte_count: int = 0
+    _buffer: bytearray = field(default_factory=bytearray)
+    _event_name: str | None = None
+    _data_lines: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """@brief 校验 response 上限 / Validate the response limit.
+
+        @return None / None.
+        """
+
+        if isinstance(self.maximum_bytes, bool) or self.maximum_bytes < 1:
+            raise ValueError("SSE maximum_bytes must be a positive integer")
+
+    def feed(self, chunk: bytes) -> tuple[_SseEvent, ...]:
+        """@brief 消费任意边界的 response bytes / Consume response bytes at arbitrary boundaries.
+
+        @param chunk 新到达的 response bytes / Newly received response bytes.
+        @return 本 chunk 完成的 SSE events / SSE events completed by this chunk.
+        @raise MessageContractError 总大小或 UTF-8 framing 非法时抛出 /
+            Raised when total size or UTF-8 framing is invalid.
+        """
+
+        if not isinstance(chunk, bytes):
+            raise MessageContractError("LLM provider SSE chunk must be bytes")
+        self.byte_count += len(chunk)
+        if self.byte_count > self.maximum_bytes:
+            raise MessageContractError("LLM provider response exceeded size limit")
+        self._buffer.extend(chunk)
+        emitted: list[_SseEvent] = []
+        while (newline := self._buffer.find(b"\n")) >= 0:
+            raw_line = bytes(self._buffer[:newline])
+            del self._buffer[: newline + 1]
+            event = self._consume_line(raw_line)
+            if event is not None:
+                emitted.append(event)
+        return tuple(emitted)
+
+    def finish(self) -> tuple[_SseEvent, ...]:
+        """@brief 在 EOF 刷新最后一行与 event / Flush the final line and event at EOF.
+
+        @return EOF 完成的零个或一个 event / Zero or one event completed at EOF.
+        """
+
+        emitted: list[_SseEvent] = []
+        if self._buffer:
+            event = self._consume_line(bytes(self._buffer))
+            self._buffer.clear()
+            if event is not None:
+                emitted.append(event)
+        event = self._dispatch()
+        if event is not None:
+            emitted.append(event)
+        return tuple(emitted)
+
+    def _consume_line(self, raw_line: bytes) -> _SseEvent | None:
+        """@brief 消费一条不含 LF 的 SSE line / Consume one SSE line without its LF.
+
+        @param raw_line 原始 line bytes / Raw line bytes.
+        @return 空行完成的 event，或 None / Event completed by a blank line, or None.
+        """
+
+        if raw_line.endswith(b"\r"):
+            raw_line = raw_line[:-1]
+        try:
+            line = raw_line.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise MessageContractError(
+                "LLM provider SSE is not valid UTF-8"
+            ) from error
+        if not line:
+            return self._dispatch()
+        if line.startswith(":"):
+            return None
+        field_name, separator, value = line.partition(":")
+        if separator and value.startswith(" "):
+            value = value[1:]
+        if field_name == "event":
+            self._event_name = value
+        elif field_name == "data":
+            self._data_lines.append(value)
+        return None
+
+    def _dispatch(self) -> _SseEvent | None:
+        """@brief 完成当前 event 并清空 framing 状态 / Complete the current event and reset framing state.
+
+        @return 有 data 的 event，或 None / Event containing data, or None.
+        """
+
+        if not self._data_lines:
+            self._event_name = None
+            return None
+        event = _SseEvent(
+            name=self._event_name or "message",
+            data="\n".join(self._data_lines),
+        )
+        self._event_name = None
+        self._data_lines.clear()
+        return event
+
+
+def _consume_provider_sse_event(
+    *,
+    route: ProviderRoute,
+    accumulator: OpenAIChatStreamAccumulator | AnthropicMessagesStreamAccumulator,
+    event: _SseEvent,
+) -> tuple[str, ...]:
+    """@brief 将一个 framed SSE event 路由到正确的 provider 状态机 / Route one framed SSE event into the correct provider state machine.
+
+    @param route 当前 provider route / Current provider route.
+    @param accumulator 对应协议的 response accumulator / Response accumulator for that protocol.
+    @param event 已分帧 SSE event / Framed SSE event.
+    @return 非空文本增量 / Non-empty text deltas.
+    @raise ProviderFailure provider 在 2xx stream 内发送 error event 时抛出 /
+        Raised when the provider sends an error event inside a 2xx stream.
+    @raise MessageContractError event 不符合所选协议时抛出 /
+        Raised when the event violates the selected protocol.
+    """
+
+    if route.style == "openai":
+        if not isinstance(accumulator, OpenAIChatStreamAccumulator):
+            raise MessageContractError("OpenAI stream accumulator type mismatch")
+        if event.name != "message":
+            raise MessageContractError(
+                "OpenAI Chat Completions SSE events must use the default event name"
+            )
+        if event.data == "[DONE]":
+            accumulator.consume_done()
+            return ()
+        payload = _decode_sse_json_object(event.data)
+        if "error" in payload:
+            raise ProviderFailure(
+                kind=ProviderFailureKind.SERVER,
+                message="LLM provider stream failed",
+            )
+        return accumulator.consume(payload)
+
+    if not isinstance(accumulator, AnthropicMessagesStreamAccumulator):
+        raise MessageContractError("Anthropic stream accumulator type mismatch")
+    payload = _decode_sse_json_object(event.data)
+    if event.name == "error" or payload.get("type") == "error":
+        raise ProviderFailure(
+            kind=ProviderFailureKind.SERVER,
+            message="LLM provider stream failed",
+        )
+    return accumulator.consume(event.name, payload)
+
+
+def _decode_sse_json_object(data: str) -> Mapping[str, object]:
+    """@brief 解码一个 SSE data JSON object / Decode one SSE data JSON object.
+
+    @param data 已按 SSE 规则合并的 data string / Data string joined by SSE rules.
+    @return 顶层 JSON object / Top-level JSON object.
+    @raise MessageContractError JSON 非法或顶层不是 object 时抛出 /
+        Raised when JSON is invalid or not an object.
+    """
+
+    try:
+        value = json.loads(data)
+    except json.JSONDecodeError as error:
+        raise MessageContractError(
+            "LLM provider SSE data is not valid JSON"
+        ) from error
+    if not isinstance(value, Mapping):
+        raise MessageContractError("LLM provider SSE data must be a JSON object")
+    return cast(Mapping[str, object], value)
 
 
 async def _read_bounded(

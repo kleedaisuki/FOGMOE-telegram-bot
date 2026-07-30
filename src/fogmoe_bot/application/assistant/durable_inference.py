@@ -11,6 +11,7 @@ the transactional outbox.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import math
 from collections.abc import Mapping, Sequence
@@ -24,6 +25,7 @@ from fogmoe_bot.application.context_window.projection import (
     ContextWindowResult,
     ContextWindowTooLarge,
     checkpoint_summary_message,
+    project_conversation_message,
 )
 from fogmoe_bot.application.conversation.inference_worker import (
     InferenceDependencyPending,
@@ -36,6 +38,7 @@ from fogmoe_bot.application.conversation.inference_worker import (
     PermanentInferenceError,
     RetryableInferenceError,
 )
+from fogmoe_bot.application.memory.rendering import WORKING_MEMORY_SYSTEM_POLICY
 from fogmoe_bot.application.runtime import SystemUtcClock, UtcClock
 from fogmoe_bot.application.workspace.errors import (
     WorkspaceInvocationOutcomeUnknownError,
@@ -58,7 +61,12 @@ from fogmoe_bot.domain.context import (
     build_context_state,
 )
 from fogmoe_bot.domain.context_window.budget import TokenCount
+from fogmoe_bot.domain.conversation.errors import StaleClaimError
 from fogmoe_bot.domain.conversation.identity import DeliveryStreamId
+from fogmoe_bot.domain.conversation.inference import (
+    InferenceGenerationCause,
+    InferenceGenerationFence,
+)
 from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.conversation.outbox import SEND_TELEGRAM_MESSAGE
 from fogmoe_bot.domain.conversation.payloads import (
@@ -99,6 +107,12 @@ from .inference_command import (
     DurableAssistantUser,
 )
 from .reply_filter import normalize_ai_reply_text
+from .streaming import (
+    AssistantStreamAddress,
+    AssistantStreamProjection,
+    AssistantStreamSession,
+    AssistantStreamState,
+)
 from .tool_runtime import ToolExecutionContext
 from .workspace_attachment_preprocessor import (
     CurrentTurnWorkspaceAttachmentPreprocessor,
@@ -152,6 +166,7 @@ class AssistantInference(Protocol):
         request_timeout: float | None = None,
         request_meta: RequestMeta | None = None,
         tool_context: ToolExecutionContext | None = None,
+        stream: AssistantStreamSession | None = None,
     ) -> AgentResponse:
         """@brief 执行 provider fallback 推理 / Run provider-fallback inference.
 
@@ -161,6 +176,7 @@ class AssistantInference(Protocol):
         @param request_meta 调用方显式请求 metadata；缺省为空 /
             Explicit caller request metadata; defaults to empty.
         @param tool_context durable 工具身份 / Durable tool identity.
+        @param stream 易失 provider-delta 投影会话 / Ephemeral provider-delta projection session.
         @return Agent 响应 / Agent response.
         """
 
@@ -182,6 +198,7 @@ class DurableAssistantInferenceAdapter:
         translation_system_prompt: str = TRANSLATION_SYSTEM_PROMPT,
         attachment_preprocessor: CurrentTurnWorkspaceAttachmentPreprocessor
         | None = None,
+        stream_projection: AssistantStreamProjection | None = None,
         clock: UtcClock | None = None,
     ) -> None:
         """@brief 创建 durable Assistant adapter / Create the durable Assistant adapter.
@@ -196,6 +213,8 @@ class DurableAssistantInferenceAdapter:
         @param attachment_preprocessor 当前 Turn 附件的 Agent 前 Workspace 导入用例；None
             仅允许没有附件的历史兼容 activity / Pre-Agent Workspace import use case for a
             current-Turn attachment; None permits only legacy activities without an attachment.
+        @param stream_projection Telegram typing/draft 的最佳努力投影 /
+            Best-effort Telegram typing/draft projection.
         @param clock UTC clock / UTC clock.
         @raise ValueError prompt 非法时抛出 / Raised for an invalid prompt.
         """
@@ -203,7 +222,9 @@ class DurableAssistantInferenceAdapter:
         if not system_prompt.strip() or not translation_system_prompt.strip():
             raise ValueError("system prompts cannot be empty")
         self._history = history
-        self._system_prompt = system_prompt
+        self._system_prompt = (
+            f"{system_prompt.strip()}\n\n{WORKING_MEMORY_SYSTEM_POLICY}"
+        )
         self._history_reserved_tokens = history_reserved_tokens
         self._provider_timeout = runtime_limits.provider_timeout
         self._inference = inference
@@ -211,6 +232,8 @@ class DurableAssistantInferenceAdapter:
         self._translation_system_prompt = translation_system_prompt.strip()
         self._attachment_preprocessor = attachment_preprocessor
         """@brief Agent 前附件预处理用例 / Pre-Agent attachment preprocessing use case."""
+        self._stream_projection = stream_projection
+        """@brief 易失流 UX 投影 / Ephemeral stream UX projection."""
         self._clock = clock or SystemUtcClock()
 
     async def infer(
@@ -218,12 +241,63 @@ class DurableAssistantInferenceAdapter:
         request: JsonObject,
         *,
         execution_deadline_monotonic: float | None = None,
+        generation_fence: InferenceGenerationFence | None = None,
+        stream: AssistantStreamSession | None = None,
+    ) -> InferenceResult:
+        """@brief 从 durable claim 计算结果并向既有会话投影 delta / Compute a durable result and project deltas to an existing session.
+
+        @param request durable activity JSON request / Durable activity JSON request.
+        @param execution_deadline_monotonic worker attempt 截止点 / Worker-attempt deadline.
+        @param generation_fence 当前 claim/revision identity / Current claim/revision identity.
+        @param stream 由 worker 建立并拥有终态的易失流会话 /
+            Ephemeral stream session started and terminalized by the worker.
+        @return 纯 durable inference result / Pure durable inference result.
+        @note 本方法绝不发送 COMPLETED/FAILED/SUSPENDED；这些帧必须晚于对应
+            repository 事务。/ This method never emits COMPLETED, FAILED, or SUSPENDED; those
+            frames must follow the corresponding repository transaction.
+        """
+
+        return await self._infer_generation(
+            request,
+            execution_deadline_monotonic=execution_deadline_monotonic,
+            generation_fence=generation_fence,
+            stream=stream,
+        )
+
+    async def start_stream(
+        self,
+        request: JsonObject,
+        *,
+        generation_fence: InferenceGenerationFence | None = None,
+    ) -> AssistantStreamSession | None:
+        """@brief 在 worker 慢依赖前启动一个 generation 流 / Start one generation stream before worker slow dependencies.
+
+        @param request durable activity JSON request / Durable activity JSON request.
+        @param generation_fence 当前 claim/revision identity / Current claim/revision identity.
+        @return 已投影 STARTED/REVISED 的会话；未配置投影时为 None /
+            Session with STARTED/REVISED projected, or None when projection is disabled.
+        @note worker 是唯一终态拥有者 / The worker is the sole terminal-state owner.
+        """
+
+        command = self._parse_request(request)
+        return await self._start_stream(command, generation_fence)
+
+    async def _infer_generation(
+        self,
+        request: JsonObject,
+        *,
+        execution_deadline_monotonic: float | None = None,
+        generation_fence: InferenceGenerationFence | None = None,
+        stream: AssistantStreamSession | None = None,
     ) -> InferenceResult:
         """@brief 严格解析 request、读取历史并执行无副作用推理 / Strictly parse a request, read history, and run side-effect-free inference.
 
         @param request durable activity JSON request / Durable activity JSON request.
         @param execution_deadline_monotonic worker 建立的 attempt 单调截止点；直接调用时可为 None /
             Attempt monotonic deadline established by the worker; may be None for direct calls.
+        @param generation_fence 当前 processing claim 的 attempt/revision/token 身份 /
+            Attempt/revision/token identity of the current processing claim.
+        @param stream 已启动的易失流会话 / Already-started ephemeral stream session.
         @return Assistant content 与 Telegram outbox intent / Assistant content and Telegram outbox intent.
         @raise PermanentInferenceError request、历史或输出永久非法 / Permanently invalid request, history, or output.
         @raise RetryableInferenceError 数据库或 provider 暂时不可用 / Temporarily unavailable database or provider.
@@ -234,6 +308,16 @@ class DurableAssistantInferenceAdapter:
 
         _validate_execution_deadline(execution_deadline_monotonic)
         command = self._parse_request(request)
+        if generation_fence is not None and generation_fence.turn_id != command.typed_turn_id:
+            raise PermanentInferenceError(
+                "Inference generation fence belongs to another Turn",
+                category=InferenceErrorCategory.INTERNAL,
+            )
+        input_revision = (
+            0
+            if generation_fence is None
+            else int(generation_fence.input_revision)
+        )
         base_context = self._base_context(command)
         try:
             projection = await self._history.project(
@@ -269,7 +353,11 @@ class DurableAssistantInferenceAdapter:
         # Validate the durable anchor before the attachment importer performs its first
         # Workspace mutation.  A malformed replayed activity must never gain an imported file
         # merely because it happened to carry a Telegram document reference.
-        self._validate_anchor(command, projection)
+        self._validate_anchor(
+            command,
+            projection,
+            input_revision=input_revision,
+        )
         attachment = await self._preprocess_current_turn_attachment(command)
         attachment_message = self._attachment_runtime_message(
             projection,
@@ -280,39 +368,54 @@ class DurableAssistantInferenceAdapter:
             projection,
             base_context=base_context,
             current_attachment_message=attachment_message,
+            input_revision=input_revision,
         )
         committed_count = len(context_state.messages)
         is_translation = command.task_kind == "translation"
         inference = self._translation_inference if is_translation else self._inference
         try:
-            response = await inference.infer(
-                context_state,
-                allow_tools=command.allow_tools and not is_translation,
-                request_timeout=self._provider_timeout.total_seconds(),
-                request_meta=command.meta,
-                tool_context=(
-                    None
+            tool_context = ToolExecutionContext(
+                turn_id=command.typed_turn_id,
+                conversation_id=command.typed_conversation_id,
+                delivery_stream_id=DeliveryStreamId(command.delivery_stream_id),
+                user_id=command.user.user_id,
+                chat_id=command.chat_id,
+                is_group=command.scope.is_group,
+                group_id=command.scope.group_id,
+                message_id=command.scope.message_id,
+                message_thread_id=command.message_thread_id,
+                allowed_tools=(
+                    frozenset()
                     if is_translation
-                    else ToolExecutionContext(
-                        turn_id=command.typed_turn_id,
-                        conversation_id=command.typed_conversation_id,
-                        delivery_stream_id=DeliveryStreamId(command.delivery_stream_id),
-                        user_id=command.user.user_id,
-                        chat_id=command.chat_id,
-                        is_group=command.scope.is_group,
-                        group_id=command.scope.group_id,
-                        message_id=command.scope.message_id,
-                        message_thread_id=command.message_thread_id,
-                        allowed_tools=(
-                            None
-                            if command.allowed_tools is None
-                            else frozenset(command.allowed_tools)
-                        ),
-                        execution_deadline_monotonic=execution_deadline_monotonic,
+                    else (
+                        None
+                        if command.allowed_tools is None
+                        else frozenset(command.allowed_tools)
                     )
                 ),
+                execution_deadline_monotonic=execution_deadline_monotonic,
+                generation_fence=generation_fence,
             )
+            if stream is None:
+                response = await inference.infer(
+                    context_state,
+                    allow_tools=command.allow_tools and not is_translation,
+                    request_timeout=self._provider_timeout.total_seconds(),
+                    request_meta=command.meta,
+                    tool_context=tool_context,
+                )
+            else:
+                response = await inference.infer(
+                    context_state,
+                    allow_tools=command.allow_tools and not is_translation,
+                    request_timeout=self._provider_timeout.total_seconds(),
+                    request_meta=command.meta,
+                    tool_context=tool_context,
+                    stream=stream,
+                )
         except InferenceError:
+            raise
+        except StaleClaimError:
             raise
         except AssistantInferenceUnavailableError as error:
             raise _classify_unavailable(error) from error
@@ -343,6 +446,51 @@ class DurableAssistantInferenceAdapter:
             context_state=context_state,
             committed_count=committed_count,
         )
+
+    async def _start_stream(
+        self,
+        command: DurableAssistantInferenceCommand,
+        generation_fence: InferenceGenerationFence | None,
+    ) -> AssistantStreamSession | None:
+        """@brief 在任何慢依赖前启动 typing/draft generation / Start typing/draft generation before any slow dependency.
+
+        @param command 已解析 durable command / Parsed durable command.
+        @param generation_fence 可选 processing generation / Optional processing generation.
+        @return 已投影首帧的 session；未配置时为 None /
+            Session whose first frame was projected, or None when unconfigured.
+        """
+
+        projection = self._stream_projection
+        if projection is None:
+            return None
+        generation = 1 if generation_fence is None else generation_fence.attempt
+        revision = (
+            0
+            if generation_fence is None
+            else int(generation_fence.input_revision)
+        )
+        state = AssistantStreamState.begin(
+            turn_id=command.typed_turn_id,
+            address=AssistantStreamAddress(
+                chat_id=command.chat_id,
+                is_group=command.scope.is_group,
+                message_thread_id=command.message_thread_id,
+            ),
+            generation=generation,
+            revision=revision,
+            revised=(
+                generation_fence is not None
+                and generation_fence.cause is InferenceGenerationCause.STEER
+            ),
+            emitted_at=self._clock.now(),
+        )
+        session = AssistantStreamSession(state=state, projection=projection)
+        try:
+            await session.start()
+        except asyncio.CancelledError:
+            await session.suspend(emitted_at=self._clock.now())
+            raise
+        return session
 
     @staticmethod
     def _parse_request(request: JsonObject) -> DurableAssistantInferenceCommand:
@@ -423,6 +571,7 @@ class DurableAssistantInferenceAdapter:
         *,
         base_context: ContextState,
         current_attachment_message: CanonicalMessage | None = None,
+        input_revision: int = 0,
     ) -> ContextState:
         """@brief 校验 anchor 并将 summary+tail 加入基础上下文 / Validate the anchor and add summary plus tail to the base context.
 
@@ -431,11 +580,17 @@ class DurableAssistantInferenceAdapter:
         @param base_context 不含普通历史的上下文 / Context without ordinary history.
         @param current_attachment_message 已 receipt 见证、待显式注入的当前附件模型消息 /
             Receipt-witnessed current-attachment model message to inject explicitly.
+        @param input_revision 当前 activity claim 的输入 revision /
+            Input revision of the current activity claim.
         @return 本次尝试独占上下文 / Attempt-local context.
         @raise PermanentInferenceError anchor Turn 损坏 / The anchor Turn is corrupt.
         """
 
-        self._validate_anchor(command, projection)
+        self._validate_anchor(
+            command,
+            projection,
+            input_revision=input_revision,
+        )
         current_user_text = _anchor_user_text(projection)
         if command.task_kind == "translation":
             base_context.current_user_text = current_user_text
@@ -460,6 +615,19 @@ class DurableAssistantInferenceAdapter:
             scope=base_context.scope,
             user_state=base_context.user_state,
         )
+        anchor_projected_count = sum(
+            len(project_conversation_message(message))
+            for message in projection.anchor_messages
+        )
+        if current_attachment_message is not None:
+            anchor_projected_count = 1
+        stable_prefix_count = len(context_state.messages) - anchor_projected_count
+        if stable_prefix_count < 1:
+            raise PermanentInferenceError(
+                "Current Turn history cannot establish a stable prompt prefix",
+                category=InferenceErrorCategory.INTERNAL,
+            )
+        context_state.stable_prefix_message_count = stable_prefix_count
         # 附件 Turn 不得将持久化 caption/原始文本作为 Working Memory 查询：检索结果会随后
         # 渲染进模型提示。durable ingress 已持久化同一占位符；这个赋值也保证早期尚未写入
         # 占位符的 activity 在首次执行时不泄漏。/ An attachment Turn must not use its
@@ -504,6 +672,12 @@ class DurableAssistantInferenceAdapter:
             )
         try:
             return await preprocessor.preprocess(command)
+        except InferenceError:
+            # Attachment preprocessing owns a durable dependency signal once its immutable
+            # import intent commits.  Preserve that type so the worker's dependency policy runs
+            # before the ordinary attempt budget. 附件预处理在 immutable intent 提交后拥有
+            # durable dependency 信号；必须保留该类型，让 worker 在普通次数预算前处理它。
+            raise
         except WorkspaceAttachmentIntentUnavailableError as error:
             raise RetryableInferenceError(
                 "Current-turn attachment import intent storage is temporarily unavailable",
@@ -641,17 +815,21 @@ class DurableAssistantInferenceAdapter:
     def _validate_anchor(
         command: DurableAssistantInferenceCommand,
         projection: ContextWindowReady,
+        *,
+        input_revision: int = 0,
     ) -> None:
-        """@brief 验证当前 Turn 恰有一个语义匹配的 user row / Validate exactly one semantically matching user row in the current Turn.
+        """@brief 验证初始输入与连续 steer revision / Validate the initial input and contiguous steer revisions.
 
         @param command durable inference command / Durable inference command.
         @param projection 含原始 anchor rows 的投影 / Projection carrying raw anchor rows.
+        @param input_revision activity claim 已 fencing 的 revision / Revision fenced by the activity claim.
         @return None / None.
         @raise PermanentInferenceError anchor 行缺失、越界或 task marker 漂移 / Anchor rows are missing, out of bounds, or have drifted task markers.
         """
 
         previous_sequence = projection.bounds.first_sequence - 1
         current_user_count = 0
+        expected_steer_revision = 1
         for message in projection.anchor_messages:
             sequence = int(message.sequence)
             if not previous_sequence < sequence <= projection.bounds.last_sequence:
@@ -671,6 +849,43 @@ class DurableAssistantInferenceAdapter:
             if message.draft.role is not MessageRole.USER:
                 continue
             current_user_count += 1
+            input_kind = message.draft.content.get("input_kind")
+            if current_user_count > 1:
+                if command.task_kind != "assistant":
+                    raise PermanentInferenceError(
+                        "Only Assistant tasks may carry same-Turn steer rows",
+                        category=InferenceErrorCategory.INVALID_REQUEST,
+                    )
+                if input_kind != "steer":
+                    raise PermanentInferenceError(
+                        "Additional current-Turn user rows must be marked as steer",
+                        category=InferenceErrorCategory.INVALID_REQUEST,
+                    )
+                revision = message.draft.content.get("input_revision")
+                if (
+                    isinstance(revision, bool)
+                    or not isinstance(revision, int)
+                    or revision != expected_steer_revision
+                ):
+                    raise PermanentInferenceError(
+                        "Current Turn steer revisions are not contiguous",
+                        category=InferenceErrorCategory.INVALID_REQUEST,
+                    )
+                expected_steer_revision += 1
+                if (
+                    message.draft.content.get("exclude_from_assistant") is True
+                    or WORKSPACE_ATTACHMENT_FIELD in message.draft.content
+                ):
+                    raise PermanentInferenceError(
+                        "A steer cannot carry history-isolation or attachment markers",
+                        category=InferenceErrorCategory.INVALID_REQUEST,
+                    )
+                continue
+            if input_kind == "steer":
+                raise PermanentInferenceError(
+                    "Current Turn must begin with its initial user input",
+                    category=InferenceErrorCategory.INVALID_REQUEST,
+                )
             excluded = message.draft.content.get("exclude_from_assistant") is True
             if (command.task_kind == "translation") != excluded:
                 raise PermanentInferenceError(
@@ -692,9 +907,9 @@ class DurableAssistantInferenceAdapter:
                     "Assistant command without an upload cannot project an attachment marker",
                     category=InferenceErrorCategory.INVALID_REQUEST,
                 )
-        if current_user_count != 1:
+        if current_user_count != input_revision + 1:
             raise PermanentInferenceError(
-                "Durable Assistant history requires exactly one current Turn user message",
+                "Durable Assistant history does not match its fenced input revision",
                 category=InferenceErrorCategory.INVALID_REQUEST,
             )
 
@@ -1015,7 +1230,7 @@ def _anchor_user_text(projection: ContextWindowReady) -> str:
 
     @param projection 已验证的 Context Window / Validated Context Window projection.
     @return 当前 Turn 原始用户文本 / Raw user text for the current Turn.
-    @raise PermanentInferenceError anchor 没有唯一可嵌入文本 / The anchor lacks one embeddable text.
+    @raise PermanentInferenceError anchor 没有可嵌入文本 / The anchor lacks embeddable text.
     """
 
     values = [
@@ -1025,12 +1240,12 @@ def _anchor_user_text(projection: ContextWindowReady) -> str:
         and isinstance((text := message.draft.content.get("text")), str)
         and text.strip()
     ]
-    if len(values) != 1:
+    if not values:
         raise PermanentInferenceError(
-            "Durable Assistant anchor requires one raw user query",
+            "Durable Assistant anchor requires a raw user query",
             category=InferenceErrorCategory.INVALID_REQUEST,
         )
-    return values[0]
+    return values[-1]
 
 
 def _profile_from_command(

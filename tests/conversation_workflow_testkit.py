@@ -13,6 +13,7 @@ from fogmoe_bot.domain.conversation.identity import (
     MessageSequence,
     OutboundMessageId,
     TurnId,
+    TurnRevision,
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inference import (
@@ -288,11 +289,16 @@ def _activity(
     *,
     status: InferenceActivityStatus = InferenceActivityStatus.PROCESSING,
     completion_token: LeaseToken | None = None,
+    input_revision: int = 0,
+    retry_budget_used: int = 0,
 ) -> InferenceActivity:
     """@brief 构造推理活动快照 / Build an inference-activity snapshot.
 
     @param status 活动状态 / Activity status.
     @param completion_token 可选完成 fencing 回执 / Optional completion fencing receipt.
+    @param input_revision 用户输入 revision / User-input revision.
+    @param retry_budget_used 已持久化的普通重试预算用量 /
+        Persisted ordinary retry-budget usage.
     @return 活动快照 / Activity snapshot.
     """
 
@@ -301,6 +307,7 @@ def _activity(
         if status
         in {
             InferenceActivityStatus.PENDING,
+            InferenceActivityStatus.STEER_PENDING,
             InferenceActivityStatus.RETRY,
         }
         else None
@@ -312,8 +319,10 @@ def _activity(
         attempt_count=1,
         next_attempt_at=next_attempt_at,
         updated_at=NOW,
+        retry_budget_used=retry_budget_used,
         completed_at=NOW if status is InferenceActivityStatus.COMPLETED else None,
         completion_token=completion_token,
+        input_revision=TurnRevision(input_revision),
     )
 
 

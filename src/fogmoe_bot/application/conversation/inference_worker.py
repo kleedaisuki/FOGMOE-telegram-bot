@@ -18,8 +18,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, cast
 
+from fogmoe_bot.application.assistant.streaming import AssistantStreamSession
+from fogmoe_bot.domain.assistant.messages import text_message
 from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.application.runtime import (
     AdaptivePollingPolicy,
@@ -34,17 +36,24 @@ from fogmoe_bot.domain.conversation.identity import (
     DeliveryStreamId,
     OutboundMessageId,
 )
-from fogmoe_bot.domain.conversation.inference import InferenceActivityClaim
+from fogmoe_bot.domain.conversation.inference import (
+    InferenceActivityClaim,
+    InferenceGenerationFence,
+)
 from fogmoe_bot.domain.conversation.message import (
     MessageDraft,
     MessageRole,
 )
 from fogmoe_bot.domain.conversation.outbox import (
+    SEND_TELEGRAM_MESSAGE,
     OutboundDraft,
     OutboundKind,
 )
-from fogmoe_bot.domain.conversation.payloads import JsonObject
-from fogmoe_bot.domain.conversation.workflow_results import InferenceCompletionResult
+from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
+from fogmoe_bot.domain.conversation.workflow_results import (
+    InferenceCompletionResult,
+    InferenceFailureDeliveryResult,
+)
 from fogmoe_bot.domain.observability.conventions import EventName, MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
 from fogmoe_bot.domain.temporal import ensure_utc
@@ -98,6 +107,7 @@ class InferencePersistence(Protocol):
         failed_at: datetime,
         retry_at: datetime,
         error: str,
+        retry_budget_used: int,
     ) -> None:
         """@brief 原子安排活动与 Turn 重试 / Atomically schedule activity and Turn retry.
 
@@ -105,6 +115,8 @@ class InferencePersistence(Protocol):
         @param failed_at 失败时间 / Failure time.
         @param retry_at 下次领取时间 / Next claim time.
         @param error 错误摘要 / Error summary.
+        @param retry_budget_used 本次决定后已使用的普通失败预算 /
+            Ordinary failure budget used after this decision.
         @return None / None.
         """
 
@@ -114,15 +126,23 @@ class InferencePersistence(Protocol):
         self,
         claim: InferenceActivityClaim,
         *,
+        assistant_message: MessageDraft,
+        outbounds: Sequence[OutboundDraft],
         failed_at: datetime,
         error: str,
-    ) -> None:
-        """@brief 原子终结活动、Turn 与未决当前附件 / Atomically fail activity, Turn, and a pending current attachment.
+        retry_budget_used: int,
+    ) -> InferenceFailureDeliveryResult:
+        """@brief 原子终结活动并持久化安全失败上下文/outbox / Atomically fail activity and persist safe failure context/outbox.
 
         @param claim 当前 claim / Current claim.
+        @param assistant_message 不含内部诊断的 canonical 失败消息 /
+            Canonical failure message without internal diagnostics.
+        @param outbounds 安全失败反馈出站 / Safe failure-feedback outbounds.
         @param failed_at 最终失败时间 / Final-failure time.
         @param error 错误摘要 / Error summary.
-        @return None / None.
+        @param retry_budget_used 本次决定后已使用的普通失败预算 /
+            Ordinary failure budget used after this decision.
+        @return 原子失败反馈回执 / Atomic failure-feedback receipt.
         @note 若该 durable request 含当前附件，持久化实现必须在同一事务内仅将其严格
             ``pending`` marker 终结为 ``unavailable``。已有 receipt 的 ``imported`` 行必须
             保持不变；可重试失败绝不能调用此方法。/ When the durable request carries a current
@@ -192,6 +212,214 @@ class InferenceResult:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class _FailureDeliveryTarget:
+    """@brief 从 durable request 投影出的最小失败投递目标 / Minimal failure-delivery target projected from a durable request.
+
+    @param delivery_stream_id 外部有序投递流 / External ordered-delivery stream.
+    @param chat_id Telegram chat ID 或频道 username / Telegram chat ID or channel username.
+    @param task_kind 进入 canonical 历史的任务类别 / Task kind stored in canonical history.
+    @param reply_to_message_id 可选回复目标 / Optional reply target.
+    @param message_thread_id 可选 Topic ID / Optional topic identifier.
+    @param disable_notification 是否静默投递 / Whether delivery is silent.
+    @param protect_content 是否保护消息 / Whether content is protected.
+    @param disable_web_page_preview 是否禁用链接预览 / Whether link previews are disabled.
+    """
+
+    delivery_stream_id: DeliveryStreamId
+    chat_id: int | str
+    task_kind: str
+    reply_to_message_id: int | None
+    message_thread_id: int | None
+    disable_notification: bool
+    protect_content: bool
+    disable_web_page_preview: bool
+
+    @classmethod
+    def from_request(cls, request: JsonObject) -> "_FailureDeliveryTarget":
+        """@brief 对失败投递所需字段做 fail-closed 解析 / Fail-closed parse of fields required for failure delivery.
+
+        @param request acceptance 持久化的 durable request / Durable request persisted by acceptance.
+        @return 已验证的最小投递目标 / Validated minimal delivery target.
+        @raise ValueError durable request 无法安全定位用户时抛出 /
+            Raised when the durable request cannot safely locate the user.
+        """
+
+        stream = request.get("delivery_stream_id")
+        if not isinstance(stream, str) or not stream.strip():
+            raise ValueError("durable inference request has no delivery_stream_id")
+        raw_chat_id = request.get("chat_id")
+        if isinstance(raw_chat_id, bool) or not isinstance(raw_chat_id, int | str):
+            raise ValueError("durable inference request has an invalid chat_id")
+        chat_id: int | str
+        if isinstance(raw_chat_id, int):
+            if raw_chat_id == 0:
+                raise ValueError("durable inference request chat_id cannot be zero")
+            chat_id = raw_chat_id
+        else:
+            chat_id = raw_chat_id.strip()
+            if not chat_id:
+                raise ValueError("durable inference request chat_id cannot be blank")
+        task_kind = request.get("task_kind", "assistant")
+        if task_kind not in {"assistant", "translation"}:
+            raise ValueError("durable inference request has an invalid task_kind")
+        return cls(
+            delivery_stream_id=DeliveryStreamId(stream),
+            chat_id=chat_id,
+            task_kind=task_kind,
+            reply_to_message_id=_optional_positive_int(
+                request,
+                "reply_to_message_id",
+            ),
+            message_thread_id=_optional_positive_int(
+                request,
+                "message_thread_id",
+            ),
+            disable_notification=_boolean_request_field(
+                request,
+                "disable_notification",
+                default=False,
+            ),
+            protect_content=_boolean_request_field(
+                request,
+                "protect_content",
+                default=False,
+            ),
+            disable_web_page_preview=_boolean_request_field(
+                request,
+                "disable_web_page_preview",
+                default=True,
+            ),
+        )
+
+
+def _optional_positive_int(request: JsonObject, field_name: str) -> int | None:
+    """@brief 读取可选正整数 request 字段 / Read an optional positive-integer request field.
+
+    @param request durable request / Durable request.
+    @param field_name 字段名 / Field name.
+    @return 正整数或 None / Positive integer or None.
+    @raise ValueError 字段类型或范围非法时抛出 / Raised for an invalid type or range.
+    """
+
+    value = request.get(field_name)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"durable inference request has an invalid {field_name}")
+    return value
+
+
+def _boolean_request_field(
+    request: JsonObject,
+    field_name: str,
+    *,
+    default: bool,
+) -> bool:
+    """@brief 读取严格布尔 request 字段 / Read a strict boolean request field.
+
+    @param request durable request / Durable request.
+    @param field_name 字段名 / Field name.
+    @param default 字段缺省值 / Default for an omitted field.
+    @return 已验证布尔值 / Validated boolean.
+    @raise ValueError 字段不是布尔值时抛出 / Raised when the field is not boolean.
+    """
+
+    value = request.get(field_name, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"durable inference request has an invalid {field_name}")
+    return value
+
+
+def _safe_failure_code(error: Exception) -> str:
+    """@brief 将内部异常降格为可公开稳定错误码 / Reduce an internal exception to a safe stable public code.
+
+    @param error 推理异常 / Inference exception.
+    @return 不含内部诊断的错误码 / Error code containing no internal diagnostics.
+    """
+
+    return (
+        error.category.value
+        if isinstance(error, InferenceError)
+        else InferenceErrorCategory.INTERNAL.value
+    )
+
+
+def _build_failure_effects(
+    claim: InferenceActivityClaim,
+    *,
+    failed_at: datetime,
+    error: Exception,
+) -> tuple[MessageDraft, tuple[OutboundDraft, ...]]:
+    """@brief 构造确定性、安全且可进入后续上下文的失败副作用 / Build deterministic, safe failure effects that enter later context.
+
+    @param claim 当前 processing claim / Current processing claim.
+    @param failed_at 最终失败时刻 / Final-failure instant.
+    @param error 原始内部异常；只用于稳定分类 / Original internal error, used only for stable classification.
+    @return canonical Assistant 消息与单条 Telegram outbox /
+        Canonical Assistant message and one Telegram outbox.
+    @note 原始异常文本、provider 响应、路径和 token 永远不会进入用户可见载荷或模型历史。/
+        Raw exception text, provider responses, paths, and tokens never enter the user-visible
+        payload or model history.
+    """
+
+    activity = claim.activity
+    target = _FailureDeliveryTarget.from_request(activity.request)
+    code = _safe_failure_code(error)
+    text = f"这次处理没有完成（错误码：{code}）。你可以继续发送补充信息，或稍后重试。"
+    history_message = text_message(MessageRole.ASSISTANT, text)
+    assistant_content: JsonObject = {
+        "schema_version": 2,
+        "history_format": "canonical-v2",
+        "task_kind": target.task_kind,
+        "text": text,
+        "history_messages": cast(list[JsonValue], [history_message.to_json()]),
+        "runtime_events": [],
+        "failure": cast(JsonValue, {"code": code}),
+    }
+    if target.task_kind == "translation":
+        assistant_content["exclude_from_assistant"] = True
+    assistant_message = MessageDraft(
+        message_id=ConversationMessageId.for_turn(
+            activity.turn_id,
+            "assistant.failure",
+        ),
+        conversation_id=activity.conversation_id,
+        turn_id=activity.turn_id,
+        source_update_id=None,
+        role=MessageRole.ASSISTANT,
+        content=assistant_content,
+        idempotency_key=f"turn:{activity.turn_id}:assistant:failure",
+        created_at=failed_at,
+    )
+    outbound_payload: JsonObject = {
+        "chat_id": cast(JsonValue, target.chat_id),
+        "text": text,
+        "disable_notification": target.disable_notification,
+        "protect_content": target.protect_content,
+        "disable_web_page_preview": target.disable_web_page_preview,
+    }
+    if target.reply_to_message_id is not None:
+        outbound_payload["reply_to_message_id"] = target.reply_to_message_id
+    if target.message_thread_id is not None:
+        outbound_payload["message_thread_id"] = target.message_thread_id
+    outbound = OutboundDraft(
+        message_id=OutboundMessageId.for_turn(
+            activity.turn_id,
+            "failure.outbound.0",
+        ),
+        conversation_id=activity.conversation_id,
+        turn_id=activity.turn_id,
+        delivery_stream_id=target.delivery_stream_id,
+        kind=SEND_TELEGRAM_MESSAGE,
+        payload=outbound_payload,
+        idempotency_key=f"turn:{activity.turn_id}:failure:outbound:0",
+        created_at=failed_at,
+        trace_context=activity.draft.trace_context,
+    )
+    return assistant_message, (outbound,)
+
+
 class InferencePort(Protocol):
     """@brief 单次 provider-neutral 推理端口 / Port for one provider-neutral inference attempt."""
 
@@ -200,12 +428,18 @@ class InferencePort(Protocol):
         request: JsonObject,
         *,
         execution_deadline_monotonic: float | None = None,
+        generation_fence: InferenceGenerationFence | None = None,
+        stream: AssistantStreamSession | None = None,
     ) -> InferenceResult:
         """@brief 执行一次外部推理尝试 / Perform one external inference attempt.
 
         @param request durable provider-neutral 请求 / Durable provider-neutral request.
         @param execution_deadline_monotonic worker 建立的 attempt 单调截止点；直接调用时可为 None /
             Attempt monotonic deadline established by the worker; may be None for direct calls.
+        @param generation_fence processing claim 的 attempt/revision/token 身份；直接纯函数测试可为 None /
+            Attempt/revision/token identity of the processing claim; may be None for direct pure tests.
+        @param stream 由 durable worker 拥有终态的易失流会话 /
+            Ephemeral stream session whose terminal state is owned by the durable worker.
         @return 类型化推理结果 / Typed inference result.
         @note 实现不得吞掉 CancelledError，也不得自行写 conversation 表。/
         Implementations must not swallow CancelledError or write conversation tables themselves.
@@ -213,6 +447,30 @@ class InferencePort(Protocol):
             持久化 request 的一部分。/ The deadline is used only for budget admission before
             an irreversible external effect is sent; it must never become part of the persisted
             request.
+        """
+
+        ...
+
+
+class InferenceStreamStarter(Protocol):
+    """@brief 在慢依赖前建立易失推理流 / Start an ephemeral inference stream before slow dependencies."""
+
+    async def start_stream(
+        self,
+        request: JsonObject,
+        *,
+        generation_fence: InferenceGenerationFence | None = None,
+    ) -> AssistantStreamSession | None:
+        """@brief 为当前 durable generation 建立流会话 / Start a stream session for the current durable generation.
+
+        @param request durable provider-neutral 请求 / Durable provider-neutral request.
+        @param generation_fence 当前 processing generation 身份 / Current processing-generation identity.
+        @return 已投影首帧的会话；未配置时为 None /
+            Session whose first frame has been projected, or None when streaming is disabled.
+        @note 本端口只建立会话；COMPLETED、FAILED、SUSPENDED 必须由 worker 在对应
+            repository 事务成功后决定。/ This port only starts a session. COMPLETED, FAILED,
+            and SUSPENDED are decided by the worker after the corresponding repository
+            transaction succeeds.
         """
 
         ...
@@ -398,19 +656,22 @@ class FullJitterInferenceRetryPolicy:
     def decide(
         self,
         *,
-        attempt_count: int,
+        retry_budget_used: int,
         failed_at: datetime,
         error: Exception,
     ) -> InferenceFailureDecision:
         """@brief 决定重试时间或永久失败 / Decide a retry time or final failure.
 
-        @param attempt_count Repository 已记录领取次数 / Claim count recorded by the repository.
+        @param retry_budget_used 包含当前普通失败、排除 dependency wait 的 durable 预算计数 /
+            Durable budget count including the current ordinary failure and excluding dependency waits.
         @param failed_at 本次失败时间 / Failure time.
         @param error 推理异常 / Inference exception.
         @return 重试或永久失败决定 / Retry or final-failure decision.
         """
 
         failure_time = ensure_utc(failed_at)
+        if retry_budget_used < 0:
+            raise ValueError("retry_budget_used cannot be negative")
         if isinstance(error, PermanentInferenceError | ValueError | TypeError):
             return FailInferenceFinal()
         if isinstance(error, InferenceDependencyPending):
@@ -427,7 +688,7 @@ class FullJitterInferenceRetryPolicy:
                 + retry_after
                 + timedelta(seconds=self._sample(0.0, jitter_cap))
             )
-        if attempt_count >= self.max_attempts:
+        if retry_budget_used >= self.max_attempts:
             return FailInferenceFinal()
         if isinstance(error, RetryableInferenceError) and error.retry_after is not None:
             provider_seconds = error.retry_after.total_seconds()
@@ -440,7 +701,7 @@ class FullJitterInferenceRetryPolicy:
                 + error.retry_after
                 + timedelta(seconds=self._sample(0.0, jitter_cap))
             )
-        exponent = max(0, attempt_count - 1)
+        exponent = max(0, retry_budget_used - 1)
         cap_seconds = min(
             self.max_delay.total_seconds(),
             self.initial_delay.total_seconds() * (2**exponent),
@@ -529,6 +790,7 @@ class InferenceWorker:
         *,
         repository: InferencePersistence,
         inference: InferencePort,
+        streaming: InferenceStreamStarter | None = None,
         worker_count: int,
         polling_policy: AdaptivePollingPolicy,
         runtime_limits: InferenceRuntimeLimits,
@@ -540,6 +802,7 @@ class InferenceWorker:
 
         @param repository 活动持久化端口 / Activity persistence port.
         @param inference 外部推理端口 / External inference port.
+        @param streaming 可选 generation 流启动端口 / Optional generation-stream starter.
         @param worker_count 已领取未终结活动上限 / Maximum claimed-but-unfinalized activities.
         @param polling_policy 自适应空闲轮询策略 / Adaptive idle-polling policy.
         @param runtime_limits provider、attempt 与 lease 的统一预算 / Shared provider, attempt, and lease budgets.
@@ -554,6 +817,7 @@ class InferenceWorker:
             raise ValueError("worker_count must be at least one")
         self._repository = repository
         self._inference = inference
+        self._streaming = streaming
         self._worker_count = worker_count
         self._polling_policy = polling_policy
         self._lease_for = runtime_limits.lease_for
@@ -601,6 +865,8 @@ class InferenceWorker:
         """
 
         activity = claim.activity
+        stream: AssistantStreamSession | None = None
+        """@brief 本次 claim 的易失投影会话 / Ephemeral projection session for this claim."""
         with self._telemetry.span(
             "inference.attempt",
             kind=SpanKind.CONSUMER,
@@ -617,10 +883,35 @@ class InferenceWorker:
                     loop.time() + self._attempt_timeout.total_seconds()
                 )
                 async with asyncio.timeout_at(execution_deadline_monotonic):
-                    result = await self._inference.infer(
-                        dict(activity.request),
-                        execution_deadline_monotonic=execution_deadline_monotonic,
-                    )
+                    request = dict(activity.request)
+                    if self._streaming is not None:
+                        stream = await self._streaming.start_stream(
+                            request,
+                            generation_fence=claim.generation_fence,
+                        )
+                    if stream is None:
+                        result = await self._inference.infer(
+                            request,
+                            execution_deadline_monotonic=execution_deadline_monotonic,
+                            generation_fence=claim.generation_fence,
+                        )
+                    else:
+                        result = await self._inference.infer(
+                            request,
+                            execution_deadline_monotonic=execution_deadline_monotonic,
+                            generation_fence=claim.generation_fence,
+                            stream=stream,
+                        )
+            except asyncio.CancelledError:
+                await self._suspend_stream(stream)
+                raise
+            except StaleClaimError:
+                logger.info(
+                    "Inference generation was superseded during execution: activity_id=%s",
+                    activity.activity_id,
+                )
+                await self._suspend_stream(stream)
+                return
             except TimeoutError:
                 error = InferenceAttemptTimeout(
                     f"inference attempt exceeded {self._attempt_timeout.total_seconds():g}s"
@@ -631,7 +922,7 @@ class InferenceWorker:
                     MetricName.INFERENCE_OUTCOMES,
                     attributes={"outcome": Outcome.TIMEOUT},
                 )
-                await self._finalize_failure(claim, error)
+                await self._finalize_failure(claim, error, stream)
                 return
             except Exception as error:
                 span.set_status(SpanStatus.ERROR, str(error))
@@ -640,7 +931,7 @@ class InferenceWorker:
                     MetricName.INFERENCE_OUTCOMES,
                     attributes={"outcome": Outcome.FAILURE},
                 )
-                await self._finalize_failure(claim, error)
+                await self._finalize_failure(claim, error, stream)
                 return
 
             completed_at = self._clock.now()
@@ -674,12 +965,18 @@ class InferenceWorker:
                 )
                 for ordinal, intent in enumerate(result.outbounds)
             )
-            await self._repository.complete_inference_activity(
-                claim,
-                assistant_message=assistant_message,
-                outbounds=outbounds,
-                completed_at=completed_at,
-            )
+            try:
+                await self._repository.complete_inference_activity(
+                    claim,
+                    assistant_message=assistant_message,
+                    outbounds=outbounds,
+                    completed_at=completed_at,
+                )
+            except BaseException:
+                await self._suspend_stream(stream)
+                raise
+            if stream is not None:
+                await stream.complete(emitted_at=self._clock.now())
             self._telemetry.counter(
                 MetricName.INFERENCE_OUTCOMES,
                 attributes={"outcome": Outcome.SUCCESS},
@@ -803,42 +1100,83 @@ class InferenceWorker:
         self,
         claim: InferenceActivityClaim,
         error: Exception,
+        stream: AssistantStreamSession | None,
     ) -> None:
-        """@brief 按错误分类与预算终结失败 / Finalize a failure by taxonomy and budget.
+        """@brief 先提交 durable 失败决定，再投影对应流终态 / Commit the durable failure decision before projecting its stream terminal.
 
         @param claim 失败 claim / Failed claim.
         @param error 推理异常 / Inference exception.
+        @param stream 可选易失流会话 / Optional ephemeral stream session.
         @return None / None.
+        @note repository 不可用时只能 SUSPEND；绝不能向用户预告尚未提交的最终失败。/
+            A repository failure may only SUSPEND the preview; it must never announce a final
+            failure that was not durably committed.
         """
 
-        failed_at = self._clock.now()
-        decision = self._retry_policy.decide(
-            attempt_count=claim.activity.attempt_count,
-            failed_at=failed_at,
-            error=error,
-        )
-        error_text = self._error_text(error)
-        if isinstance(decision, RetryInferenceAt):
-            await self._repository.retry_inference_activity(
+        try:
+            failed_at = self._clock.now()
+            retry_budget_used = claim.activity.retry_budget_used + (
+                0 if isinstance(error, InferenceDependencyPending) else 1
+            )
+            """@brief dependency gate 不消耗普通失败预算 / Dependency gates do not consume the ordinary failure budget."""
+            decision = self._retry_policy.decide(
+                retry_budget_used=retry_budget_used,
+                failed_at=failed_at,
+                error=error,
+            )
+            error_text = self._error_text(error)
+            if isinstance(decision, RetryInferenceAt):
+                await self._repository.retry_inference_activity(
+                    claim,
+                    failed_at=failed_at,
+                    retry_at=decision.at,
+                    error=error_text,
+                    retry_budget_used=retry_budget_used,
+                )
+                self._telemetry.counter(
+                    MetricName.INFERENCE_OUTCOMES,
+                    attributes={"outcome": Outcome.RETRY},
+                )
+                await self._suspend_stream(stream)
+                return
+            assistant_message, outbounds = _build_failure_effects(
                 claim,
                 failed_at=failed_at,
-                retry_at=decision.at,
+                error=error,
+            )
+            await self._repository.fail_inference_activity(
+                claim,
+                assistant_message=assistant_message,
+                outbounds=outbounds,
+                failed_at=failed_at,
                 error=error_text,
+                retry_budget_used=retry_budget_used,
             )
             self._telemetry.counter(
                 MetricName.INFERENCE_OUTCOMES,
-                attributes={"outcome": Outcome.RETRY},
+                attributes={"outcome": Outcome.DROPPED},
             )
-            return
-        await self._repository.fail_inference_activity(
-            claim,
-            failed_at=failed_at,
-            error=error_text,
-        )
-        self._telemetry.counter(
-            MetricName.INFERENCE_OUTCOMES,
-            attributes={"outcome": Outcome.DROPPED},
-        )
+            if stream is not None:
+                await stream.fail(
+                    _safe_failure_code(error),
+                    emitted_at=self._clock.now(),
+                )
+        except BaseException:
+            await self._suspend_stream(stream)
+            raise
+
+    async def _suspend_stream(
+        self,
+        stream: AssistantStreamSession | None,
+    ) -> None:
+        """@brief 最佳努力停止未提交终态的 typing/draft / Best-effort stop typing/drafts without claiming a durable terminal.
+
+        @param stream 可选易失流会话 / Optional ephemeral stream session.
+        @return None / None.
+        """
+
+        if stream is not None:
+            await stream.suspend(emitted_at=self._clock.now())
 
     @staticmethod
     def _error_text(error: Exception) -> str:
@@ -903,6 +1241,7 @@ __all__ = [
     "InferencePort",
     "InferenceResult",
     "InferenceRuntimeLimits",
+    "InferenceStreamStarter",
     "InferenceWorker",
     "PermanentInferenceError",
     "RetryInferenceAt",

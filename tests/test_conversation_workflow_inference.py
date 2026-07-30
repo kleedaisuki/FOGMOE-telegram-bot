@@ -48,6 +48,13 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.inference import (
 )
 
 
+def test_processing_activity_requires_an_unfinalized_claim_ordinal() -> None:
+    """@brief processing 状态不能把当前 claim 提前计入失败预算 / Processing cannot pre-consume its current claim in the failure budget."""
+
+    with pytest.raises(ValueError, match="unfinalized claim"):
+        _activity(retry_budget_used=1)
+
+
 def test_inference_claim_preserves_conversation_causality_across_workers(
     monkeypatch: Any,
 ) -> None:
@@ -88,7 +95,10 @@ def test_inference_claim_preserves_conversation_causality_across_workers(
         assert claims == ()
         sql = str(captured["sql"])
         assert "earlier.conversation_id = candidate.conversation_id" in sql
-        assert "earlier.status IN ('pending', 'processing', 'retry')" in sql
+        assert (
+            "earlier.status IN ('pending', 'processing', 'steer_pending', 'retry')"
+            in sql
+        )
         assert "(earlier.created_at, earlier.activity_id)" in sql
         assert "< (candidate.created_at, candidate.activity_id)" in sql
         assert captured["connection"] is connection
@@ -112,7 +122,7 @@ def test_expired_inference_recovery_returns_a_complete_activity_projection(
         *,
         connection: object,
     ) -> list[tuple[object, ...]]:
-        """@brief 返回恢复后的 14 列 activity 行 / Return the recovered 14-column activity row.
+        """@brief 返回恢复后的 16 列 activity 行 / Return the recovered 16-column activity row.
 
         @param sql 执行的 SQL / Executed SQL.
         @param params SQL 参数 / SQL parameters.
@@ -133,6 +143,7 @@ def test_expired_inference_recovery_returns_a_complete_activity_projection(
                 "retry",
                 2,
                 activity.attempt_count,
+                activity.retry_budget_used,
                 retry_at,
                 activity.draft.created_at,
                 retry_at,
@@ -140,6 +151,7 @@ def test_expired_inference_recovery_returns_a_complete_activity_projection(
                 None,
                 "inference worker lease expired before finalization",
                 activity.draft.trace_context.to_traceparent(),
+                0,
             )
         ]
 
@@ -195,9 +207,279 @@ def test_expired_inference_recovery_returns_a_complete_activity_projection(
     recovered = asyncio.run(repository.recover_expired_inference_leases(now=NOW))
 
     assert recovered == 1
-    assert "activity.last_error, activity.traceparent" in str(captured["sql"])
+    assert "activity.retry_budget_used" in str(captured["sql"])
+    assert "activity.last_error" in str(captured["sql"])
     assert getattr(captured["turn"], "state").value == "inference_retry_wait"
     assert captured["version"] == 3
+
+
+@pytest.mark.parametrize("retry_budget_used", (0, 1))
+def test_inference_retry_persists_absolute_retry_budget_under_claim_fence(
+    monkeypatch: Any,
+    retry_budget_used: int,
+) -> None:
+    """@brief dependency 保持预算、普通失败只增加一次且受 claim fence 保护 / A dependency preserves budget while an ordinary failure increments it once under the claim fence.
+
+    @param monkeypatch pytest 替换工具 / Pytest replacement helper.
+    @param retry_budget_used 本次 retry 后的绝对预算目标 / Absolute budget target after this retry.
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 捕获真实 repository retry UPDATE / Capture the real repository retry UPDATE.
+
+        @return None / None.
+        """
+
+        connection = object()
+        repository = PostgresInferenceRepository()
+        token = LeaseToken.new()
+        claim = InferenceActivityClaim(
+            activity=_activity(retry_budget_used=0),
+            token=token,
+            lease_expires_at=NOW + timedelta(minutes=1),
+        )
+        captured: dict[str, object] = {}
+
+        async def fake_load_activity(
+            activity_id: InferenceActivityId,
+            *,
+            connection: object,
+        ) -> tuple[InferenceActivity, LeaseToken]:
+            """@brief 返回当前 processing claim / Return the current processing claim."""
+
+            assert activity_id == claim.activity.activity_id
+            return claim.activity, token
+
+        async def fake_load_turn(
+            turn_id: TurnId,
+            *,
+            connection: object,
+        ) -> object:
+            """@brief 返回 waiting-inference Turn / Return a waiting-inference Turn."""
+
+            assert turn_id == claim.activity.turn_id
+            return turn_uow._map_turn(
+                _turn_row(
+                    state="waiting_inference",
+                    version=2,
+                    inference_attempts=1,
+                )
+            )
+
+        async def fake_execute(
+            sql: str,
+            params: tuple[object, ...],
+            *,
+            connection: object,
+        ) -> int:
+            """@brief 捕获 fenced retry UPDATE / Capture the fenced retry UPDATE."""
+
+            captured["sql"] = sql
+            captured["params"] = params
+            return 1
+
+        async def fake_persist(
+            turn: object,
+            *,
+            expected_version: int,
+            connection: object,
+        ) -> None:
+            """@brief 记录 retry Turn 已同步 / Record synchronization of the retry Turn."""
+
+            captured["turn"] = turn
+            captured["turn_version"] = expected_version
+
+        monkeypatch.setattr(
+            db,
+            "transaction",
+            lambda: _TransactionContext(connection),
+        )
+        monkeypatch.setattr(
+            repository,
+            "_load_inference_activity_for_update",
+            fake_load_activity,
+        )
+        monkeypatch.setattr(
+            inference_repository,
+            "_load_turn_for_mutation",
+            fake_load_turn,
+        )
+        monkeypatch.setattr(db, "execute", fake_execute)
+        monkeypatch.setattr(inference_repository, "_persist_turn", fake_persist)
+
+        await repository.retry_inference_activity(
+            claim,
+            failed_at=NOW,
+            retry_at=NOW + timedelta(seconds=5),
+            retry_budget_used=retry_budget_used,
+            error="typed retry",
+        )
+
+        sql = str(captured["sql"])
+        params = captured["params"]
+        assert isinstance(params, tuple)
+        assert "retry_budget_used = %s" in sql
+        assert "AND retry_budget_used = %s" in sql
+        assert params[3] == retry_budget_used
+        assert params[-1] == 0
+        assert getattr(captured["turn"], "state").value == "inference_retry_wait"
+
+    asyncio.run(scenario())
+
+
+def test_inference_final_failure_persists_retry_budget_under_claim_fence(
+    monkeypatch: Any,
+) -> None:
+    """@brief 最终失败原子写入绝对预算并校验旧预算 fence / Final failure atomically writes the absolute budget and fences the prior budget."""
+
+    async def scenario() -> None:
+        """@brief 捕获真实 repository final-failure UPDATE / Capture the real repository final-failure UPDATE."""
+
+        connection = object()
+        repository = PostgresInferenceRepository()
+        token = LeaseToken.new()
+        claim = InferenceActivityClaim(
+            activity=_activity(retry_budget_used=0),
+            token=token,
+            lease_expires_at=NOW + timedelta(minutes=1),
+        )
+        assistant_message = _message_draft(role=MessageRole.ASSISTANT)
+        outbound = _outbound_draft()
+        captured: dict[str, object] = {}
+
+        async def fake_load_activity(
+            activity_id: InferenceActivityId,
+            *,
+            connection: object,
+        ) -> tuple[InferenceActivity, LeaseToken]:
+            """@brief 返回当前 processing claim / Return the current processing claim."""
+
+            assert activity_id == claim.activity.activity_id
+            return claim.activity, token
+
+        async def fake_load_turn(
+            turn_id: TurnId,
+            *,
+            connection: object,
+        ) -> object:
+            """@brief 返回 waiting-inference Turn / Return a waiting-inference Turn."""
+
+            assert turn_id == claim.activity.turn_id
+            return turn_uow._map_turn(
+                _turn_row(
+                    state="waiting_inference",
+                    version=2,
+                    inference_attempts=1,
+                )
+            )
+
+        async def fake_fetch_one(
+            sql: str,
+            params: tuple[object, ...],
+            *,
+            connection: object,
+        ) -> tuple[str] | None:
+            """@brief 模拟 advisory lock 并捕获 failed UPDATE / Simulate the advisory lock and capture the failed UPDATE."""
+
+            if "pg_advisory_xact_lock" in sql:
+                return None
+            captured["sql"] = sql
+            captured["params"] = params
+            return ("failed-row",)
+
+        def fake_map_activity(row: object) -> InferenceActivity:
+            """@brief 返回含目标预算的 failed 投影 / Return a failed projection carrying the target budget."""
+
+            assert row == ("failed-row",)
+            return _activity(
+                status=InferenceActivityStatus.FAILED,
+                retry_budget_used=1,
+            )
+
+        async def fake_append(
+            message: MessageDraft,
+            *,
+            connection: object,
+        ) -> MessageAppendResult:
+            """@brief 返回已原子追加的失败消息 / Return the atomically appended failure message."""
+
+            return _message_result(message, inserted=True)
+
+        async def fake_enqueue(
+            connection: object,
+            draft: OutboundDraft,
+        ) -> OutboundEnqueueResult:
+            """@brief 返回已原子入队的失败反馈 / Return the atomically enqueued failure feedback."""
+
+            assert draft == outbound
+            return OutboundEnqueueResult(
+                message=outbox_repository._map_outbound(
+                    _outbound_row(status="pending")
+                ),
+                inserted=True,
+            )
+
+        async def fake_persist(
+            turn: object,
+            *,
+            expected_version: int,
+            connection: object,
+        ) -> None:
+            """@brief 记录最终失败 Turn 已同步 / Record synchronization of the final-failure Turn."""
+
+            captured["turn"] = turn
+            captured["turn_version"] = expected_version
+
+        monkeypatch.setattr(
+            db,
+            "transaction",
+            lambda: _TransactionContext(connection),
+        )
+        monkeypatch.setattr(
+            repository,
+            "_load_inference_activity_for_update",
+            fake_load_activity,
+        )
+        monkeypatch.setattr(
+            inference_repository,
+            "_load_turn_for_mutation",
+            fake_load_turn,
+        )
+        monkeypatch.setattr(db, "fetch_one", fake_fetch_one)
+        monkeypatch.setattr(
+            inference_repository,
+            "_map_inference_activity",
+            fake_map_activity,
+        )
+        monkeypatch.setattr(inference_repository, "_append_message", fake_append)
+        monkeypatch.setattr(
+            repository._outbox,
+            "enqueue_outbound_in_transaction",
+            fake_enqueue,
+        )
+        monkeypatch.setattr(inference_repository, "_persist_turn", fake_persist)
+
+        result = await repository.fail_inference_activity(
+            claim,
+            assistant_message=assistant_message,
+            outbounds=(outbound,),
+            failed_at=NOW,
+            retry_budget_used=1,
+            error="typed final failure",
+        )
+
+        sql = str(captured["sql"])
+        params = captured["params"]
+        assert isinstance(params, tuple)
+        assert "retry_budget_used = %s" in sql
+        assert "AND retry_budget_used = %s" in sql
+        assert params[2] == 1
+        assert params[-1] == 0
+        assert result.activity.retry_budget_used == 1
+        assert getattr(captured["turn"], "state").value == "waiting_delivery"
+
+    asyncio.run(scenario())
 
 
 def test_inference_uow_failure_exits_the_single_transaction_for_rollback(

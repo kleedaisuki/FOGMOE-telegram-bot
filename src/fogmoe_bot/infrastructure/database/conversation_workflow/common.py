@@ -17,6 +17,7 @@ from fogmoe_bot.domain.conversation.identity import (
     InferenceActivityId,
     LeaseToken,
     TurnId,
+    TurnRevision,
 )
 from fogmoe_bot.domain.conversation.inference import (
     InferenceActivity,
@@ -29,8 +30,8 @@ from fogmoe_bot.domain.temporal import ensure_utc
 
 _INFERENCE_ACTIVITY_COLUMNS = (
     "activity_id, turn_id, conversation_id, request, status, version, "
-    "attempt_count, next_attempt_at, created_at, updated_at, completed_at, "
-    "completion_token, last_error, traceparent"
+    "attempt_count, retry_budget_used, next_attempt_at, created_at, updated_at, "
+    "completed_at, completion_token, last_error, traceparent, input_revision"
 )
 """@brief acceptance 与 inference 共享的活动列 / Activity columns shared by acceptance and inference."""
 
@@ -43,28 +44,30 @@ _INFERENCE_ACTIVITY_SELECT = (
 def _map_inference_activity(row: object) -> InferenceActivity:
     """@brief 将数据库行映射为推理活动 / Map a database row to an inference activity."""
 
-    values = _row_values(row, 14)
+    values = _row_values(row, 16)
     draft = InferenceActivityDraft(
         activity_id=InferenceActivityId.parse(_uuid(values[0])),
         turn_id=TurnId.parse(_uuid(values[1])),
         conversation_id=ConversationId(_text(values[2])),
         request=_json_object(values[3]),
-        created_at=_datetime(values[8]),
-        trace_context=TraceContext.parse(_text(values[13])),
+        created_at=_datetime(values[9]),
+        trace_context=TraceContext.parse(_text(values[14])),
     )
     completion_token = (
-        LeaseToken.parse(_uuid(values[11])) if values[11] is not None else None
+        LeaseToken.parse(_uuid(values[12])) if values[12] is not None else None
     )
     return InferenceActivity(
         draft=draft,
         status=InferenceActivityStatus(_text(values[4])),
         version=_integer(values[5]),
         attempt_count=_integer(values[6]),
-        next_attempt_at=_optional_datetime(values[7]),
-        updated_at=_datetime(values[9]),
-        completed_at=_optional_datetime(values[10]),
+        retry_budget_used=_integer(values[7]),
+        next_attempt_at=_optional_datetime(values[8]),
+        updated_at=_datetime(values[10]),
+        completed_at=_optional_datetime(values[11]),
         completion_token=completion_token,
-        last_error=_optional_text(values[12]),
+        last_error=_optional_text(values[13]),
+        input_revision=TurnRevision(_integer(values[15])),
     )
 
 
