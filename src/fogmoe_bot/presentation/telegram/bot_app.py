@@ -135,6 +135,9 @@ from fogmoe_bot.infrastructure.telegram.group_authorization import (
 from fogmoe_bot.infrastructure.telegram.current_turn_upload import (
     TelegramCurrentTurnUploadSource,
 )
+from fogmoe_bot.infrastructure.telegram.assistant_streaming import (
+    TelegramAssistantStreamProjection,
+)
 from fogmoe_bot.infrastructure.telegram.monitor_notification import (
     TelegramMonitorNotificationSink,
 )
@@ -158,6 +161,7 @@ from .catalog_route import (
 )
 from .chance_handlers import ChanceTelegramCommandHandler
 from .command_cooldown_guard import TelegramCommandCooldownGuard
+from .command_menu import install_telegram_command_menu
 from .command_route import TelegramDurableCommandPrimaryRoute
 from .economy_basic_handlers import EconomyBasicTelegramCommandHandler
 from .handler_catalog import (
@@ -510,6 +514,11 @@ def _compose_services(
         lease_for=timedelta(seconds=runtime.inbox.lease_seconds),
         telemetry=observability.telemetry,
     )
+    assistant_stream_projection = TelegramAssistantStreamProjection(
+        application.bot,
+        terminal_cursor_ttl_seconds=float(runtime.inference.lease_seconds * 2),
+    )
+    """@brief Telegram typing 与私聊 draft 的易失投影 / Ephemeral Telegram typing and private-draft projection."""
     assistant = build_durable_assistant(
         settings=settings,
         resources=resources,
@@ -518,10 +527,12 @@ def _compose_services(
             bot=application.bot,
             http=settings.telegram.http,
         ),
+        assistant_stream_projection=assistant_stream_projection,
     )
     inference = InferenceWorker(
         repository=primitives.inference,
         inference=assistant.inference,
+        streaming=assistant.inference,
         worker_count=runtime.inference.worker_count,
         polling_policy=AdaptivePollingPolicy(
             runtime.inference.poll_interval_seconds,
@@ -606,6 +617,11 @@ def _compose_services(
         ServiceBinding(
             "workspace-runtime",
             assistant.runtime_process_lifecycle,
+            shutdown_phase=25,
+        ),
+        ServiceBinding(
+            "assistant-streaming",
+            assistant_stream_projection,
             shutdown_phase=25,
         ),
         ServiceBinding(
@@ -860,6 +876,7 @@ async def serve_application(
             resources=resources,
         )
         await _resolve_administrator_contact(application)
+        await install_telegram_command_menu(application.bot)
         await application.start()
         started = True
         runtime = compose_bot_runtime(

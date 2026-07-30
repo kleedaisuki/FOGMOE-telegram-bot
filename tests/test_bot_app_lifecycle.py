@@ -107,6 +107,7 @@ def test_composition_has_one_listener_and_complete_phased_runtime(
         "admin-announcements",
         "btc-monitor",
         "workspace-runtime",
+        "assistant-streaming",
         "assistant-blocking-calls",
         "llm-http-client",
         "embedding-http-client",
@@ -135,6 +136,8 @@ class _LifecycleApplication:
         """
 
         self.events = events
+        self.bot = object()
+        """@brief 生命周期测试的 Bot 哨兵 / Bot sentinel for lifecycle tests."""
 
     async def initialize(self) -> None:
         """@brief 记录初始化 / Record initialization."""
@@ -219,6 +222,11 @@ def test_serve_application_drains_runtime_before_bot_and_database(
             """@brief 跳过无 capability fake 的管理员解析 / Skip admin resolution for a capability-free fake."""
 
         monkeypatch.setattr(bot_app, "_resolve_administrator_contact", skip_contact)
+
+        async def skip_menu(bot: object) -> None:
+            """@brief 跳过无 Bot fake 的命令菜单协调 / Skip command-menu reconciliation for a Bot-less fake."""
+
+        monkeypatch.setattr(bot_app, "install_telegram_command_menu", skip_menu)
         monkeypatch.setattr(
             bot_app,
             "compose_bot_runtime",

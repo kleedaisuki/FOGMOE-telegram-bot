@@ -39,6 +39,7 @@
 *聊天相关：*
 /setmyinfo - 设置个性化提示词
 /clear - 清空上下文并开始新对话
+Bot 正在回答时，直接发送补充消息即可 steer 同一回合；系统会按新要求重新检索 WorkingMemory 并调整回答
 /resetmem - 清空个人记忆
 /resetprofile - 清除 User Profile
 /regen - 手动请求更新 User Profile
