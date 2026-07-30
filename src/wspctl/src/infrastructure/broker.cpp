@@ -3703,7 +3703,7 @@ void Broker::reap_expired_sessions() noexcept {
     }
 }
 
-Result<void> Broker::serve_forever() {
+Result<void> Broker::serve_forever(const ReadyCallback ready_callback) {
     if (listen_fd_ < 0 || operator_listen_fd_ < 0) {
         return std::unexpected(make_error(ErrorCode::internal, "Bot or operator broker listener is not bound"));
     }
@@ -3800,8 +3800,12 @@ Result<void> Broker::serve_forever() {
         }
         return std::unexpected(make_error(ErrorCode::internal, "create bounded broker worker pool"));
     }
+    /** @brief accept loop 或 readiness callback 的终止状态 / Terminal state from the accept loop or readiness callback. */
     Result<void> terminal{};
-    for (;;) {
+    if (ready_callback != nullptr) {
+        terminal = ready_callback();
+    }
+    while (terminal.has_value()) {
         reap_expired_sessions();
         std::array<pollfd, 2> listening{
             pollfd{.fd = listen_fd_, .events = POLLIN, .revents = 0},

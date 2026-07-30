@@ -20,7 +20,12 @@ RequiresMountsFor=@WSPCTL_HOST_STATE_ROOT@
 ConditionPathIsMountPoint=@WSPCTL_HOST_STATE_ROOT@
 
 [Service]
-Type=simple
+# systemctl start/restart may return only after wspctld has bound both sockets, created every
+# worker, and emitted READY=1. A socket pathname alone is not readiness: the previous generation's
+# inode may remain briefly during restart.
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=30s
 User=root
 Group=root
 UMask=0077
@@ -54,7 +59,9 @@ SystemCallArchitectures=native
 # wspctld only needs its local AF_UNIX control and fork-server sockets.  Runtime network
 # isolation is separately established in each child namespace.
 RestrictAddressFamilies=AF_UNIX
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL CAP_MKNOD
+# CAP_SETPCAP is a startup handoff capability, not a steady-state supervisor capability:
+# wsp-systemd uses it to lock securebits and shrink its own bounding set, then drops it permanently.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL CAP_MKNOD
 ReadWritePaths=@WSPCTL_HOST_WORKDIR@ /sys/fs/cgroup
 # The root-owned socket parents are intentionally prepared before wspctld starts. The Bot gets
 # only the ``bot`` child as a container view; the root-only ``operator`` child is never mounted
@@ -71,7 +78,7 @@ ExecStartPre=/usr/bin/install --directory --owner=root --group=root --mode=0700 
 # hard filesystem quota before it creates a persistent OverlayFS upperdir; otherwise it fails closed.
 # Native preflight derives exactly images/sha256/<digest>/rootfs, verifies its readonly VFS
 # mount, OCI identity, runtime contract, and local materialization seal before binding sockets.
-ExecStart=@WSPCTL_HOST_BROKER_EXECUTABLE@ --socket ${WSPCTL_SOCKET} --operator-socket ${WSPCTL_OPERATOR_SOCKET} --state-root ${WSPCTL_STATE_ROOT} --image-store ${WSPCTL_IMAGES_ROOT} --image-digest ${WSPCTL_IMAGE_DIGEST} --client-uid ${WSPCTL_CLIENT_UID} --operator-uid ${WSPCTL_OPERATOR_UID} --cgroup-root ${WSPCTL_CGROUP_ROOT} --sandbox-uid ${WSPCTL_SANDBOX_UID} --sandbox-gid ${WSPCTL_SANDBOX_GID} --memory-max ${WSPCTL_MEMORY_MAX} --memory-high ${WSPCTL_MEMORY_HIGH} --memory-swap-max ${WSPCTL_MEMORY_SWAP_MAX} --cpu-max-us ${WSPCTL_CPU_MAX_US} --cpu-period-us ${WSPCTL_CPU_PERIOD_US} --pids-max ${WSPCTL_PIDS_MAX} --io-weight ${WSPCTL_IO_WEIGHT} --idle-minutes ${WSPCTL_IDLE_MINUTES} --quota-backend ${WSPCTL_QUOTA_BACKEND} --xfs-quota-mount ${WSPCTL_XFS_QUOTA_MOUNT} --xfs-project-id-min ${WSPCTL_XFS_PROJECT_ID_MIN} --xfs-project-id-max ${WSPCTL_XFS_PROJECT_ID_MAX} --runtime-control-hard-bytes ${WSPCTL_RUNTIME_CONTROL_HARD_BYTES} --runtime-control-hard-inodes ${WSPCTL_RUNTIME_CONTROL_HARD_INODES} --runtime-workspace-hard-bytes ${WSPCTL_RUNTIME_WORKSPACE_HARD_BYTES} --runtime-workspace-hard-inodes ${WSPCTL_RUNTIME_WORKSPACE_HARD_INODES} --xfs-global-admission-bytes ${WSPCTL_XFS_GLOBAL_ADMISSION_BYTES} --xfs-global-admission-inodes ${WSPCTL_XFS_GLOBAL_ADMISSION_INODES} --xfs-system-reserve-bytes ${WSPCTL_XFS_SYSTEM_RESERVE_BYTES} --xfs-system-reserve-inodes ${WSPCTL_XFS_SYSTEM_RESERVE_INODES} @WSPCTL_INSECURE_DEVELOPMENT_ROOT_ARGUMENT@
+ExecStart=@WSPCTL_HOST_BROKER_EXECUTABLE@ --systemd-notify --socket ${WSPCTL_SOCKET} --operator-socket ${WSPCTL_OPERATOR_SOCKET} --state-root ${WSPCTL_STATE_ROOT} --image-store ${WSPCTL_IMAGES_ROOT} --image-digest ${WSPCTL_IMAGE_DIGEST} --client-uid ${WSPCTL_CLIENT_UID} --operator-uid ${WSPCTL_OPERATOR_UID} --cgroup-root ${WSPCTL_CGROUP_ROOT} --sandbox-uid ${WSPCTL_SANDBOX_UID} --sandbox-gid ${WSPCTL_SANDBOX_GID} --memory-max ${WSPCTL_MEMORY_MAX} --memory-high ${WSPCTL_MEMORY_HIGH} --memory-swap-max ${WSPCTL_MEMORY_SWAP_MAX} --cpu-max-us ${WSPCTL_CPU_MAX_US} --cpu-period-us ${WSPCTL_CPU_PERIOD_US} --pids-max ${WSPCTL_PIDS_MAX} --io-weight ${WSPCTL_IO_WEIGHT} --idle-minutes ${WSPCTL_IDLE_MINUTES} --quota-backend ${WSPCTL_QUOTA_BACKEND} --xfs-quota-mount ${WSPCTL_XFS_QUOTA_MOUNT} --xfs-project-id-min ${WSPCTL_XFS_PROJECT_ID_MIN} --xfs-project-id-max ${WSPCTL_XFS_PROJECT_ID_MAX} --runtime-control-hard-bytes ${WSPCTL_RUNTIME_CONTROL_HARD_BYTES} --runtime-control-hard-inodes ${WSPCTL_RUNTIME_CONTROL_HARD_INODES} --runtime-workspace-hard-bytes ${WSPCTL_RUNTIME_WORKSPACE_HARD_BYTES} --runtime-workspace-hard-inodes ${WSPCTL_RUNTIME_WORKSPACE_HARD_INODES} --xfs-global-admission-bytes ${WSPCTL_XFS_GLOBAL_ADMISSION_BYTES} --xfs-global-admission-inodes ${WSPCTL_XFS_GLOBAL_ADMISSION_INODES} --xfs-system-reserve-bytes ${WSPCTL_XFS_SYSTEM_RESERVE_BYTES} --xfs-system-reserve-inodes ${WSPCTL_XFS_SYSTEM_RESERVE_INODES} @WSPCTL_INSECURE_DEVELOPMENT_ROOT_ARGUMENT@
 
 [Install]
 WantedBy=multi-user.target

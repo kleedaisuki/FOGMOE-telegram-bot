@@ -937,6 +937,80 @@ private:
 };
 
 /**
+ * @brief 把 E2E broker child 收口到 production systemd capability 集 /
+ * Restrict the E2E broker child to the production systemd capability set.
+ * @return 成功时为真 / True on success.
+ * @note 该收口发生在 exec 前，防止 full-root E2E 掩盖 unit 与 runtime capability 契约不一致。
+ *       The restriction happens before exec so a full-root E2E cannot hide a mismatch between
+ *       the unit and runtime capability contracts.
+ */
+[[nodiscard]] bool install_service_equivalent_capabilities() {
+    /** @brief production service unit 授予 broker 的精确集合 / Exact set granted by the production service unit. */
+    constexpr std::array<cap_value_t, 10U> kServiceCapabilities{
+        CAP_SYS_ADMIN,
+        CAP_SYS_CHROOT,
+        CAP_SETUID,
+        CAP_SETGID,
+        CAP_SETPCAP,
+        CAP_CHOWN,
+        CAP_DAC_OVERRIDE,
+        CAP_FOWNER,
+        CAP_KILL,
+        CAP_MKNOD,
+    };
+    /** @brief 判断 capability 是否属于 production 集 / Check whether a capability belongs to the production set. */
+    const auto retained = [&](const int capability) noexcept {
+        return std::ranges::find(kServiceCapabilities, capability) != kServiceCapabilities.end();
+    };
+    /** @brief 防止异常 kernel ABI 导致无界 capability 探测 / Guard against an anomalous unbounded capability ABI. */
+    constexpr int kCapabilityProbeLimit = 1024;
+    /** @brief 是否找到运行中内核的 capability 上界 / Whether the running-kernel capability boundary was found. */
+    bool found_kernel_boundary = false;
+    for (int capability = 0; capability < kCapabilityProbeLimit; ++capability) {
+        errno = 0;
+        /** @brief capability 是否在 child bounding set 中 / Whether the capability is in the child bounding set. */
+        const int present = prctl(PR_CAPBSET_READ, capability, 0, 0, 0);
+        if (present < 0) {
+            if (errno == EINVAL) {
+                found_kernel_boundary = true;
+                break;
+            }
+            return false;
+        }
+        if (present != 0 && !retained(capability) &&
+            prctl(PR_CAPBSET_DROP, capability, 0, 0, 0) != 0) {
+            return false;
+        }
+    }
+    if (!found_kernel_boundary) {
+        return false;
+    }
+    /** @brief 待安装的 production permitted/effective sets / Production permitted/effective sets to install. */
+    cap_t capabilities = cap_init();
+    if (capabilities == nullptr) {
+        return false;
+    }
+    /** @brief permitted-set 配置结果 / Permitted-set configuration result. */
+    const int permitted = cap_set_flag(
+        capabilities,
+        CAP_PERMITTED,
+        static_cast<int>(kServiceCapabilities.size()),
+        kServiceCapabilities.data(),
+        CAP_SET);
+    /** @brief effective-set 配置结果 / Effective-set configuration result. */
+    const int effective = cap_set_flag(
+        capabilities,
+        CAP_EFFECTIVE,
+        static_cast<int>(kServiceCapabilities.size()),
+        kServiceCapabilities.data(),
+        CAP_SET);
+    /** @brief capability application 结果 / Capability application result. */
+    const int applied = permitted == 0 && effective == 0 ? cap_set_proc(capabilities) : -1;
+    cap_free(capabilities);
+    return applied == 0;
+}
+
+/**
  * @brief fork/exec 一个真实 wspctld 进程 / Fork and exec one real wspctld process.
  * @param fixture 包含实际 state/cgroup 路径的 fixture / Fixture holding actual state and cgroup paths.
  * @param launch broker executable 与 socket 描述 / Broker executable and socket description.
@@ -1000,7 +1074,8 @@ private:
         return false;
     }
     if (child == 0) {
-        if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0 || getppid() != expected_parent) {
+        if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0 || getppid() != expected_parent ||
+            !install_service_equivalent_capabilities()) {
             _exit(125);
         }
         execv(launch.executable.c_str(), argv.data());
@@ -1466,7 +1541,7 @@ private:
     if (geteuid() != 0U) {
         return unavailable(requirement, "effective UID is not root");
     }
-    for (const cap_value_t capability : {CAP_SYS_ADMIN, CAP_SYS_CHROOT, CAP_SETUID, CAP_SETGID, CAP_MKNOD}) {
+    for (const cap_value_t capability : {CAP_SYS_ADMIN, CAP_SYS_CHROOT, CAP_SETUID, CAP_SETGID, CAP_SETPCAP, CAP_MKNOD}) {
         if (!has_effective_capability(capability)) {
             return unavailable(requirement, "required broker Linux capabilities are absent");
         }

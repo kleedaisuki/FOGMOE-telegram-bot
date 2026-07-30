@@ -87,6 +87,13 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
         assert forbidden not in script
     assert "systemctl start" in script
     assert 'systemctl enable "$SERVICE_NAME"' in script
+    assert "probe_broker_execution" in script
+    assert "InvocationID" in script
+    assert '["/bin/true"]' in script
+    assert 'result.get("replayed") is not False' in script
+    assert "runtime-execute-v2-systemd-notify" in script
+    assert "BROKER_VALIDATED_INVOCATION_ID" in script
+    assert "validate_current_broker_execution" in script
     assert "WSPCTL_CLIENT_UID" in script
     assert 'OPERATOR_UID="${WSPCTL_OPERATOR_UID:-0}"' in script
     assert 'SOCKET_PATH="$WORK_ROOT/run/bot/wspctld.sock"' in script
@@ -141,8 +148,8 @@ resolve_io_weight
     assert "禁用相对 I/O 权重" in checked.stdout
 
 
-def test_broker_health_wait_covers_type_simple_socket_publication_race() -> None:
-    """@brief 健康检查必须等待 Type=simple 服务异步发布 socket / Health checks must wait for a Type=simple service to publish sockets asynchronously.
+def test_broker_health_wait_is_bounded_during_generation_rollover() -> None:
+    """@brief 健康检查必须有界等待 service generation 滚代 / Health checks must wait boundedly during service-generation rollover.
 
     @return None / None.
     """
@@ -168,6 +175,150 @@ if wait_for_broker_healthy; then
     exit 1
 fi
 [[ "$attempts" == 100 ]]
+"""
+    checked = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    assert checked.returncode == 0, checked.stderr
+
+
+def test_start_service_validates_each_new_systemd_invocation_once() -> None:
+    """@brief 每个新 systemd invocation 必须执行一次 canary，同一代不得重复 /
+    Every new systemd invocation must execute one canary without repeating it for the same generation.
+
+    @return None / None.
+    """
+
+    script = f"""
+set -euo pipefail
+source {START_SCRIPT!s}
+BROKER_RESTART_REQUIRED=false
+BROKER_VALIDATED_INVOCATION_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+CURRENT_INVOCATION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+probe_calls=0
+record_calls=0
+
+sudo() {{ :; }}
+broker_is_healthy() {{ return 0; }}
+current_broker_invocation_id() {{ printf '%s\\n' "$CURRENT_INVOCATION"; }}
+try_current_broker_invocation_id() {{ printf '%s\\n' "$CURRENT_INVOCATION"; }}
+probe_broker_execution() {{
+    [[ "$1" == "$CURRENT_INVOCATION" ]]
+    ((probe_calls += 1))
+}}
+record_applied_fingerprint() {{
+    [[ "$1" == "$CURRENT_INVOCATION" ]]
+    ((record_calls += 1))
+}}
+
+start_service
+[[ "$probe_calls" == 0 ]]
+[[ "$record_calls" == 0 ]]
+
+CURRENT_INVOCATION=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+start_service
+[[ "$probe_calls" == 1 ]]
+[[ "$record_calls" == 1 ]]
+"""
+    checked = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    assert checked.returncode == 0, checked.stderr
+
+
+def test_runtime_canary_follows_generation_change_but_not_same_generation_failure() -> None:
+    """@brief canary 仅在 InvocationID 改变时重试，同代执行失败不得漂白 /
+    Retry a canary only when InvocationID changes; never bleach a same-generation execution failure.
+
+    @return None / None.
+    """
+
+    script = f"""
+set -euo pipefail
+source {START_SCRIPT!s}
+CURRENT_INVOCATION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+probe_calls=0
+record_calls=0
+
+wait_for_broker_healthy() {{ return 0; }}
+try_current_broker_invocation_id() {{ printf '%s\\n' "$CURRENT_INVOCATION"; }}
+probe_broker_execution() {{
+    ((probe_calls += 1))
+    if [[ "$probe_calls" == 1 ]]; then
+        CURRENT_INVOCATION=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    fi
+    return 0
+}}
+record_applied_fingerprint() {{
+    [[ "$1" == bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]]
+    ((record_calls += 1))
+}}
+
+validate_current_broker_execution
+[[ "$probe_calls" == 2 ]]
+[[ "$record_calls" == 1 ]]
+[[ "$BROKER_VALIDATED_INVOCATION_ID" == bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]]
+
+probe_calls=0
+record_calls=0
+probe_broker_execution() {{
+    ((probe_calls += 1))
+    return 1
+}}
+if validate_current_broker_execution; then
+    exit 1
+fi
+[[ "$probe_calls" == 1 ]]
+[[ "$record_calls" == 0 ]]
+"""
+    checked = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    assert checked.returncode == 0, checked.stderr
+
+
+def test_broker_fingerprint_record_rejects_legacy_unvalidated_evidence(
+    tmp_path: Path,
+) -> None:
+    """@brief 旧单行 fingerprint 不得伪装成 execution-validated generation /
+    A legacy one-line fingerprint must not masquerade as an execution-validated generation.
+
+    @param tmp_path pytest 临时目录 / Pytest temporary directory.
+    @return None / None.
+    """
+
+    fingerprint_file = tmp_path / "fingerprint"
+    fingerprint_file.write_text("desired\n", encoding="utf-8")
+    script = f"""
+set -euo pipefail
+source {START_SCRIPT!s}
+FINGERPRINT_FILE={fingerprint_file!s}
+BROKER_RESTART_REQUIRED=false
+broker_fingerprint() {{ printf 'desired\\n'; }}
+prepare_restart_decision
+[[ "$BROKER_RESTART_REQUIRED" == false ]]
+[[ -z "$BROKER_VALIDATED_INVOCATION_ID" ]]
+
+printf 'fingerprint=desired\\ninvocation_id=cccccccccccccccccccccccccccccccc\\n' > "$FINGERPRINT_FILE"
+BROKER_RESTART_REQUIRED=false
+prepare_restart_decision
+[[ "$BROKER_RESTART_REQUIRED" == false ]]
+[[ "$BROKER_VALIDATED_INVOCATION_ID" == cccccccccccccccccccccccccccccccc ]]
 """
     checked = subprocess.run(
         ["bash", "-c", script],
@@ -402,8 +553,13 @@ def test_root_status_script_is_readonly_and_reports_operational_boundaries() -> 
         raise AssertionError(f"invalid bash:\n{checked.stderr}")
     script = STATUS_SCRIPT.read_text(encoding="utf-8")
     assert "systemctl show" in script
+    assert "InvocationID" in script
+    assert "runtime execution validation" in script
+    assert "passed /bin/true runtime canary" in script
     assert "NRestarts" in script
     assert "RestartPreventExitStatus" in script
+    assert "NotifyAccess" in script
+    assert "TimeoutStartUSec" in script
     assert "xfs_quota -x -c 'state -p'" in script
     assert "WSPCTL_STATUS=healthy" in script
     assert "WSPCTL_STATUS=degraded" in script

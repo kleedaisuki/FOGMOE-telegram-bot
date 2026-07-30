@@ -165,8 +165,29 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_image_mount() -> None:
     quota_guide = XFS_QUOTA_GUIDE_PATH.read_text(encoding="utf-8")
     assert not (REPOSITORY_ROOT / "systemd").exists()
     assert "Delegate=cpu memory pids io" in unit
+    assert "Type=notify" in unit
+    assert "Type=simple" not in unit
+    assert "NotifyAccess=main" in unit
+    assert "TimeoutStartSec=30s" in unit
+    assert "--systemd-notify" in unit
     assert "RestartPreventExitStatus=78" in unit
     assert "CAP_MKNOD" in unit
+    assert "CAP_SETPCAP" in unit
+    capability_line = next(
+        line for line in unit.splitlines() if line.startswith("CapabilityBoundingSet=")
+    )
+    assert set(capability_line.removeprefix("CapabilityBoundingSet=").split()) == {
+        "CAP_SYS_ADMIN",
+        "CAP_SYS_CHROOT",
+        "CAP_SETUID",
+        "CAP_SETGID",
+        "CAP_SETPCAP",
+        "CAP_CHOWN",
+        "CAP_DAC_OVERRIDE",
+        "CAP_FOWNER",
+        "CAP_KILL",
+        "CAP_MKNOD",
+    }
     assert "ProtectSystem=strict" in unit
     assert "ProtectHome=read-only" in unit
     assert "RestrictAddressFamilies=AF_UNIX" in unit

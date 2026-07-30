@@ -135,6 +135,7 @@ wspctl_enable_warnings(wspctl_infrastructure)
 # Presentation owns process entry points and Python/Unix-facing adapters.  It only depends downwards.
 add_library(wspctl_presentation STATIC
     src/presentation/operator_gateway.cpp
+    src/presentation/systemd_notify.cpp
     src/presentation/unix_gateway.cpp
 )
 set_target_properties(wspctl_presentation PROPERTIES POSITION_INDEPENDENT_CODE ON)

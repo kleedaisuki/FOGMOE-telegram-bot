@@ -405,6 +405,14 @@ admission 前创建/读回 pair，并将 journal 放入 control project；没有
 “inner node 无进程、single writer”规则：broker 本身位于 `manager/` leaf，runtime 边界为
 无进程父节点，supervisor 与每一个 task 位于 sibling leaf。
 
+- unit 使用 `Type=notify`；`wspctld` 在 Bot/operator listener 和 bounded worker pools 全部
+  建立后才发送 `READY=1`。因此旧 generation 的 stale Unix-socket pathname 不能让
+  `systemctl restart` 提前返回；
+- `NotifyAccess=main` 只接受 main PID 的 readiness，daemon 随即清除 `NOTIFY_SOCKET`，不把
+  service-manager notification capability 传给 fork-server、supervisor 或 task；
+- 部署验收仍须额外走 Bot endpoint 执行 `/bin/true`：systemd readiness 证明 control plane
+  可以接单，runtime canary 则证明 namespace、quota、mount、降权和 seccomp 的完整 data plane。
+
 ```text
 wspctld.service
 ├─ manager/                         ← wspctld
@@ -417,6 +425,14 @@ broker 不会在异步边界把可复用的 host PID 写入 `supervisor/cgroup.p
 namespace PID 1 前通过预打开 FD 写入自身的 `0`，因此 PID 1 继承 supervisor leaf。task child 则由
 `wsp-systemd` 在 fork 后、start barrier（启动屏障）放行前写入 task leaf；此时 parent 仍持有 child，
 其 PID 不可能先被回收复用。
+
+host service 的 `CAP_SETPCAP` 只是一项启动期 handoff capability（交接能力）。broker preflight
+在发布 socket 前验证它存在；每个 `wsp-systemd` PID 1 随后用它锁定 `NOROOT`、
+`NO_SETUID_FIXUP`、keep-caps 与 ambient-raise securebits，并按运行中内核的 capability 上界把
+bounding set 收口为 `CAP_SETUID/CAP_SETGID/CAP_KILL`，最后先从 bounding set、再从
+permitted/effective sets 丢掉 `CAP_SETPCAP`。因此 payload identity drop 仍可完成，但 PID 1
+及其后代不能从 UID 0、ambient capability、file capability 或较新的未知 capability 恢复权限。
+OCI sealer 对 file capability/set-id 的拒绝与 `PR_SET_NO_NEW_PRIVS` 是额外的独立防线。
 
 broker 在 task cgroup 上设定 `pids.max`、`memory.high`、`memory.max`、CPU/IO 限额。timeout
 先请求 task process group 正常退出；宽限后优先写 `cgroup.kill`，缺少该特性时以 pidfd 与

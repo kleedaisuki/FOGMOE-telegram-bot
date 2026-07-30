@@ -83,7 +83,10 @@ int main(const int argc, char* argv[]) {
     // command or forks a task.  Keeping it after exec preserves exactly the three capabilities
     // needed by the child-side identity drop and PID1 task-tree cleanup.
     if (const auto hardened = wspctl::harden_supervisor(); !hardened) {
-        std::fputs("wsp-systemd: cannot reduce supervisor privileges\n", stderr);
+        std::fprintf(
+            stderr,
+            "wsp-systemd: cannot reduce supervisor privileges: %s\n",
+            hardened.error().message.c_str());
         return 70;
     }
     config.workspace_fd = open("/workspace", O_RDONLY | O_DIRECTORY | O_CLOEXEC);

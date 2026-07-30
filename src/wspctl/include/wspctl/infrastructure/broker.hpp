@@ -45,6 +45,9 @@ struct BrokerConfig final {
  */
 class Broker final : private application::OperatorWorkspaceReadPort {
 public:
+    /** @brief listener 与 worker 就绪后的单次回调 / One-shot callback after listeners and workers are ready. */
+    using ReadyCallback = Result<void> (*)();
+
     /**
      * @brief 构造并执行 fail-closed 验证 / Construct and run fail-closed validation.
      * @param config broker 配置 / Broker configuration.
@@ -65,9 +68,11 @@ public:
 
     /**
      * @brief 监听并处理控制请求 / Listen and process control requests.
+     * @param ready_callback worker pool 建立后、进入 accept loop 前执行的可选回调 /
+     *        Optional callback run after worker-pool creation and before the accept loop.
      * @return 直到不可恢复错误 / Runs until an unrecoverable error.
      */
-    [[nodiscard]] Result<void> serve_forever();
+    [[nodiscard]] Result<void> serve_forever(ReadyCallback ready_callback = nullptr);
 
 private:
     /**

@@ -1,4 +1,5 @@
 #include "wspctl/infrastructure/broker.hpp"
+#include "wspctl/presentation/systemd_notify.hpp"
 
 #include <charconv>
 #include <cstdio>
@@ -58,12 +59,19 @@ int main(const int argc, char *argv[])
     bool have_admission_inodes = false;
     bool have_system_reserve_bytes = false;
     bool have_system_reserve_inodes = false;
+    bool systemd_notify = false;
     for (int index = 1; index < argc;)
     {
         const std::string_view option{argv[index]};
         if (option == "--allow-insecure-dev-root")
         {
             config.allow_insecure_dev_root = true;
+            ++index;
+            continue;
+        }
+        if (option == "--systemd-notify")
+        {
+            systemd_notify = true;
             ++index;
             continue;
         }
@@ -255,7 +263,8 @@ int main(const int argc, char *argv[])
             broker.error().message.c_str());
         return 78;
     }
-    const auto served = broker->serve_forever();
+    const auto served = broker->serve_forever(
+        systemd_notify ? &wspctl::presentation::notify_systemd_ready : nullptr);
     if (!served)
     {
         std::fprintf(

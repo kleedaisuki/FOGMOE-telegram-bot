@@ -152,8 +152,25 @@ import、mount、native verify 和 selection 由 root-owned `publish.lock` 串�
 
 每次聚合安装都会把三个阶段的 stdout/stderr 实时显示并完整写入
 `logs/wspctl_install_<timestamp>_<pid>.log`。日志以 `0600` 创建，失败时保留底层阶段的原始
-退出码；若 broker 健康检查失败，同一文件还包含 `systemctl status` 与最近 100 行 journal。
-`./statusWspctl.sh` 会报告最近一次安装日志的绝对路径和 metadata。
+退出码。readiness 分为两个互不替代的层次：
+
+1. `wspctld.service` 使用 `Type=notify` 与 `NotifyAccess=main`。daemon 只有在 native preflight、
+   Bot/operator listener 和全部 worker pool 均就绪后，才由 main PID 发送 `READY=1`；发送后立即
+   清除 `NOTIFY_SOCKET`，runtime child 不会继承 service-manager notification capability。
+   `systemctl start/restart` 因此不会把旧 generation 短暂残留的 socket inode 当成新 generation
+   readiness；30 秒 `TimeoutStartSec` 又让通知丢失或初始化卡死有界失败。
+2. systemd handshake 成功后，安装器再以 Bot UID 通过公共 native endpoint，在固定保留的 health
+   runtime 中真实执行一次 `/bin/true`。canary 的 request ID 绑定 systemd `InvocationID`，要求
+   `replayed=false`，所以历史 durable receipt 不能把本轮启动即死的 PID 1 伪装成健康。
+
+固定 runtime 只占用一对 XFS project ID，不会让重复部署无限消耗 project-ID range；每个新
+service invocation 只验收一次。安装器在 canary 前后复核 `InvocationID`：若外部操作恰好触发
+滚代，只跟随新 generation 有界重试；同一 generation 的真实执行失败不会被重试漂白。只有稳定
+generation 的 canary 成功后，启动脚本才原子记录 fingerprint 与已验证的 `InvocationID`。
+
+若 socket 或真实执行检查失败，同一安装日志还包含 `systemctl status` 或最近 100 行 journal。
+`./statusWspctl.sh` 会报告最近一次安装日志，并只读比较当前 `InvocationID` 与 execution-validation
+evidence；它本身绝不执行 task。
 
 安装器不推断 Linux、WSL 或容器环境，也不构造、改写或默认任何代理地址。需要代理访问 base
 image、Debian snapshot 或 Python wheel 时，它直接读取调用环境中已经存在的大小写两组

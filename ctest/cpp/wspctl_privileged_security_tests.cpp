@@ -18,9 +18,13 @@
 #include <sys/wait.h>
 
 #include <cerrno>
+#include <array>
+#include <charconv>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -28,6 +32,7 @@
 
 #include <fcntl.h>
 #include <linux/fs.h>
+#include <linux/securebits.h>
 #include <unistd.h>
 
 namespace {
@@ -141,6 +146,92 @@ enum class Requirement {
  */
 [[nodiscard]] bool hexadecimal_is_zero(const std::string_view value) {
     return !value.empty() && value.find_first_not_of('0') == std::string_view::npos;
+}
+
+/**
+ * @brief 判断 capability 十六进制字段是否精确等于给定集合 /
+ * Determine whether a hexadecimal capability field exactly equals a capability set.
+ * @param value `/proc/self/status` capability 十六进制值 / Hexadecimal capability value.
+ * @param expected 预期 capability 集 / Expected capability set.
+ * @return 精确相等时为真 / True on exact equality.
+ */
+[[nodiscard]] bool hexadecimal_equals_capabilities(
+    const std::string_view value,
+    const std::initializer_list<cap_value_t> expected) {
+    /** @brief status 字段解析值 / Parsed status-field value. */
+    std::uint64_t parsed{};
+    /** @brief 十六进制解析结果 / Hexadecimal parse result. */
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), parsed, 16);
+    if (error != std::errc{} || end != value.data() + value.size()) {
+        return false;
+    }
+    /** @brief 预期 capability bitmask / Expected capability bitmask. */
+    std::uint64_t mask{};
+    for (const cap_value_t capability : expected) {
+        if (capability < 0 || capability >= 64) {
+            return false;
+        }
+        mask |= std::uint64_t{1U} << static_cast<unsigned int>(capability);
+    }
+    return parsed == mask;
+}
+
+/**
+ * @brief 断言 supervisor hardening 的完整 capability 生命周期 /
+ * Assert the complete supervisor-hardening capability lifecycle.
+ * @return 所有 supervisor 不变量满足时为真 / True when every supervisor invariant holds.
+ */
+[[nodiscard]] bool verify_hardened_supervisor_status() {
+    /** @brief supervisor 最终保留的 capability / Capabilities retained by the hardened supervisor. */
+    constexpr std::array<cap_value_t, 3U> kSupervisorCapabilities{CAP_SETUID, CAP_SETGID, CAP_KILL};
+    /** @brief 断言结果 / Accumulated assertion result. */
+    bool valid = true;
+    for (const std::string_view field : {"CapPrm", "CapEff", "CapBnd"}) {
+        /** @brief 当前 capability 字段 / Current capability field. */
+        const std::optional<std::string> value = status_field(field);
+        if (!value.has_value() ||
+            !hexadecimal_equals_capabilities(
+                *value,
+                {kSupervisorCapabilities[0], kSupervisorCapabilities[1], kSupervisorCapabilities[2]})) {
+            std::cerr << "FAIL: " << field
+                      << " must contain exactly CAP_SETUID/CAP_SETGID/CAP_KILL after harden_supervisor\n";
+            valid = false;
+        }
+    }
+    for (const std::string_view field : {"CapInh", "CapAmb"}) {
+        /** @brief 必须为空的 capability 字段 / Capability field that must be empty. */
+        const std::optional<std::string> value = status_field(field);
+        if (!value.has_value() || !hexadecimal_is_zero(*value)) {
+            std::cerr << "FAIL: " << field << " must be all zero after harden_supervisor\n";
+            valid = false;
+        }
+    }
+    /** @brief supervisor 的 no_new_privs 状态 / Supervisor no_new_privs state. */
+    const std::optional<std::string> no_new_privileges = status_field("NoNewPrivs");
+    if (!no_new_privileges.has_value() || *no_new_privileges != "1") {
+        std::cerr << "FAIL: NoNewPrivs must be 1 after harden_supervisor\n";
+        valid = false;
+    }
+    /** @brief supervisor securebits / Supervisor securebits. */
+    const int securebits = prctl(PR_GET_SECUREBITS, 0, 0, 0, 0);
+    /** @brief 预期锁定的 securebits / Expected locked securebits. */
+    constexpr int kExpectedSecurebits =
+        SECBIT_KEEP_CAPS_LOCKED |
+        SECBIT_NOROOT |
+        SECBIT_NOROOT_LOCKED |
+        SECBIT_NO_SETUID_FIXUP |
+        SECBIT_NO_SETUID_FIXUP_LOCKED |
+        SECBIT_NO_CAP_AMBIENT_RAISE |
+        SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED;
+    if (securebits != kExpectedSecurebits) {
+        std::cerr << "FAIL: supervisor securebits did not lock root, keep-caps, setuid-fixup, and ambient-raise behavior\n";
+        valid = false;
+    }
+    if (prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) != 0) {
+        std::cerr << "FAIL: supervisor must be nondumpable\n";
+        valid = false;
+    }
+    return valid;
 }
 
 /**
@@ -336,29 +427,58 @@ enum class Requirement {
 }
 
 /**
+ * @brief 等待 hardening child 并翻译其状态 / Wait for a hardening child and translate its status.
+ * @param child_pid 已 fork 的子进程 PID / PID of the already-forked child.
+ * @return child 成功时 EXIT_SUCCESS，否则 EXIT_FAILURE / EXIT_SUCCESS when the child succeeds, otherwise EXIT_FAILURE.
+ */
+[[nodiscard]] int wait_for_child(pid_t child_pid);
+
+/**
  * @brief 在单独进程中执行不可逆 hardening / Execute irreversible hardening in an isolated child process.
  * @return 成功为 EXIT_SUCCESS，失败为 EXIT_FAILURE / EXIT_SUCCESS on success and EXIT_FAILURE on failure.
  */
 [[nodiscard]] int run_hardened_child() {
-    /** @brief native task hardening 的结果 / Result returned by native task hardening. */
-    const auto hardened = wspctl::harden_task(kSandboxUid, kSandboxGid);
-    if (!hardened) {
-        std::cerr << "FAIL: harden_task failed: " << hardened.error().message << '\n';
+    /** @brief native supervisor hardening 的结果 / Result returned by native supervisor hardening. */
+    const auto supervisor_hardened = wspctl::harden_supervisor();
+    if (!supervisor_hardened) {
+        std::cerr << "FAIL: harden_supervisor failed: " << supervisor_hardened.error().message << '\n';
         return EXIT_FAILURE;
     }
-    /** @brief task hardening 后的 status 断言 / Status assertions after task hardening. */
-    const bool status_valid = verify_hardened_status();
-    /** @brief task hardening 后的 module syscall 断言 / Module-syscall assertions after task hardening. */
-    const bool module_syscalls_valid = verify_module_syscalls_are_denied();
-    /** @brief task hardening 后的 io_uring syscall 断言 / io_uring syscall assertions after task hardening. */
-    const bool io_uring_syscalls_valid = verify_io_uring_syscalls_are_denied();
-    /** @brief task hardening 后的 keyring syscall 断言 / Keyring-syscall assertions after task hardening. */
-    const bool keyring_syscalls_valid = verify_keyring_syscalls_are_denied();
-    /** @brief task hardening 后的 XFS project 元数据保护断言 / XFS project-metadata protection assertions after task hardening. */
-    const bool quota_metadata_valid = verify_project_quota_metadata_mutations_are_denied();
-    return status_valid && module_syscalls_valid && io_uring_syscalls_valid && keyring_syscalls_valid && quota_metadata_valid
-        ? EXIT_SUCCESS
-        : EXIT_FAILURE;
+    if (!verify_hardened_supervisor_status()) {
+        return EXIT_FAILURE;
+    }
+    /** @brief 模拟 supervisor fork 出的真实 task child / Real task child forked as a supervisor would. */
+    const pid_t task_pid = fork();
+    if (task_pid < 0) {
+        std::cerr << "FAIL: fork task child failed: " << std::strerror(errno) << '\n';
+        return EXIT_FAILURE;
+    }
+    if (task_pid == 0) {
+        /** @brief native task hardening 的结果 / Result returned by native task hardening. */
+        const auto task_hardened = wspctl::harden_task(kSandboxUid, kSandboxGid);
+        if (!task_hardened) {
+            std::cerr << "FAIL: harden_task failed: " << task_hardened.error().message << '\n';
+            std::cerr.flush();
+            std::_Exit(EXIT_FAILURE);
+        }
+        /** @brief task hardening 后的 status 断言 / Status assertions after task hardening. */
+        const bool status_valid = verify_hardened_status();
+        /** @brief task hardening 后的 module syscall 断言 / Module-syscall assertions after task hardening. */
+        const bool module_syscalls_valid = verify_module_syscalls_are_denied();
+        /** @brief task hardening 后的 io_uring syscall 断言 / io_uring syscall assertions after task hardening. */
+        const bool io_uring_syscalls_valid = verify_io_uring_syscalls_are_denied();
+        /** @brief task hardening 后的 keyring syscall 断言 / Keyring-syscall assertions after task hardening. */
+        const bool keyring_syscalls_valid = verify_keyring_syscalls_are_denied();
+        /** @brief task hardening 后的 XFS project 元数据保护断言 / XFS project-metadata protection assertions after task hardening. */
+        const bool quota_metadata_valid = verify_project_quota_metadata_mutations_are_denied();
+        std::cerr.flush();
+        std::_Exit(
+            status_valid && module_syscalls_valid && io_uring_syscalls_valid &&
+                    keyring_syscalls_valid && quota_metadata_valid
+                ? EXIT_SUCCESS
+                : EXIT_FAILURE);
+    }
+    return wait_for_child(task_pid);
 }
 
 /**
@@ -399,8 +519,12 @@ int main() {
     if (geteuid() != 0U) {
         return unavailable(requirement, "effective UID is not root");
     }
-    if (!has_effective_capability(CAP_SETUID) || !has_effective_capability(CAP_SETGID)) {
-        return unavailable(requirement, "CAP_SETUID and CAP_SETGID are required for the real identity-drop path");
+    for (const cap_value_t capability : {CAP_SETUID, CAP_SETGID, CAP_SETPCAP, CAP_KILL}) {
+        if (!has_effective_capability(capability)) {
+            return unavailable(
+                requirement,
+                "CAP_SETUID, CAP_SETGID, CAP_SETPCAP, and CAP_KILL are required for the real supervisor-to-task hardening path");
+        }
     }
     /** @brief 隔离不可逆 cap/seccomp 修改的 child PID / Child PID isolating irreversible capability/seccomp changes. */
     const pid_t child_pid = fork();

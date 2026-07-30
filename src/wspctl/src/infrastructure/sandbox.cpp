@@ -49,22 +49,37 @@ namespace {
     return enabled == CAP_SET;
 }
 
+/**
+ * @brief broker 启动所需的 capability 描述 / Capability required during broker startup.
+ */
+struct RequiredCapability final {
+    /** @brief Linux capability 数值 / Linux capability value. */
+    cap_value_t value;
+    /** @brief 稳定诊断名称 / Stable diagnostic name. */
+    std::string_view name;
+};
+
 /** @brief 校验 broker 必须持有的一组 capability / Validate the capability set mandatory for broker. */
 [[nodiscard]] Result<void> require_broker_capabilities() {
-    constexpr std::array<cap_value_t, 5> kRequired{
-        CAP_SYS_ADMIN,
-        CAP_SYS_CHROOT,
-        CAP_SETUID,
-        CAP_SETGID,
-        CAP_MKNOD,
-    };
-    for (const cap_value_t capability : kRequired) {
-        const auto present = has_effective_capability(capability);
+    // CAP_SETPCAP is deliberately startup-only: namespace PID 1 needs it to lock securebits and
+    // remove every non-supervisor capability from its bounding set, then drops CAP_SETPCAP too.
+    constexpr std::array<RequiredCapability, 6> kRequired{{
+        {.value = CAP_SYS_ADMIN, .name = "CAP_SYS_ADMIN"},
+        {.value = CAP_SYS_CHROOT, .name = "CAP_SYS_CHROOT"},
+        {.value = CAP_SETUID, .name = "CAP_SETUID"},
+        {.value = CAP_SETGID, .name = "CAP_SETGID"},
+        {.value = CAP_SETPCAP, .name = "CAP_SETPCAP"},
+        {.value = CAP_MKNOD, .name = "CAP_MKNOD"},
+    }};
+    for (const RequiredCapability& capability : kRequired) {
+        const auto present = has_effective_capability(capability.value);
         if (!present) {
             return std::unexpected(present.error());
         }
         if (!*present) {
-            return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "required Linux capability is absent"));
+            return std::unexpected(make_error(
+                ErrorCode::sandbox_preflight_failed,
+                "required Linux capability is absent: " + std::string(capability.name)));
         }
     }
     return {};
@@ -308,18 +323,118 @@ namespace {
         static_cast<int>(kSupervisorCapabilities.size()),
         kSupervisorCapabilities.data(),
         CAP_SET);
+    if (permitted != 0) {
+        const int saved_errno = errno;
+        cap_free(capabilities);
+        errno = saved_errno;
+        return std::unexpected(errno_error(
+            ErrorCode::sandbox_preflight_failed,
+            "configure supervisor permitted capabilities"));
+    }
     const int effective = cap_set_flag(
         capabilities,
         CAP_EFFECTIVE,
         static_cast<int>(kSupervisorCapabilities.size()),
         kSupervisorCapabilities.data(),
         CAP_SET);
-    const int applied = permitted == 0 && effective == 0 ? cap_set_proc(capabilities) : -1;
+    if (effective != 0) {
+        const int saved_errno = errno;
+        cap_free(capabilities);
+        errno = saved_errno;
+        return std::unexpected(errno_error(
+            ErrorCode::sandbox_preflight_failed,
+            "configure supervisor effective capabilities"));
+    }
+    const int applied = cap_set_proc(capabilities);
     const int saved_errno = errno;
     cap_free(capabilities);
     errno = saved_errno;
     if (applied != 0) {
         return std::unexpected(errno_error(ErrorCode::sandbox_preflight_failed, "install supervisor capabilities"));
+    }
+    return {};
+}
+
+/** @brief 判断 PID 1 完成 hardening 后是否仍需一个 capability / Check whether PID 1 still needs a capability after hardening. */
+[[nodiscard]] bool supervisor_retains_capability(const int capability) noexcept {
+    return capability == CAP_SETUID || capability == CAP_SETGID || capability == CAP_KILL;
+}
+
+/**
+ * @brief 将 PID 1 capability bounding set 收口到最终最小集合 /
+ * Restrict the PID 1 capability bounding set to its final minimal set.
+ * @return 成功或 fail-closed prctl 错误 / Success or a fail-closed prctl error.
+ * @note capability 编号由内核按 0..cap_last_cap 连续分配；探测到首个 EINVAL 即到达运行中
+ *       内核的上界，避免编译期 headers 落后于 host kernel 时遗漏新 capability。/
+ *       Capability numbers are contiguous from zero through cap_last_cap; the first EINVAL is
+ *       therefore the running kernel boundary, avoiding leaks when build-time headers lag the host.
+ */
+[[nodiscard]] Result<void> constrain_supervisor_bounding_set() {
+    /** @brief 防止异常内核接口导致无界探测的保守上限 / Conservative guard against an unbounded anomalous kernel interface. */
+    constexpr int kCapabilityProbeLimit = 1024;
+    /** @brief 是否已观察到运行中内核的 capability 上界 / Whether the running-kernel capability boundary was observed. */
+    bool found_kernel_boundary = false;
+    for (int capability = 0; capability < kCapabilityProbeLimit; ++capability) {
+        errno = 0;
+        /** @brief 当前 capability 是否存在于 bounding set / Whether this capability is in the bounding set. */
+        const int present = prctl(PR_CAPBSET_READ, capability, 0, 0, 0);
+        if (present < 0) {
+            if (errno == EINVAL) {
+                found_kernel_boundary = true;
+                break;
+            }
+            return std::unexpected(errno_error(
+                ErrorCode::sandbox_preflight_failed,
+                "inspect supervisor capability bounding set"));
+        }
+        if (present == 0 || supervisor_retains_capability(capability) || capability == CAP_SETPCAP) {
+            continue;
+        }
+        if (prctl(PR_CAPBSET_DROP, capability, 0, 0, 0) != 0) {
+            return std::unexpected(errno_error(
+                ErrorCode::sandbox_preflight_failed,
+                "drop non-supervisor capability " + std::to_string(capability) +
+                    " from bounding set"));
+        }
+    }
+    if (!found_kernel_boundary) {
+        return std::unexpected(make_error(
+            ErrorCode::sandbox_preflight_failed,
+            "kernel capability boundary exceeds hard safety limit"));
+    }
+    // CAP_SETPCAP must be last: every preceding PR_CAPBSET_DROP requires it in the effective set.
+    if (prctl(PR_CAPBSET_DROP, CAP_SETPCAP, 0, 0, 0) != 0) {
+        return std::unexpected(errno_error(
+            ErrorCode::sandbox_preflight_failed,
+            "drop transient CAP_SETPCAP from supervisor bounding set"));
+    }
+    for (const int capability : {CAP_SETUID, CAP_SETGID, CAP_KILL}) {
+        /** @brief retained capability 的 readback / Readback of a retained capability. */
+        const int retained = prctl(PR_CAPBSET_READ, capability, 0, 0, 0);
+        if (retained < 0) {
+            return std::unexpected(errno_error(
+                ErrorCode::sandbox_preflight_failed,
+                "verify retained supervisor capability " + std::to_string(capability) +
+                    " in bounding set"));
+        }
+        if (retained != 1) {
+            return std::unexpected(make_error(
+                ErrorCode::sandbox_preflight_failed,
+                "required supervisor capability " + std::to_string(capability) +
+                    " is absent from bounding set"));
+        }
+    }
+    /** @brief CAP_SETPCAP bounding-set readback / CAP_SETPCAP bounding-set readback. */
+    const int transient_capability = prctl(PR_CAPBSET_READ, CAP_SETPCAP, 0, 0, 0);
+    if (transient_capability < 0) {
+        return std::unexpected(errno_error(
+            ErrorCode::sandbox_preflight_failed,
+            "verify transient CAP_SETPCAP removal from supervisor bounding set"));
+    }
+    if (transient_capability != 0) {
+        return std::unexpected(make_error(
+            ErrorCode::sandbox_preflight_failed,
+            "transient CAP_SETPCAP remains in supervisor bounding set"));
     }
     return {};
 }
@@ -917,9 +1032,23 @@ Result<void> harden_supervisor() {
     // NO_SETUID_FIXUP bit deliberately lets the forked child retain the three temporary caps
     // while it calls setresgid/setresuid; harden_task immediately clears them afterwards.
     constexpr unsigned int kSecureBits =
-        SECBIT_NOROOT | SECBIT_NOROOT_LOCKED | SECBIT_NO_SETUID_FIXUP | SECBIT_NO_SETUID_FIXUP_LOCKED;
+        SECBIT_KEEP_CAPS_LOCKED |
+        SECBIT_NOROOT |
+        SECBIT_NOROOT_LOCKED |
+        SECBIT_NO_SETUID_FIXUP |
+        SECBIT_NO_SETUID_FIXUP_LOCKED |
+        SECBIT_NO_CAP_AMBIENT_RAISE |
+        SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED;
     if (prctl(PR_SET_SECUREBITS, kSecureBits, 0, 0, 0) != 0) {
         return std::unexpected(errno_error(ErrorCode::sandbox_preflight_failed, "lock supervisor securebits"));
+    }
+    if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) != 0) {
+        return std::unexpected(errno_error(
+            ErrorCode::sandbox_preflight_failed,
+            "clear supervisor ambient capabilities"));
+    }
+    if (const auto bounding_set = constrain_supervisor_bounding_set(); !bounding_set) {
+        return std::unexpected(bounding_set.error());
     }
     if (const auto capabilities = install_supervisor_capabilities(); !capabilities) {
         return std::unexpected(capabilities.error());

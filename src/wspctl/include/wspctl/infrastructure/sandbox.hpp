@@ -223,10 +223,15 @@ struct TaskCgroupControl final {
 /**
  * @brief 将 runtime PID 1 缩减为最小 supervisor 权限 / Reduce runtime PID 1 to minimal supervisor privileges.
  * @return 成功或 fail-closed 错误 / Success or fail-closed error.
- * @note PID 1 保持 UID 0，但只保留 CAP_SETUID、CAP_SETGID、CAP_KILL；随后 fork 的
- *       task child 用 harden_task 清空这些 capability 并降到 sandbox identity。
- *       PID 1 stays UID 0 but retains only CAP_SETUID, CAP_SETGID, and CAP_KILL; a forked
- *       task child clears them through harden_task and drops to the sandbox identity.
+ * @note PID 1 保持 UID 0，但 permitted、effective 与 bounding sets 都只保留
+ *       CAP_SETUID、CAP_SETGID、CAP_KILL；启动阶段临时使用的 CAP_SETPCAP 也会被不可逆丢弃。
+ *       securebits 同时锁死 root 隐式权限、keep-caps 与 ambient capability raise。
+ *       随后 fork 的 task child 用 harden_task 清空这些 capability 并降到 sandbox identity。/
+ *       PID 1 stays UID 0, but its permitted, effective, and bounding sets retain only
+ *       CAP_SETUID, CAP_SETGID, and CAP_KILL; startup-only CAP_SETPCAP is irreversibly dropped too.
+ *       Securebits also lock out implicit root privilege, keep-caps, and ambient capability raises.
+ *       A forked task child then clears those capabilities through harden_task and drops to the
+ *       sandbox identity.
  */
 [[nodiscard]] Result<void> harden_supervisor();
 
