@@ -38,7 +38,8 @@ public:
      * @param request_id 可选调用 ID / Optional invocation ID.
      */
     NativeFailure(Error error, std::string request_id)
-        : std::runtime_error(error.message), error_(std::move(error)), request_id_(std::move(request_id)) {}
+        : std::runtime_error(error.message), error_(std::move(error)),
+          request_id_(std::move(request_id)) {}
 
     /** @brief 取得原生错误 / Get native error. */
     [[nodiscard]] const Error& error() const noexcept { return error_; }
@@ -53,10 +54,12 @@ private:
 };
 
 /**
- * @brief 将 NativeFailure 翻译为带稳定属性的 Python 异常 / Translate NativeFailure into a Python exception with stable attributes.
+ * @brief 将 NativeFailure 翻译为带稳定属性的 Python 异常 / Translate NativeFailure into a Python
+ * exception with stable attributes.
  * @param pointer 当前 C++ 异常 / Current C++ exception.
  * @note pybind11 3.x 要求此 translator 可转换为普通函数指针；因此不能捕获 module-local 对象。
- *       pybind11 3.x requires this translator to be convertible to a plain function pointer, so it cannot capture module-local objects.
+ *       pybind11 3.x requires this translator to be convertible to a plain function pointer, so it
+ * cannot capture module-local objects.
  */
 void translate_native_failure(std::exception_ptr pointer) {
     try {
@@ -64,14 +67,16 @@ void translate_native_failure(std::exception_ptr pointer) {
             std::rethrow_exception(pointer);
         }
     } catch (const NativeFailure& failure) {
-        if (g_runtime_process_error_type == nullptr || g_invocation_in_doubt_error_type == nullptr) {
+        if (g_runtime_process_error_type == nullptr ||
+            g_invocation_in_doubt_error_type == nullptr) {
             PyErr_SetString(PyExc_RuntimeError, failure.what());
             return;
         }
         const PyObject* selected = failure.error().code == ErrorCode::invocation_in_doubt
-            ? g_invocation_in_doubt_error_type
-            : g_runtime_process_error_type;
-        const py::object error_type = py::reinterpret_borrow<py::object>(const_cast<PyObject*>(selected));
+                                       ? g_invocation_in_doubt_error_type
+                                       : g_runtime_process_error_type;
+        const py::object error_type =
+            py::reinterpret_borrow<py::object>(const_cast<PyObject*>(selected));
         const py::object instance = error_type(py::str(failure.what()));
         instance.attr("code") = py::str(error_code_name(failure.error().code));
         instance.attr("message") = py::str(failure.error().message);
@@ -83,28 +88,46 @@ void translate_native_failure(std::exception_ptr pointer) {
 /** @brief 将 ErrorCode 映射为稳定 Python code / Map ErrorCode to a stable Python code. */
 [[nodiscard]] std::string_view error_code_name(const ErrorCode code) {
     switch (code) {
-        case ErrorCode::invalid_argument: return "invalid_argument";
-        case ErrorCode::malformed_frame: return "malformed_frame";
-        case ErrorCode::frame_too_large: return "frame_too_large";
-        case ErrorCode::unsupported_version: return "unsupported_version";
-        case ErrorCode::protocol_violation: return "protocol_violation";
-        case ErrorCode::authentication_failed: return "authentication_failed";
-        case ErrorCode::sandbox_preflight_failed: return "sandbox_preflight_failed";
-        case ErrorCode::permission_denied: return "permission_denied";
-        case ErrorCode::not_found: return "not_found";
-        case ErrorCode::already_exists: return "already_exists";
-        case ErrorCode::busy: return "busy";
-        case ErrorCode::timeout: return "timeout";
-        case ErrorCode::io_failure: return "io_failure";
-        case ErrorCode::journal_conflict: return "journal_conflict";
-        case ErrorCode::invocation_in_doubt: return "invocation_in_doubt";
-        case ErrorCode::child_failure: return "child_failure";
-        case ErrorCode::internal: return "internal";
+    case ErrorCode::invalid_argument:
+        return "invalid_argument";
+    case ErrorCode::malformed_frame:
+        return "malformed_frame";
+    case ErrorCode::frame_too_large:
+        return "frame_too_large";
+    case ErrorCode::unsupported_version:
+        return "unsupported_version";
+    case ErrorCode::protocol_violation:
+        return "protocol_violation";
+    case ErrorCode::authentication_failed:
+        return "authentication_failed";
+    case ErrorCode::sandbox_preflight_failed:
+        return "sandbox_preflight_failed";
+    case ErrorCode::permission_denied:
+        return "permission_denied";
+    case ErrorCode::not_found:
+        return "not_found";
+    case ErrorCode::already_exists:
+        return "already_exists";
+    case ErrorCode::busy:
+        return "busy";
+    case ErrorCode::timeout:
+        return "timeout";
+    case ErrorCode::io_failure:
+        return "io_failure";
+    case ErrorCode::journal_conflict:
+        return "journal_conflict";
+    case ErrorCode::invocation_in_doubt:
+        return "invocation_in_doubt";
+    case ErrorCode::child_failure:
+        return "child_failure";
+    case ErrorCode::internal:
+        return "internal";
     }
     return "internal";
 }
 
-/** @brief 将 Python Iterable[bytes] 适配为单消费 native chunk 源 / Adapt a Python Iterable[bytes] into a single-consumption native chunk source. */
+/** @brief 将 Python Iterable[bytes] 适配为单消费 native chunk 源 / Adapt a Python Iterable[bytes]
+ * into a single-consumption native chunk source. */
 class PythonPayloadChunkSource final : public presentation::PayloadChunkSource {
 public:
     /**
@@ -117,7 +140,8 @@ public:
     explicit PythonPayloadChunkSource(const py::handle chunks) {
         if (py::isinstance<py::str>(chunks) || py::isinstance<py::bytes>(chunks) ||
             py::isinstance<py::bytearray>(chunks) || py::isinstance<py::memoryview>(chunks)) {
-            throw py::type_error("RuntimeProcess.add_file chunks must be an iterable of bytes chunks, not one raw buffer");
+            throw py::type_error("RuntimeProcess.add_file chunks must be an iterable of bytes "
+                                 "chunks, not one raw buffer");
         }
         iterator_ = py::iter(chunks);
     }
@@ -134,15 +158,15 @@ public:
         const py::handle item = *iterator_;
         ++iterator_;
         if (!py::isinstance<py::bytes>(item)) {
-            return std::unexpected(make_error(
-                ErrorCode::invalid_argument,
-                "RuntimeProcess.add_file chunks must contain bytes values only"));
+            return std::unexpected(
+                make_error(ErrorCode::invalid_argument,
+                           "RuntimeProcess.add_file chunks must contain bytes values only"));
         }
         const std::string bytes = py::cast<std::string>(item);
         if (bytes.empty() || bytes.size() > kMaxAddFileChunkBytes) {
-            return std::unexpected(make_error(
-                ErrorCode::invalid_argument,
-                "RuntimeProcess.add_file chunk is empty or exceeds 64 KiB"));
+            return std::unexpected(
+                make_error(ErrorCode::invalid_argument,
+                           "RuntimeProcess.add_file chunk is empty or exceeds 64 KiB"));
         }
         std::vector<std::byte> chunk;
         chunk.reserve(bytes.size());
@@ -158,7 +182,8 @@ private:
 };
 
 /**
- * @brief pybind 暴露的不可变 runtime 状态 DTO / Immutable runtime-status DTO exposed through pybind.
+ * @brief pybind 暴露的不可变 runtime 状态 DTO / Immutable runtime-status DTO exposed through
+ * pybind.
  *
  * ``dump`` 只构造固定 allowlist 的 Python ``dict``。它不透传 C++ 对象、``__dict__``、错误正文
  * 或任何 command/payload/host 字段，因此 Python 日志调用点不会因未来内部字段增加而意外泄漏。
@@ -169,22 +194,34 @@ private:
 class RuntimeStatus final {
 public:
     /**
-     * @brief 从 presentation 状态构造 Python DTO / Construct the Python DTO from presentation status.
-     * @param status 已验证的 allowlisted presentation 状态 / Validated allowlisted presentation status.
+     * @brief 从 presentation 状态构造 Python DTO / Construct the Python DTO from presentation
+     * status.
+     * @param status 已验证的 allowlisted presentation 状态 / Validated allowlisted presentation
+     * status.
      */
-    explicit RuntimeStatus(presentation::ClientRuntimeStatus status) noexcept : status_(std::move(status)) {}
+    explicit RuntimeStatus(presentation::ClientRuntimeStatus status) noexcept
+        : status_(std::move(status)) {}
 
     /** @brief 取得 runtime UUID / Get the runtime UUID. */
     [[nodiscard]] const std::string& runtime_key() const noexcept { return status_.runtime_key; }
     /** @brief 取得稳定生命周期状态名 / Get the stable lifecycle-state name. */
-    [[nodiscard]] std::string state() const { return std::string(domain::runtime_state_name(status_.state)); }
-    /** @brief 取得当前 owner activation；不活跃时为空 / Get current owner activation; empty when inactive. */
-    [[nodiscard]] const std::optional<std::string>& active_activation_id() const noexcept { return status_.active_activation_id; }
-    /** @brief handle activation 是否匹配当前 owner / Whether the handle activation matches the current owner. */
-    [[nodiscard]] bool handle_activation_matches() const noexcept { return status_.handle_activation_matches; }
+    [[nodiscard]] std::string state() const {
+        return std::string(domain::runtime_state_name(status_.state));
+    }
+    /** @brief 取得当前 owner activation；不活跃时为空 / Get current owner activation; empty when
+     * inactive. */
+    [[nodiscard]] const std::optional<std::string>& active_activation_id() const noexcept {
+        return status_.active_activation_id;
+    }
+    /** @brief handle activation 是否匹配当前 owner / Whether the handle activation matches the
+     * current owner. */
+    [[nodiscard]] bool handle_activation_matches() const noexcept {
+        return status_.handle_activation_matches;
+    }
     /** @brief 是否有健康、可复用 supervisor / Whether a healthy reusable supervisor exists. */
     [[nodiscard]] bool supervisor_alive() const noexcept { return status_.supervisor_alive; }
-    /** @brief ready 状态空闲年龄（毫秒）；其他状态为空 / Idle age in milliseconds while ready; empty otherwise. */
+    /** @brief ready 状态空闲年龄（毫秒）；其他状态为空 / Idle age in milliseconds while ready;
+     * empty otherwise. */
     [[nodiscard]] std::optional<std::int64_t> idle_for_ms() const noexcept {
         if (!status_.idle_for.has_value()) {
             return std::nullopt;
@@ -193,8 +230,11 @@ public:
     }
     /** @brief broker idle 回收阈值（毫秒） / Broker idle-retirement threshold in milliseconds. */
     [[nodiscard]] std::int64_t idle_ttl_ms() const noexcept { return status_.idle_ttl.count(); }
-    /** @brief 当前借用 session 的 broker dispatch 数 / Current broker dispatches borrowing the session. */
-    [[nodiscard]] std::uint64_t borrowed_dispatches() const noexcept { return status_.borrowed_dispatches; }
+    /** @brief 当前借用 session 的 broker dispatch 数 / Current broker dispatches borrowing the
+     * session. */
+    [[nodiscard]] std::uint64_t borrowed_dispatches() const noexcept {
+        return status_.borrowed_dispatches;
+    }
     /** @brief 是否有已知清理/隔离待办 / Whether known cleanup/quarantine is pending. */
     [[nodiscard]] bool cleanup_pending() const noexcept { return status_.cleanup_pending; }
 
@@ -207,13 +247,12 @@ public:
         dictionary["runtime_key"] = status_.runtime_key;
         dictionary["state"] = state();
         dictionary["active_activation_id"] = status_.active_activation_id.has_value()
-            ? py::cast(*status_.active_activation_id)
-            : py::none();
+                                                 ? py::cast(*status_.active_activation_id)
+                                                 : py::none();
         dictionary["handle_activation_matches"] = status_.handle_activation_matches;
         dictionary["supervisor_alive"] = status_.supervisor_alive;
-        dictionary["idle_for_ms"] = status_.idle_for.has_value()
-            ? py::cast(status_.idle_for->count())
-            : py::none();
+        dictionary["idle_for_ms"] =
+            status_.idle_for.has_value() ? py::cast(status_.idle_for->count()) : py::none();
         dictionary["idle_ttl_ms"] = status_.idle_ttl.count();
         dictionary["borrowed_dispatches"] = status_.borrowed_dispatches;
         dictionary["cleanup_pending"] = status_.cleanup_pending;
@@ -239,18 +278,24 @@ public:
      * @brief 构造惰性 client / Construct a lazy client.
      * @param socket_path broker socket 路径 / Broker socket path.
      * @param runtime_key runtime UUID / Runtime UUID.
-     * @param activation_id 此 handle 唯一绑定的 activation / Activation uniquely bound to this handle.
+     * @param activation_id 此 handle 唯一绑定的 activation / Activation uniquely bound to this
+     * handle.
      */
     RuntimeProcess(std::string socket_path, std::string runtime_key, std::string activation_id)
-        : gateway_(std::move(socket_path)), runtime_key_(std::move(runtime_key)), activation_id_(std::move(activation_id)) {
-        if (const auto endpoint = presentation::UnixGatewayClient::validate_socket_path(gateway_socket_path()); !endpoint) {
+        : gateway_(std::move(socket_path)), runtime_key_(std::move(runtime_key)),
+          activation_id_(std::move(activation_id)) {
+        if (const auto endpoint =
+                presentation::UnixGatewayClient::validate_socket_path(gateway_socket_path());
+            !endpoint) {
             throw NativeFailure(endpoint.error(), {});
         }
         if (const auto runtime = domain::RuntimeId::parse(runtime_key_); !runtime) {
-            throw NativeFailure(make_error(ErrorCode::invalid_argument, runtime.error().message), {});
+            throw NativeFailure(make_error(ErrorCode::invalid_argument, runtime.error().message),
+                                {});
         }
         if (const auto activation = domain::ActivationId::parse(activation_id_); !activation) {
-            throw NativeFailure(make_error(ErrorCode::invalid_argument, activation.error().message), {});
+            throw NativeFailure(make_error(ErrorCode::invalid_argument, activation.error().message),
+                                {});
         }
     }
 
@@ -265,17 +310,14 @@ public:
      * @param request_hash caller semantic hash / Caller semantic hash.
      * @return Python result dictionary / Python result dictionary.
      */
-    [[nodiscard]] py::dict execute(
-        const py::sequence& argv,
-        const std::string& stdin_data,
-        const std::string& cwd,
-        const std::int64_t timeout_ms,
-        const std::size_t output_limit,
-        const std::string& request_id,
-        const std::string& request_hash) {
+    [[nodiscard]] py::dict execute(const py::sequence& argv, const std::string& stdin_data,
+                                   const std::string& cwd, const std::int64_t timeout_ms,
+                                   const std::size_t output_limit, const std::string& request_id,
+                                   const std::string& request_hash) {
         std::lock_guard lock(mutex_);
         if (closed_) {
-            throw NativeFailure(make_error(ErrorCode::permission_denied, "RuntimeProcess is closed"), request_id);
+            throw NativeFailure(
+                make_error(ErrorCode::permission_denied, "RuntimeProcess is closed"), request_id);
         }
         presentation::ClientExecuteRequest request;
         request.runtime_key = runtime_key_;
@@ -302,7 +344,8 @@ public:
         py::dict dictionary;
         dictionary["stdout"] = result.stdout_data;
         dictionary["stderr"] = result.stderr_data;
-        dictionary["exit_code"] = result.exit_code.has_value() ? py::cast(*result.exit_code) : py::none();
+        dictionary["exit_code"] =
+            result.exit_code.has_value() ? py::cast(*result.exit_code) : py::none();
         dictionary["timed_out"] = result.timed_out;
         dictionary["truncated"] = result.truncated;
         dictionary["replayed"] = result.replayed;
@@ -320,7 +363,8 @@ public:
     [[nodiscard]] RuntimeStatus status() {
         std::lock_guard lock(mutex_);
         if (closed_) {
-            throw NativeFailure(make_error(ErrorCode::permission_denied, "RuntimeProcess is closed"), {});
+            throw NativeFailure(
+                make_error(ErrorCode::permission_denied, "RuntimeProcess is closed"), {});
         }
         presentation::ClientRuntimeStatus observed;
         {
@@ -338,8 +382,10 @@ public:
     }
 
     /**
-     * @brief 向受限 workspace 路径流式写入一个文件 / Stream one file into a constrained workspace path.
-     * @param opaque_id 可信上层生成的 opaque directory capability / Opaque directory capability generated by a trusted upper layer.
+     * @brief 向受限 workspace 路径流式写入一个文件 / Stream one file into a constrained workspace
+     * path.
+     * @param opaque_id 可信上层生成的 opaque directory capability / Opaque directory capability
+     * generated by a trusted upper layer.
      * @param chunks 单消费 ``Iterable[bytes]`` / Single-consumption ``Iterable[bytes]``.
      * @param byte_size 声明完整文件字节数 / Declared complete file byte count.
      * @param sha256 声明完整文件 SHA-256 / Declared complete file SHA-256.
@@ -350,16 +396,14 @@ public:
      *     This entry transports bytes only; it does not interpret MIME, extensions, or shebangs,
      *     and it accepts no host path.
      */
-    [[nodiscard]] py::dict add_file(
-        const std::string& opaque_id,
-        const py::handle chunks,
-        const std::size_t byte_size,
-        const std::string& sha256,
-        const std::string& request_id,
-        const std::string& request_hash) {
+    [[nodiscard]] py::dict add_file(const std::string& opaque_id, const py::handle chunks,
+                                    const std::size_t byte_size, const std::string& sha256,
+                                    const std::string& request_id,
+                                    const std::string& request_hash) {
         std::lock_guard lock(mutex_);
         if (closed_) {
-            throw NativeFailure(make_error(ErrorCode::permission_denied, "RuntimeProcess is closed"), request_id);
+            throw NativeFailure(
+                make_error(ErrorCode::permission_denied, "RuntimeProcess is closed"), request_id);
         }
         PythonPayloadChunkSource source(chunks);
         presentation::ClientAddFileRequest request{
@@ -390,27 +434,28 @@ public:
     }
 
     /**
-     * @brief 只读恢复已完成 add_file 的 durable receipt / Read-only replay of a completed add_file durable receipt.
-     * @param opaque_id 可信上层保存的 opaque directory capability / Opaque directory capability persisted by the trusted upper layer.
+     * @brief 只读恢复已完成 add_file 的 durable receipt / Read-only replay of a completed add_file
+     * durable receipt.
+     * @param opaque_id 可信上层保存的 opaque directory capability / Opaque directory capability
+     * persisted by the trusted upper layer.
      * @param byte_size 已保存的完整文件字节数 / Persisted complete file byte count.
      * @param sha256 已保存的完整文件 SHA-256 / Persisted complete file SHA-256.
      * @param request_id 原始稳定 journal 调用 ID / Original stable journal invocation ID.
      * @param request_hash 原始调用方语义 SHA-256 / Original caller semantic SHA-256.
-     * @return ``replayed=true`` 的 Python 文件收据 dictionary / Python file-receipt dictionary with ``replayed=true``.
+     * @return ``replayed=true`` 的 Python 文件收据 dictionary / Python file-receipt dictionary with
+     * ``replayed=true``.
      * @note 该入口刻意不使用此 handle 的 activation；它不会启动/替换 RuntimeProcess，也不会
      *       读取 Python bytes 或创建 pending journal。/ This entry deliberately does not use this
      *       handle's activation; it does not start/replace a RuntimeProcess, read Python bytes,
      *       or create a pending journal.
      */
-    [[nodiscard]] py::dict replay_file(
-        const std::string& opaque_id,
-        const std::size_t byte_size,
-        const std::string& sha256,
-        const std::string& request_id,
-        const std::string& request_hash) {
+    [[nodiscard]] py::dict replay_file(const std::string& opaque_id, const std::size_t byte_size,
+                                       const std::string& sha256, const std::string& request_id,
+                                       const std::string& request_hash) {
         std::lock_guard lock(mutex_);
         if (closed_) {
-            throw NativeFailure(make_error(ErrorCode::permission_denied, "RuntimeProcess is closed"), request_id);
+            throw NativeFailure(
+                make_error(ErrorCode::permission_denied, "RuntimeProcess is closed"), request_id);
         }
         presentation::ClientReplayFileRequest request{
             .runtime_key = runtime_key_,
@@ -430,7 +475,10 @@ public:
             result = *replayed;
         }
         if (!result.replayed) {
-            throw NativeFailure(make_error(ErrorCode::protocol_violation, "broker returned a non-replayed receipt for replay_file"), request_id);
+            throw NativeFailure(
+                make_error(ErrorCode::protocol_violation,
+                           "broker returned a non-replayed receipt for replay_file"),
+                request_id);
         }
         py::dict dictionary;
         dictionary["request_id"] = result.request_id;
@@ -448,7 +496,8 @@ public:
     }
 
 private:
-    /** @brief 取得 gateway endpoint 供构造时验证 / Get the gateway endpoint for construction-time validation. */
+    /** @brief 取得 gateway endpoint 供构造时验证 / Get the gateway endpoint for construction-time
+     * validation. */
     [[nodiscard]] const std::string& gateway_socket_path() const noexcept {
         return gateway_.socket_path();
     }
@@ -465,15 +514,15 @@ private:
     bool closed_{false};
 };
 
-}  // namespace
-}  // namespace wspctl
+} // namespace
+} // namespace wspctl
 
 PYBIND11_MODULE(_native, module) {
     module.doc() = "wspctl non-privileged SOCK_SEQPACKET client";
     py::object runtime_error_type = py::reinterpret_steal<py::object>(
         PyErr_NewException("wspctl._native.RuntimeProcessError", PyExc_RuntimeError, nullptr));
-    py::object in_doubt_type = py::reinterpret_steal<py::object>(
-        PyErr_NewException("wspctl._native.InvocationInDoubtError", runtime_error_type.ptr(), nullptr));
+    py::object in_doubt_type = py::reinterpret_steal<py::object>(PyErr_NewException(
+        "wspctl._native.InvocationInDoubtError", runtime_error_type.ptr(), nullptr));
     module.attr("RuntimeProcessError") = runtime_error_type;
     module.attr("InvocationInDoubtError") = in_doubt_type;
     module.attr("NativeError") = runtime_error_type;
@@ -484,7 +533,8 @@ PYBIND11_MODULE(_native, module) {
         .def_property_readonly("runtime_key", &wspctl::RuntimeStatus::runtime_key)
         .def_property_readonly("state", &wspctl::RuntimeStatus::state)
         .def_property_readonly("active_activation_id", &wspctl::RuntimeStatus::active_activation_id)
-        .def_property_readonly("handle_activation_matches", &wspctl::RuntimeStatus::handle_activation_matches)
+        .def_property_readonly("handle_activation_matches",
+                               &wspctl::RuntimeStatus::handle_activation_matches)
         .def_property_readonly("supervisor_alive", &wspctl::RuntimeStatus::supervisor_alive)
         .def_property_readonly("idle_for_ms", &wspctl::RuntimeStatus::idle_for_ms)
         .def_property_readonly("idle_ttl_ms", &wspctl::RuntimeStatus::idle_ttl_ms)
@@ -492,38 +542,18 @@ PYBIND11_MODULE(_native, module) {
         .def_property_readonly("cleanup_pending", &wspctl::RuntimeStatus::cleanup_pending)
         .def("dump", &wspctl::RuntimeStatus::dump);
     py::class_<wspctl::RuntimeProcess>(module, "RuntimeProcess")
-        .def(
-            py::init<std::string, std::string, std::string>(),
-            py::arg("socket_path"),
-            py::arg("runtime_key"),
-            py::arg("activation_id"))
-        .def(
-            "execute",
-            &wspctl::RuntimeProcess::execute,
-            py::arg("argv"),
-            py::arg("stdin") = "",
-            py::arg("cwd") = "/workspace",
-            py::arg("timeout_ms") = 30'000,
-            py::arg("output_limit") = 65'536,
-            py::arg("request_id") = "",
-            py::arg("request_hash") = "")
+        .def(py::init<std::string, std::string, std::string>(), py::arg("socket_path"),
+             py::arg("runtime_key"), py::arg("activation_id"))
+        .def("execute", &wspctl::RuntimeProcess::execute, py::arg("argv"), py::arg("stdin") = "",
+             py::arg("cwd") = "/workspace", py::arg("timeout_ms") = 30'000,
+             py::arg("output_limit") = 65'536, py::arg("request_id") = "",
+             py::arg("request_hash") = "")
         .def("status", &wspctl::RuntimeProcess::status)
-        .def(
-            "add_file",
-            &wspctl::RuntimeProcess::add_file,
-            py::arg("opaque_id"),
-            py::arg("chunks"),
-            py::arg("byte_size"),
-            py::arg("sha256"),
-            py::arg("request_id") = "",
-            py::arg("request_hash") = "")
-        .def(
-            "replay_file",
-            &wspctl::RuntimeProcess::replay_file,
-            py::arg("opaque_id"),
-            py::arg("byte_size"),
-            py::arg("sha256"),
-            py::arg("request_id") = "",
-            py::arg("request_hash") = "")
+        .def("add_file", &wspctl::RuntimeProcess::add_file, py::arg("opaque_id"), py::arg("chunks"),
+             py::arg("byte_size"), py::arg("sha256"), py::arg("request_id") = "",
+             py::arg("request_hash") = "")
+        .def("replay_file", &wspctl::RuntimeProcess::replay_file, py::arg("opaque_id"),
+             py::arg("byte_size"), py::arg("sha256"), py::arg("request_id") = "",
+             py::arg("request_hash") = "")
         .def("close", &wspctl::RuntimeProcess::close);
 }

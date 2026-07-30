@@ -4,15 +4,15 @@
 
 namespace wspctl::application {
 
-OperatorWorkspaceQueryError make_operator_workspace_query_error(
-    const OperatorWorkspaceQueryErrorCode code,
-    std::string message) {
+OperatorWorkspaceQueryError
+make_operator_workspace_query_error(const OperatorWorkspaceQueryErrorCode code,
+                                    std::string message) {
     return OperatorWorkspaceQueryError{.code = code, .message = std::move(message)};
 }
 
-OperatorWorkspaceQueryResult<domain::OperatorWorkspaceStatus> OperatorWorkspaceQueryService::status(
-    const domain::RuntimeId& runtime,
-    const OperatorWorkspaceReadPort& port) const {
+OperatorWorkspaceQueryResult<domain::OperatorWorkspaceStatus>
+OperatorWorkspaceQueryService::status(const domain::RuntimeId& runtime,
+                                      const OperatorWorkspaceReadPort& port) const {
     auto status = port.status(runtime);
     if (!status) {
         return std::unexpected(status.error());
@@ -25,10 +25,10 @@ OperatorWorkspaceQueryResult<domain::OperatorWorkspaceStatus> OperatorWorkspaceQ
     return status;
 }
 
-OperatorWorkspaceQueryResult<domain::WorkspaceListing> OperatorWorkspaceQueryService::list(
-    const domain::RuntimeId& runtime,
-    const domain::OperatorWorkspacePath& path,
-    const OperatorWorkspaceReadPort& port) const {
+OperatorWorkspaceQueryResult<domain::WorkspaceListing>
+OperatorWorkspaceQueryService::list(const domain::RuntimeId& runtime,
+                                    const domain::OperatorWorkspacePath& path,
+                                    const OperatorWorkspaceReadPort& port) const {
     auto listing = port.list(runtime, path);
     if (!listing) {
         return std::unexpected(listing.error());
@@ -41,4 +41,4 @@ OperatorWorkspaceQueryResult<domain::WorkspaceListing> OperatorWorkspaceQuerySer
     return listing;
 }
 
-}  // namespace wspctl::application
+} // namespace wspctl::application

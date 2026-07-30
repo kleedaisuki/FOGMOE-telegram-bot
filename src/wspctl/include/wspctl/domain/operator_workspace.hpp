@@ -11,10 +11,12 @@
 
 namespace wspctl::domain {
 
-/** @brief 单次 operator 目录查询允许返回的最大条目数 / Maximum entries returned by one operator directory query. */
+/** @brief 单次 operator 目录查询允许返回的最大条目数 / Maximum entries returned by one operator
+ * directory query. */
 inline constexpr std::size_t kOperatorWorkspaceListingLimit{128U};
 
-/** @brief operator 可见的 workspace 持久化状态 / Persistent-workspace state visible to an operator. */
+/** @brief operator 可见的 workspace 持久化状态 / Persistent-workspace state visible to an operator.
+ */
 enum class WorkspacePersistence : std::uint8_t {
     /** @brief 尚无已持久化 workspace / No persistent workspace exists yet. */
     absent = 0,
@@ -22,7 +24,8 @@ enum class WorkspacePersistence : std::uint8_t {
     ready = 1,
 };
 
-/** @brief operator 可见的 RuntimeProcess 活动状态 / RuntimeProcess activity state visible to an operator. */
+/** @brief operator 可见的 RuntimeProcess 活动状态 / RuntimeProcess activity state visible to an
+ * operator. */
 enum class WorkspaceActivity : std::uint8_t {
     /** @brief 没有当前 RuntimeProcess / There is no current RuntimeProcess. */
     inactive = 0,
@@ -34,11 +37,13 @@ enum class WorkspaceActivity : std::uint8_t {
     executing = 3,
     /** @brief RuntimeProcess 正被回收 / The RuntimeProcess is being retired. */
     retiring = 4,
-    /** @brief 当前 RuntimeProcess 已失败且等待清理 / The current RuntimeProcess failed and awaits cleanup. */
+    /** @brief 当前 RuntimeProcess 已失败且等待清理 / The current RuntimeProcess failed and awaits
+       cleanup. */
     failed = 5,
 };
 
-/** @brief 经内核 XFS project quota 读取的已验证 workspace 用量 / Validated workspace usage read from kernel XFS project quota. */
+/** @brief 经内核 XFS project quota 读取的已验证 workspace 用量 / Validated workspace usage read
+ * from kernel XFS project quota. */
 class WorkspaceQuotaUsage final {
 public:
     /**
@@ -52,11 +57,10 @@ public:
      *       Usage may temporarily exceed a limit to faithfully expose an existing XFS overage;
      *       the hard limit itself must not be zero.
      */
-    [[nodiscard]] static Result<WorkspaceQuotaUsage> create(
-        std::uint64_t used_bytes,
-        std::uint64_t hard_bytes,
-        std::uint64_t used_inodes,
-        std::uint64_t hard_inodes);
+    [[nodiscard]] static Result<WorkspaceQuotaUsage> create(std::uint64_t used_bytes,
+                                                            std::uint64_t hard_bytes,
+                                                            std::uint64_t used_inodes,
+                                                            std::uint64_t hard_inodes);
 
     /** @brief 取得当前已计费字节数 / Get currently accounted bytes. */
     [[nodiscard]] std::uint64_t used_bytes() const noexcept;
@@ -78,11 +82,8 @@ private:
      * @param used_inodes 已验证已计费 inode 数 / Validated accounted inode count.
      * @param hard_inodes 已验证 inode hard limit / Validated inode hard limit.
      */
-    WorkspaceQuotaUsage(
-        std::uint64_t used_bytes,
-        std::uint64_t hard_bytes,
-        std::uint64_t used_inodes,
-        std::uint64_t hard_inodes) noexcept;
+    WorkspaceQuotaUsage(std::uint64_t used_bytes, std::uint64_t hard_bytes,
+                        std::uint64_t used_inodes, std::uint64_t hard_inodes) noexcept;
 
     /** @brief 当前已计费字节数 / Currently accounted bytes. */
     std::uint64_t used_bytes_{};
@@ -94,7 +95,8 @@ private:
     std::uint64_t hard_inodes_{};
 };
 
-/** @brief operator 的已验证 allowlisted runtime 状态读模型 / Validated allowlisted runtime-status read model for an operator. */
+/** @brief operator 的已验证 allowlisted runtime 状态读模型 / Validated allowlisted runtime-status
+ * read model for an operator. */
 class OperatorWorkspaceStatus final {
 public:
     /**
@@ -106,11 +108,9 @@ public:
      *     Kernel quota for a ready workspace; it must be empty for an absent workspace.
      * @return 已验证状态或领域错误 / Validated status or a domain error.
      */
-    [[nodiscard]] static Result<OperatorWorkspaceStatus> create(
-        RuntimeId runtime,
-        WorkspacePersistence persistence,
-        WorkspaceActivity activity,
-        std::optional<WorkspaceQuotaUsage> quota);
+    [[nodiscard]] static Result<OperatorWorkspaceStatus>
+    create(RuntimeId runtime, WorkspacePersistence persistence, WorkspaceActivity activity,
+           std::optional<WorkspaceQuotaUsage> quota);
 
     /** @brief 取得查询的长期 runtime 标识 / Get the queried long-lived runtime identity. */
     [[nodiscard]] const RuntimeId& runtime() const noexcept;
@@ -132,11 +132,9 @@ private:
      * @param activity 已验证 activity / Validated activity.
      * @param quota 已验证 quota presence / Validated quota presence.
      */
-    OperatorWorkspaceStatus(
-        RuntimeId runtime,
-        WorkspacePersistence persistence,
-        WorkspaceActivity activity,
-        std::optional<WorkspaceQuotaUsage> quota) noexcept;
+    OperatorWorkspaceStatus(RuntimeId runtime, WorkspacePersistence persistence,
+                            WorkspaceActivity activity,
+                            std::optional<WorkspaceQuotaUsage> quota) noexcept;
 
     /** @brief 查询的长期 runtime 标识 / Queried long-lived runtime identity. */
     RuntimeId runtime_;
@@ -149,7 +147,8 @@ private:
 };
 
 /**
- * @brief 仅指向 runtime `/workspace` 树的规范路径值对象 / Canonical path value object confined to a runtime `/workspace` tree.
+ * @brief 仅指向 runtime `/workspace` 树的规范路径值对象 / Canonical path value object confined to a
+ * runtime `/workspace` tree.
  *
  * 它不是 host filesystem path：它只表示 namespace 内的逻辑路径。基础设施必须从已经验证的
  * `upper` directory FD 开始，以 `openat2` 逐分量解析它。/ This is not a host filesystem path:
@@ -163,7 +162,8 @@ public:
      * @param value 待验证逻辑路径 / Logical path to validate.
      * @return 已验证路径或领域错误 / Validated path or a domain error.
      * @note 不接受 host-absolute path、`.`、`..`、重复分隔符、尾随分隔符或 NUL。
-     *       Host-absolute paths, `.`, `..`, repeated separators, trailing separators, and NUL are rejected.
+     *       Host-absolute paths, `.`, `..`, repeated separators, trailing separators, and NUL are
+     * rejected.
      */
     [[nodiscard]] static Result<OperatorWorkspacePath> parse(std::string value);
 
@@ -201,7 +201,8 @@ enum class WorkspaceEntryKind : std::uint8_t {
 };
 
 /**
- * @brief 一条经过命名语义验证的 workspace 目录项 / One workspace directory entry with validated naming semantics.
+ * @brief 一条经过命名语义验证的 workspace 目录项 / One workspace directory entry with validated
+ * naming semantics.
  *
  * `encoded_name` 采用可逆 ASCII percent encoding；它不是原始 filename，避免不可信 filename
  * 进入 terminal 或 operator protocol 的文本显示边界。/ `encoded_name` uses reversible ASCII
@@ -214,13 +215,12 @@ public:
      * @brief 构造一个已安全编码的目录项 / Construct a safely encoded directory entry.
      * @param encoded_name 已 percent-encoded 的单一 filename / Percent-encoded single filename.
      * @param kind 不跟随链接观测到的节点类型 / Node kind observed without following links.
-     * @param size_bytes 普通文件的逻辑字节数；其他类型为零 / Logical size for a regular file; zero otherwise.
+     * @param size_bytes 普通文件的逻辑字节数；其他类型为零 / Logical size for a regular file; zero
+     * otherwise.
      * @return 已验证条目或领域错误 / Validated entry or a domain error.
      */
-    [[nodiscard]] static Result<WorkspaceEntry> create(
-        std::string encoded_name,
-        WorkspaceEntryKind kind,
-        std::uint64_t size_bytes);
+    [[nodiscard]] static Result<WorkspaceEntry>
+    create(std::string encoded_name, WorkspaceEntryKind kind, std::uint64_t size_bytes);
 
     /** @brief 取得安全显示名 / Get the safe display name. */
     [[nodiscard]] const std::string& encoded_name() const noexcept;
@@ -239,7 +239,8 @@ private:
      * @param kind 已验证节点类型 / Validated node kind.
      * @param size_bytes 已验证逻辑字节数 / Validated logical byte size.
      */
-    WorkspaceEntry(std::string encoded_name, WorkspaceEntryKind kind, std::uint64_t size_bytes) noexcept;
+    WorkspaceEntry(std::string encoded_name, WorkspaceEntryKind kind,
+                   std::uint64_t size_bytes) noexcept;
 
     /** @brief 安全、可逆编码的 filename / Safe reversible encoded filename. */
     std::string encoded_name_;
@@ -249,18 +250,21 @@ private:
     std::uint64_t size_bytes_{};
 };
 
-/** @brief 一次有界、只读的 workspace 目录列举结果 / One bounded read-only workspace directory listing. */
+/** @brief 一次有界、只读的 workspace 目录列举结果 / One bounded read-only workspace directory
+ * listing. */
 struct WorkspaceListing final {
     /** @brief 已验证的被列举路径 / Validated path being listed. */
     OperatorWorkspacePath path;
-    /** @brief 按 encoded_name 字节序排序的目录项 / Directory entries sorted by encoded-name byte order. */
+    /** @brief 按 encoded_name 字节序排序的目录项 / Directory entries sorted by encoded-name byte
+     * order. */
     std::vector<WorkspaceEntry> entries;
     /** @brief 是否因固定上限而省略后续项 / Whether later entries were omitted by the fixed cap. */
     bool truncated{false};
 };
 
 /**
- * @brief 将原始 POSIX filename 编码为安全可逆 ASCII / Encode a raw POSIX filename into safe reversible ASCII.
+ * @brief 将原始 POSIX filename 编码为安全可逆 ASCII / Encode a raw POSIX filename into safe
+ * reversible ASCII.
  * @param raw_name 不含 `/` 与 NUL 的原始目录项名称 / Raw directory-entry name without `/` or NUL.
  * @return percent-encoded ASCII 名称或领域错误 / Percent-encoded ASCII name or a domain error.
  * @note 编码规则固定为保留 `[A-Za-z0-9._-]`，其余每个 byte 写为大写 `%HH`。
@@ -268,4 +272,4 @@ struct WorkspaceListing final {
  */
 [[nodiscard]] Result<std::string> encode_workspace_entry_name(std::string_view raw_name);
 
-}  // namespace wspctl::domain
+} // namespace wspctl::domain

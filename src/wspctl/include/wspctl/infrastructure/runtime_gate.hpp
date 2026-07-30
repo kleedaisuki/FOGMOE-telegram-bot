@@ -44,7 +44,8 @@ private:
 };
 
 /**
- * @brief 防止共享 workspace 并发写入的闸门 / Gate preventing concurrent writes to a shared workspace.
+ * @brief 防止共享 workspace 并发写入的闸门 / Gate preventing concurrent writes to a shared
+ * workspace.
  */
 class RuntimeExecutionGate final {
 public:
@@ -70,4 +71,4 @@ private:
     void release(const std::string& runtime_key) noexcept;
 };
 
-}  // namespace wspctl
+} // namespace wspctl

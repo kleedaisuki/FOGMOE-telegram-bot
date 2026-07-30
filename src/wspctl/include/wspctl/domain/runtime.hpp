@@ -32,8 +32,7 @@ struct Error final {
 };
 
 /** @brief 携带领域错误的结果 / Result carrying a domain error. */
-template <typename Value>
-using Result = std::expected<Value, Error>;
+template <typename Value> using Result = std::expected<Value, Error>;
 
 /**
  * @brief 构造领域错误 / Construct a domain error.
@@ -172,9 +171,8 @@ public:
      * @param output_bytes 合并输出字节上限 / Combined output byte cap.
      * @return 已验证预算或错误 / Validated budget or error.
      */
-    [[nodiscard]] static Result<ExecutionBudget> create(
-        std::chrono::milliseconds wall_clock,
-        std::size_t output_bytes);
+    [[nodiscard]] static Result<ExecutionBudget> create(std::chrono::milliseconds wall_clock,
+                                                        std::size_t output_bytes);
 
     /** @brief 取得墙钟上限 / Get the wall-clock cap. */
     [[nodiscard]] std::chrono::milliseconds wall_clock() const noexcept;
@@ -240,10 +238,8 @@ public:
      *     Current activation ownership; it must be empty for dormant/failed.
      * @return 已验证快照或领域不变量错误 / Validated snapshot or a domain-invariant error.
      */
-    [[nodiscard]] static Result<RuntimeSnapshot> create(
-        RuntimeId runtime,
-        RuntimeState state,
-        std::optional<ActivationId> active_activation);
+    [[nodiscard]] static Result<RuntimeSnapshot>
+    create(RuntimeId runtime, RuntimeState state, std::optional<ActivationId> active_activation);
 
     /** @brief 取得长期 runtime 身份 / Get the long-lived runtime identity. */
     [[nodiscard]] const RuntimeId& runtime() const noexcept;
@@ -253,7 +249,8 @@ public:
     [[nodiscard]] const std::optional<ActivationId>& active_activation() const noexcept;
 
 private:
-    /** @brief 聚合可直接投影自身已验证状态 / The aggregate may directly project its validated state. */
+    /** @brief 聚合可直接投影自身已验证状态 / The aggregate may directly project its validated
+     * state. */
     friend class Runtime;
 
     /**
@@ -262,10 +259,8 @@ private:
      * @param state 已验证生命周期状态 / Validated lifecycle state.
      * @param active_activation 已验证 activation 所有权 / Validated activation ownership.
      */
-    RuntimeSnapshot(
-        RuntimeId runtime,
-        RuntimeState state,
-        std::optional<ActivationId> active_activation) noexcept;
+    RuntimeSnapshot(RuntimeId runtime, RuntimeState state,
+                    std::optional<ActivationId> active_activation) noexcept;
 
     /** @brief 长期 runtime 身份 / Long-lived runtime identity. */
     RuntimeId runtime_;
@@ -288,10 +283,12 @@ enum class CommandJournalDecision : std::uint8_t {
 };
 
 /**
- * @brief 具有 activation 所有权不变量的 runtime 聚合 / Runtime aggregate with activation-ownership invariants.
+ * @brief 具有 activation 所有权不变量的 runtime 聚合 / Runtime aggregate with activation-ownership
+ * invariants.
  *
  * 该聚合只表达业务生命周期；mount、cgroup、socket 和 Linux 权限均属于基础设施层。
- * This aggregate expresses only business lifecycle; mounts, cgroups, sockets, and Linux privileges belong to infrastructure.
+ * This aggregate expresses only business lifecycle; mounts, cgroups, sockets, and Linux privileges
+ * belong to infrastructure.
  */
 class Runtime final {
 public:
@@ -305,14 +302,17 @@ public:
     [[nodiscard]] RuntimeState state() const noexcept;
     /** @brief 取得长期 runtime 标识 / Get the long-lived runtime identifier. */
     [[nodiscard]] const RuntimeId& id() const noexcept;
-    /** @brief 取得当前 activation；dormant/failed 时为空 / Get the active activation; empty while dormant/failed. */
+    /** @brief 取得当前 activation；dormant/failed 时为空 / Get the active activation; empty while
+     * dormant/failed. */
     [[nodiscard]] const std::optional<ActivationId>& active_activation() const noexcept;
-    /** @brief 取得满足聚合不变量的无载荷观察快照 / Get a payload-free snapshot satisfying aggregate invariants. */
+    /** @brief 取得满足聚合不变量的无载荷观察快照 / Get a payload-free snapshot satisfying aggregate
+     * invariants. */
     [[nodiscard]] RuntimeSnapshot snapshot() const;
 
     /**
      * @brief 请求新的 activation / Request a new activation.
-     * @param activation 请求拥有该 runtime 的 activation / Activation requesting ownership of this runtime.
+     * @param activation 请求拥有该 runtime 的 activation / Activation requesting ownership of this
+     * runtime.
      * @return 成功或生命周期错误 / Success or lifecycle error.
      */
     [[nodiscard]] Result<void> begin_activation(const ActivationId& activation);
@@ -346,7 +346,8 @@ public:
      * @return 成功或所有权/状态错误 / Success or ownership/state error.
      */
     [[nodiscard]] Result<void> finish_retirement(const ActivationId& activation);
-    /** @brief 标记本进程失败并清除 activation / Mark this process failed and clear its activation. */
+    /** @brief 标记本进程失败并清除 activation / Mark this process failed and clear its activation.
+     */
     void fail() noexcept;
 
 private:
@@ -357,17 +358,16 @@ private:
      * @param operation 操作诊断名 / Diagnostic operation name.
      * @return 成功或精确不变量错误 / Success or precise invariant error.
      */
-    [[nodiscard]] Result<void> require_active(
-        RuntimeState expected,
-        const ActivationId& activation,
-        std::string_view operation) const;
+    [[nodiscard]] Result<void> require_active(RuntimeState expected, const ActivationId& activation,
+                                              std::string_view operation) const;
 
     /** @brief 长期 runtime 标识 / Long-lived runtime identifier. */
     RuntimeId id_;
     /** @brief 当前状态 / Current state. */
     RuntimeState state_{RuntimeState::dormant};
-    /** @brief 对当前 RuntimeProcess 的唯一所有权 / Exclusive ownership of the current RuntimeProcess. */
+    /** @brief 对当前 RuntimeProcess 的唯一所有权 / Exclusive ownership of the current
+     * RuntimeProcess. */
     std::optional<ActivationId> active_activation_;
 };
 
-}  // namespace wspctl::domain
+} // namespace wspctl::domain

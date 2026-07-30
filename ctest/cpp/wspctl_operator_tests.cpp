@@ -1,6 +1,7 @@
 /**
  * @file wspctl_operator_tests.cpp
- * @brief 独立 operator shell DDD/协议/文件系统测试 / Independent operator-shell DDD, protocol, and filesystem tests.
+ * @brief 独立 operator shell DDD/协议/文件系统测试 / Independent operator-shell DDD, protocol, and
+ * filesystem tests.
  */
 
 #include "wspctl/application/operator_workspace.hpp"
@@ -66,25 +67,26 @@ void expect(const bool condition, const std::string& message) {
  * @param runtime status 所属 runtime / Runtime owned by the status.
  * @return allowlisted operator status / Allowlisted operator status.
  */
-[[nodiscard]] wspctl::domain::OperatorWorkspaceStatus ready_status(const wspctl::domain::RuntimeId& runtime) {
+[[nodiscard]] wspctl::domain::OperatorWorkspaceStatus
+ready_status(const wspctl::domain::RuntimeId& runtime) {
     const auto status = wspctl::domain::OperatorWorkspaceStatus::create(
-        runtime,
-        wspctl::domain::WorkspacePersistence::ready,
-        wspctl::domain::WorkspaceActivity::inactive,
-        ready_quota());
+        runtime, wspctl::domain::WorkspacePersistence::ready,
+        wspctl::domain::WorkspaceActivity::inactive, ready_quota());
     expect(status.has_value(), "create ready operator status");
     return *status;
 }
 
 /**
- * @brief 构造默认测试 runtime 的 ready status / Construct a ready status for the default test runtime.
+ * @brief 构造默认测试 runtime 的 ready status / Construct a ready status for the default test
+ * runtime.
  * @return allowlisted operator status / Allowlisted operator status.
  */
 [[nodiscard]] wspctl::domain::OperatorWorkspaceStatus ready_status() {
     return ready_status(test_runtime());
 }
 
-/** @brief 测试 workspace logical-path 与 filename 编码领域约束 / Test workspace logical-path and filename-encoding domain constraints. */
+/** @brief 测试 workspace logical-path 与 filename 编码领域约束 / Test workspace logical-path and
+ * filename-encoding domain constraints. */
 void test_domain_path_and_filename_encoding() {
     expect(wspctl::domain::OperatorWorkspacePath::parse("/workspace/a/b").has_value(),
            "accept normalized workspace path");
@@ -103,49 +105,64 @@ void test_domain_path_and_filename_encoding() {
     const auto encoded = wspctl::domain::encode_workspace_entry_name(raw_name);
     expect(encoded.has_value() && *encoded == "line%0A%1B%5B31m",
            "percent encode newline and ANSI escape bytes reversibly");
-    expect(wspctl::domain::WorkspaceEntry::create(*encoded, wspctl::domain::WorkspaceEntryKind::regular_file, 1U).has_value(),
+    expect(wspctl::domain::WorkspaceEntry::create(
+               *encoded, wspctl::domain::WorkspaceEntryKind::regular_file, 1U)
+               .has_value(),
            "accept canonical safe filename encoding");
-    expect(!wspctl::domain::WorkspaceEntry::create("line\n", wspctl::domain::WorkspaceEntryKind::regular_file, 1U).has_value(),
+    expect(!wspctl::domain::WorkspaceEntry::create(
+                "line\n", wspctl::domain::WorkspaceEntryKind::regular_file, 1U)
+                .has_value(),
            "reject raw terminal-control filename bytes");
-    expect(!wspctl::domain::WorkspaceEntry::create("%41", wspctl::domain::WorkspaceEntryKind::regular_file, 1U).has_value(),
+    expect(!wspctl::domain::WorkspaceEntry::create(
+                "%41", wspctl::domain::WorkspaceEntryKind::regular_file, 1U)
+                .has_value(),
            "reject non-canonical percent encoding of a display-safe byte");
-    expect(!wspctl::domain::WorkspaceEntry::create(".", wspctl::domain::WorkspaceEntryKind::directory, 0U).has_value() &&
-               !wspctl::domain::WorkspaceEntry::create("..", wspctl::domain::WorkspaceEntryKind::directory, 0U).has_value(),
+    expect(!wspctl::domain::WorkspaceEntry::create(
+                ".", wspctl::domain::WorkspaceEntryKind::directory, 0U)
+                   .has_value() &&
+               !wspctl::domain::WorkspaceEntry::create(
+                    "..", wspctl::domain::WorkspaceEntryKind::directory, 0U)
+                    .has_value(),
            "reject POSIX dot names even though they are display-safe bytes");
 }
 
-/** @brief 测试 operator endpoint UID/path 隔离策略 / Test operator endpoint UID/path separation policy. */
+/** @brief 测试 operator endpoint UID/path 隔离策略 / Test operator endpoint UID/path separation
+ * policy. */
 void test_endpoint_separation_policy() {
-    expect(wspctl::validate_operator_endpoint_separation(
-               "/run/wspctl/bot/broker.sock", 65532U, "/run/wspctl/operator/broker.sock", 0U)
+    expect(wspctl::validate_operator_endpoint_separation("/run/wspctl/bot/broker.sock", 65532U,
+                                                         "/run/wspctl/operator/broker.sock", 0U)
                .has_value(),
            "accept distinct Bot and root operator endpoints");
     expect(!wspctl::validate_operator_endpoint_separation(
                 "/run/wspctl/bot/broker.sock", 65532U, "/run/wspctl/operator/broker.sock", 65532U)
                 .has_value(),
            "reject an operator UID equal to Bot UID");
-    expect(!wspctl::validate_operator_endpoint_separation(
-                "/run/wspctl/same.sock", 65532U, "/run/wspctl/same.sock", 0U)
+    expect(!wspctl::validate_operator_endpoint_separation("/run/wspctl/same.sock", 65532U,
+                                                          "/run/wspctl/same.sock", 0U)
                 .has_value(),
            "reject shared Bot and operator socket path");
     expect(!wspctl::validate_operator_endpoint_separation(
                 "/run/wspctl/bot/broker.sock", 65532U, "/run/wspctl/bot/operator/broker.sock", 0U)
                 .has_value(),
            "reject an operator endpoint nested in the Bot socket directory view");
-    expect(!wspctl::validate_operator_endpoint_separation(
-                "/run/wspctl/bot/operator/broker.sock", 65532U, "/run/wspctl/bot/broker.sock", 0U)
+    expect(!wspctl::validate_operator_endpoint_separation("/run/wspctl/bot/operator/broker.sock",
+                                                          65532U, "/run/wspctl/bot/broker.sock", 0U)
                 .has_value(),
            "reject a Bot endpoint nested in the operator socket directory view");
-    expect(wspctl::is_authorized_operator_peer(0U, 0U) && !wspctl::is_authorized_operator_peer(65532U, 0U),
+    expect(wspctl::is_authorized_operator_peer(0U, 0U) &&
+               !wspctl::is_authorized_operator_peer(65532U, 0U),
            "authorize only the exact operator SO_PEERCRED UID");
 }
 
-/** @brief 测试 operator wire 与 Bot wire 的魔数隔离 / Test magic isolation between operator and Bot wires. */
+/** @brief 测试 operator wire 与 Bot wire 的魔数隔离 / Test magic isolation between operator and Bot
+ * wires. */
 void test_protocol_isolation_and_round_trip() {
     namespace op = wspctl::operator_protocol;
-    const auto status_payload = op::encode_status_response(op::StatusResponse{.status = ready_status()});
+    const auto status_payload =
+        op::encode_status_response(op::StatusResponse{.status = ready_status()});
     expect(status_payload.has_value(), "encode operator status response");
-    const auto status_frame = op::encode_operator_frame(op::OperatorMessageKind::status_response, *status_payload);
+    const auto status_frame =
+        op::encode_operator_frame(op::OperatorMessageKind::status_response, *status_payload);
     expect(status_frame.has_value(), "frame operator status response");
     const auto decoded_operator_frame = op::decode_operator_frame(*status_frame);
     expect(decoded_operator_frame.has_value(), "decode operator status frame");
@@ -155,35 +172,27 @@ void test_protocol_isolation_and_round_trip() {
            "round trip operator status quota fields");
 
     expect(!wspctl::domain::OperatorWorkspaceStatus::create(
-                test_runtime(),
-                wspctl::domain::WorkspacePersistence::ready,
-                static_cast<wspctl::domain::WorkspaceActivity>(255U),
-                ready_quota())
+                test_runtime(), wspctl::domain::WorkspacePersistence::ready,
+                static_cast<wspctl::domain::WorkspaceActivity>(255U), ready_quota())
                 .has_value(),
            "domain status rejects an unknown activity enum before serialization");
     expect(!wspctl::domain::WorkspaceQuotaUsage::create(1024U, 0U, 2U, 64U).has_value(),
            "domain quota rejects a zero byte hard limit before serialization");
     expect(!wspctl::domain::OperatorWorkspaceStatus::create(
-                test_runtime(),
-                wspctl::domain::WorkspacePersistence::ready,
-                wspctl::domain::WorkspaceActivity::inactive,
-                std::nullopt)
+                test_runtime(), wspctl::domain::WorkspacePersistence::ready,
+                wspctl::domain::WorkspaceActivity::inactive, std::nullopt)
                 .has_value(),
            "domain status rejects a ready workspace without a quota snapshot");
     expect(!wspctl::domain::OperatorWorkspaceStatus::create(
-                test_runtime(),
-                wspctl::domain::WorkspacePersistence::absent,
-                wspctl::domain::WorkspaceActivity::inactive,
-                ready_quota())
+                test_runtime(), wspctl::domain::WorkspacePersistence::absent,
+                wspctl::domain::WorkspaceActivity::inactive, ready_quota())
                 .has_value(),
            "domain status rejects an absent workspace with a quota snapshot");
     auto malformed_quota_payload = *status_payload;
     constexpr std::size_t kStatusPrefixBytes = sizeof(std::uint32_t) + 36U + 3U;
     constexpr std::size_t kHardBytesOffset = kStatusPrefixBytes + sizeof(std::uint64_t);
-    std::fill_n(
-        malformed_quota_payload.begin() + static_cast<std::ptrdiff_t>(kHardBytesOffset),
-        sizeof(std::uint64_t),
-        std::byte{0U});
+    std::fill_n(malformed_quota_payload.begin() + static_cast<std::ptrdiff_t>(kHardBytesOffset),
+                sizeof(std::uint64_t), std::byte{0U});
     expect(!op::decode_status_response(malformed_quota_payload).has_value(),
            "reject a wire status response with a zero byte hard limit");
     auto malformed_activity_payload = *status_payload;
@@ -200,16 +209,20 @@ void test_protocol_isolation_and_round_trip() {
 
     const auto path = wspctl::domain::OperatorWorkspacePath::parse("/workspace");
     expect(path.has_value(), "parse root path for list round trip");
-    const auto entry = wspctl::domain::WorkspaceEntry::create("safe%0Aname", wspctl::domain::WorkspaceEntryKind::regular_file, 7U);
+    const auto entry = wspctl::domain::WorkspaceEntry::create(
+        "safe%0Aname", wspctl::domain::WorkspaceEntryKind::regular_file, 7U);
     expect(entry.has_value(), "create safe list entry");
-    const auto list_payload = op::encode_list_response(op::ListResponse{.listing = wspctl::domain::WorkspaceListing{
-        .path = *path,
-        .entries = {*entry},
-        .truncated = false,
-    }});
-    const auto decoded_list = list_payload ? op::decode_list_response(*list_payload)
-                                           : wspctl::Result<op::ListResponse>{std::unexpected(list_payload.error())};
-    expect(decoded_list.has_value() && decoded_list->listing.entries.front().encoded_name() == "safe%0Aname",
+    const auto list_payload =
+        op::encode_list_response(op::ListResponse{.listing = wspctl::domain::WorkspaceListing{
+                                                      .path = *path,
+                                                      .entries = {*entry},
+                                                      .truncated = false,
+                                                  }});
+    const auto decoded_list =
+        list_payload ? op::decode_list_response(*list_payload)
+                     : wspctl::Result<op::ListResponse>{std::unexpected(list_payload.error())};
+    expect(decoded_list.has_value() &&
+               decoded_list->listing.entries.front().encoded_name() == "safe%0Aname",
            "round trip safely encoded operator list entry");
 }
 
@@ -221,8 +234,9 @@ public:
      * @param runtime 查询 runtime / Queried runtime.
      * @return 固定 ready status / Fixed ready status.
      */
-    [[nodiscard]] wspctl::application::OperatorWorkspaceQueryResult<wspctl::domain::OperatorWorkspaceStatus> status(
-        const wspctl::domain::RuntimeId& runtime) const override {
+    [[nodiscard]] wspctl::application::OperatorWorkspaceQueryResult<
+        wspctl::domain::OperatorWorkspaceStatus>
+    status(const wspctl::domain::RuntimeId& runtime) const override {
         ++status_calls;
         return ready_status(runtime);
     }
@@ -233,9 +247,10 @@ public:
      * @param path 被列举 path / Listed path.
      * @return 固定空 listing / Fixed empty listing.
      */
-    [[nodiscard]] wspctl::application::OperatorWorkspaceQueryResult<wspctl::domain::WorkspaceListing> list(
-        const wspctl::domain::RuntimeId& runtime,
-        const wspctl::domain::OperatorWorkspacePath& path) const override {
+    [[nodiscard]] wspctl::application::OperatorWorkspaceQueryResult<
+        wspctl::domain::WorkspaceListing>
+    list(const wspctl::domain::RuntimeId& runtime,
+         const wspctl::domain::OperatorWorkspacePath& path) const override {
         static_cast<void>(runtime);
         ++list_calls;
         return wspctl::domain::WorkspaceListing{.path = path, .entries = {}, .truncated = false};
@@ -247,7 +262,8 @@ public:
     mutable unsigned int list_calls{0U};
 };
 
-/** @brief 测试 application read use case 不含 activation 副作用 / Test the application read use case contains no activation side effect. */
+/** @brief 测试 application read use case 不含 activation 副作用 / Test the application read use
+ * case contains no activation side effect. */
 void test_application_read_only_boundary() {
     RecordingOperatorPort port;
     wspctl::application::OperatorWorkspaceQueryService service;
@@ -255,7 +271,8 @@ void test_application_read_only_boundary() {
     const auto path = wspctl::domain::OperatorWorkspacePath::parse("/workspace");
     const auto status = service.status(runtime, port);
     const auto listing = service.list(runtime, *path, port);
-    expect(status.has_value() && listing.has_value() && port.status_calls == 1U && port.list_calls == 1U,
+    expect(status.has_value() && listing.has_value() && port.status_calls == 1U &&
+               port.list_calls == 1U,
            "application service invokes only read-model port methods");
 }
 
@@ -275,7 +292,8 @@ void test_application_read_only_boundary() {
 }
 
 /**
- * @brief 测试 upper-dirfd 遍历与安全 filename 输出 / Test upper-dirfd traversal and safe filename output.
+ * @brief 测试 upper-dirfd 遍历与安全 filename 输出 / Test upper-dirfd traversal and safe filename
+ * output.
  */
 void test_reader_uses_upper_dirfd_and_refuses_symlink_traversal() {
     const std::filesystem::path temporary_root = make_temporary_root();
@@ -311,22 +329,26 @@ void test_reader_uses_upper_dirfd_and_refuses_symlink_traversal() {
     const auto root_path = wspctl::domain::OperatorWorkspacePath::parse("/workspace");
     const auto root_listing = reader.list(binding, *root_path);
     const auto encoded_hostile = wspctl::domain::encode_workspace_entry_name(hostile_name);
-    const bool found_encoded_hostile = root_listing.has_value() && std::ranges::any_of(
-        root_listing->entries,
-        [&](const wspctl::domain::WorkspaceEntry& entry) { return entry.encoded_name() == *encoded_hostile; });
+    const bool found_encoded_hostile =
+        root_listing.has_value() &&
+        std::ranges::any_of(root_listing->entries,
+                            [&](const wspctl::domain::WorkspaceEntry& entry) {
+                                return entry.encoded_name() == *encoded_hostile;
+                            });
     expect(found_encoded_hostile, "reader returns only safely encoded hostile filename");
     const auto escape_path = wspctl::domain::OperatorWorkspacePath::parse("/workspace/escape");
     expect(!reader.list(binding, *escape_path).has_value(),
            "reader fails closed instead of traversing an upper-layer symlink");
     const auto missing_path = wspctl::domain::OperatorWorkspacePath::parse("/workspace/missing");
     const auto missing_listing = reader.list(binding, *missing_path);
-    expect(!missing_listing.has_value() && missing_listing.error().code == wspctl::ErrorCode::not_found,
+    expect(!missing_listing.has_value() &&
+               missing_listing.error().code == wspctl::ErrorCode::not_found,
            "reader preserves a missing logical directory as the domain not-found result");
     std::filesystem::remove_all(temporary_root, error);
     expect(!error, "clean up self-created temporary reader root");
 }
 
-}  // namespace
+} // namespace
 
 /**
  * @brief operator CTest 入口 / Operator CTest entry point.

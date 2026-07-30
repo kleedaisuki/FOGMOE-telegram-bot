@@ -9,12 +9,14 @@
 namespace wspctl::detail {
 
 bool signal_and_close_pidfd(int& owned_pidfd, const int signal) noexcept {
-    /** @brief 先转移所有权，避免任何失败路径泄漏 descriptor / Transfer ownership first so no failure path leaks the descriptor. */
+    /** @brief 先转移所有权，避免任何失败路径泄漏 descriptor / Transfer ownership first so no
+     * failure path leaks the descriptor. */
     const int pidfd = std::exchange(owned_pidfd, -1);
     if (pidfd < 0) {
         return false;
     }
-    /** @brief kernel 是否确认 target terminal / Whether the kernel confirmed the target is terminal. */
+    /** @brief kernel 是否确认 target terminal / Whether the kernel confirmed the target is
+     * terminal. */
     bool terminal = false;
 #ifdef SYS_pidfd_send_signal
     if (syscall(SYS_pidfd_send_signal, pidfd, signal, nullptr, 0U) == 0) {
@@ -31,4 +33,4 @@ bool signal_and_close_pidfd(int& owned_pidfd, const int signal) noexcept {
     return terminal;
 }
 
-}  // namespace wspctl::detail
+} // namespace wspctl::detail

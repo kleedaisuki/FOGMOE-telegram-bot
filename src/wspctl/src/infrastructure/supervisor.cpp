@@ -18,11 +18,11 @@
 #include <poll.h>
 #include <sys/fsuid.h>
 #include <sys/random.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <sys/resource.h>
-#include <sys/syscall.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -70,7 +70,8 @@ void close_fd(int& fd) noexcept {
     }
 }
 
-/** @brief 文件写入时暂时采用 sandbox 文件系统身份 / Temporarily adopt sandbox filesystem credentials for file ingress. */
+/** @brief 文件写入时暂时采用 sandbox 文件系统身份 / Temporarily adopt sandbox filesystem
+ * credentials for file ingress. */
 class ScopedFsCredentials final {
 public:
     /**
@@ -85,21 +86,22 @@ public:
         credentials.gid_changed_ = true;
         if (static_cast<gid_t>(setfsgid(static_cast<gid_t>(-1))) != gid) {
             credentials.restore();
-            return std::unexpected(make_error(ErrorCode::permission_denied, "cannot assume sandbox filesystem GID"));
+            return std::unexpected(
+                make_error(ErrorCode::permission_denied, "cannot assume sandbox filesystem GID"));
         }
         credentials.previous_uid_ = setfsuid(uid);
         credentials.uid_changed_ = true;
         if (static_cast<uid_t>(setfsuid(static_cast<uid_t>(-1))) != uid) {
             credentials.restore();
-            return std::unexpected(make_error(ErrorCode::permission_denied, "cannot assume sandbox filesystem UID"));
+            return std::unexpected(
+                make_error(ErrorCode::permission_denied, "cannot assume sandbox filesystem UID"));
         }
         return credentials;
     }
 
     /** @brief 支持移动，避免重复 restore / Support moves without restoring twice. */
     ScopedFsCredentials(ScopedFsCredentials&& other) noexcept
-        : previous_uid_(other.previous_uid_),
-          previous_gid_(other.previous_gid_),
+        : previous_uid_(other.previous_uid_), previous_gid_(other.previous_gid_),
           uid_changed_(std::exchange(other.uid_changed_, false)),
           gid_changed_(std::exchange(other.gid_changed_, false)) {}
 
@@ -108,7 +110,8 @@ public:
     /** @brief 禁止复制赋值 / Copy assignment is forbidden. */
     ScopedFsCredentials& operator=(const ScopedFsCredentials&) = delete;
 
-    /** @brief 析构时恢复 PID 1 原 fsuid/fsgid / Restore the original PID 1 fsuid/fsgid on destruction. */
+    /** @brief 析构时恢复 PID 1 原 fsuid/fsgid / Restore the original PID 1 fsuid/fsgid on
+     * destruction. */
     ~ScopedFsCredentials() { restore(); }
 
 private:
@@ -138,22 +141,25 @@ private:
 };
 
 /**
- * @brief 用 openat2 打开一个不跟随链接的子目录 / Open a child directory without following links via openat2.
+ * @brief 用 openat2 打开一个不跟随链接的子目录 / Open a child directory without following links via
+ * openat2.
  * @param parent_fd 已验证父目录 FD / Verified parent-directory FD.
  * @param name 受限单路径分量 / Constrained single path component.
  * @return 子目录 FD 或错误 / Child-directory FD or an error.
  */
 [[nodiscard]] Result<int> open_directory_beneath(const int parent_fd, const std::string_view name) {
-    if (parent_fd < 0 || name.empty() || name == "." || name == ".." || name.find('/') != std::string_view::npos ||
-        name.find('\0') != std::string_view::npos) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid workspace directory component"));
+    if (parent_fd < 0 || name.empty() || name == "." || name == ".." ||
+        name.find('/') != std::string_view::npos || name.find('\0') != std::string_view::npos) {
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid workspace directory component"));
     }
     std::string material(name);
     open_how how{};
     how.flags = static_cast<std::uint64_t>(O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    how.resolve = static_cast<std::uint64_t>(
-        RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV);
-    const int fd = static_cast<int>(syscall(SYS_openat2, parent_fd, material.c_str(), &how, sizeof(how)));
+    how.resolve = static_cast<std::uint64_t>(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+                                             RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV);
+    const int fd =
+        static_cast<int>(syscall(SYS_openat2, parent_fd, material.c_str(), &how, sizeof(how)));
     if (fd < 0) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "openat2 workspace directory"));
     }
@@ -162,24 +168,25 @@ private:
         const int saved_errno = errno;
         static_cast<void>(close(fd));
         errno = saved_errno;
-        return std::unexpected(make_error(ErrorCode::io_failure, "workspace component is not a directory"));
+        return std::unexpected(
+            make_error(ErrorCode::io_failure, "workspace component is not a directory"));
     }
     return fd;
 }
 
 /**
- * @brief 在受控父目录下创建或安全打开私有目录 / Create or safely open a private directory below a controlled parent.
+ * @brief 在受控父目录下创建或安全打开私有目录 / Create or safely open a private directory below a
+ * controlled parent.
  * @param parent_fd 已验证父目录 FD / Verified parent-directory FD.
  * @param name 受限单路径分量 / Constrained single path component.
  * @param owner_uid 目录必须归属的 task UID / Task UID that must own the directory.
  * @param owner_gid 目录必须归属的 task GID / Task GID that must own the directory.
- * @return 已打开的 task-private 子目录 FD 或错误 / Opened task-private child-directory FD or an error.
+ * @return 已打开的 task-private 子目录 FD 或错误 / Opened task-private child-directory FD or an
+ * error.
  */
-[[nodiscard]] Result<int> ensure_workspace_directory(
-    const int parent_fd,
-    const std::string_view name,
-    const uid_t owner_uid,
-    const gid_t owner_gid) {
+[[nodiscard]] Result<int> ensure_workspace_directory(const int parent_fd,
+                                                     const std::string_view name,
+                                                     const uid_t owner_uid, const gid_t owner_gid) {
     std::string material(name);
     if (mkdirat(parent_fd, material.c_str(), 0700) != 0 && errno != EEXIST) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "mkdirat workspace directory"));
@@ -189,15 +196,16 @@ private:
         return std::unexpected(directory.error());
     }
     struct stat metadata {};
-    if (fstat(*directory, &metadata) != 0 || !S_ISDIR(metadata.st_mode) || metadata.st_uid != owner_uid ||
-        metadata.st_gid != owner_gid) {
+    if (fstat(*directory, &metadata) != 0 || !S_ISDIR(metadata.st_mode) ||
+        metadata.st_uid != owner_uid || metadata.st_gid != owner_gid) {
         static_cast<void>(close(*directory));
-        return std::unexpected(make_error(
-            ErrorCode::permission_denied,
-            "workspace file-ingress directory is not task-owned private storage"));
+        return std::unexpected(
+            make_error(ErrorCode::permission_denied,
+                       "workspace file-ingress directory is not task-owned private storage"));
     }
     if (fchmod(*directory, 0700) != 0) {
-        const Error error = errno_error(ErrorCode::permission_denied, "protect workspace file-ingress directory");
+        const Error error =
+            errno_error(ErrorCode::permission_denied, "protect workspace file-ingress directory");
         static_cast<void>(close(*directory));
         return std::unexpected(error);
     }
@@ -214,12 +222,15 @@ private:
     if (config.workspace_fd >= 0) {
         fd = fcntl(config.workspace_fd, F_DUPFD_CLOEXEC, 3);
         if (fd < 0) {
-            return std::unexpected(errno_error(ErrorCode::io_failure, "duplicate workspace directory FD"));
+            return std::unexpected(
+                errno_error(ErrorCode::io_failure, "duplicate workspace directory FD"));
         }
     } else {
-        fd = open(config.test_workspace_root.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        fd = open(config.test_workspace_root.c_str(),
+                  O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (fd < 0) {
-            return std::unexpected(errno_error(ErrorCode::io_failure, "open CTest workspace directory"));
+            return std::unexpected(
+                errno_error(ErrorCode::io_failure, "open CTest workspace directory"));
         }
     }
     struct stat metadata {};
@@ -227,29 +238,30 @@ private:
         const int saved_errno = errno;
         static_cast<void>(close(fd));
         errno = saved_errno;
-        return std::unexpected(make_error(ErrorCode::io_failure, "workspace FD is not a directory"));
+        return std::unexpected(
+            make_error(ErrorCode::io_failure, "workspace FD is not a directory"));
     }
     return fd;
 }
 
 /**
- * @brief 以 Agent 身份从固定 workspace FD 解析 cwd / Resolve cwd from the pinned workspace FD as the Agent.
+ * @brief 以 Agent 身份从固定 workspace FD 解析 cwd / Resolve cwd from the pinned workspace FD as
+ * the Agent.
  * @param config supervisor 配置 / Supervisor configuration.
  * @param cwd 已通过协议规范化的 runtime cwd / Protocol-normalized runtime cwd.
- * @return 不跨 mount 且不跟随 symlink 的 cwd FD / A cwd FD that crosses neither mounts nor symlinks.
+ * @return 不跨 mount 且不跟随 symlink 的 cwd FD / A cwd FD that crosses neither mounts nor
+ * symlinks.
  * @note 调用方必须先完成 ``harden_task``，否则无 DAC override 的 root 无法穿越
  *       ``agent:agent 0700`` workspace。/ The caller must complete ``harden_task`` first;
  *       root without DAC override cannot traverse an ``agent:agent 0700`` workspace.
  */
-[[nodiscard]] Result<int> open_workspace_cwd_for_task(
-    const SupervisorConfig& config,
-    const std::string_view cwd) {
+[[nodiscard]] Result<int> open_workspace_cwd_for_task(const SupervisorConfig& config,
+                                                      const std::string_view cwd) {
     constexpr std::string_view kWorkspaceRoot{"/workspace"};
     constexpr std::string_view kWorkspacePrefix{"/workspace/"};
     if (cwd != kWorkspaceRoot && !cwd.starts_with(kWorkspacePrefix)) {
-        return std::unexpected(make_error(
-            ErrorCode::invalid_argument,
-            "task cwd is outside the workspace"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "task cwd is outside the workspace"));
     }
     /** @brief 当前已验证目录 FD / Current validated directory FD. */
     auto current = open_workspace_root_for_payload(config);
@@ -267,8 +279,7 @@ private:
         const std::size_t end = relative.find('/', begin);
         /** @brief 当前已规范化路径分量 / Current normalized path component. */
         const std::string_view component = relative.substr(
-            begin,
-            end == std::string_view::npos ? relative.size() - begin : end - begin);
+            begin, end == std::string_view::npos ? relative.size() - begin : end - begin);
         auto child = open_directory_beneath(*current, component);
         if (!child) {
             static_cast<void>(close(*current));
@@ -292,15 +303,14 @@ private:
     std::array<unsigned char, 16U> random_bytes{};
     std::size_t offset = 0U;
     while (offset < random_bytes.size()) {
-        const ssize_t count = getrandom(
-            random_bytes.data() + static_cast<std::ptrdiff_t>(offset),
-            random_bytes.size() - offset,
-            0U);
+        const ssize_t count = getrandom(random_bytes.data() + static_cast<std::ptrdiff_t>(offset),
+                                        random_bytes.size() - offset, 0U);
         if (count < 0 && errno == EINTR) {
             continue;
         }
         if (count <= 0) {
-            return std::unexpected(errno_error(ErrorCode::io_failure, "getrandom file temporary name"));
+            return std::unexpected(
+                errno_error(ErrorCode::io_failure, "getrandom file temporary name"));
         }
         offset += static_cast<std::size_t>(count);
     }
@@ -323,10 +333,8 @@ private:
 [[nodiscard]] Result<void> write_all_bytes(const int fd, const std::span<const std::byte> bytes) {
     std::size_t offset = 0U;
     while (offset < bytes.size()) {
-        const ssize_t count = write(
-            fd,
-            bytes.data() + static_cast<std::ptrdiff_t>(offset),
-            bytes.size() - offset);
+        const ssize_t count =
+            write(fd, bytes.data() + static_cast<std::ptrdiff_t>(offset), bytes.size() - offset);
         if (count < 0 && errno == EINTR) {
             continue;
         }
@@ -344,7 +352,8 @@ private:
  * @param size digest byte count / Digest byte count.
  * @return 小写十六进制摘要 / Lowercase hexadecimal digest.
  */
-[[nodiscard]] std::string render_sha256(const unsigned char* const digest, const unsigned int size) {
+[[nodiscard]] std::string render_sha256(const unsigned char* const digest,
+                                        const unsigned int size) {
     constexpr std::string_view kDigits{"0123456789abcdef"};
     std::string rendered;
     rendered.reserve(static_cast<std::size_t>(size) * 2U);
@@ -357,12 +366,14 @@ private:
 }
 
 /**
- * @brief 以 renameat2 原子替换最终 payload 名称 / Atomically replace the final payload name with renameat2.
+ * @brief 以 renameat2 原子替换最终 payload 名称 / Atomically replace the final payload name with
+ * renameat2.
  * @param directory_fd 已验证 opaque uploads 目录 FD / Verified opaque uploads-directory FD.
  * @param temporary_name 已 seal 临时 basename / Sealed temporary basename.
  * @return 成功或 I/O 错误 / Success or I/O error.
  */
-[[nodiscard]] Result<void> publish_payload_name(const int directory_fd, const std::string_view temporary_name) {
+[[nodiscard]] Result<void> publish_payload_name(const int directory_fd,
+                                                const std::string_view temporary_name) {
     std::string temporary(temporary_name);
     if (syscall(SYS_renameat2, directory_fd, temporary.c_str(), directory_fd, "payload", 0U) != 0) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "renameat2 publish file"));
@@ -379,14 +390,17 @@ private:
     return {};
 }
 
-/** @brief 单轮最多从一个输出 pipe 读取的字节数 / Maximum bytes read from one output pipe in one event-loop iteration. */
+/** @brief 单轮最多从一个输出 pipe 读取的字节数 / Maximum bytes read from one output pipe in one
+ * event-loop iteration. */
 constexpr std::size_t kDrainBudgetBytes{64U * 1024U};
 
-/** @brief stdout/stderr 共享的最终 UTF-8 输出预算 / Shared final UTF-8 output budget for stdout and stderr. */
+/** @brief stdout/stderr 共享的最终 UTF-8 输出预算 / Shared final UTF-8 output budget for stdout and
+ * stderr. */
 struct OutputBudget final {
     /** @brief 尚可写入的规范化字节数 / Remaining normalized bytes writable. */
     std::size_t remaining{};
-    /** @brief 一旦不能写入完整 code point，后续输出只 drain 不保留 / Once a full code point cannot fit, later output is drain-only. */
+    /** @brief 一旦不能写入完整 code point，后续输出只 drain 不保留 / Once a full code point cannot
+     * fit, later output is drain-only. */
     bool exhausted{false};
 };
 
@@ -394,17 +408,15 @@ struct OutputBudget final {
 class Utf8OutputNormalizer final {
 public:
     /**
-     * @brief 吸收 raw output 字节并追加规范 UTF-8 / Consume raw output bytes and append canonical UTF-8.
+     * @brief 吸收 raw output 字节并追加规范 UTF-8 / Consume raw output bytes and append canonical
+     * UTF-8.
      * @param bytes 原始输出 / Raw output.
      * @param destination 对应 stdout/stderr 目的字符串 / Corresponding stdout/stderr destination.
      * @param budget 两路共享的最终输出预算 / Shared final output budget.
      * @param truncated 输出是否超过预算 / Whether output exceeded the budget.
      */
-    void consume(
-        const std::string_view bytes,
-        std::string& destination,
-        OutputBudget& budget,
-        bool& truncated) {
+    void consume(const std::string_view bytes, std::string& destination, OutputBudget& budget,
+                 bool& truncated) {
         for (const unsigned char byte : bytes) {
             consume_byte(byte, destination, budget, truncated);
         }
@@ -431,12 +443,10 @@ private:
     /** @brief pending sequence 所需长度 / Required pending-sequence length. */
     std::size_t expected_size_{};
 
-    /** @brief 将一个完整 canonical sequence 写入预算 / Write one complete canonical sequence within budget. */
-    static void append_sequence(
-        const std::string_view sequence,
-        std::string& destination,
-        OutputBudget& budget,
-        bool& truncated) {
+    /** @brief 将一个完整 canonical sequence 写入预算 / Write one complete canonical sequence within
+     * budget. */
+    static void append_sequence(const std::string_view sequence, std::string& destination,
+                                OutputBudget& budget, bool& truncated) {
         if (budget.exhausted || sequence.size() > budget.remaining) {
             budget.exhausted = true;
             truncated = true;
@@ -446,16 +456,15 @@ private:
         budget.remaining -= sequence.size();
     }
 
-    /** @brief 将指定数量的替换字符 '?' 写入预算 / Write a requested number of '?' replacement characters within budget. */
-    static void append_questions(
-        const std::size_t count,
-        std::string& destination,
-        OutputBudget& budget,
-        bool& truncated) {
+    /** @brief 将指定数量的替换字符 '?' 写入预算 / Write a requested number of '?' replacement
+     * characters within budget. */
+    static void append_questions(const std::size_t count, std::string& destination,
+                                 OutputBudget& budget, bool& truncated) {
         append_sequence(std::string(count, '?'), destination, budget, truncated);
     }
 
-    /** @brief 判定 pending sequence 的完整编码是否为标量值 / Check that a complete pending sequence encodes a scalar value. */
+    /** @brief 判定 pending sequence 的完整编码是否为标量值 / Check that a complete pending sequence
+     * encodes a scalar value. */
     [[nodiscard]] bool pending_is_valid() const noexcept {
         if (expected_size_ == 2U) {
             return true;
@@ -469,7 +478,8 @@ private:
                !(pending_[0] == 0xf4U && second > 0x8fU);
     }
 
-    /** @brief 将 pending sequence 作为有效或逐字节无效输出 / Emit pending sequence as valid or bytewise-invalid output. */
+    /** @brief 将 pending sequence 作为有效或逐字节无效输出 / Emit pending sequence as valid or
+     * bytewise-invalid output. */
     void emit_pending(std::string& destination, OutputBudget& budget, bool& truncated) {
         if (pending_is_valid()) {
             std::string sequence;
@@ -486,11 +496,8 @@ private:
     }
 
     /** @brief 吸收单个 raw byte / Consume one raw byte. */
-    void consume_byte(
-        const unsigned char byte,
-        std::string& destination,
-        OutputBudget& budget,
-        bool& truncated) {
+    void consume_byte(const unsigned char byte, std::string& destination, OutputBudget& budget,
+                      bool& truncated) {
         if (budget.exhausted) {
             return;
         }
@@ -529,12 +536,9 @@ private:
 };
 
 /** @brief 用有界缓冲 drain 一个输出 FD / Drain one output FD into a bounded buffer. */
-[[nodiscard]] Result<void> drain_output(
-    int& fd,
-    std::string& destination,
-    Utf8OutputNormalizer& normalizer,
-    OutputBudget& budget,
-    bool& truncated) {
+[[nodiscard]] Result<void> drain_output(int& fd, std::string& destination,
+                                        Utf8OutputNormalizer& normalizer, OutputBudget& budget,
+                                        bool& truncated) {
     std::array<char, 16U * 1024U> buffer{};
     std::size_t drain_budget = kDrainBudgetBytes;
     while (drain_budget > 0U) {
@@ -542,7 +546,8 @@ private:
         const ssize_t count = read(fd, buffer.data(), chunk);
         if (count > 0) {
             const std::size_t size = static_cast<std::size_t>(count);
-            normalizer.consume(std::string_view(buffer.data(), size), destination, budget, truncated);
+            normalizer.consume(std::string_view(buffer.data(), size), destination, budget,
+                               truncated);
             drain_budget -= size;
             continue;
         }
@@ -567,7 +572,8 @@ private:
 /** @brief 尝试写入剩余 stdin / Try to write remaining stdin. */
 [[nodiscard]] Result<void> feed_stdin(int& fd, const std::string_view input, std::size_t& offset) {
     while (offset < input.size()) {
-        const ssize_t count = write(fd, input.data() + static_cast<std::ptrdiff_t>(offset), input.size() - offset);
+        const ssize_t count =
+            write(fd, input.data() + static_cast<std::ptrdiff_t>(offset), input.size() - offset);
         if (count > 0) {
             offset += static_cast<std::size_t>(count);
             continue;
@@ -612,14 +618,17 @@ void close_non_stdio_fds() noexcept {
     }
 }
 
-/** @brief payload 可保留的最大文件描述符数 / Maximum number of file descriptors a payload may retain. */
+/** @brief payload 可保留的最大文件描述符数 / Maximum number of file descriptors a payload may
+ * retain. */
 constexpr rlim_t kTaskNofileLimit{256U};
 
 /**
- * @brief 为 untrusted payload 收紧不可放宽的资源限制 / Tighten irreversible resource limits for an untrusted payload.
+ * @brief 为 untrusted payload 收紧不可放宽的资源限制 / Tighten irreversible resource limits for an
+ * untrusted payload.
  * @return 两个限制均成功设置时为真 / True only when both limits were installed.
- * @note 不在此处设置 RLIMIT_FSIZE；workspace 的持久化存储预算必须与未来 XFS project quota 使用同一语义。
- *       RLIMIT_FSIZE is deliberately not set here: persistent-workspace storage must share semantics with the future XFS project quota.
+ * @note 不在此处设置 RLIMIT_FSIZE；workspace 的持久化存储预算必须与未来 XFS project quota
+ * 使用同一语义。 RLIMIT_FSIZE is deliberately not set here: persistent-workspace storage must share
+ * semantics with the future XFS project quota.
  */
 [[nodiscard]] bool install_task_rlimits() noexcept {
     /** @brief payload 的 soft/hard NOFILE 上限 / Payload soft/hard NOFILE limit. */
@@ -629,35 +638,42 @@ constexpr rlim_t kTaskNofileLimit{256U};
     return setrlimit(RLIMIT_NOFILE, &nofile) == 0 && setrlimit(RLIMIT_CORE, &core) == 0;
 }
 
-/** @brief 向预打开的 cgroup 文件写一小段控制值 / Write a small control value to a preopened cgroup file. */
+/** @brief 向预打开的 cgroup 文件写一小段控制值 / Write a small control value to a preopened cgroup
+ * file. */
 [[nodiscard]] Result<void> write_cgroup_control(const int fd, const std::string_view value) {
     if (fd < 0) {
-        return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "missing mandatory task cgroup control FD"));
+        return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed,
+                                          "missing mandatory task cgroup control FD"));
     }
     if (lseek(fd, 0, SEEK_SET) < 0) {
-        return std::unexpected(errno_error(ErrorCode::sandbox_preflight_failed, "seek task cgroup control"));
+        return std::unexpected(
+            errno_error(ErrorCode::sandbox_preflight_failed, "seek task cgroup control"));
     }
     std::size_t offset = 0;
     while (offset < value.size()) {
-        const ssize_t count = write(fd, value.data() + static_cast<std::ptrdiff_t>(offset), value.size() - offset);
+        const ssize_t count =
+            write(fd, value.data() + static_cast<std::ptrdiff_t>(offset), value.size() - offset);
         if (count < 0 && errno == EINTR) {
             continue;
         }
         if (count <= 0) {
-            return std::unexpected(errno_error(ErrorCode::sandbox_preflight_failed, "write task cgroup control"));
+            return std::unexpected(
+                errno_error(ErrorCode::sandbox_preflight_failed, "write task cgroup control"));
         }
         offset += static_cast<std::size_t>(count);
     }
     return {};
 }
 
-/** @brief 判断 task cgroup.events 是否明确报告 populated 0 / Check whether task cgroup.events explicitly reports populated 0. */
+/** @brief 判断 task cgroup.events 是否明确报告 populated 0 / Check whether task cgroup.events
+ * explicitly reports populated 0. */
 [[nodiscard]] bool task_cgroup_is_empty(const std::string_view events) noexcept {
     constexpr std::string_view kPopulatedZero{"populated 0"};
     std::size_t offset = 0U;
     while (offset < events.size()) {
         const std::size_t end = events.find('\n', offset);
-        const std::string_view line = events.substr(offset, end == std::string_view::npos ? events.size() - offset : end - offset);
+        const std::string_view line = events.substr(
+            offset, end == std::string_view::npos ? events.size() - offset : end - offset);
         if (line == kPopulatedZero) {
             return true;
         }
@@ -669,45 +685,57 @@ constexpr rlim_t kTaskNofileLimit{256U};
     return false;
 }
 
-/** @brief 等待 pre-opened task cgroup.events 证明空闲 / Wait for pre-opened task cgroup.events to prove emptiness. */
-[[nodiscard]] Result<void> wait_task_cgroup_empty(const int events_fd, const std::chrono::milliseconds timeout) {
+/** @brief 等待 pre-opened task cgroup.events 证明空闲 / Wait for pre-opened task cgroup.events to
+ * prove emptiness. */
+[[nodiscard]] Result<void> wait_task_cgroup_empty(const int events_fd,
+                                                  const std::chrono::milliseconds timeout) {
     if (events_fd < 0) {
-        return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "missing mandatory task cgroup.events FD"));
+        return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed,
+                                          "missing mandatory task cgroup.events FD"));
     }
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     std::array<char, 4096> buffer{};
     do {
         if (lseek(events_fd, 0, SEEK_SET) < 0) {
-            return std::unexpected(errno_error(ErrorCode::sandbox_preflight_failed, "seek task cgroup.events"));
+            return std::unexpected(
+                errno_error(ErrorCode::sandbox_preflight_failed, "seek task cgroup.events"));
         }
         const ssize_t count = read(events_fd, buffer.data(), buffer.size());
         if (count < 0) {
             if (errno == EINTR) {
                 continue;
             }
-            return std::unexpected(errno_error(ErrorCode::sandbox_preflight_failed, "read task cgroup.events"));
+            return std::unexpected(
+                errno_error(ErrorCode::sandbox_preflight_failed, "read task cgroup.events"));
         }
         if (count == 0) {
-            return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "task cgroup.events returned no population state"));
+            return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed,
+                                              "task cgroup.events returned no population state"));
         }
-        if (task_cgroup_is_empty(std::string_view(buffer.data(), static_cast<std::size_t>(count)))) {
+        if (task_cgroup_is_empty(
+                std::string_view(buffer.data(), static_cast<std::size_t>(count)))) {
             return {};
         }
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) {
             break;
         }
-        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
         pollfd descriptor{.fd = events_fd, .events = POLLIN | POLLPRI | POLLHUP, .revents = 0};
-        const int ready = poll(&descriptor, 1U, static_cast<int>(std::min<std::int64_t>(remaining.count(), 10)));
+        const int ready =
+            poll(&descriptor, 1U, static_cast<int>(std::min<std::int64_t>(remaining.count(), 10)));
         if (ready < 0 && errno != EINTR) {
-            return std::unexpected(errno_error(ErrorCode::sandbox_preflight_failed, "poll task cgroup.events"));
+            return std::unexpected(
+                errno_error(ErrorCode::sandbox_preflight_failed, "poll task cgroup.events"));
         }
     } while (std::chrono::steady_clock::now() < deadline);
-    return std::unexpected(make_error(ErrorCode::child_failure, "task cgroup remained populated after cgroup.kill"));
+    return std::unexpected(
+        make_error(ErrorCode::child_failure, "task cgroup remained populated after cgroup.kill"));
 }
 
-/** @brief 杀死 task cgroup 并以 populated 0 建立 completion barrier / Kill task cgroup and establish a populated-0 completion barrier. */
+/** @brief 杀死 task cgroup 并以 populated 0 建立 completion barrier / Kill task cgroup and
+ * establish a populated-0 completion barrier. */
 [[nodiscard]] Result<void> kill_task_cgroup_and_wait(const SupervisorConfig& config) {
     if (const auto killed = write_cgroup_control(config.task_cgroup_kill_fd, "1"); !killed) {
         return std::unexpected(killed.error());
@@ -715,7 +743,8 @@ constexpr rlim_t kTaskNofileLimit{256U};
     return wait_task_cgroup_empty(config.task_cgroup_events_fd, std::chrono::seconds(5));
 }
 
-/** @brief 在成功回复前持久化 workspace OverlayFS / Persist the workspace OverlayFS before replying success. */
+/** @brief 在成功回复前持久化 workspace OverlayFS / Persist the workspace OverlayFS before replying
+ * success. */
 [[nodiscard]] Result<void> sync_workspace(const int workspace_fd) {
     if (workspace_fd < 0) {
         // Direct unit construction has no runtime mount; wsp-systemd main always supplies this FD.
@@ -764,17 +793,14 @@ constexpr rlim_t kTaskNofileLimit{256U};
 }
 
 /** @brief child 执行直接 argv / Child executes direct argv. */
-[[noreturn]] void exec_task_child(
-    const ExecuteRequest& request,
-    const SupervisorConfig& config,
-    const int stdin_fd,
-    const int stdout_fd,
-    const int stderr_fd,
-    const int start_fd) {
+[[noreturn]] void exec_task_child(const ExecuteRequest& request, const SupervisorConfig& config,
+                                  const int stdin_fd, const int stdout_fd, const int stderr_fd,
+                                  const int start_fd) {
     if (setpgid(0, 0) != 0) {
         _exit(126);
     }
-    if (dup2(stdin_fd, STDIN_FILENO) < 0 || dup2(stdout_fd, STDOUT_FILENO) < 0 || dup2(stderr_fd, STDERR_FILENO) < 0) {
+    if (dup2(stdin_fd, STDIN_FILENO) < 0 || dup2(stdout_fd, STDOUT_FILENO) < 0 ||
+        dup2(stderr_fd, STDERR_FILENO) < 0) {
         _exit(126);
     }
     if (stdin_fd > STDERR_FILENO) {
@@ -826,7 +852,8 @@ constexpr rlim_t kTaskNofileLimit{256U};
         _exit(126);
     }
     /**
-     * @brief 不继承 broker secret 的固定 Agent 环境 / Fixed Agent environment that inherits no broker secrets.
+     * @brief 不继承 broker secret 的固定 Agent 环境 / Fixed Agent environment that inherits no
+     * broker secrets.
      */
     constexpr std::array<std::pair<std::string_view, std::string_view>, 9U> kAgentEnvironment{{
         {"HOME", "/workspace"},
@@ -840,10 +867,7 @@ constexpr rlim_t kTaskNofileLimit{256U};
         {"XDG_CACHE_HOME", "/workspace/.cache"},
     }};
     for (const auto& [name, value] : kAgentEnvironment) {
-        if (setenv(
-                std::string(name).c_str(),
-                std::string(value).c_str(),
-                1) != 0) {
+        if (setenv(std::string(name).c_str(), std::string(value).c_str(), 1) != 0) {
             _exit(126);
         }
     }
@@ -862,13 +886,15 @@ constexpr rlim_t kTaskNofileLimit{256U};
     _exit(127);
 }
 
-}  // namespace
+} // namespace
 
 /** @brief PID 1 保留的单次文件写入暂存状态 / One file-ingress staging state retained by PID 1. */
 struct Supervisor::ActivePayload final {
-    /** @brief 当前 workspace 根目录的独立 FD / Independently owned FD for the current workspace root. */
+    /** @brief 当前 workspace 根目录的独立 FD / Independently owned FD for the current workspace
+     * root. */
     int workspace_fd{-1};
-    /** @brief opaque uploads 目录的独立 FD / Independently owned FD for the opaque uploads directory. */
+    /** @brief opaque uploads 目录的独立 FD / Independently owned FD for the opaque uploads
+     * directory. */
     int directory_fd{-1};
     /** @brief 尚未发布的临时 regular-file FD / Unpublished temporary regular-file FD. */
     int file_fd{-1};
@@ -888,7 +914,8 @@ struct Supervisor::ActivePayload final {
     std::string expected_sha256;
     /** @brief streaming SHA-256 上下文 / Streaming SHA-256 context. */
     EVP_MD_CTX* digest{nullptr};
-    /** @brief 是否已经检查 bytes/hash 并 fdatasync / Whether bytes/hash were checked and fdatasync completed. */
+    /** @brief 是否已经检查 bytes/hash 并 fdatasync / Whether bytes/hash were checked and fdatasync
+     * completed. */
     bool sealed{false};
 
     /** @brief 释放文件、目录与 OpenSSL 上下文 / Release file, directory, and OpenSSL context. */
@@ -904,9 +931,7 @@ struct Supervisor::ActivePayload final {
 
 Supervisor::Supervisor(SupervisorConfig config) : config_(config) {}
 
-Supervisor::~Supervisor() {
-    static_cast<void>(discard_active_payload());
-}
+Supervisor::~Supervisor() { static_cast<void>(discard_active_payload()); }
 
 Result<void> Supervisor::discard_active_payload() {
     if (!active_payload_) {
@@ -915,13 +940,17 @@ Result<void> Supervisor::discard_active_payload() {
     std::unique_ptr<ActivePayload> payload = std::move(active_payload_);
     Result<void> cleanup{};
     if (!payload->temporary_name.empty() && payload->directory_fd >= 0) {
-        const auto credentials = ScopedFsCredentials::enter(config_.sandbox_uid, config_.sandbox_gid);
+        const auto credentials =
+            ScopedFsCredentials::enter(config_.sandbox_uid, config_.sandbox_gid);
         if (!credentials) {
             cleanup = std::unexpected(credentials.error());
-        } else if (unlinkat(payload->directory_fd, payload->temporary_name.c_str(), 0) != 0 && errno != ENOENT) {
-            cleanup = std::unexpected(errno_error(ErrorCode::io_failure, "unlink unpublished file temporary"));
+        } else if (unlinkat(payload->directory_fd, payload->temporary_name.c_str(), 0) != 0 &&
+                   errno != ENOENT) {
+            cleanup = std::unexpected(
+                errno_error(ErrorCode::io_failure, "unlink unpublished file temporary"));
         } else if (fsync(payload->directory_fd) != 0) {
-            cleanup = std::unexpected(errno_error(ErrorCode::io_failure, "fsync file directory after abort"));
+            cleanup = std::unexpected(
+                errno_error(ErrorCode::io_failure, "fsync file directory after abort"));
         }
     }
     return cleanup;
@@ -952,16 +981,21 @@ Result<ExecutionResult> Supervisor::execute_once(const ExecuteRequest& request) 
     if (const auto signals = install_sigchld_handler(); !signals) {
         return std::unexpected(signals.error());
     }
-    const bool any_task_cgroup_fd = config_.task_cgroup_procs_fd >= 0 || config_.task_cgroup_kill_fd >= 0 ||
-        config_.task_cgroup_events_fd >= 0;
-    const bool all_task_cgroup_fds = config_.task_cgroup_procs_fd >= 0 && config_.task_cgroup_kill_fd >= 0 &&
-        config_.task_cgroup_events_fd >= 0;
+    const bool any_task_cgroup_fd = config_.task_cgroup_procs_fd >= 0 ||
+                                    config_.task_cgroup_kill_fd >= 0 ||
+                                    config_.task_cgroup_events_fd >= 0;
+    const bool all_task_cgroup_fds = config_.task_cgroup_procs_fd >= 0 &&
+                                     config_.task_cgroup_kill_fd >= 0 &&
+                                     config_.task_cgroup_events_fd >= 0;
     if (any_task_cgroup_fd != all_task_cgroup_fds) {
-        return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed, "incomplete task cgroup control configuration"));
+        return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed,
+                                          "incomplete task cgroup control configuration"));
     }
     const bool use_task_cgroup = all_task_cgroup_fds;
     if (use_task_cgroup) {
-        if (const auto empty = wait_task_cgroup_empty(config_.task_cgroup_events_fd, std::chrono::seconds(5)); !empty) {
+        if (const auto empty =
+                wait_task_cgroup_empty(config_.task_cgroup_events_fd, std::chrono::seconds(5));
+            !empty) {
             return std::unexpected(empty.error());
         }
     }
@@ -1006,20 +1040,23 @@ Result<ExecutionResult> Supervisor::execute_once(const ExecuteRequest& request) 
         close_fd(stdout_pipe[0]);
         close_fd(stderr_pipe[0]);
         close_fd(start_pipe[1]);
-        exec_task_child(request, config_, stdin_pipe[0], stdout_pipe[1], stderr_pipe[1], start_pipe[0]);
+        exec_task_child(request, config_, stdin_pipe[0], stdout_pipe[1], stderr_pipe[1],
+                        start_pipe[0]);
     }
     close_fd(start_pipe[0]);
     if (setpgid(child, child) != 0 && getpgid(child) != child) {
         signal_process_group(child, SIGKILL);
         static_cast<void>(close(start_pipe[1]));
         static_cast<void>(waitpid(child, nullptr, 0));
-        return std::unexpected(errno_error(ErrorCode::child_failure, "place task in process group"));
+        return std::unexpected(
+            errno_error(ErrorCode::child_failure, "place task in process group"));
     }
     close_fd(stdin_pipe[0]);
     close_fd(stdout_pipe[1]);
     close_fd(stderr_pipe[1]);
     if (use_task_cgroup) {
-        const auto placed = write_cgroup_control(config_.task_cgroup_procs_fd, std::to_string(child));
+        const auto placed =
+            write_cgroup_control(config_.task_cgroup_procs_fd, std::to_string(child));
         if (!placed) {
             signal_process_group(child, SIGKILL);
             close_fd(start_pipe[1]);
@@ -1038,7 +1075,8 @@ Result<ExecutionResult> Supervisor::execute_once(const ExecuteRequest& request) 
         close_fd(stdin_pipe[1]);
         close_fd(stdout_pipe[0]);
         close_fd(stderr_pipe[0]);
-        return std::unexpected(errno_error(ErrorCode::child_failure, "release task after cgroup placement"));
+        return std::unexpected(
+            errno_error(ErrorCode::child_failure, "release task after cgroup placement"));
     }
     close_fd(start_pipe[1]);
     if (const auto stdin_nonblocking = make_nonblocking(stdin_pipe[1]); !stdin_nonblocking) {
@@ -1094,7 +1132,8 @@ Result<ExecutionResult> Supervisor::execute_once(const ExecuteRequest& request) 
                 // A direct child exiting must not leave a background process holding workspace FDs.
                 signal_process_group(child, SIGTERM);
                 termination_sent = true;
-                termination_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+                termination_deadline =
+                    std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
             } else if (waited < 0 && errno != EINTR) {
                 return std::unexpected(errno_error(ErrorCode::child_failure, "waitpid task"));
             }
@@ -1124,30 +1163,35 @@ Result<ExecutionResult> Supervisor::execute_once(const ExecuteRequest& request) 
             poll_fds[count++] = pollfd{.fd = stdin_pipe[1], .events = POLLOUT, .revents = 0};
         }
         if (stdout_pipe[0] >= 0) {
-            poll_fds[count++] = pollfd{.fd = stdout_pipe[0], .events = POLLIN | POLLHUP, .revents = 0};
+            poll_fds[count++] =
+                pollfd{.fd = stdout_pipe[0], .events = POLLIN | POLLHUP, .revents = 0};
         }
         if (stderr_pipe[0] >= 0) {
-            poll_fds[count++] = pollfd{.fd = stderr_pipe[0], .events = POLLIN | POLLHUP, .revents = 0};
+            poll_fds[count++] =
+                pollfd{.fd = stderr_pipe[0], .events = POLLIN | POLLHUP, .revents = 0};
         }
         const int polled = poll(poll_fds.data(), count, 25);
         if (polled < 0 && errno != EINTR) {
             return std::unexpected(errno_error(ErrorCode::io_failure, "poll task pipes"));
         }
         if (stdin_pipe[1] >= 0) {
-            if (const auto fed = feed_stdin(stdin_pipe[1], request.stdin_data, stdin_offset); !fed) {
+            if (const auto fed = feed_stdin(stdin_pipe[1], request.stdin_data, stdin_offset);
+                !fed) {
                 return std::unexpected(fed.error());
             }
         }
         if (stdout_pipe[0] >= 0) {
-            if (const auto drained = drain_output(
-                    stdout_pipe[0], result.stdout_data, stdout_normalizer, output_budget, result.truncated);
+            if (const auto drained =
+                    drain_output(stdout_pipe[0], result.stdout_data, stdout_normalizer,
+                                 output_budget, result.truncated);
                 !drained) {
                 return std::unexpected(drained.error());
             }
         }
         if (stderr_pipe[0] >= 0) {
-            if (const auto drained = drain_output(
-                    stderr_pipe[0], result.stderr_data, stderr_normalizer, output_budget, result.truncated);
+            if (const auto drained =
+                    drain_output(stderr_pipe[0], result.stderr_data, stderr_normalizer,
+                                 output_budget, result.truncated);
                 !drained) {
                 return std::unexpected(drained.error());
             }
@@ -1165,7 +1209,8 @@ Result<ExecutionResult> Supervisor::execute_once(const ExecuteRequest& request) 
             }
         }
     }
-    // Even a task that exits normally may have double-forked descendants. The task leaf is the authority.
+    // Even a task that exits normally may have double-forked descendants. The task leaf is the
+    // authority.
     if (use_task_cgroup && !kill_sent) {
         const auto killed = kill_task_cgroup_and_wait(config_);
         if (!killed) {
@@ -1206,24 +1251,19 @@ Result<PayloadAck> Supervisor::begin_payload(const PayloadBeginRequest& request)
 
     Result<void> preparation{};
     {
-        const auto credentials = ScopedFsCredentials::enter(config_.sandbox_uid, config_.sandbox_gid);
+        const auto credentials =
+            ScopedFsCredentials::enter(config_.sandbox_uid, config_.sandbox_gid);
         if (!credentials) {
             preparation = std::unexpected(credentials.error());
         } else {
             const auto uploads = ensure_workspace_directory(
-                payload->workspace_fd,
-                "uploads",
-                config_.sandbox_uid,
-                config_.sandbox_gid);
+                payload->workspace_fd, "uploads", config_.sandbox_uid, config_.sandbox_gid);
             if (!uploads) {
                 preparation = std::unexpected(uploads.error());
             } else {
                 int uploads_fd = *uploads;
                 const auto opaque_directory = ensure_workspace_directory(
-                    uploads_fd,
-                    request.opaque_id,
-                    config_.sandbox_uid,
-                    config_.sandbox_gid);
+                    uploads_fd, request.opaque_id, config_.sandbox_uid, config_.sandbox_gid);
                 close_fd(uploads_fd);
                 if (!opaque_directory) {
                     preparation = std::unexpected(opaque_directory.error());
@@ -1235,22 +1275,21 @@ Result<PayloadAck> Supervisor::begin_payload(const PayloadBeginRequest& request)
                             preparation = std::unexpected(temporary_name.error());
                             break;
                         }
-                        const int file_fd = openat(
-                            payload->directory_fd,
-                            temporary_name->c_str(),
-                            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-                            0600);
+                        const int file_fd =
+                            openat(payload->directory_fd, temporary_name->c_str(),
+                                   O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
                         if (file_fd < 0 && errno == EEXIST) {
                             continue;
                         }
                         if (file_fd < 0) {
-                            preparation = std::unexpected(errno_error(ErrorCode::io_failure, "create file temporary"));
+                            preparation = std::unexpected(
+                                errno_error(ErrorCode::io_failure, "create file temporary"));
                             break;
                         }
                         struct stat metadata {};
                         if (fstat(file_fd, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
-                            metadata.st_uid != config_.sandbox_uid || metadata.st_gid != config_.sandbox_gid ||
-                            fchmod(file_fd, 0600) != 0) {
+                            metadata.st_uid != config_.sandbox_uid ||
+                            metadata.st_gid != config_.sandbox_gid || fchmod(file_fd, 0600) != 0) {
                             const int saved_errno = errno;
                             static_cast<void>(close(file_fd));
                             errno = saved_errno;
@@ -1264,9 +1303,9 @@ Result<PayloadAck> Supervisor::begin_payload(const PayloadBeginRequest& request)
                         break;
                     }
                     if (preparation && payload->file_fd < 0) {
-                        preparation = std::unexpected(make_error(
-                            ErrorCode::io_failure,
-                            "cannot allocate a collision-free file temporary"));
+                        preparation = std::unexpected(
+                            make_error(ErrorCode::io_failure,
+                                       "cannot allocate a collision-free file temporary"));
                     }
                 }
             }
@@ -1278,7 +1317,8 @@ Result<PayloadAck> Supervisor::begin_payload(const PayloadBeginRequest& request)
         return std::unexpected(preparation.error());
     }
     payload->digest = EVP_MD_CTX_new();
-    if (payload->digest == nullptr || EVP_DigestInit_ex(payload->digest, EVP_sha256(), nullptr) != 1) {
+    if (payload->digest == nullptr ||
+        EVP_DigestInit_ex(payload->digest, EVP_sha256(), nullptr) != 1) {
         active_payload_ = std::move(payload);
         static_cast<void>(discard_active_payload());
         return std::unexpected(make_error(ErrorCode::internal, "initialize streaming SHA-256"));
@@ -1296,28 +1336,31 @@ Result<PayloadAck> Supervisor::append_payload(const PayloadChunk& chunk) {
         return std::unexpected(valid.error());
     }
     if (!active_payload_ || active_payload_->request_id != chunk.request_id) {
-        return std::unexpected(make_error(ErrorCode::protocol_violation, "file chunk has no matching active ingress"));
+        return std::unexpected(
+            make_error(ErrorCode::protocol_violation, "file chunk has no matching active ingress"));
     }
     if (active_payload_->sealed) {
-        return std::unexpected(make_error(ErrorCode::protocol_violation, "file chunk arrived after seal"));
+        return std::unexpected(
+            make_error(ErrorCode::protocol_violation, "file chunk arrived after seal"));
     }
     if (active_payload_->received_bytes > active_payload_->expected_bytes ||
         chunk.bytes.size() > active_payload_->expected_bytes - active_payload_->received_bytes) {
-        const Error error = make_error(ErrorCode::invalid_argument, "file chunks exceed declared byte size");
+        const Error error =
+            make_error(ErrorCode::invalid_argument, "file chunks exceed declared byte size");
         static_cast<void>(discard_active_payload());
         return std::unexpected(error);
     }
     Result<void> appended{};
     {
-        const auto credentials = ScopedFsCredentials::enter(config_.sandbox_uid, config_.sandbox_gid);
+        const auto credentials =
+            ScopedFsCredentials::enter(config_.sandbox_uid, config_.sandbox_gid);
         if (!credentials) {
             appended = std::unexpected(credentials.error());
-        } else if (const auto written = write_all_bytes(active_payload_->file_fd, chunk.bytes); !written) {
+        } else if (const auto written = write_all_bytes(active_payload_->file_fd, chunk.bytes);
+                   !written) {
             appended = std::unexpected(written.error());
-        } else if (EVP_DigestUpdate(
-                       active_payload_->digest,
-                       chunk.bytes.data(),
-                       chunk.bytes.size()) != 1) {
+        } else if (EVP_DigestUpdate(active_payload_->digest, chunk.bytes.data(),
+                                    chunk.bytes.size()) != 1) {
             appended = std::unexpected(make_error(ErrorCode::internal, "update streaming SHA-256"));
         }
     }
@@ -1339,13 +1382,16 @@ Result<PayloadAck> Supervisor::seal_payload(const PayloadControlRequest& request
         return std::unexpected(valid.error());
     }
     if (!active_payload_ || active_payload_->request_id != request.request_id) {
-        return std::unexpected(make_error(ErrorCode::protocol_violation, "file seal has no matching active ingress"));
+        return std::unexpected(
+            make_error(ErrorCode::protocol_violation, "file seal has no matching active ingress"));
     }
     if (active_payload_->sealed) {
-        return std::unexpected(make_error(ErrorCode::protocol_violation, "file ingress was sealed twice"));
+        return std::unexpected(
+            make_error(ErrorCode::protocol_violation, "file ingress was sealed twice"));
     }
     if (active_payload_->received_bytes != active_payload_->expected_bytes) {
-        const Error error = make_error(ErrorCode::invalid_argument, "file bytes do not match declared size");
+        const Error error =
+            make_error(ErrorCode::invalid_argument, "file bytes do not match declared size");
         static_cast<void>(discard_active_payload());
         return std::unexpected(error);
     }
@@ -1359,11 +1405,10 @@ Result<PayloadAck> Supervisor::seal_payload(const PayloadControlRequest& request
     }
     const std::string actual_sha256 = render_sha256(digest.data(), digest_size);
     if (actual_sha256.size() != active_payload_->expected_sha256.size() ||
-        CRYPTO_memcmp(
-            actual_sha256.data(),
-            active_payload_->expected_sha256.data(),
-            actual_sha256.size()) != 0) {
-        const Error error = make_error(ErrorCode::invalid_argument, "file content SHA-256 does not match declared digest");
+        CRYPTO_memcmp(actual_sha256.data(), active_payload_->expected_sha256.data(),
+                      actual_sha256.size()) != 0) {
+        const Error error = make_error(ErrorCode::invalid_argument,
+                                       "file content SHA-256 does not match declared digest");
         static_cast<void>(discard_active_payload());
         return std::unexpected(error);
     }
@@ -1384,23 +1429,26 @@ Result<PayloadResult> Supervisor::publish_payload(const PayloadControlRequest& r
     if (const auto valid = validate_payload_control_request(request); !valid) {
         return std::unexpected(valid.error());
     }
-    if (!active_payload_ || active_payload_->request_id != request.request_id || !active_payload_->sealed) {
-        return std::unexpected(make_error(ErrorCode::protocol_violation, "file publish requires a matching sealed ingress"));
+    if (!active_payload_ || active_payload_->request_id != request.request_id ||
+        !active_payload_->sealed) {
+        return std::unexpected(make_error(ErrorCode::protocol_violation,
+                                          "file publish requires a matching sealed ingress"));
     }
     Result<void> published{};
     {
-        const auto credentials = ScopedFsCredentials::enter(config_.sandbox_uid, config_.sandbox_gid);
+        const auto credentials =
+            ScopedFsCredentials::enter(config_.sandbox_uid, config_.sandbox_gid);
         if (!credentials) {
             published = std::unexpected(credentials.error());
-        } else if (const auto renamed = publish_payload_name(
-                       active_payload_->directory_fd,
-                       active_payload_->temporary_name);
+        } else if (const auto renamed = publish_payload_name(active_payload_->directory_fd,
+                                                             active_payload_->temporary_name);
                    !renamed) {
             published = std::unexpected(renamed.error());
         } else {
             active_payload_->temporary_name.clear();
             if (fsync(active_payload_->directory_fd) != 0) {
-                published = std::unexpected(errno_error(ErrorCode::invocation_in_doubt, "fsync file directory after publish"));
+                published = std::unexpected(errno_error(ErrorCode::invocation_in_doubt,
+                                                        "fsync file directory after publish"));
             } else if (const auto synced = sync_workspace(active_payload_->workspace_fd); !synced) {
                 published = std::unexpected(make_error(
                     ErrorCode::invocation_in_doubt,
@@ -1412,9 +1460,10 @@ Result<PayloadResult> Supervisor::publish_payload(const PayloadControlRequest& r
         const Error error = published.error();
         if (!active_payload_->temporary_name.empty()) {
             if (const auto discarded = discard_active_payload(); !discarded) {
-                return std::unexpected(make_error(
-                    ErrorCode::invocation_in_doubt,
-                    "file publish failed and staging cleanup could not be proven: " + discarded.error().message));
+                return std::unexpected(
+                    make_error(ErrorCode::invocation_in_doubt,
+                               "file publish failed and staging cleanup could not be proven: " +
+                                   discarded.error().message));
             }
         } else {
             active_payload_.reset();
@@ -1437,13 +1486,14 @@ Result<PayloadAck> Supervisor::abort_payload(const PayloadControlRequest& reques
         return std::unexpected(valid.error());
     }
     if (!active_payload_ || active_payload_->request_id != request.request_id) {
-        return std::unexpected(make_error(ErrorCode::protocol_violation, "file abort has no matching active ingress"));
+        return std::unexpected(
+            make_error(ErrorCode::protocol_violation, "file abort has no matching active ingress"));
     }
     const std::size_t received_bytes = active_payload_->received_bytes;
     if (const auto discarded = discard_active_payload(); !discarded) {
-        return std::unexpected(make_error(
-            ErrorCode::invocation_in_doubt,
-            "cannot prove unpublished file temporary was removed: " + discarded.error().message));
+        return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
+                                          "cannot prove unpublished file temporary was removed: " +
+                                              discarded.error().message));
     }
     return PayloadAck{
         .request_id = request.request_id,
@@ -1454,7 +1504,8 @@ Result<PayloadAck> Supervisor::abort_payload(const PayloadControlRequest& reques
 
 Result<void> Supervisor::serve() {
     if (config_.control_fd < 0) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "supervisor control_fd is invalid"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "supervisor control_fd is invalid"));
     }
     if (const auto installed = install_sigchld_handler(); !installed) {
         return std::unexpected(installed.error());
@@ -1469,7 +1520,8 @@ Result<void> Supervisor::serve() {
             if (errno == EINTR) {
                 continue;
             }
-            return std::unexpected(errno_error(ErrorCode::io_failure, "poll supervisor control socket"));
+            return std::unexpected(
+                errno_error(ErrorCode::io_failure, "poll supervisor control socket"));
         }
         if (control_ready == 0) {
             continue;
@@ -1518,7 +1570,8 @@ Result<void> Supervisor::serve() {
                 }
                 continue;
             }
-            if (const auto sent = send_payload_ack_frame(config_.control_fd, *acknowledgement); !sent) {
+            if (const auto sent = send_payload_ack_frame(config_.control_fd, *acknowledgement);
+                !sent) {
                 return std::unexpected(sent.error());
             }
             continue;
@@ -1546,12 +1599,14 @@ Result<void> Supervisor::serve() {
                 }
                 continue;
             }
-            if (const auto sent = send_payload_ack_frame(config_.control_fd, *acknowledgement); !sent) {
+            if (const auto sent = send_payload_ack_frame(config_.control_fd, *acknowledgement);
+                !sent) {
                 return std::unexpected(sent.error());
             }
             continue;
         }
-        if (frame->kind == MessageKind::payload_seal || frame->kind == MessageKind::payload_publish ||
+        if (frame->kind == MessageKind::payload_seal ||
+            frame->kind == MessageKind::payload_publish ||
             frame->kind == MessageKind::payload_abort) {
             const auto request = decode_payload_control_request(frame->payload);
             if (!request) {
@@ -1576,14 +1631,15 @@ Result<void> Supervisor::serve() {
                     }
                     continue;
                 }
-                if (const auto sent = send_payload_result_frame(config_.control_fd, *result); !sent) {
+                if (const auto sent = send_payload_result_frame(config_.control_fd, *result);
+                    !sent) {
                     return std::unexpected(sent.error());
                 }
                 continue;
             }
             const auto acknowledgement = frame->kind == MessageKind::payload_seal
-                ? seal_payload(*request)
-                : abort_payload(*request);
+                                             ? seal_payload(*request)
+                                             : abort_payload(*request);
             if (!acknowledgement) {
                 const auto payload = encode_error(acknowledgement.error());
                 if (payload) {
@@ -1594,13 +1650,16 @@ Result<void> Supervisor::serve() {
                 }
                 continue;
             }
-            if (const auto sent = send_payload_ack_frame(config_.control_fd, *acknowledgement); !sent) {
+            if (const auto sent = send_payload_ack_frame(config_.control_fd, *acknowledgement);
+                !sent) {
                 return std::unexpected(sent.error());
             }
             continue;
         }
         if (frame->kind != MessageKind::execute) {
-            const Error error = make_error(ErrorCode::protocol_violation, "supervisor accepts execute, file ingress, or shutdown only");
+            const Error error =
+                make_error(ErrorCode::protocol_violation,
+                           "supervisor accepts execute, file ingress, or shutdown only");
             const auto payload = encode_error(error);
             if (payload) {
                 const auto outbound = encode_frame(MessageKind::error, *payload);
@@ -1646,4 +1705,4 @@ Result<void> Supervisor::serve() {
     }
 }
 
-}  // namespace wspctl
+} // namespace wspctl

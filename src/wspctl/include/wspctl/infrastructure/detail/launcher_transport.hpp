@@ -12,7 +12,8 @@ namespace wspctl::detail::launcher_transport {
 /** @brief fork-server 单包 wire 载荷上限 / Fork-server single-packet wire payload limit. */
 inline constexpr std::size_t kMaxPacketBytes{32U * 1024U};
 
-/** @brief fork-server 单包允许的最大 SCM_RIGHTS FD 数 / Maximum SCM_RIGHTS FD count per fork-server packet. */
+/** @brief fork-server 单包允许的最大 SCM_RIGHTS FD 数 / Maximum SCM_RIGHTS FD count per fork-server
+ * packet. */
 inline constexpr std::size_t kMaxFileDescriptors{5U};
 
 /**
@@ -25,7 +26,8 @@ inline constexpr std::size_t kMaxFileDescriptors{5U};
 struct LauncherPacket final {
     /** @brief 单个 wire 数据报 / One wire datagram. */
     std::vector<std::byte> bytes;
-    /** @brief 由 SCM_RIGHTS 接收且由本对象拥有的 FD / FDs received through SCM_RIGHTS and owned by this object. */
+    /** @brief 由 SCM_RIGHTS 接收且由本对象拥有的 FD / FDs received through SCM_RIGHTS and owned by
+     * this object. */
     std::array<int, kMaxFileDescriptors> fds = [] {
         std::array<int, kMaxFileDescriptors> descriptors{};
         descriptors.fill(-1);
@@ -42,22 +44,23 @@ struct LauncherPacket final {
 void close_launcher_packet_fds(LauncherPacket& packet) noexcept;
 
 /**
- * @brief 通过一个 SOCK_SEQPACKET 发送 wire 与严格有界的 FD 集 / Send wire and a strictly bounded FD set through SOCK_SEQPACKET.
+ * @brief 通过一个 SOCK_SEQPACKET 发送 wire 与严格有界的 FD 集 / Send wire and a strictly bounded FD
+ * set through SOCK_SEQPACKET.
  * @param fd 已连接的 fork-server socket / Connected fork-server socket.
  * @param bytes 非空且有界的 wire bytes / Non-empty bounded wire bytes.
  * @param fds 待传递的 0 到 5 个 FD / Zero to five FDs to pass.
  * @return 成功或可恢复 transport 错误 / Success or a recoverable transport error.
  */
-[[nodiscard]] Result<void> send_launcher_packet(
-    int fd,
-    std::span<const std::byte> bytes,
-    std::span<const int> fds);
+[[nodiscard]] Result<void> send_launcher_packet(int fd, std::span<const std::byte> bytes,
+                                                std::span<const int> fds);
 
 /**
- * @brief 从一个 SOCK_SEQPACKET 接收 wire 与严格有界的 FD 集 / Receive wire and a strictly bounded FD set from SOCK_SEQPACKET.
+ * @brief 从一个 SOCK_SEQPACKET 接收 wire 与严格有界的 FD 集 / Receive wire and a strictly bounded
+ * FD set from SOCK_SEQPACKET.
  * @param fd 已连接的 fork-server socket / Connected fork-server socket.
- * @return 拥有 FD 的 packet 或 fail-closed transport 错误 / FD-owning packet or a fail-closed transport error.
+ * @return 拥有 FD 的 packet 或 fail-closed transport 错误 / FD-owning packet or a fail-closed
+ * transport error.
  */
 [[nodiscard]] Result<LauncherPacket> receive_launcher_packet(int fd);
 
-}  // namespace wspctl::detail::launcher_transport
+} // namespace wspctl::detail::launcher_transport

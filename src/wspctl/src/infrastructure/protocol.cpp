@@ -90,8 +90,10 @@ public:
         std::uint16_t value = 0;
         for (unsigned int index = 0; index < 2U; ++index) {
             /** @brief 当前 little-endian byte / Current little-endian byte. */
-            const std::uint16_t byte = static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes_[offset_++]));
-            value = static_cast<std::uint16_t>(value | static_cast<std::uint16_t>(byte << (index * 8U)));
+            const std::uint16_t byte =
+                static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes_[offset_++]));
+            value = static_cast<std::uint16_t>(value |
+                                               static_cast<std::uint16_t>(byte << (index * 8U)));
         }
         return value;
     }
@@ -103,7 +105,8 @@ public:
         }
         std::uint32_t value = 0;
         for (unsigned int index = 0; index < 4U; ++index) {
-            value |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes_[offset_++])) << (index * 8U);
+            value |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes_[offset_++]))
+                     << (index * 8U);
         }
         return value;
     }
@@ -115,7 +118,8 @@ public:
         }
         std::uint64_t value = 0;
         for (unsigned int index = 0; index < 8U; ++index) {
-            value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(bytes_[offset_++])) << (index * 8U);
+            value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(bytes_[offset_++]))
+                     << (index * 8U);
         }
         return value;
     }
@@ -157,10 +161,8 @@ public:
             return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid byte length"));
         }
         std::vector<std::byte> value;
-        value.insert(
-            value.end(),
-            bytes_.begin() + static_cast<std::ptrdiff_t>(offset_),
-            bytes_.begin() + static_cast<std::ptrdiff_t>(offset_ + size));
+        value.insert(value.end(), bytes_.begin() + static_cast<std::ptrdiff_t>(offset_),
+                     bytes_.begin() + static_cast<std::ptrdiff_t>(offset_ + size));
         offset_ += size;
         return value;
     }
@@ -188,9 +190,11 @@ private:
 
 /** @brief 判断合法十六进制摘要 / Check a valid lowercase hexadecimal digest. */
 [[nodiscard]] bool is_sha256(const std::string_view value) {
-    return value.size() == SHA256_DIGEST_LENGTH * 2U && std::all_of(value.begin(), value.end(), [](const char character) {
-        return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f');
-    });
+    return value.size() == SHA256_DIGEST_LENGTH * 2U &&
+           std::all_of(value.begin(), value.end(), [](const char character) {
+               return (character >= '0' && character <= '9') ||
+                      (character >= 'a' && character <= 'f');
+           });
 }
 
 /** @brief 判断安全 runtime/invocation 标识 / Check a safe runtime/invocation identifier. */
@@ -199,11 +203,16 @@ private:
         return false;
     }
     return std::all_of(value.begin(), value.end(), [](const unsigned char character) {
-        return (character >= static_cast<unsigned char>('a') && character <= static_cast<unsigned char>('z')) ||
-               (character >= static_cast<unsigned char>('A') && character <= static_cast<unsigned char>('Z')) ||
-               (character >= static_cast<unsigned char>('0') && character <= static_cast<unsigned char>('9')) ||
-               character == static_cast<unsigned char>('_') || character == static_cast<unsigned char>('-') ||
-               character == static_cast<unsigned char>('.') || character == static_cast<unsigned char>(':');
+        return (character >= static_cast<unsigned char>('a') &&
+                character <= static_cast<unsigned char>('z')) ||
+               (character >= static_cast<unsigned char>('A') &&
+                character <= static_cast<unsigned char>('Z')) ||
+               (character >= static_cast<unsigned char>('0') &&
+                character <= static_cast<unsigned char>('9')) ||
+               character == static_cast<unsigned char>('_') ||
+               character == static_cast<unsigned char>('-') ||
+               character == static_cast<unsigned char>('.') ||
+               character == static_cast<unsigned char>(':');
     });
 }
 
@@ -213,9 +222,12 @@ private:
         return false;
     }
     const auto is_alphanumeric = [](const unsigned char character) noexcept {
-        return (character >= static_cast<unsigned char>('a') && character <= static_cast<unsigned char>('z')) ||
-               (character >= static_cast<unsigned char>('A') && character <= static_cast<unsigned char>('Z')) ||
-               (character >= static_cast<unsigned char>('0') && character <= static_cast<unsigned char>('9'));
+        return (character >= static_cast<unsigned char>('a') &&
+                character <= static_cast<unsigned char>('z')) ||
+               (character >= static_cast<unsigned char>('A') &&
+                character <= static_cast<unsigned char>('Z')) ||
+               (character >= static_cast<unsigned char>('0') &&
+                character <= static_cast<unsigned char>('9'));
     };
     if (!is_alphanumeric(static_cast<unsigned char>(value.front()))) {
         return false;
@@ -230,10 +242,12 @@ private:
 [[nodiscard]] bool is_safe_payload_runtime_path(const std::string_view path) {
     constexpr std::string_view kPrefix{"/workspace/uploads/"};
     constexpr std::string_view kSuffix{"/payload"};
-    if (!path.starts_with(kPrefix) || !path.ends_with(kSuffix) || path.size() <= kPrefix.size() + kSuffix.size()) {
+    if (!path.starts_with(kPrefix) || !path.ends_with(kSuffix) ||
+        path.size() <= kPrefix.size() + kSuffix.size()) {
         return false;
     }
-    const std::string_view opaque_id = path.substr(kPrefix.size(), path.size() - kPrefix.size() - kSuffix.size());
+    const std::string_view opaque_id =
+        path.substr(kPrefix.size(), path.size() - kPrefix.size() - kSuffix.size());
     return opaque_id.find('/') == std::string_view::npos && is_safe_payload_opaque_id(opaque_id);
 }
 
@@ -242,14 +256,15 @@ private:
     if (cwd == "/workspace") {
         return true;
     }
-    if (!cwd.starts_with("/workspace/") || cwd.size() > 4096U || cwd.find('\0') != std::string_view::npos ||
-        cwd.find("//") != std::string_view::npos) {
+    if (!cwd.starts_with("/workspace/") || cwd.size() > 4096U ||
+        cwd.find('\0') != std::string_view::npos || cwd.find("//") != std::string_view::npos) {
         return false;
     }
     std::size_t begin = 1U;
     while (begin < cwd.size()) {
         const std::size_t end = cwd.find('/', begin);
-        const std::string_view component = cwd.substr(begin, end == std::string_view::npos ? cwd.size() - begin : end - begin);
+        const std::string_view component =
+            cwd.substr(begin, end == std::string_view::npos ? cwd.size() - begin : end - begin);
         if (component.empty() || component == "." || component == "..") {
             return false;
         }
@@ -261,7 +276,8 @@ private:
     return true;
 }
 
-/** @brief 编码不含外部语义 hash 的规范请求 / Encode canonical request without caller semantic hash. */
+/** @brief 编码不含外部语义 hash 的规范请求 / Encode canonical request without caller semantic hash.
+ */
 [[nodiscard]] std::vector<std::byte> encode_canonical_request(const ExecuteRequest& request) {
     Writer writer;
     writer.string(request.runtime_key);
@@ -280,7 +296,8 @@ private:
 }
 
 /**
- * @brief 编码不含外部语义 hash/activation 的规范文件元数据 / Encode canonical file metadata excluding caller semantic hash and activation.
+ * @brief 编码不含外部语义 hash/activation 的规范文件元数据 / Encode canonical file metadata
+ * excluding caller semantic hash and activation.
  * @param runtime_key 持久 runtime 标识 / Persistent runtime key.
  * @param request_id 稳定文件调用标识 / Stable file invocation ID.
  * @param opaque_id 受限 uploads capability / Constrained uploads capability.
@@ -289,11 +306,8 @@ private:
  * @return 用于 SHA-256 的 canonical bytes / Canonical bytes used for SHA-256.
  */
 [[nodiscard]] std::vector<std::byte> encode_canonical_payload_metadata(
-    const std::string_view runtime_key,
-    const std::string_view request_id,
-    const std::string_view opaque_id,
-    const std::size_t byte_size,
-    const std::string_view sha256) {
+    const std::string_view runtime_key, const std::string_view request_id,
+    const std::string_view opaque_id, const std::size_t byte_size, const std::string_view sha256) {
     Writer writer;
     writer.string(runtime_key);
     writer.string(request_id);
@@ -303,13 +317,11 @@ private:
     return writer.take();
 }
 
-/** @brief 将任意 bytes 的 SHA-256 渲染为小写十六进制 / Render the SHA-256 of arbitrary bytes as lowercase hexadecimal. */
+/** @brief 将任意 bytes 的 SHA-256 渲染为小写十六进制 / Render the SHA-256 of arbitrary bytes as
+ * lowercase hexadecimal. */
 [[nodiscard]] std::string sha256_hex(const std::span<const std::byte> bytes) {
     std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
-    SHA256(
-        reinterpret_cast<const unsigned char*>(bytes.data()),
-        bytes.size(),
-        digest.data());
+    SHA256(reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size(), digest.data());
     std::string rendered;
     rendered.reserve(digest.size() * 2U);
     for (const unsigned char value : digest) {
@@ -324,7 +336,8 @@ private:
     return value.find('\0') == std::string_view::npos;
 }
 
-/** @brief 校验无 NUL 的严格 UTF-8 scalar sequence / Validate NUL-free strict UTF-8 scalar sequences. */
+/** @brief 校验无 NUL 的严格 UTF-8 scalar sequence / Validate NUL-free strict UTF-8 scalar
+ * sequences. */
 [[nodiscard]] bool is_nul_free_utf8(const std::string_view value) noexcept {
     for (std::size_t index = 0U; index < value.size();) {
         const unsigned char first = static_cast<unsigned char>(value[index]);
@@ -373,7 +386,8 @@ private:
 /** @brief 校验 execution result 可安全编码 / Validate an execution result before encoding. */
 [[nodiscard]] Result<void> validate_execution_result(const ExecutionResult& result) {
     if (!is_safe_identifier(result.request_id)) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid result request_id"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid result request_id"));
     }
     if (result.exit_code.has_value() && (*result.exit_code < 0 || *result.exit_code > 255)) {
         return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid exit code"));
@@ -393,23 +407,26 @@ private:
          acknowledgement.stage != PayloadAckStage::sealed &&
          acknowledgement.stage != PayloadAckStage::aborted) ||
         acknowledgement.received_bytes > kMaxAddFileBytes) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid payload acknowledgement"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid payload acknowledgement"));
     }
     return {};
 }
 
-}  // namespace
+} // namespace
 
 Result<void> validate_execute_request(const ExecuteRequest& request) {
     if (!is_safe_identifier(request.runtime_key) || !is_safe_identifier(request.activation_id) ||
         !is_safe_identifier(request.request_id)) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid runtime, activation, or request identifier"));
+        return std::unexpected(make_error(ErrorCode::invalid_argument,
+                                          "invalid runtime, activation, or request identifier"));
     }
     if (!is_sha256(request.request_hash)) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "request_hash must be lowercase SHA-256 hex"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "request_hash must be lowercase SHA-256 hex"));
     }
-    if (request.argv.empty() || request.argv.size() > kMaxArgvEntries || request.argv.front().empty() ||
-        request.argv.front().front() == '-') {
+    if (request.argv.empty() || request.argv.size() > kMaxArgvEntries ||
+        request.argv.front().empty() || request.argv.front().front() == '-') {
         return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid argv"));
     }
     std::size_t argv_bytes = 0;
@@ -426,22 +443,25 @@ Result<void> validate_execute_request(const ExecuteRequest& request) {
         return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid stdin"));
     }
     if (!is_safe_workspace_cwd(request.cwd)) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "cwd must be a normalized path below /workspace"));
+        return std::unexpected(make_error(ErrorCode::invalid_argument,
+                                          "cwd must be a normalized path below /workspace"));
     }
     if (request.timeout.count() <= 0 || request.timeout > std::chrono::minutes(15)) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "timeout is outside 1ms..15min"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "timeout is outside 1ms..15min"));
     }
     if (request.output_limit == 0U || request.output_limit > kMaxOutputBytes) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "output_limit is outside quota"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "output_limit is outside quota"));
     }
     return {};
 }
 
 Result<void> validate_runtime_status_request(const RuntimeStatusRequest& request) {
     if (!is_safe_identifier(request.runtime_key) || !is_safe_identifier(request.activation_id)) {
-        return std::unexpected(make_error(
-            ErrorCode::invalid_argument,
-            "invalid runtime or activation identifier for runtime status"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument,
+                       "invalid runtime or activation identifier for runtime status"));
     }
     return {};
 }
@@ -459,21 +479,26 @@ Result<void> validate_runtime_status_result(const RuntimeStatusResult& result) {
         }
         active_activation = *parsed;
     }
-    if (const auto snapshot = domain::RuntimeSnapshot::create(*runtime, result.state, std::move(active_activation)); !snapshot) {
+    if (const auto snapshot =
+            domain::RuntimeSnapshot::create(*runtime, result.state, std::move(active_activation));
+        !snapshot) {
         return std::unexpected(make_error(ErrorCode::invalid_argument, snapshot.error().message));
     }
     if (result.idle_ttl.count() <= 0 ||
         result.idle_ttl.count() > std::numeric_limits<std::int64_t>::max() ||
         (result.idle_for.has_value() && result.idle_for->count() < 0) ||
         (result.idle_for.has_value() && result.state != domain::RuntimeState::ready)) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid runtime status timing"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid runtime status timing"));
     }
-    if (result.supervisor_alive &&
-        (result.state == domain::RuntimeState::dormant || result.state == domain::RuntimeState::failed)) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "inactive runtime cannot report a live supervisor"));
+    if (result.supervisor_alive && (result.state == domain::RuntimeState::dormant ||
+                                    result.state == domain::RuntimeState::failed)) {
+        return std::unexpected(make_error(ErrorCode::invalid_argument,
+                                          "inactive runtime cannot report a live supervisor"));
     }
     if (result.handle_activation_matches && !result.active_activation_id.has_value()) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "activation match requires an active activation"));
+        return std::unexpected(make_error(ErrorCode::invalid_argument,
+                                          "activation match requires an active activation"));
     }
     return {};
 }
@@ -481,17 +506,18 @@ Result<void> validate_runtime_status_result(const RuntimeStatusResult& result) {
 Result<void> validate_payload_begin_request(const PayloadBeginRequest& request) {
     if (!is_safe_identifier(request.runtime_key) || !is_safe_identifier(request.activation_id) ||
         !is_safe_identifier(request.request_id) || !is_safe_payload_opaque_id(request.opaque_id)) {
-        return std::unexpected(make_error(
-            ErrorCode::invalid_argument,
-            "invalid runtime, activation, request, or opaque file identifier"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument,
+                       "invalid runtime, activation, request, or opaque file identifier"));
     }
     if (!is_sha256(request.request_hash) || !is_sha256(request.sha256)) {
-        return std::unexpected(make_error(
-            ErrorCode::invalid_argument,
-            "file request_hash and sha256 must be lowercase SHA-256 hex"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument,
+                       "file request_hash and sha256 must be lowercase SHA-256 hex"));
     }
     if (request.byte_size > kMaxAddFileBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "file byte size exceeds ingress quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "file byte size exceeds ingress quota"));
     }
     return {};
 }
@@ -499,23 +525,25 @@ Result<void> validate_payload_begin_request(const PayloadBeginRequest& request) 
 Result<void> validate_payload_replay_request(const PayloadReplayRequest& request) {
     if (!is_safe_identifier(request.runtime_key) || !is_safe_identifier(request.request_id) ||
         !is_safe_payload_opaque_id(request.opaque_id)) {
-        return std::unexpected(make_error(
-            ErrorCode::invalid_argument,
-            "invalid runtime, request, or opaque file identifier for read-only replay"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument,
+                       "invalid runtime, request, or opaque file identifier for read-only replay"));
     }
     if (!is_sha256(request.request_hash) || !is_sha256(request.sha256)) {
-        return std::unexpected(make_error(
-            ErrorCode::invalid_argument,
-            "file replay request_hash and sha256 must be lowercase SHA-256 hex"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument,
+                       "file replay request_hash and sha256 must be lowercase SHA-256 hex"));
     }
     if (request.byte_size > kMaxAddFileBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "file replay byte size exceeds ingress quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "file replay byte size exceeds ingress quota"));
     }
     return {};
 }
 
 Result<void> validate_payload_chunk(const PayloadChunk& chunk) {
-    if (!is_safe_identifier(chunk.request_id) || chunk.bytes.empty() || chunk.bytes.size() > kMaxAddFileChunkBytes) {
+    if (!is_safe_identifier(chunk.request_id) || chunk.bytes.empty() ||
+        chunk.bytes.size() > kMaxAddFileChunkBytes) {
         return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid file chunk"));
     }
     return {};
@@ -523,7 +551,8 @@ Result<void> validate_payload_chunk(const PayloadChunk& chunk) {
 
 Result<void> validate_payload_control_request(const PayloadControlRequest& request) {
     if (!is_safe_identifier(request.request_id)) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid file control request"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid file control request"));
     }
     return {};
 }
@@ -531,7 +560,8 @@ Result<void> validate_payload_control_request(const PayloadControlRequest& reque
 Result<void> validate_payload_result(const PayloadResult& result) {
     if (!is_safe_identifier(result.request_id) || !is_safe_payload_runtime_path(result.path) ||
         result.byte_size > kMaxAddFileBytes || !is_sha256(result.sha256)) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid file ingress receipt"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid file ingress receipt"));
     }
     return {};
 }
@@ -542,22 +572,16 @@ std::string canonical_request_hash(const ExecuteRequest& request) {
 }
 
 std::string canonical_payload_hash(const PayloadBeginRequest& request) {
-    const std::vector<std::byte> canonical = encode_canonical_payload_metadata(
-        request.runtime_key,
-        request.request_id,
-        request.opaque_id,
-        request.byte_size,
-        request.sha256);
+    const std::vector<std::byte> canonical =
+        encode_canonical_payload_metadata(request.runtime_key, request.request_id,
+                                          request.opaque_id, request.byte_size, request.sha256);
     return sha256_hex(canonical);
 }
 
 std::string canonical_payload_hash(const PayloadReplayRequest& request) {
-    const std::vector<std::byte> canonical = encode_canonical_payload_metadata(
-        request.runtime_key,
-        request.request_id,
-        request.opaque_id,
-        request.byte_size,
-        request.sha256);
+    const std::vector<std::byte> canonical =
+        encode_canonical_payload_metadata(request.runtime_key, request.request_id,
+                                          request.opaque_id, request.byte_size, request.sha256);
     return sha256_hex(canonical);
 }
 
@@ -580,14 +604,16 @@ Result<std::vector<std::byte>> encode_execute_request(const ExecuteRequest& requ
     writer.u64(static_cast<std::uint64_t>(request.output_limit));
     std::vector<std::byte> encoded = writer.take();
     if (encoded.size() > kMaxFrameBytes - kFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "request payload exceeds frame quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "request payload exceeds frame quota"));
     }
     return encoded;
 }
 
 Result<ExecuteRequest> decode_execute_request(const std::span<const std::byte> payload) {
     if (payload.size() > kMaxFrameBytes - kFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "request payload exceeds quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "request payload exceeds quota"));
     }
     Reader reader(payload);
     ExecuteRequest request;
@@ -621,7 +647,8 @@ Result<ExecuteRequest> decode_execute_request(const std::span<const std::byte> p
     if (!stdin_data || !cwd || !timeout || !output_limit || !reader.finished() ||
         *timeout > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
         *output_limit > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid execute request tail"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid execute request tail"));
     }
     request.stdin_data = *stdin_data;
     request.cwd = *cwd;
@@ -643,12 +670,14 @@ Result<std::vector<std::byte>> encode_runtime_status_request(const RuntimeStatus
     return writer.take();
 }
 
-Result<RuntimeStatusRequest> decode_runtime_status_request(const std::span<const std::byte> payload) {
+Result<RuntimeStatusRequest>
+decode_runtime_status_request(const std::span<const std::byte> payload) {
     Reader reader(payload);
     const auto runtime_key = reader.string(128U);
     const auto activation_id = reader.string(128U);
     if (!runtime_key || !activation_id || !reader.finished()) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid runtime status request"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid runtime status request"));
     }
     RuntimeStatusRequest request{
         .runtime_key = *runtime_key,
@@ -690,13 +719,15 @@ Result<RuntimeStatusResult> decode_runtime_status_result(const std::span<const s
     const auto has_active_activation = reader.u8();
     if (!runtime_key || !raw_state || !has_active_activation || *has_active_activation > 1U ||
         *raw_state > static_cast<std::uint8_t>(domain::RuntimeState::failed)) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid runtime status header"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid runtime status header"));
     }
     std::optional<std::string> active_activation_id;
     if (*has_active_activation == 1U) {
         const auto active_activation = reader.string(128U);
         if (!active_activation) {
-            return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid runtime status activation"));
+            return std::unexpected(
+                make_error(ErrorCode::malformed_frame, "invalid runtime status activation"));
         }
         active_activation_id = *active_activation;
     }
@@ -705,13 +736,16 @@ Result<RuntimeStatusResult> decode_runtime_status_result(const std::span<const s
     const auto has_idle_for = reader.u8();
     if (!handle_activation_matches || !supervisor_alive || !has_idle_for ||
         *handle_activation_matches > 1U || *supervisor_alive > 1U || *has_idle_for > 1U) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid runtime status flags"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid runtime status flags"));
     }
     std::optional<std::chrono::milliseconds> idle_for;
     if (*has_idle_for == 1U) {
         const auto idle_for_ms = reader.u64();
-        if (!idle_for_ms || *idle_for_ms > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
-            return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid runtime status idle age"));
+        if (!idle_for_ms ||
+            *idle_for_ms > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+            return std::unexpected(
+                make_error(ErrorCode::malformed_frame, "invalid runtime status idle age"));
         }
         idle_for = std::chrono::milliseconds(static_cast<std::int64_t>(*idle_for_ms));
     }
@@ -721,7 +755,8 @@ Result<RuntimeStatusResult> decode_runtime_status_result(const std::span<const s
     if (!idle_ttl_ms || !borrowed_dispatches || !cleanup_pending || *cleanup_pending > 1U ||
         *idle_ttl_ms > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
         !reader.finished()) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid runtime status tail"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid runtime status tail"));
     }
     RuntimeStatusResult result{
         .runtime_key = *runtime_key,
@@ -754,14 +789,16 @@ Result<std::vector<std::byte>> encode_payload_begin_request(const PayloadBeginRe
     writer.string(request.sha256);
     std::vector<std::byte> encoded = writer.take();
     if (encoded.size() > kMaxFrameBytes - kFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "file begin payload exceeds frame quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "file begin payload exceeds frame quota"));
     }
     return encoded;
 }
 
 Result<PayloadBeginRequest> decode_payload_begin_request(const std::span<const std::byte> payload) {
     if (payload.size() > kMaxFrameBytes - kFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "file begin payload exceeds frame quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "file begin payload exceeds frame quota"));
     }
     Reader reader(payload);
     const auto runtime_key = reader.string(128U);
@@ -771,9 +808,11 @@ Result<PayloadBeginRequest> decode_payload_begin_request(const std::span<const s
     const auto opaque_id = reader.string(kMaxFileOpaqueIdBytes);
     const auto byte_size = reader.u64();
     const auto sha256 = reader.string(64U);
-    if (!runtime_key || !activation_id || !request_id || !request_hash || !opaque_id || !byte_size || !sha256 ||
-        !reader.finished() || *byte_size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid file begin request"));
+    if (!runtime_key || !activation_id || !request_id || !request_hash || !opaque_id ||
+        !byte_size || !sha256 || !reader.finished() ||
+        *byte_size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid file begin request"));
     }
     PayloadBeginRequest request{
         .runtime_key = *runtime_key,
@@ -803,14 +842,17 @@ Result<std::vector<std::byte>> encode_payload_replay_request(const PayloadReplay
     writer.string(request.sha256);
     std::vector<std::byte> encoded = writer.take();
     if (encoded.size() > kMaxFrameBytes - kFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "file replay payload exceeds frame quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "file replay payload exceeds frame quota"));
     }
     return encoded;
 }
 
-Result<PayloadReplayRequest> decode_payload_replay_request(const std::span<const std::byte> payload) {
+Result<PayloadReplayRequest>
+decode_payload_replay_request(const std::span<const std::byte> payload) {
     if (payload.size() > kMaxFrameBytes - kFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "file replay payload exceeds quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "file replay payload exceeds quota"));
     }
     Reader reader(payload);
     const auto runtime_key = reader.string(128U);
@@ -819,9 +861,11 @@ Result<PayloadReplayRequest> decode_payload_replay_request(const std::span<const
     const auto opaque_id = reader.string(kMaxFileOpaqueIdBytes);
     const auto byte_size = reader.u64();
     const auto sha256 = reader.string(64U);
-    if (!runtime_key || !request_id || !request_hash || !opaque_id || !byte_size || !sha256 || !reader.finished() ||
+    if (!runtime_key || !request_id || !request_hash || !opaque_id || !byte_size || !sha256 ||
+        !reader.finished() ||
         *byte_size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid file replay request"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid file replay request"));
     }
     PayloadReplayRequest request{
         .runtime_key = *runtime_key,
@@ -846,14 +890,16 @@ Result<std::vector<std::byte>> encode_payload_chunk(const PayloadChunk& chunk) {
     writer.bytes(chunk.bytes);
     std::vector<std::byte> encoded = writer.take();
     if (encoded.size() > kMaxFrameBytes - kFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "file chunk payload exceeds frame quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "file chunk payload exceeds frame quota"));
     }
     return encoded;
 }
 
 Result<PayloadChunk> decode_payload_chunk(const std::span<const std::byte> payload) {
     if (payload.size() > kMaxFrameBytes - kFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "file chunk payload exceeds frame quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "file chunk payload exceeds frame quota"));
     }
     Reader reader(payload);
     const auto request_id = reader.string(128U);
@@ -868,7 +914,8 @@ Result<PayloadChunk> decode_payload_chunk(const std::span<const std::byte> paylo
     return chunk;
 }
 
-Result<std::vector<std::byte>> encode_payload_control_request(const PayloadControlRequest& request) {
+Result<std::vector<std::byte>>
+encode_payload_control_request(const PayloadControlRequest& request) {
     if (const auto valid = validate_payload_control_request(request); !valid) {
         return std::unexpected(valid.error());
     }
@@ -877,11 +924,13 @@ Result<std::vector<std::byte>> encode_payload_control_request(const PayloadContr
     return writer.take();
 }
 
-Result<PayloadControlRequest> decode_payload_control_request(const std::span<const std::byte> payload) {
+Result<PayloadControlRequest>
+decode_payload_control_request(const std::span<const std::byte> payload) {
     Reader reader(payload);
     const auto request_id = reader.string(128U);
     if (!request_id || !reader.finished()) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid file control request"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid file control request"));
     }
     PayloadControlRequest request{.request_id = *request_id};
     if (const auto valid = validate_payload_control_request(request); !valid) {
@@ -908,7 +957,8 @@ Result<PayloadAck> decode_payload_ack(const std::span<const std::byte> payload) 
     const auto received_bytes = reader.u64();
     if (!request_id || !raw_stage || !received_bytes || !reader.finished() ||
         *received_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid file acknowledgement"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid file acknowledgement"));
     }
     PayloadAck acknowledgement{
         .request_id = *request_id,
@@ -941,9 +991,11 @@ Result<PayloadResult> decode_payload_result(const std::span<const std::byte> pay
     const auto path = reader.string(512U);
     const auto byte_size = reader.u64();
     const auto sha256 = reader.string(64U);
-    if (!request_id || !replayed || *replayed > 1U || !path || !byte_size || !sha256 || !reader.finished() ||
+    if (!request_id || !replayed || *replayed > 1U || !path || !byte_size || !sha256 ||
+        !reader.finished() ||
         *byte_size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid file ingress receipt"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid file ingress receipt"));
     }
     PayloadResult result{
         .request_id = *request_id,
@@ -975,14 +1027,16 @@ Result<std::vector<std::byte>> encode_execution_result(const ExecutionResult& re
     writer.string(result.stderr_data);
     std::vector<std::byte> encoded = writer.take();
     if (encoded.size() > kMaxFrameBytes - kFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "result payload exceeds frame quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "result payload exceeds frame quota"));
     }
     return encoded;
 }
 
 Result<ExecutionResult> decode_execution_result(const std::span<const std::byte> payload) {
     if (payload.size() > kMaxFrameBytes - kFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "result payload exceeds quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "result payload exceeds quota"));
     }
     Reader reader(payload);
     const auto request_id = reader.string(128U);
@@ -995,7 +1049,8 @@ Result<ExecutionResult> decode_execution_result(const std::span<const std::byte>
     if (*has_exit_code == 1U) {
         const auto exit_code = reader.u32();
         if (!exit_code || *exit_code > 255U) {
-            return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid result exit code"));
+            return std::unexpected(
+                make_error(ErrorCode::malformed_frame, "invalid result exit code"));
         }
         result.exit_code = static_cast<std::int32_t>(*exit_code);
     }
@@ -1004,8 +1059,8 @@ Result<ExecutionResult> decode_execution_result(const std::span<const std::byte>
     const auto replayed = reader.u8();
     const auto stdout_data = reader.string(kMaxOutputBytes);
     const auto stderr_data = reader.string(kMaxOutputBytes);
-    if (!timed_out || !truncated || !replayed || *timed_out > 1U || *truncated > 1U || *replayed > 1U ||
-        !stdout_data || !stderr_data || !reader.finished()) {
+    if (!timed_out || !truncated || !replayed || *timed_out > 1U || *truncated > 1U ||
+        *replayed > 1U || !stdout_data || !stderr_data || !reader.finished()) {
         return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid result tail"));
     }
     result.timed_out = *timed_out == 1U;
@@ -1033,15 +1088,19 @@ Result<Error> decode_error(const std::span<const std::byte> payload) {
     Reader reader(payload);
     const auto raw_code = reader.u16();
     const auto message = reader.string(4096U);
-    if (!raw_code || !message || !reader.finished() || *raw_code > static_cast<std::uint16_t>(ErrorCode::internal)) {
+    if (!raw_code || !message || !reader.finished() ||
+        *raw_code > static_cast<std::uint16_t>(ErrorCode::internal)) {
         return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid error payload"));
     }
     return Error{.code = static_cast<ErrorCode>(*raw_code), .message = *message};
 }
 
-Result<std::vector<std::byte>> encode_frame(const MessageKind kind, const std::span<const std::byte> payload) {
-    if (!is_known_kind(static_cast<std::uint16_t>(kind)) || payload.size() > kMaxFrameBytes - kFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "invalid frame kind or payload length"));
+Result<std::vector<std::byte>> encode_frame(const MessageKind kind,
+                                            const std::span<const std::byte> payload) {
+    if (!is_known_kind(static_cast<std::uint16_t>(kind)) ||
+        payload.size() > kMaxFrameBytes - kFrameHeaderBytes) {
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "invalid frame kind or payload length"));
     }
     Writer writer;
     writer.u32(kProtocolMagic);
@@ -1069,22 +1128,27 @@ Result<Frame> decode_frame(const std::span<const std::byte> wire) {
         return std::unexpected(make_error(ErrorCode::malformed_frame, "truncated frame header"));
     }
     if (*magic != kProtocolMagic) {
-        return std::unexpected(make_error(ErrorCode::protocol_violation, "unexpected protocol magic"));
+        return std::unexpected(
+            make_error(ErrorCode::protocol_violation, "unexpected protocol magic"));
     }
     if (*version != kProtocolVersion) {
-        return std::unexpected(make_error(ErrorCode::unsupported_version, "unsupported protocol version"));
+        return std::unexpected(
+            make_error(ErrorCode::unsupported_version, "unsupported protocol version"));
     }
     if (!is_known_kind(*raw_kind) || *payload_length != wire.size() - kFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid frame kind or length"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid frame kind or length"));
     }
     Frame frame{.kind = static_cast<MessageKind>(*raw_kind), .payload = {}};
-    frame.payload.insert(frame.payload.end(), wire.begin() + static_cast<std::ptrdiff_t>(kFrameHeaderBytes), wire.end());
+    frame.payload.insert(frame.payload.end(),
+                         wire.begin() + static_cast<std::ptrdiff_t>(kFrameHeaderBytes), wire.end());
     return frame;
 }
 
 Result<void> send_frame(const int fd, const std::span<const std::byte> frame) {
     if (fd < 0 || frame.empty() || frame.size() > kMaxFrameBytes) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid send frame arguments"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid send frame arguments"));
     }
     ssize_t written = 0;
     do {
@@ -1122,9 +1186,11 @@ Result<std::vector<std::byte>> receive_frame(const int fd) {
         return std::unexpected(make_error(ErrorCode::io_failure, "SOCK_SEQPACKET peer closed"));
     }
     bool has_ancillary = false;
-    for (cmsghdr* header = CMSG_FIRSTHDR(&message); header != nullptr; header = CMSG_NXTHDR(&message, header)) {
+    for (cmsghdr* header = CMSG_FIRSTHDR(&message); header != nullptr;
+         header = CMSG_NXTHDR(&message, header)) {
         has_ancillary = true;
-        if (header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS && header->cmsg_len >= CMSG_LEN(0)) {
+        if (header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS &&
+            header->cmsg_len >= CMSG_LEN(0)) {
             const std::size_t payload_bytes = header->cmsg_len - CMSG_LEN(0);
             if (payload_bytes % sizeof(int) == 0U) {
                 const auto* descriptors = reinterpret_cast<const int*>(CMSG_DATA(header));
@@ -1136,14 +1202,17 @@ Result<std::vector<std::byte>> receive_frame(const int fd) {
             }
         }
     }
-    if ((message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0 || static_cast<std::size_t>(received) > buffer.size()) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "truncated SOCK_SEQPACKET frame"));
+    if ((message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0 ||
+        static_cast<std::size_t>(received) > buffer.size()) {
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "truncated SOCK_SEQPACKET frame"));
     }
     if (has_ancillary) {
-        return std::unexpected(make_error(ErrorCode::protocol_violation, "SCM ancillary data is forbidden on control frames"));
+        return std::unexpected(make_error(ErrorCode::protocol_violation,
+                                          "SCM ancillary data is forbidden on control frames"));
     }
     buffer.resize(static_cast<std::size_t>(received));
     return buffer;
 }
 
-}  // namespace wspctl
+} // namespace wspctl

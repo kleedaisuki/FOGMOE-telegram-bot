@@ -1,11 +1,11 @@
-#include "wspctl/infrastructure/supervisor.hpp"
 #include "wspctl/infrastructure/sandbox.hpp"
+#include "wspctl/infrastructure/supervisor.hpp"
 
 #include <charconv>
 #include <cstdio>
 #include <cstring>
-#include <string_view>
 #include <fcntl.h>
+#include <string_view>
 #include <sys/prctl.h>
 #include <unistd.h>
 
@@ -23,7 +23,7 @@ template <typename Value>
     return error == std::errc{} && end == text.data() + text.size();
 }
 
-}  // namespace
+} // namespace
 
 /**
  * @brief wsp-systemd 入口 / wsp-systemd entry point.
@@ -73,9 +73,10 @@ int main(const int argc, char* argv[]) {
             return 64;
         }
     }
-    if (!have_control || !have_procs || !have_kill || !have_events || !have_uid || !have_gid || config.control_fd < 3 ||
-        config.task_cgroup_procs_fd < 3 || config.task_cgroup_kill_fd < 3 || config.task_cgroup_events_fd < 3 || config.sandbox_uid == 0U ||
-        config.sandbox_gid == 0U) {
+    if (!have_control || !have_procs || !have_kill || !have_events || !have_uid || !have_gid ||
+        config.control_fd < 3 || config.task_cgroup_procs_fd < 3 ||
+        config.task_cgroup_kill_fd < 3 || config.task_cgroup_events_fd < 3 ||
+        config.sandbox_uid == 0U || config.sandbox_gid == 0U) {
         std::fputs("wsp-systemd: mandatory secure control configuration missing\n", stderr);
         return 64;
     }
@@ -83,9 +84,7 @@ int main(const int argc, char* argv[]) {
     // PID 1 still has CAP_DAC_OVERRIDE; after hardening, reopening it would deterministically
     // fail even though the immutable mount is valid. O_NOFOLLOW keeps the pinned object a
     // directory rather than a replaceable symlink.
-    config.workspace_fd = open(
-        "/workspace",
-        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    config.workspace_fd = open("/workspace", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (config.workspace_fd < 0) {
         std::fputs("wsp-systemd: cannot open immutable workspace mount\n", stderr);
         return 70;
@@ -94,10 +93,8 @@ int main(const int argc, char* argv[]) {
     // accepts any broker command or forks a task. Keeping it after exec preserves exactly the
     // three capabilities needed by the child-side identity drop and PID1 task-tree cleanup.
     if (const auto hardened = wspctl::harden_supervisor(); !hardened) {
-        std::fprintf(
-            stderr,
-            "wsp-systemd: cannot reduce supervisor privileges: %s\n",
-            hardened.error().message.c_str());
+        std::fprintf(stderr, "wsp-systemd: cannot reduce supervisor privileges: %s\n",
+                     hardened.error().message.c_str());
         static_cast<void>(close(config.workspace_fd));
         return 70;
     }

@@ -59,39 +59,47 @@ void test_value_objects() {
            "reject uppercase SHA-256 digest");
     expect(wspctl::domain::ExecutionBudget::create(std::chrono::milliseconds(1), 1U).has_value(),
            "accept positive execution budget");
-    expect(!wspctl::domain::ExecutionBudget::create(std::chrono::milliseconds::zero(), 1U).has_value(),
-           "reject zero wall-clock budget");
+    expect(
+        !wspctl::domain::ExecutionBudget::create(std::chrono::milliseconds::zero(), 1U).has_value(),
+        "reject zero wall-clock budget");
     expect(!wspctl::domain::ExecutionBudget::create(std::chrono::milliseconds(1), 0U).has_value(),
            "reject zero output budget");
 }
 
-/** @brief 测试 activation 所有权与完整生命周期 / Test activation ownership and the complete lifecycle. */
+/** @brief 测试 activation 所有权与完整生命周期 / Test activation ownership and the complete
+ * lifecycle. */
 void test_activation_ownership() {
     wspctl::domain::Runtime runtime(test_runtime_id());
     const wspctl::domain::ActivationId owner = test_activation("activation-owner");
     const wspctl::domain::ActivationId stranger = test_activation("activation-stranger");
     expect(runtime.begin_activation(owner).has_value(), "begin owned activation");
-    expect(runtime.state() == wspctl::domain::RuntimeState::activating && runtime.active_activation() == owner,
+    expect(runtime.state() == wspctl::domain::RuntimeState::activating &&
+               runtime.active_activation() == owner,
            "activation establishes unique owner");
     const auto stranger_ready = runtime.mark_ready(stranger);
-    expect(!stranger_ready.has_value() && stranger_ready.error().code == wspctl::domain::ErrorCode::activation_mismatch,
+    expect(!stranger_ready.has_value() &&
+               stranger_ready.error().code == wspctl::domain::ErrorCode::activation_mismatch,
            "reject ready transition from non-owner activation");
     expect(runtime.mark_ready(owner).has_value(), "owner marks runtime ready");
     const auto stranger_execute = runtime.begin_execution(stranger);
-    expect(!stranger_execute.has_value() && stranger_execute.error().code == wspctl::domain::ErrorCode::activation_mismatch,
+    expect(!stranger_execute.has_value() &&
+               stranger_execute.error().code == wspctl::domain::ErrorCode::activation_mismatch,
            "reject execute transition from non-owner activation");
     expect(runtime.begin_execution(owner).has_value(), "owner starts execution");
     const auto retirement_while_executing = runtime.begin_retirement(owner);
     expect(!retirement_while_executing.has_value() &&
-               retirement_while_executing.error().code == wspctl::domain::ErrorCode::illegal_transition,
+               retirement_while_executing.error().code ==
+                   wspctl::domain::ErrorCode::illegal_transition,
            "reject retirement while a task executes");
     expect(runtime.finish_execution(owner).has_value(), "owner finishes execution");
     expect(runtime.begin_retirement(owner).has_value(), "owner begins retirement");
     const auto stranger_finish = runtime.finish_retirement(stranger);
-    expect(!stranger_finish.has_value() && stranger_finish.error().code == wspctl::domain::ErrorCode::activation_mismatch,
+    expect(!stranger_finish.has_value() &&
+               stranger_finish.error().code == wspctl::domain::ErrorCode::activation_mismatch,
            "reject retirement completion from non-owner activation");
     expect(runtime.finish_retirement(owner).has_value(), "owner completes retirement");
-    expect(runtime.state() == wspctl::domain::RuntimeState::dormant && !runtime.active_activation().has_value(),
+    expect(runtime.state() == wspctl::domain::RuntimeState::dormant &&
+               !runtime.active_activation().has_value(),
            "completed retirement clears active activation");
 }
 
@@ -101,46 +109,44 @@ void test_failure_clears_owner() {
     const wspctl::domain::ActivationId owner = test_activation("activation-owner");
     expect(runtime.begin_activation(owner).has_value(), "begin activation before failure");
     runtime.fail();
-    expect(runtime.state() == wspctl::domain::RuntimeState::failed && !runtime.active_activation().has_value(),
+    expect(runtime.state() == wspctl::domain::RuntimeState::failed &&
+               !runtime.active_activation().has_value(),
            "failure clears owner and is explicit");
 }
 
-/** @brief 测试快照只能投影完整领域状态 / Test that snapshots can project only complete domain states. */
+/** @brief 测试快照只能投影完整领域状态 / Test that snapshots can project only complete domain
+ * states. */
 void test_runtime_snapshots_preserve_lifecycle_invariants() {
     const wspctl::domain::RuntimeId runtime_id = test_runtime_id();
     const wspctl::domain::ActivationId activation = test_activation("snapshot-owner");
     const auto dormant = wspctl::domain::RuntimeSnapshot::create(
-        runtime_id,
-        wspctl::domain::RuntimeState::dormant,
-        std::nullopt);
+        runtime_id, wspctl::domain::RuntimeState::dormant, std::nullopt);
     expect(dormant.has_value() && dormant->runtime() == runtime_id &&
                dormant->state() == wspctl::domain::RuntimeState::dormant &&
                !dormant->active_activation().has_value(),
            "construct payload-free dormant snapshot");
-    expect(!wspctl::domain::RuntimeSnapshot::create(
-                runtime_id,
-                wspctl::domain::RuntimeState::ready,
-                std::nullopt)
+    expect(!wspctl::domain::RuntimeSnapshot::create(runtime_id, wspctl::domain::RuntimeState::ready,
+                                                    std::nullopt)
                 .has_value(),
            "reject ready snapshot without activation owner");
     expect(!wspctl::domain::RuntimeSnapshot::create(
-                runtime_id,
-                wspctl::domain::RuntimeState::failed,
-                activation)
+                runtime_id, wspctl::domain::RuntimeState::failed, activation)
                 .has_value(),
            "reject failed snapshot retaining an activation owner");
 
     wspctl::domain::Runtime aggregate(runtime_id);
-    expect(aggregate.begin_activation(activation).has_value(), "begin aggregate activation for snapshot projection");
+    expect(aggregate.begin_activation(activation).has_value(),
+           "begin aggregate activation for snapshot projection");
     const wspctl::domain::RuntimeSnapshot activating = aggregate.snapshot();
     expect(activating.state() == wspctl::domain::RuntimeState::activating &&
                activating.active_activation() == activation,
            "aggregate snapshot preserves active owner");
-    expect(wspctl::domain::runtime_state_name(wspctl::domain::RuntimeState::executing) == "executing",
+    expect(wspctl::domain::runtime_state_name(wspctl::domain::RuntimeState::executing) ==
+               "executing",
            "render stable runtime-state vocabulary");
 }
 
-}  // namespace
+} // namespace
 
 /**
  * @brief domain CTest 入口 / Domain CTest entry point.

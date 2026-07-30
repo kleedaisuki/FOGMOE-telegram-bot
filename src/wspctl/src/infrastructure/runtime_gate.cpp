@@ -32,7 +32,8 @@ Result<RuntimeLease> RuntimeExecutionGate::try_acquire(const std::string& runtim
     const auto [unused, inserted] = active_.insert(runtime_key);
     static_cast<void>(unused);
     if (!inserted) {
-        return std::unexpected(make_error(ErrorCode::busy, "runtime already has an active command"));
+        return std::unexpected(
+            make_error(ErrorCode::busy, "runtime already has an active command"));
     }
     return RuntimeLease(this, runtime_key);
 }
@@ -42,4 +43,4 @@ void RuntimeExecutionGate::release(const std::string& runtime_key) noexcept {
     active_.erase(runtime_key);
 }
 
-}  // namespace wspctl
+} // namespace wspctl

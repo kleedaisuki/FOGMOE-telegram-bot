@@ -9,7 +9,8 @@
 
 namespace wspctl::application {
 
-/** @brief operator 只读查询的应用层错误分类 / Application error categories for operator read-only queries. */
+/** @brief operator 只读查询的应用层错误分类 / Application error categories for operator read-only
+ * queries. */
 enum class OperatorWorkspaceQueryErrorCode : std::uint8_t {
     /** @brief 请求的持久 workspace 尚不存在 / The requested persistent workspace does not exist. */
     not_found = 1,
@@ -19,11 +20,13 @@ enum class OperatorWorkspaceQueryErrorCode : std::uint8_t {
     unavailable = 3,
 };
 
-/** @brief operator 只读查询的应用层错误值 / Application error value for operator read-only queries. */
+/** @brief operator 只读查询的应用层错误值 / Application error value for operator read-only queries.
+ */
 struct OperatorWorkspaceQueryError final {
     /** @brief 可供协议映射的稳定错误分类 / Stable category for protocol mapping. */
     OperatorWorkspaceQueryErrorCode code;
-    /** @brief 不得含 host path 或 payload 内容的诊断 / Diagnostic without host paths or payload content. */
+    /** @brief 不得含 host path 或 payload 内容的诊断 / Diagnostic without host paths or payload
+     * content. */
     std::string message;
 };
 
@@ -49,18 +52,18 @@ public:
      * @param runtime 已验证长期 runtime 标识 / Validated long-lived runtime identity.
      * @return 状态或归一化的只读查询错误 / Status or a normalized read-only query error.
      */
-    [[nodiscard]] virtual OperatorWorkspaceQueryResult<domain::OperatorWorkspaceStatus> status(
-        const domain::RuntimeId& runtime) const = 0;
+    [[nodiscard]] virtual OperatorWorkspaceQueryResult<domain::OperatorWorkspaceStatus>
+    status(const domain::RuntimeId& runtime) const = 0;
 
     /**
      * @brief 读取一层 workspace 目录 / Read one workspace directory level.
      * @param runtime 已验证长期 runtime 标识 / Validated long-lived runtime identity.
      * @param path 已验证 `/workspace` 逻辑路径 / Validated `/workspace` logical path.
-     * @return 有界目录项或归一化的只读查询错误 / Bounded directory entries or a normalized read-only query error.
+     * @return 有界目录项或归一化的只读查询错误 / Bounded directory entries or a normalized
+     * read-only query error.
      */
-    [[nodiscard]] virtual OperatorWorkspaceQueryResult<domain::WorkspaceListing> list(
-        const domain::RuntimeId& runtime,
-        const domain::OperatorWorkspacePath& path) const = 0;
+    [[nodiscard]] virtual OperatorWorkspaceQueryResult<domain::WorkspaceListing>
+    list(const domain::RuntimeId& runtime, const domain::OperatorWorkspacePath& path) const = 0;
 };
 
 /**
@@ -80,9 +83,8 @@ public:
      * @param port 只读 read-model 端口 / Read-only read-model port.
      * @return allowlisted 状态或查询错误 / Allowlisted status or a query error.
      */
-    [[nodiscard]] OperatorWorkspaceQueryResult<domain::OperatorWorkspaceStatus> status(
-        const domain::RuntimeId& runtime,
-        const OperatorWorkspaceReadPort& port) const;
+    [[nodiscard]] OperatorWorkspaceQueryResult<domain::OperatorWorkspaceStatus>
+    status(const domain::RuntimeId& runtime, const OperatorWorkspaceReadPort& port) const;
 
     /**
      * @brief 查询一层 workspace 目录 / Query one workspace directory level.
@@ -91,10 +93,9 @@ public:
      * @param port 只读 read-model 端口 / Read-only read-model port.
      * @return 有界目录项或查询错误 / Bounded directory entries or a query error.
      */
-    [[nodiscard]] OperatorWorkspaceQueryResult<domain::WorkspaceListing> list(
-        const domain::RuntimeId& runtime,
-        const domain::OperatorWorkspacePath& path,
-        const OperatorWorkspaceReadPort& port) const;
+    [[nodiscard]] OperatorWorkspaceQueryResult<domain::WorkspaceListing>
+    list(const domain::RuntimeId& runtime, const domain::OperatorWorkspacePath& path,
+         const OperatorWorkspaceReadPort& port) const;
 };
 
 /**
@@ -103,8 +104,7 @@ public:
  * @param message 不含敏感内容的诊断 / Diagnostic without sensitive content.
  * @return 可传播查询错误 / Propagatable query error.
  */
-[[nodiscard]] OperatorWorkspaceQueryError make_operator_workspace_query_error(
-    OperatorWorkspaceQueryErrorCode code,
-    std::string message);
+[[nodiscard]] OperatorWorkspaceQueryError
+make_operator_workspace_query_error(OperatorWorkspaceQueryErrorCode code, std::string message);
 
-}  // namespace wspctl::application
+} // namespace wspctl::application

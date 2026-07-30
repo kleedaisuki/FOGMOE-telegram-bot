@@ -14,7 +14,7 @@
 namespace wspctl {
 
 /** @brief 协议魔数 / Control protocol magic number. */
-inline constexpr std::uint32_t kProtocolMagic = 0x31505357U;  // "WSP1" in little endian.
+inline constexpr std::uint32_t kProtocolMagic = 0x31505357U; // "WSP1" in little endian.
 /** @brief 当前协议版本 / Current control protocol version. */
 inline constexpr std::uint16_t kProtocolVersion = 3;
 /** @brief 固定帧头长度 / Fixed wire-frame header length. */
@@ -38,7 +38,8 @@ inline constexpr std::size_t kMaxFileOpaqueIdBytes = 128U;
  * @brief 控制帧类别 / Control frame kinds.
  *
  * SOCK_SEQPACKET 保留消息边界；帧头中的长度仍用于拒绝截断、拼接与资源耗尽。
- * SOCK_SEQPACKET preserves message boundaries; the length still rejects truncation, concatenation, and exhaustion.
+ * SOCK_SEQPACKET preserves message boundaries; the length still rejects truncation, concatenation,
+ * and exhaustion.
  */
 enum class MessageKind : std::uint16_t {
     execute = 1,
@@ -59,7 +60,8 @@ enum class MessageKind : std::uint16_t {
     payload_ack = 10,
     /** @brief 文件写入收据 / File-ingress receipt. */
     payload_result = 11,
-    /** @brief 已完成文件收据的只读恢复查询 / Read-only recovery lookup for a completed file receipt. */
+    /** @brief 已完成文件收据的只读恢复查询 / Read-only recovery lookup for a completed file
+       receipt. */
     payload_replay = 12,
     /** @brief 无副作用 runtime 状态查询 / Side-effect-free runtime-status query. */
     runtime_status = 13,
@@ -83,7 +85,8 @@ struct RuntimeStatusRequest final {
 };
 
 /**
- * @brief 跨 control protocol 的 allowlisted runtime 状态 / Allowlisted runtime status across the control protocol.
+ * @brief 跨 control protocol 的 allowlisted runtime 状态 / Allowlisted runtime status across the
+ * control protocol.
  *
  * 这是固定、平面的遥测形状。它刻意不含 host 路径、PID、mount/cgroup、command、request ID/hash、
  * stdin/stdout/stderr 或 payload 任何字段。/ This is a fixed, flat telemetry shape. It deliberately
@@ -95,9 +98,11 @@ struct RuntimeStatusResult final {
     std::string runtime_key;
     /** @brief 聚合生命周期状态 / Aggregate lifecycle state. */
     domain::RuntimeState state{domain::RuntimeState::dormant};
-    /** @brief 当前 owner activation；dormant/failed 时为空 / Current owner activation; empty while dormant/failed. */
+    /** @brief 当前 owner activation；dormant/failed 时为空 / Current owner activation; empty while
+     * dormant/failed. */
     std::optional<std::string> active_activation_id;
-    /** @brief 此 handle activation 是否是当前 owner / Whether this handle activation is the current owner. */
+    /** @brief 此 handle activation 是否是当前 owner / Whether this handle activation is the current
+     * owner. */
     bool handle_activation_matches{false};
     /** @brief supervisor 是否可观察为存活 / Whether the supervisor is observably alive. */
     bool supervisor_alive{false};
@@ -105,7 +110,8 @@ struct RuntimeStatusResult final {
     std::optional<std::chrono::milliseconds> idle_for;
     /** @brief broker idle 回收阈值 / Broker idle-retirement threshold. */
     std::chrono::milliseconds idle_ttl{1};
-    /** @brief 当前借用 session 的 broker dispatch 数 / Current broker dispatches borrowing the session. */
+    /** @brief 当前借用 session 的 broker dispatch 数 / Current broker dispatches borrowing the
+     * session. */
     std::uint64_t borrowed_dispatches{};
     /** @brief 是否有已知的清理/隔离待办 / Whether known cleanup/quarantine is pending. */
     bool cleanup_pending{false};
@@ -143,7 +149,8 @@ struct ExecuteRequest final {
 struct ExecutionResult final {
     /** @brief 对应调用 ID / Corresponding invocation ID. */
     std::string request_id;
-    /** @brief POSIX/Bash 风格退出码；仅 timeout 为空 / POSIX/Bash-style exit code; empty only for timeout. */
+    /** @brief POSIX/Bash 风格退出码；仅 timeout 为空 / POSIX/Bash-style exit code; empty only for
+     * timeout. */
     std::optional<std::int32_t> exit_code;
     /** @brief 是否超过超时 / Whether the command exceeded its timeout. */
     bool timed_out{false};
@@ -186,7 +193,8 @@ struct PayloadBeginRequest final {
     std::string request_id;
     /** @brief 调用方计算的语义 SHA-256 / Caller-computed semantic SHA-256. */
     std::string request_hash;
-    /** @brief 受限 uploads 子目录 opaque component / Constrained uploads-subdirectory opaque component. */
+    /** @brief 受限 uploads 子目录 opaque component / Constrained uploads-subdirectory opaque
+     * component. */
     std::string opaque_id;
     /** @brief 声明的完整字节数 / Declared complete byte count. */
     std::size_t byte_size{};
@@ -206,15 +214,19 @@ struct PayloadBeginRequest final {
 struct PayloadReplayRequest final {
     /** @brief 持久 runtime 标识 / Persistent runtime key. */
     std::string runtime_key;
-    /** @brief 稳定、可去重的原始写入调用标识 / Stable deduplicable original ingress invocation ID. */
+    /** @brief 稳定、可去重的原始写入调用标识 / Stable deduplicable original ingress invocation ID.
+     */
     std::string request_id;
-    /** @brief 原始写入调用方计算的语义 SHA-256 / Caller-computed semantic SHA-256 of the original ingress. */
+    /** @brief 原始写入调用方计算的语义 SHA-256 / Caller-computed semantic SHA-256 of the original
+     * ingress. */
     std::string request_hash;
-    /** @brief 受限 uploads 子目录 opaque component / Constrained uploads-subdirectory opaque component. */
+    /** @brief 受限 uploads 子目录 opaque component / Constrained uploads-subdirectory opaque
+     * component. */
     std::string opaque_id;
     /** @brief 原始完整文件字节数 / Original complete file byte count. */
     std::size_t byte_size{};
-    /** @brief 原始完整内容的规范小写 SHA-256 / Canonical lowercase SHA-256 of the original complete content. */
+    /** @brief 原始完整内容的规范小写 SHA-256 / Canonical lowercase SHA-256 of the original complete
+     * content. */
     std::string sha256;
 };
 
@@ -226,7 +238,8 @@ struct PayloadChunk final {
     std::vector<std::byte> bytes;
 };
 
-/** @brief seal、publish 或 abort 的文件控制请求 / File control request for seal, publish, or abort. */
+/** @brief seal、publish 或 abort 的文件控制请求 / File control request for seal, publish, or abort.
+ */
 struct PayloadControlRequest final {
     /** @brief 所属稳定调用标识 / Owning stable invocation ID. */
     std::string request_id;
@@ -286,14 +299,16 @@ struct Frame final {
 [[nodiscard]] Result<void> validate_runtime_status_result(const RuntimeStatusResult& result);
 
 /**
- * @brief 校验文件开始请求的 capability 与资源上限 / Validate file-begin capability and resource caps.
+ * @brief 校验文件开始请求的 capability 与资源上限 / Validate file-begin capability and resource
+ * caps.
  * @param request 待校验文件开始请求 / File-begin request to validate.
  * @return 成功或精确错误 / Success or precise error.
  */
 [[nodiscard]] Result<void> validate_payload_begin_request(const PayloadBeginRequest& request);
 
 /**
- * @brief 校验只读文件恢复查询的 capability 与资源上限 / Validate a read-only file-replay query's capability and resource caps.
+ * @brief 校验只读文件恢复查询的 capability 与资源上限 / Validate a read-only file-replay query's
+ * capability and resource caps.
  * @param request 待校验恢复查询 / Replay query to validate.
  * @return 成功或精确错误 / Success or precise error.
  */
@@ -328,14 +343,16 @@ struct Frame final {
 [[nodiscard]] std::string canonical_request_hash(const ExecuteRequest& request);
 
 /**
- * @brief 计算不含 request_hash/activation 的规范文件元数据 SHA-256 / Hash canonical file metadata excluding request_hash and activation.
+ * @brief 计算不含 request_hash/activation 的规范文件元数据 SHA-256 / Hash canonical file metadata
+ * excluding request_hash and activation.
  * @param request 文件开始请求 / File-begin request.
  * @return 64 位小写十六进制 SHA-256 / Lowercase 64-character SHA-256.
  */
 [[nodiscard]] std::string canonical_payload_hash(const PayloadBeginRequest& request);
 
 /**
- * @brief 计算与原始文件 ingress 相同的规范元数据 SHA-256 / Compute the same canonical metadata SHA-256 as the original file ingress.
+ * @brief 计算与原始文件 ingress 相同的规范元数据 SHA-256 / Compute the same canonical metadata
+ * SHA-256 as the original file ingress.
  * @param request 已验证只读恢复查询 / Validated read-only replay query.
  * @return 64 位小写十六进制 SHA-256 / Lowercase 64-character SHA-256.
  * @note 此值与相同 runtime/request/opaque/size/content-digest 的 ``PayloadBeginRequest`` 完全
@@ -360,30 +377,40 @@ struct Frame final {
 [[nodiscard]] Result<ExecuteRequest> decode_execute_request(std::span<const std::byte> payload);
 
 /** @brief 编码无副作用 runtime 状态请求 / Encode a side-effect-free runtime-status request. */
-[[nodiscard]] Result<std::vector<std::byte>> encode_runtime_status_request(const RuntimeStatusRequest& request);
+[[nodiscard]] Result<std::vector<std::byte>>
+encode_runtime_status_request(const RuntimeStatusRequest& request);
 /** @brief 解码无副作用 runtime 状态请求 / Decode a side-effect-free runtime-status request. */
-[[nodiscard]] Result<RuntimeStatusRequest> decode_runtime_status_request(std::span<const std::byte> payload);
+[[nodiscard]] Result<RuntimeStatusRequest>
+decode_runtime_status_request(std::span<const std::byte> payload);
 /** @brief 编码 allowlisted runtime 状态结果 / Encode an allowlisted runtime-status result. */
-[[nodiscard]] Result<std::vector<std::byte>> encode_runtime_status_result(const RuntimeStatusResult& result);
+[[nodiscard]] Result<std::vector<std::byte>>
+encode_runtime_status_result(const RuntimeStatusResult& result);
 /** @brief 解码 allowlisted runtime 状态结果 / Decode an allowlisted runtime-status result. */
-[[nodiscard]] Result<RuntimeStatusResult> decode_runtime_status_result(std::span<const std::byte> payload);
+[[nodiscard]] Result<RuntimeStatusResult>
+decode_runtime_status_result(std::span<const std::byte> payload);
 
 /** @brief 编码文件开始请求 / Encode a file-begin request. */
-[[nodiscard]] Result<std::vector<std::byte>> encode_payload_begin_request(const PayloadBeginRequest& request);
+[[nodiscard]] Result<std::vector<std::byte>>
+encode_payload_begin_request(const PayloadBeginRequest& request);
 /** @brief 解码文件开始请求 / Decode a file-begin request. */
-[[nodiscard]] Result<PayloadBeginRequest> decode_payload_begin_request(std::span<const std::byte> payload);
+[[nodiscard]] Result<PayloadBeginRequest>
+decode_payload_begin_request(std::span<const std::byte> payload);
 /** @brief 编码只读文件恢复查询 / Encode a read-only file-replay query. */
-[[nodiscard]] Result<std::vector<std::byte>> encode_payload_replay_request(const PayloadReplayRequest& request);
+[[nodiscard]] Result<std::vector<std::byte>>
+encode_payload_replay_request(const PayloadReplayRequest& request);
 /** @brief 解码只读文件恢复查询 / Decode a read-only file-replay query. */
-[[nodiscard]] Result<PayloadReplayRequest> decode_payload_replay_request(std::span<const std::byte> payload);
+[[nodiscard]] Result<PayloadReplayRequest>
+decode_payload_replay_request(std::span<const std::byte> payload);
 /** @brief 编码一个文件分块 / Encode one file chunk. */
 [[nodiscard]] Result<std::vector<std::byte>> encode_payload_chunk(const PayloadChunk& chunk);
 /** @brief 解码一个文件分块 / Decode one file chunk. */
 [[nodiscard]] Result<PayloadChunk> decode_payload_chunk(std::span<const std::byte> payload);
 /** @brief 编码文件控制请求 / Encode a file control request. */
-[[nodiscard]] Result<std::vector<std::byte>> encode_payload_control_request(const PayloadControlRequest& request);
+[[nodiscard]] Result<std::vector<std::byte>>
+encode_payload_control_request(const PayloadControlRequest& request);
 /** @brief 解码文件控制请求 / Decode a file control request. */
-[[nodiscard]] Result<PayloadControlRequest> decode_payload_control_request(std::span<const std::byte> payload);
+[[nodiscard]] Result<PayloadControlRequest>
+decode_payload_control_request(std::span<const std::byte> payload);
 /** @brief 编码文件阶段 ACK / Encode a file phase acknowledgement. */
 [[nodiscard]] Result<std::vector<std::byte>> encode_payload_ack(const PayloadAck& acknowledgement);
 /** @brief 解码文件阶段 ACK / Decode a file phase acknowledgement. */
@@ -427,9 +454,8 @@ struct Frame final {
  * @param payload 载荷 / Payload.
  * @return 一整个 SOCK_SEQPACKET 消息 / One whole SOCK_SEQPACKET message.
  */
-[[nodiscard]] Result<std::vector<std::byte>> encode_frame(
-    MessageKind kind,
-    std::span<const std::byte> payload);
+[[nodiscard]] Result<std::vector<std::byte>> encode_frame(MessageKind kind,
+                                                          std::span<const std::byte> payload);
 
 /**
  * @brief 解析并严格校验一整个帧 / Parse and strictly validate one whole frame.
@@ -453,4 +479,4 @@ struct Frame final {
  */
 [[nodiscard]] Result<std::vector<std::byte>> receive_frame(int fd);
 
-}  // namespace wspctl
+} // namespace wspctl

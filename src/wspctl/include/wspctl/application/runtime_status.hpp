@@ -20,7 +20,8 @@ public:
     /**
      * @brief 以已验证领域身份构造查询 / Construct a query from validated domain identities.
      * @param runtime 查询目标 runtime / Target runtime to inspect.
-     * @param handle_activation 调用 handle 绑定的 activation / Activation bound to the calling handle.
+     * @param handle_activation 调用 handle 绑定的 activation / Activation bound to the calling
+     * handle.
      */
     RuntimeStatusQuery(domain::RuntimeId runtime, domain::ActivationId handle_activation) noexcept;
 
@@ -57,21 +58,19 @@ public:
      * @param idle_ttl broker 的空闲回收阈值 / Broker idle-retirement threshold.
      * @param borrowed_dispatches 当前借用 session 的 broker dispatch 数 /
      *     Number of broker dispatches currently borrowing the session.
-     * @param cleanup_pending 是否有已知清理/隔离待办 / Whether known cleanup/quarantine remains pending.
+     * @param cleanup_pending 是否有已知清理/隔离待办 / Whether known cleanup/quarantine remains
+     * pending.
      * @return 已验证状态或领域不变量错误 / Validated status or a domain-invariant error.
      */
-    [[nodiscard]] static domain::Result<RuntimeStatus> create(
-        const RuntimeStatusQuery& query,
-        domain::RuntimeSnapshot snapshot,
-        bool supervisor_alive,
-        std::optional<std::chrono::milliseconds> idle_for,
-        std::chrono::milliseconds idle_ttl,
-        std::uint64_t borrowed_dispatches,
-        bool cleanup_pending);
+    [[nodiscard]] static domain::Result<RuntimeStatus>
+    create(const RuntimeStatusQuery& query, domain::RuntimeSnapshot snapshot, bool supervisor_alive,
+           std::optional<std::chrono::milliseconds> idle_for, std::chrono::milliseconds idle_ttl,
+           std::uint64_t borrowed_dispatches, bool cleanup_pending);
 
     /** @brief 取得领域生命周期快照 / Get the domain lifecycle snapshot. */
     [[nodiscard]] const domain::RuntimeSnapshot& snapshot() const noexcept;
-    /** @brief handle activation 是否正是 snapshot owner / Whether the handle activation is the snapshot owner. */
+    /** @brief handle activation 是否正是 snapshot owner / Whether the handle activation is the
+     * snapshot owner. */
     [[nodiscard]] bool handle_activation_matches() const noexcept;
     /** @brief supervisor 是否可观察为存活 / Whether the supervisor is observably alive. */
     [[nodiscard]] bool supervisor_alive() const noexcept;
@@ -79,7 +78,8 @@ public:
     [[nodiscard]] const std::optional<std::chrono::milliseconds>& idle_for() const noexcept;
     /** @brief broker 的 idle 退役阈值 / Broker idle retirement threshold. */
     [[nodiscard]] std::chrono::milliseconds idle_ttl() const noexcept;
-    /** @brief 当前借用 session 的 broker dispatch 数 / Current broker dispatches borrowing the session. */
+    /** @brief 当前借用 session 的 broker dispatch 数 / Current broker dispatches borrowing the
+     * session. */
     [[nodiscard]] std::uint64_t borrowed_dispatches() const noexcept;
     /** @brief 是否存在已知清理/隔离待办 / Whether known cleanup/quarantine remains pending. */
     [[nodiscard]] bool cleanup_pending() const noexcept;
@@ -88,21 +88,18 @@ private:
     /**
      * @brief 从已验证字段构造状态 / Construct status from validated fields.
      * @param snapshot 已验证领域快照 / Validated domain snapshot.
-     * @param handle_activation_matches 已验证 handle 所有权匹配位 / Validated handle-ownership match bit.
+     * @param handle_activation_matches 已验证 handle 所有权匹配位 / Validated handle-ownership
+     * match bit.
      * @param supervisor_alive 已验证 supervisor 存活位 / Validated supervisor liveness bit.
      * @param idle_for 已验证空闲年龄 / Validated idle age.
      * @param idle_ttl 已验证回收阈值 / Validated retirement threshold.
      * @param borrowed_dispatches 已验证 broker 借用数 / Validated broker borrow count.
      * @param cleanup_pending 已验证清理待办位 / Validated cleanup-pending bit.
      */
-    RuntimeStatus(
-        domain::RuntimeSnapshot snapshot,
-        bool handle_activation_matches,
-        bool supervisor_alive,
-        std::optional<std::chrono::milliseconds> idle_for,
-        std::chrono::milliseconds idle_ttl,
-        std::uint64_t borrowed_dispatches,
-        bool cleanup_pending) noexcept;
+    RuntimeStatus(domain::RuntimeSnapshot snapshot, bool handle_activation_matches,
+                  bool supervisor_alive, std::optional<std::chrono::milliseconds> idle_for,
+                  std::chrono::milliseconds idle_ttl, std::uint64_t borrowed_dispatches,
+                  bool cleanup_pending) noexcept;
 
     /** @brief 领域生命周期快照 / Domain lifecycle snapshot. */
     domain::RuntimeSnapshot snapshot_;
@@ -138,7 +135,8 @@ public:
      * @param query 已验证领域身份组成的查询 / Query composed of validated domain identities.
      * @return 运行态或已归一化领域错误 / Operating status or a normalized domain error.
      */
-    [[nodiscard]] virtual domain::Result<RuntimeStatus> observe(const RuntimeStatusQuery& query) const = 0;
+    [[nodiscard]] virtual domain::Result<RuntimeStatus>
+    observe(const RuntimeStatusQuery& query) const = 0;
 };
 
 /**
@@ -157,9 +155,8 @@ public:
      * @param port read-model 实现 / Read-model implementation.
      * @return allowlisted 运行态或错误 / Allowlisted operating status or error.
      */
-    [[nodiscard]] domain::Result<RuntimeStatus> inspect(
-        const RuntimeStatusQuery& query,
-        const RuntimeStatusPort& port) const;
+    [[nodiscard]] domain::Result<RuntimeStatus> inspect(const RuntimeStatusQuery& query,
+                                                        const RuntimeStatusPort& port) const;
 };
 
-}  // namespace wspctl::application
+} // namespace wspctl::application

@@ -40,7 +40,8 @@ private:
  * @brief 只读基础镜像清单 / Immutable base-image manifest.
  *
  * manifest 是由镜像构建阶段写入的最小证明，不接受 Bot 的 .venv 或宿主 /usr 作为镜像。
- * The manifest is a minimal attestation written by image build; Bot .venv and host /usr are never images.
+ * The manifest is a minimal attestation written by image build; Bot .venv and host /usr are never
+ * images.
  */
 struct ImageManifest final {
     /** @brief schema 版本 / Schema version. */
@@ -70,12 +71,12 @@ struct ImageManifest final {
  * @note 只接受 <images_root>/sha256/<manifest-hex>/rootfs 的规范路径。
  *       Only the canonical <images_root>/sha256/<manifest-hex>/rootfs layout is accepted.
  */
-[[nodiscard]] Result<ImageManifest> validate_image_root(
-    const std::filesystem::path& base_root,
-    const std::filesystem::path& images_root);
+[[nodiscard]] Result<ImageManifest> validate_image_root(const std::filesystem::path& base_root,
+                                                        const std::filesystem::path& images_root);
 
 /**
- * @brief 为受控暂存 rootfs 写入不可变镜像清单 / Seal a controlled staging rootfs with an immutable-image manifest.
+ * @brief 为受控暂存 rootfs 写入不可变镜像清单 / Seal a controlled staging rootfs with an
+ * immutable-image manifest.
  * @param base_root 尚未发布且可写的 rootfs 根 / Writable, not-yet-published rootfs root.
  * @param platform 标准 OCI 平台名 / Canonical OCI platform name.
  * @param source_oci_manifest_digest 权威 OCI manifest 的 ``sha256:...`` 摘要 /
@@ -85,10 +86,9 @@ struct ImageManifest final {
  *       This function is only for the trusted image builder; it rejects an existing manifest and
  *       never reseals an already published image in place.
  */
-[[nodiscard]] Result<ImageManifest> seal_image_root(
-    const std::filesystem::path& base_root,
-    const std::string& platform,
-    const std::string& source_oci_manifest_digest);
+[[nodiscard]] Result<ImageManifest> seal_image_root(const std::filesystem::path& base_root,
+                                                    const std::string& platform,
+                                                    const std::string& source_oci_manifest_digest);
 
 /**
  * @brief 生成 manifest 自校验摘要 / Generate manifest self-validation digest.
@@ -97,13 +97,13 @@ struct ImageManifest final {
  * @param rootfs_digest rootfs 摘要 / Rootfs digest.
  * @return 64 位小写 SHA-256 / Lowercase 64-character SHA-256.
  */
-[[nodiscard]] std::string manifest_digest(
-    const std::string& source_oci_manifest_digest,
-    const std::string& platform,
-    const std::string& rootfs_digest);
+[[nodiscard]] std::string manifest_digest(const std::string& source_oci_manifest_digest,
+                                          const std::string& platform,
+                                          const std::string& rootfs_digest);
 
 /**
- * @brief 计算去除 manifest 本身后的确定性 rootfs 摘要 / Calculate deterministic rootfs digest excluding the manifest itself.
+ * @brief 计算去除 manifest 本身后的确定性 rootfs 摘要 / Calculate deterministic rootfs digest
+ * excluding the manifest itself.
  * @param base_root 镜像 rootfs / Image rootfs.
  * @return 64 位小写 SHA-256 / Lowercase 64-character SHA-256.
  * @note 接受目录、regular file 与按容器根语义不逃逸 rootfs 的 symlink；拒绝设备和其他不稳定节点。
@@ -112,4 +112,4 @@ struct ImageManifest final {
  */
 [[nodiscard]] Result<std::string> calculate_rootfs_digest(const std::filesystem::path& base_root);
 
-}  // namespace wspctl
+} // namespace wspctl

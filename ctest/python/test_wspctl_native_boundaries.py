@@ -406,6 +406,7 @@ def test_payload_replay_never_activates_or_provisions_state() -> None:
 
     broker = BROKER_SOURCE.read_text(encoding="utf-8")
     quota = XFS_QUOTA_SOURCE.read_text(encoding="utf-8")
+    normalized_quota = " ".join(quota.split())
     verifier = PAYLOAD_REPLAY_SOURCE.read_text(encoding="utf-8")
     replay_start = broker.index("Result<PayloadResult> Broker::replay_payload(")
     replay_end = broker.index(
@@ -423,14 +424,14 @@ def test_payload_replay_never_activates_or_provisions_state() -> None:
         "dispatch_payload_stream(",
     ):
         assert forbidden not in replay_block, f"replay must not perform {forbidden}"
-    lookup_start = quota.index(
+    lookup_start = normalized_quota.index(
         "Result<RuntimeQuotaBinding> XfsProjectQuota::find_ready_runtime("
     )
-    lookup_end = quota.index(
+    lookup_end = normalized_quota.index(
         "Result<RuntimeActivationLease> XfsProjectQuota::acquire_activation_lease(",
         lookup_start,
     )
-    lookup_block = quota[lookup_start:lookup_end]
+    lookup_block = normalized_quota[lookup_start:lookup_end]
     assert "lock_existing_registry_shared(registry_root)" in lookup_block
     for forbidden in (
         "ensure_registry_directories(",

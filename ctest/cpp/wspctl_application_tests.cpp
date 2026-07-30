@@ -31,7 +31,8 @@ void expect(const bool condition, const std::string& message) {
  * @return 处于 dormant 状态的 runtime / Runtime in dormant state.
  */
 [[nodiscard]] wspctl::domain::Runtime test_runtime() {
-    const auto runtime_id = wspctl::domain::RuntimeId::parse("123e4567-e89b-12d3-a456-426614174000");
+    const auto runtime_id =
+        wspctl::domain::RuntimeId::parse("123e4567-e89b-12d3-a456-426614174000");
     expect(runtime_id.has_value(), "parse application test runtime ID");
     return wspctl::domain::Runtime(*runtime_id);
 }
@@ -55,9 +56,9 @@ public:
      * @param activation activation ID / Activation ID.
      * @return 成功 / Success.
      */
-    [[nodiscard]] wspctl::domain::Result<void> establish(
-        const wspctl::domain::RuntimeId& runtime,
-        const wspctl::domain::ActivationId& activation) override {
+    [[nodiscard]] wspctl::domain::Result<void>
+    establish(const wspctl::domain::RuntimeId& runtime,
+              const wspctl::domain::ActivationId& activation) override {
         calls.emplace_back("establish:" + runtime.value() + ":" + activation.value());
         return {};
     }
@@ -68,9 +69,9 @@ public:
      * @param activation activation ID / Activation ID.
      * @return 成功 / Success.
      */
-    [[nodiscard]] wspctl::domain::Result<void> retire(
-        const wspctl::domain::RuntimeId& runtime,
-        const wspctl::domain::ActivationId& activation) override {
+    [[nodiscard]] wspctl::domain::Result<void>
+    retire(const wspctl::domain::RuntimeId& runtime,
+           const wspctl::domain::ActivationId& activation) override {
         calls.emplace_back("retire:" + runtime.value() + ":" + activation.value());
         return {};
     }
@@ -88,14 +89,13 @@ public:
      * @param activation 未使用 activation / Unused activation.
      * @return 领域错误 / Domain error.
      */
-    [[nodiscard]] wspctl::domain::Result<void> establish(
-        const wspctl::domain::RuntimeId& runtime,
-        const wspctl::domain::ActivationId& activation) override {
+    [[nodiscard]] wspctl::domain::Result<void>
+    establish(const wspctl::domain::RuntimeId& runtime,
+              const wspctl::domain::ActivationId& activation) override {
         static_cast<void>(runtime);
         static_cast<void>(activation);
         return std::unexpected(wspctl::domain::make_error(
-            wspctl::domain::ErrorCode::illegal_transition,
-            "fake establish failed"));
+            wspctl::domain::ErrorCode::illegal_transition, "fake establish failed"));
     }
 
     /**
@@ -104,14 +104,13 @@ public:
      * @param activation 未使用 activation / Unused activation.
      * @return 领域错误 / Domain error.
      */
-    [[nodiscard]] wspctl::domain::Result<void> retire(
-        const wspctl::domain::RuntimeId& runtime,
-        const wspctl::domain::ActivationId& activation) override {
+    [[nodiscard]] wspctl::domain::Result<void>
+    retire(const wspctl::domain::RuntimeId& runtime,
+           const wspctl::domain::ActivationId& activation) override {
         static_cast<void>(runtime);
         static_cast<void>(activation);
         return std::unexpected(wspctl::domain::make_error(
-            wspctl::domain::ErrorCode::illegal_transition,
-            "fake retire should not run"));
+            wspctl::domain::ErrorCode::illegal_transition, "fake retire should not run"));
     }
 };
 
@@ -119,28 +118,22 @@ public:
 class RecordingStatusPort final : public wspctl::application::RuntimeStatusPort {
 public:
     /**
-     * @brief 返回一个 ready runtime 的 allowlisted 状态 / Return allowlisted status for a ready runtime.
+     * @brief 返回一个 ready runtime 的 allowlisted 状态 / Return allowlisted status for a ready
+     * runtime.
      * @param query 已验证只读查询 / Validated read-only query.
      * @return ready 状态或领域错误 / Ready status or a domain error.
      */
-    [[nodiscard]] wspctl::domain::Result<wspctl::application::RuntimeStatus> observe(
-        const wspctl::application::RuntimeStatusQuery& query) const override {
+    [[nodiscard]] wspctl::domain::Result<wspctl::application::RuntimeStatus>
+    observe(const wspctl::application::RuntimeStatusQuery& query) const override {
         ++calls;
         const auto snapshot = wspctl::domain::RuntimeSnapshot::create(
-            query.runtime(),
-            wspctl::domain::RuntimeState::ready,
-            query.handle_activation());
+            query.runtime(), wspctl::domain::RuntimeState::ready, query.handle_activation());
         if (!snapshot) {
             return std::unexpected(snapshot.error());
         }
-        return wspctl::application::RuntimeStatus::create(
-            query,
-            *snapshot,
-            true,
-            std::chrono::milliseconds(123),
-            std::chrono::minutes(15),
-            2U,
-            false);
+        return wspctl::application::RuntimeStatus::create(query, *snapshot, true,
+                                                          std::chrono::milliseconds(123),
+                                                          std::chrono::minutes(15), 2U, false);
     }
 
     /** @brief 被调用次数 / Invocation count. */
@@ -153,19 +146,24 @@ void test_lifecycle_orchestration() {
     const wspctl::domain::ActivationId activation = test_activation();
     wspctl::application::RuntimeActivationService service;
     RecordingPort port;
-    expect(service.activate(runtime, activation, port).has_value(), "application service activates aggregate through port");
-    expect(runtime.state() == wspctl::domain::RuntimeState::ready && runtime.active_activation() == activation,
+    expect(service.activate(runtime, activation, port).has_value(),
+           "application service activates aggregate through port");
+    expect(runtime.state() == wspctl::domain::RuntimeState::ready &&
+               runtime.active_activation() == activation,
            "activation leaves aggregate ready with owner");
     expect(port.calls.size() == 1U && port.calls.front().starts_with("establish:"),
            "activate calls only establish exactly once");
-    expect(service.retire(runtime, activation, port).has_value(), "application service retires aggregate through port");
-    expect(runtime.state() == wspctl::domain::RuntimeState::dormant && !runtime.active_activation().has_value(),
+    expect(service.retire(runtime, activation, port).has_value(),
+           "application service retires aggregate through port");
+    expect(runtime.state() == wspctl::domain::RuntimeState::dormant &&
+               !runtime.active_activation().has_value(),
            "retirement returns aggregate to dormant");
     expect(port.calls.size() == 2U && port.calls.back().starts_with("retire:"),
            "retire calls port after legal domain transition");
 }
 
-/** @brief 测试外设失败不会伪造 ready runtime / Test that a port failure never fabricates a ready runtime. */
+/** @brief 测试外设失败不会伪造 ready runtime / Test that a port failure never fabricates a ready
+ * runtime. */
 void test_failure_compensation() {
     wspctl::domain::Runtime runtime = test_runtime();
     const wspctl::domain::ActivationId activation = test_activation();
@@ -173,11 +171,13 @@ void test_failure_compensation() {
     FailingEstablishPort port;
     const auto activated = service.activate(runtime, activation, port);
     expect(!activated.has_value(), "surface establish failure");
-    expect(runtime.state() == wspctl::domain::RuntimeState::failed && !runtime.active_activation().has_value(),
+    expect(runtime.state() == wspctl::domain::RuntimeState::failed &&
+               !runtime.active_activation().has_value(),
            "failed establish clears owner instead of leaving half-ready state");
 }
 
-/** @brief 测试应用状态查询只使用 read port 且验证 health 不变量 / Test status query uses only the read port and validates health invariants. */
+/** @brief 测试应用状态查询只使用 read port 且验证 health 不变量 / Test status query uses only the
+ * read port and validates health invariants. */
 void test_status_query_use_case() {
     const auto runtime = wspctl::domain::RuntimeId::parse("123e4567-e89b-12d3-a456-426614174000");
     const wspctl::domain::ActivationId activation = test_activation();
@@ -201,24 +201,16 @@ void test_status_query_use_case() {
     }
 
     const auto dormant = wspctl::domain::RuntimeSnapshot::create(
-        *runtime,
-        wspctl::domain::RuntimeState::dormant,
-        std::nullopt);
+        *runtime, wspctl::domain::RuntimeState::dormant, std::nullopt);
     expect(dormant.has_value(), "construct dormant status snapshot");
     if (dormant) {
         const auto invalid = wspctl::application::RuntimeStatus::create(
-            query,
-            *dormant,
-            true,
-            std::nullopt,
-            std::chrono::minutes(15),
-            0U,
-            false);
+            query, *dormant, true, std::nullopt, std::chrono::minutes(15), 0U, false);
         expect(!invalid.has_value(), "reject dormant runtime claiming a live reusable supervisor");
     }
 }
 
-}  // namespace
+} // namespace
 
 /**
  * @brief application CTest 入口 / Application CTest entry point.

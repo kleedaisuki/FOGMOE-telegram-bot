@@ -75,13 +75,15 @@ public:
     /** @brief 读取 little-endian 16 位值 / Read a little-endian 16-bit value. */
     [[nodiscard]] Result<std::uint16_t> u16() {
         if (!has(2U)) {
-            return std::unexpected(make_error(ErrorCode::malformed_frame, "truncated operator u16"));
+            return std::unexpected(
+                make_error(ErrorCode::malformed_frame, "truncated operator u16"));
         }
         /** @brief little-endian 16 位结果 / Little-endian 16-bit result. */
         std::uint16_t value{0U};
         for (unsigned int index = 0U; index < 2U; ++index) {
             value = static_cast<std::uint16_t>(
-                value | static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes_[offset_++]) << (index * 8U)));
+                value | static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes_[offset_++])
+                                                   << (index * 8U)));
         }
         return value;
     }
@@ -89,12 +91,14 @@ public:
     /** @brief 读取 little-endian 32 位值 / Read a little-endian 32-bit value. */
     [[nodiscard]] Result<std::uint32_t> u32() {
         if (!has(4U)) {
-            return std::unexpected(make_error(ErrorCode::malformed_frame, "truncated operator u32"));
+            return std::unexpected(
+                make_error(ErrorCode::malformed_frame, "truncated operator u32"));
         }
         /** @brief little-endian 32 位结果 / Little-endian 32-bit result. */
         std::uint32_t value{0U};
         for (unsigned int index = 0U; index < 4U; ++index) {
-            value |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes_[offset_++])) << (index * 8U);
+            value |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes_[offset_++]))
+                     << (index * 8U);
         }
         return value;
     }
@@ -102,12 +106,14 @@ public:
     /** @brief 读取 little-endian 64 位值 / Read a little-endian 64-bit value. */
     [[nodiscard]] Result<std::uint64_t> u64() {
         if (!has(8U)) {
-            return std::unexpected(make_error(ErrorCode::malformed_frame, "truncated operator u64"));
+            return std::unexpected(
+                make_error(ErrorCode::malformed_frame, "truncated operator u64"));
         }
         /** @brief little-endian 64 位结果 / Little-endian 64-bit result. */
         std::uint64_t value{0U};
         for (unsigned int index = 0U; index < 8U; ++index) {
-            value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(bytes_[offset_++])) << (index * 8U);
+            value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(bytes_[offset_++]))
+                     << (index * 8U);
         }
         return value;
     }
@@ -125,14 +131,17 @@ public:
         /** @brief 经过无符号扩展的长度 / Length after unsigned extension. */
         const std::size_t size = static_cast<std::size_t>(*length);
         if (size > maximum || !has(size)) {
-            return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid operator string length"));
+            return std::unexpected(
+                make_error(ErrorCode::malformed_frame, "invalid operator string length"));
         }
         std::string value;
         value.reserve(size);
         for (std::size_t index = 0U; index < size; ++index) {
-            const char character = static_cast<char>(std::to_integer<unsigned char>(bytes_[offset_++]));
+            const char character =
+                static_cast<char>(std::to_integer<unsigned char>(bytes_[offset_++]));
             if (character == '\0') {
-                return std::unexpected(make_error(ErrorCode::malformed_frame, "operator strings cannot contain NUL"));
+                return std::unexpected(
+                    make_error(ErrorCode::malformed_frame, "operator strings cannot contain NUL"));
             }
             value.push_back(character);
         }
@@ -159,12 +168,14 @@ private:
 };
 
 /**
- * @brief 判断字符串是否无 NUL 且在指定上限内 / Check a string is NUL-free and within the specified cap.
+ * @brief 判断字符串是否无 NUL 且在指定上限内 / Check a string is NUL-free and within the specified
+ * cap.
  * @param value 待验证字符串 / String to validate.
  * @param maximum 最大 byte 数 / Maximum byte count.
  * @return 是否可安全编码 / Whether it may be safely encoded.
  */
-[[nodiscard]] bool is_bounded_nul_free(const std::string_view value, const std::size_t maximum) noexcept {
+[[nodiscard]] bool is_bounded_nul_free(const std::string_view value,
+                                       const std::size_t maximum) noexcept {
     return !value.empty() && value.size() <= maximum && value.find('\0') == std::string_view::npos;
 }
 
@@ -189,7 +200,8 @@ private:
 }
 
 /**
- * @brief 判断 workspace entry kind 枚举是否已知 / Check whether a workspace-entry-kind enum is known.
+ * @brief 判断 workspace entry kind 枚举是否已知 / Check whether a workspace-entry-kind enum is
+ * known.
  * @param raw_value 原始枚举值 / Raw enum value.
  * @return 是否为已知值 / Whether it is known.
  */
@@ -199,13 +211,15 @@ private:
 }
 
 /**
- * @brief 将过大的字节序列拒绝为 operator 帧错误 / Reject an oversized byte sequence as an operator-frame error.
+ * @brief 将过大的字节序列拒绝为 operator 帧错误 / Reject an oversized byte sequence as an
+ * operator-frame error.
  * @param bytes 待检查 bytes / Bytes to inspect.
  * @return 成功或 frame-too-large 错误 / Success or a frame-too-large error.
  */
 [[nodiscard]] Result<void> require_operator_payload_bound(const std::span<const std::byte> bytes) {
     if (bytes.size() > kOperatorMaxFrameBytes - kOperatorFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "operator payload exceeds hard frame quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "operator payload exceeds hard frame quota"));
     }
     return {};
 }
@@ -215,8 +229,10 @@ private:
  * @param message 带 ancillary data 的接收消息 / Received message carrying ancillary data.
  */
 void close_received_rights(msghdr& message) noexcept {
-    for (cmsghdr* header = CMSG_FIRSTHDR(&message); header != nullptr; header = CMSG_NXTHDR(&message, header)) {
-        if (header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS && header->cmsg_len >= CMSG_LEN(0)) {
+    for (cmsghdr* header = CMSG_FIRSTHDR(&message); header != nullptr;
+         header = CMSG_NXTHDR(&message, header)) {
+        if (header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS &&
+            header->cmsg_len >= CMSG_LEN(0)) {
             /** @brief ancillary 描述符 payload byte 数 / Ancillary descriptor payload bytes. */
             const std::size_t payload_bytes = header->cmsg_len - CMSG_LEN(0);
             if (payload_bytes % sizeof(int) == 0U) {
@@ -231,11 +247,12 @@ void close_received_rights(msghdr& message) noexcept {
     }
 }
 
-}  // namespace
+} // namespace
 
 Result<std::vector<std::byte>> encode_status_request(const StatusRequest& request) {
     if (!is_bounded_nul_free(request.runtime_key, kOperatorRuntimeTextBytes)) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid operator runtime status request"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid operator runtime status request"));
     }
     Writer writer;
     writer.string(request.runtime_key);
@@ -252,8 +269,10 @@ Result<StatusRequest> decode_status_request(const std::span<const std::byte> pay
     }
     Reader reader(payload);
     const auto runtime_key = reader.string(kOperatorRuntimeTextBytes);
-    if (!runtime_key || !reader.finished() || !is_bounded_nul_free(*runtime_key, kOperatorRuntimeTextBytes)) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid operator runtime status request"));
+    if (!runtime_key || !reader.finished() ||
+        !is_bounded_nul_free(*runtime_key, kOperatorRuntimeTextBytes)) {
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid operator runtime status request"));
     }
     return StatusRequest{.runtime_key = *runtime_key};
 }
@@ -261,7 +280,8 @@ Result<StatusRequest> decode_status_request(const std::span<const std::byte> pay
 Result<std::vector<std::byte>> encode_list_request(const ListRequest& request) {
     if (!is_bounded_nul_free(request.runtime_key, kOperatorRuntimeTextBytes) ||
         !is_bounded_nul_free(request.path, kOperatorWorkspacePathBytes)) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid operator workspace list request"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid operator workspace list request"));
     }
     Writer writer;
     writer.string(request.runtime_key);
@@ -280,9 +300,11 @@ Result<ListRequest> decode_list_request(const std::span<const std::byte> payload
     Reader reader(payload);
     const auto runtime_key = reader.string(kOperatorRuntimeTextBytes);
     const auto path = reader.string(kOperatorWorkspacePathBytes);
-    if (!runtime_key || !path || !reader.finished() || !is_bounded_nul_free(*runtime_key, kOperatorRuntimeTextBytes) ||
+    if (!runtime_key || !path || !reader.finished() ||
+        !is_bounded_nul_free(*runtime_key, kOperatorRuntimeTextBytes) ||
         !is_bounded_nul_free(*path, kOperatorWorkspacePathBytes)) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid operator workspace list request"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid operator workspace list request"));
     }
     return ListRequest{.runtime_key = *runtime_key, .path = *path};
 }
@@ -317,11 +339,13 @@ Result<StatusResponse> decode_status_response(const std::span<const std::byte> p
     const auto quota_present = reader.u8();
     if (!runtime_key || !raw_persistence || !raw_activity || !quota_present ||
         (*quota_present != 0U && *quota_present != 1U)) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid operator status response"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid operator status response"));
     }
     const auto runtime = domain::RuntimeId::parse(*runtime_key);
     if (!runtime) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "operator status response runtime is invalid"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "operator status response runtime is invalid"));
     }
     std::optional<domain::WorkspaceQuotaUsage> quota;
     if (*quota_present == 1U) {
@@ -330,38 +354,39 @@ Result<StatusResponse> decode_status_response(const std::span<const std::byte> p
         const auto used_inodes = reader.u64();
         const auto hard_inodes = reader.u64();
         if (!used_bytes || !hard_bytes || !used_inodes || !hard_inodes) {
-            return std::unexpected(make_error(ErrorCode::malformed_frame, "truncated operator quota response"));
+            return std::unexpected(
+                make_error(ErrorCode::malformed_frame, "truncated operator quota response"));
         }
         if (*hard_bytes == 0U || *hard_inodes == 0U) {
-            return std::unexpected(make_error(ErrorCode::malformed_frame, "operator quota limits must be non-zero"));
+            return std::unexpected(
+                make_error(ErrorCode::malformed_frame, "operator quota limits must be non-zero"));
         }
-        const auto created_quota = domain::WorkspaceQuotaUsage::create(
-            *used_bytes,
-            *hard_bytes,
-            *used_inodes,
-            *hard_inodes);
+        const auto created_quota = domain::WorkspaceQuotaUsage::create(*used_bytes, *hard_bytes,
+                                                                       *used_inodes, *hard_inodes);
         if (!created_quota) {
-            return std::unexpected(make_error(ErrorCode::malformed_frame, "operator quota violates the domain contract"));
+            return std::unexpected(make_error(ErrorCode::malformed_frame,
+                                              "operator quota violates the domain contract"));
         }
         quota = *created_quota;
     }
     if (!reader.finished()) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "operator status response violates quota invariant"));
+        return std::unexpected(make_error(ErrorCode::malformed_frame,
+                                          "operator status response violates quota invariant"));
     }
     const auto status = domain::OperatorWorkspaceStatus::create(
-        *runtime,
-        static_cast<domain::WorkspacePersistence>(*raw_persistence),
-        static_cast<domain::WorkspaceActivity>(*raw_activity),
-        std::move(quota));
+        *runtime, static_cast<domain::WorkspacePersistence>(*raw_persistence),
+        static_cast<domain::WorkspaceActivity>(*raw_activity), std::move(quota));
     if (!status) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "operator status response violates the domain contract"));
+        return std::unexpected(make_error(ErrorCode::malformed_frame,
+                                          "operator status response violates the domain contract"));
     }
     return StatusResponse{.status = *status};
 }
 
 Result<std::vector<std::byte>> encode_list_response(const ListResponse& response) {
     if (response.listing.entries.size() > domain::kOperatorWorkspaceListingLimit) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "operator listing exceeds entry cap"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "operator listing exceeds entry cap"));
     }
     Writer writer;
     writer.string(response.listing.path.value());
@@ -389,11 +414,13 @@ Result<ListResponse> decode_list_response(const std::span<const std::byte> paylo
     const auto entry_count = reader.u32();
     if (!path_text || !truncated || !entry_count || (*truncated != 0U && *truncated != 1U) ||
         *entry_count > domain::kOperatorWorkspaceListingLimit) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid operator list response header"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid operator list response header"));
     }
     const auto path = domain::OperatorWorkspacePath::parse(*path_text);
     if (!path) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "operator list response path is invalid"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "operator list response path is invalid"));
     }
     std::vector<domain::WorkspaceEntry> entries;
     entries.reserve(*entry_count);
@@ -402,19 +429,20 @@ Result<ListResponse> decode_list_response(const std::span<const std::byte> paylo
         const auto raw_kind = reader.u8();
         const auto size_bytes = reader.u64();
         if (!encoded_name || !raw_kind || !size_bytes || !is_known_entry_kind(*raw_kind)) {
-            return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid operator list response entry"));
+            return std::unexpected(
+                make_error(ErrorCode::malformed_frame, "invalid operator list response entry"));
         }
         const auto entry = domain::WorkspaceEntry::create(
-            *encoded_name,
-            static_cast<domain::WorkspaceEntryKind>(*raw_kind),
-            *size_bytes);
+            *encoded_name, static_cast<domain::WorkspaceEntryKind>(*raw_kind), *size_bytes);
         if (!entry) {
-            return std::unexpected(make_error(ErrorCode::malformed_frame, "operator list response entry encoding is unsafe"));
+            return std::unexpected(make_error(ErrorCode::malformed_frame,
+                                              "operator list response entry encoding is unsafe"));
         }
         entries.push_back(*entry);
     }
     if (!reader.finished()) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "operator list response has trailing bytes"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "operator list response has trailing bytes"));
     }
     return ListResponse{.listing = domain::WorkspaceListing{
                             .path = *path,
@@ -425,7 +453,8 @@ Result<ListResponse> decode_list_response(const std::span<const std::byte> paylo
 
 Result<std::vector<std::byte>> encode_error_response(const ErrorResponse& response) {
     if (!is_known_error_code(static_cast<std::uint8_t>(response.code))) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid operator error code"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid operator error code"));
     }
     Writer writer;
     writer.u8(static_cast<std::uint8_t>(response.code));
@@ -436,17 +465,18 @@ Result<ErrorResponse> decode_error_response(const std::span<const std::byte> pay
     Reader reader(payload);
     const auto raw_code = reader.u8();
     if (!raw_code || !reader.finished() || !is_known_error_code(*raw_code)) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid operator error response"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid operator error response"));
     }
     return ErrorResponse{.code = static_cast<OperatorErrorCode>(*raw_code)};
 }
 
-Result<std::vector<std::byte>> encode_operator_frame(
-    const OperatorMessageKind kind,
-    const std::span<const std::byte> payload) {
+Result<std::vector<std::byte>> encode_operator_frame(const OperatorMessageKind kind,
+                                                     const std::span<const std::byte> payload) {
     if (!is_known_message_kind(static_cast<std::uint16_t>(kind)) ||
         payload.size() > kOperatorMaxFrameBytes - kOperatorFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "invalid operator frame kind or payload length"));
+        return std::unexpected(make_error(ErrorCode::frame_too_large,
+                                          "invalid operator frame kind or payload length"));
     }
     Writer writer;
     writer.u32(kOperatorProtocolMagic);
@@ -460,10 +490,12 @@ Result<std::vector<std::byte>> encode_operator_frame(
 
 Result<OperatorFrame> decode_operator_frame(const std::span<const std::byte> wire) {
     if (wire.size() > kOperatorMaxFrameBytes) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "operator frame exceeds hard quota"));
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "operator frame exceeds hard quota"));
     }
     if (wire.size() < kOperatorFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "truncated operator frame header"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "truncated operator frame header"));
     }
     Reader reader(wire.first(kOperatorFrameHeaderBytes));
     const auto magic = reader.u32();
@@ -471,28 +503,33 @@ Result<OperatorFrame> decode_operator_frame(const std::span<const std::byte> wir
     const auto raw_kind = reader.u16();
     const auto payload_length = reader.u32();
     if (!magic || !version || !raw_kind || !payload_length) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "truncated operator frame header"));
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "truncated operator frame header"));
     }
     if (*magic != kOperatorProtocolMagic) {
-        return std::unexpected(make_error(ErrorCode::protocol_violation, "unexpected operator protocol magic"));
+        return std::unexpected(
+            make_error(ErrorCode::protocol_violation, "unexpected operator protocol magic"));
     }
     if (*version != kOperatorProtocolVersion) {
-        return std::unexpected(make_error(ErrorCode::unsupported_version, "unsupported operator protocol version"));
+        return std::unexpected(
+            make_error(ErrorCode::unsupported_version, "unsupported operator protocol version"));
     }
-    if (!is_known_message_kind(*raw_kind) || *payload_length != wire.size() - kOperatorFrameHeaderBytes) {
-        return std::unexpected(make_error(ErrorCode::malformed_frame, "invalid operator frame kind or length"));
+    if (!is_known_message_kind(*raw_kind) ||
+        *payload_length != wire.size() - kOperatorFrameHeaderBytes) {
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid operator frame kind or length"));
     }
     OperatorFrame frame{.kind = static_cast<OperatorMessageKind>(*raw_kind), .payload = {}};
-    frame.payload.insert(
-        frame.payload.end(),
-        wire.begin() + static_cast<std::ptrdiff_t>(kOperatorFrameHeaderBytes),
-        wire.end());
+    frame.payload.insert(frame.payload.end(),
+                         wire.begin() + static_cast<std::ptrdiff_t>(kOperatorFrameHeaderBytes),
+                         wire.end());
     return frame;
 }
 
 Result<void> send_operator_frame(const int fd, const std::span<const std::byte> frame) {
     if (fd < 0 || frame.empty() || frame.size() > kOperatorMaxFrameBytes) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid operator send frame arguments"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid operator send frame arguments"));
     }
     /** @brief 实际写入 byte 数 / Actual number of bytes written. */
     ssize_t written{0};
@@ -500,17 +537,20 @@ Result<void> send_operator_frame(const int fd, const std::span<const std::byte> 
         written = send(fd, frame.data(), frame.size(), MSG_NOSIGNAL);
     } while (written < 0 && errno == EINTR);
     if (written < 0) {
-        return std::unexpected(errno_error(ErrorCode::io_failure, "send operator SOCK_SEQPACKET frame"));
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "send operator SOCK_SEQPACKET frame"));
     }
     if (static_cast<std::size_t>(written) != frame.size()) {
-        return std::unexpected(make_error(ErrorCode::io_failure, "short operator SOCK_SEQPACKET send"));
+        return std::unexpected(
+            make_error(ErrorCode::io_failure, "short operator SOCK_SEQPACKET send"));
     }
     return {};
 }
 
 Result<std::vector<std::byte>> receive_operator_frame(const int fd) {
     if (fd < 0) {
-        return std::unexpected(make_error(ErrorCode::invalid_argument, "invalid operator receive fd"));
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid operator receive fd"));
     }
     std::vector<std::byte> buffer(kOperatorMaxFrameBytes);
     iovec vector{.iov_base = buffer.data(), .iov_len = buffer.size()};
@@ -526,21 +566,26 @@ Result<std::vector<std::byte>> receive_operator_frame(const int fd) {
         received = recvmsg(fd, &message, MSG_TRUNC | MSG_CMSG_CLOEXEC);
     } while (received < 0 && errno == EINTR);
     if (received < 0) {
-        return std::unexpected(errno_error(ErrorCode::io_failure, "receive operator SOCK_SEQPACKET frame"));
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "receive operator SOCK_SEQPACKET frame"));
     }
     if (received == 0) {
-        return std::unexpected(make_error(ErrorCode::io_failure, "operator SOCK_SEQPACKET peer closed"));
+        return std::unexpected(
+            make_error(ErrorCode::io_failure, "operator SOCK_SEQPACKET peer closed"));
     }
     const bool has_ancillary = CMSG_FIRSTHDR(&message) != nullptr;
     close_received_rights(message);
-    if ((message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0 || static_cast<std::size_t>(received) > buffer.size()) {
-        return std::unexpected(make_error(ErrorCode::frame_too_large, "truncated operator SOCK_SEQPACKET frame"));
+    if ((message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0 ||
+        static_cast<std::size_t>(received) > buffer.size()) {
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "truncated operator SOCK_SEQPACKET frame"));
     }
     if (has_ancillary) {
-        return std::unexpected(make_error(ErrorCode::protocol_violation, "SCM ancillary data is forbidden on operator frames"));
+        return std::unexpected(make_error(ErrorCode::protocol_violation,
+                                          "SCM ancillary data is forbidden on operator frames"));
     }
     buffer.resize(static_cast<std::size_t>(received));
     return buffer;
 }
 
-}  // namespace wspctl::operator_protocol
+} // namespace wspctl::operator_protocol

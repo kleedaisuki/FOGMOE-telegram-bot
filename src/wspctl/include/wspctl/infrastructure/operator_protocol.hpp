@@ -12,18 +12,22 @@
 namespace wspctl::operator_protocol {
 
 /** @brief operator wire 协议魔数 / Operator wire-protocol magic number. */
-inline constexpr std::uint32_t kOperatorProtocolMagic{0x31504f57U};  // "WOP1" in little endian.
+inline constexpr std::uint32_t kOperatorProtocolMagic{0x31504f57U}; // "WOP1" in little endian.
 /** @brief operator wire 协议版本 / Operator wire-protocol version. */
 inline constexpr std::uint16_t kOperatorProtocolVersion{1U};
 /** @brief operator 固定帧头大小 / Operator fixed-frame header size. */
 inline constexpr std::size_t kOperatorFrameHeaderBytes{12U};
-/** @brief 一条 operator SOCK_SEQPACKET 消息的最大大小 / Maximum one operator SOCK_SEQPACKET message size. */
+/** @brief 一条 operator SOCK_SEQPACKET 消息的最大大小 / Maximum one operator SOCK_SEQPACKET message
+ * size. */
 inline constexpr std::size_t kOperatorMaxFrameBytes{128U * 1024U};
-/** @brief operator 请求中 runtime 文本的最大大小 / Maximum runtime-text size in an operator request. */
+/** @brief operator 请求中 runtime 文本的最大大小 / Maximum runtime-text size in an operator
+ * request. */
 inline constexpr std::size_t kOperatorRuntimeTextBytes{128U};
-/** @brief operator 请求中 workspace 逻辑路径的最大大小 / Maximum workspace logical-path size in an operator request. */
+/** @brief operator 请求中 workspace 逻辑路径的最大大小 / Maximum workspace logical-path size in an
+ * operator request. */
 inline constexpr std::size_t kOperatorWorkspacePathBytes{4096U};
-/** @brief operator wire 中安全 filename 的最大大小 / Maximum safe filename size in the operator wire protocol. */
+/** @brief operator wire 中安全 filename 的最大大小 / Maximum safe filename size in the operator
+ * wire protocol. */
 inline constexpr std::size_t kOperatorEncodedFilenameBytes{255U * 3U};
 
 /** @brief operator 协议的有限帧类别 / Finite frame kinds of the operator protocol. */
@@ -36,7 +40,8 @@ enum class OperatorMessageKind : std::uint16_t {
     list_request = 3,
     /** @brief 返回一层 workspace 目录 / Return one workspace directory level. */
     list_response = 4,
-    /** @brief 返回不携带敏感文本的 operator 错误 / Return an operator error without sensitive text. */
+    /** @brief 返回不携带敏感文本的 operator 错误 / Return an operator error without sensitive text.
+     */
     error_response = 5,
 };
 
@@ -60,7 +65,8 @@ struct StatusRequest final {
     std::string runtime_key;
 };
 
-/** @brief workspace 单层目录查询的 wire DTO / Wire DTO for a one-level workspace directory query. */
+/** @brief workspace 单层目录查询的 wire DTO / Wire DTO for a one-level workspace directory query.
+ */
 struct ListRequest final {
     /** @brief 待查询的 canonical runtime UUID 文本 / Canonical runtime UUID text to query. */
     std::string runtime_key;
@@ -68,7 +74,8 @@ struct ListRequest final {
     std::string path;
 };
 
-/** @brief operator runtime 状态响应的 wire DTO / Wire DTO for an operator runtime-status response. */
+/** @brief operator runtime 状态响应的 wire DTO / Wire DTO for an operator runtime-status response.
+ */
 struct StatusResponse final {
     /** @brief 经 allowlist 限定的 runtime 状态 / Allowlisted runtime status. */
     domain::OperatorWorkspaceStatus status;
@@ -145,13 +152,13 @@ struct OperatorFrame final {
  * @param payload 已验证载荷 / Validated payload.
  * @return 完整 SOCK_SEQPACKET 消息 / Complete SOCK_SEQPACKET message.
  */
-[[nodiscard]] Result<std::vector<std::byte>> encode_operator_frame(
-    OperatorMessageKind kind,
-    std::span<const std::byte> payload);
+[[nodiscard]] Result<std::vector<std::byte>>
+encode_operator_frame(OperatorMessageKind kind, std::span<const std::byte> payload);
 
 /**
  * @brief 严格解码一条 operator 独立帧 / Strictly decode one independent operator frame.
- * @param wire 从 operator SOCK_SEQPACKET 收到的消息 / Message received from the operator SOCK_SEQPACKET endpoint.
+ * @param wire 从 operator SOCK_SEQPACKET 收到的消息 / Message received from the operator
+ * SOCK_SEQPACKET endpoint.
  * @return 已验证帧或协议错误 / Validated frame or a protocol error.
  */
 [[nodiscard]] Result<OperatorFrame> decode_operator_frame(std::span<const std::byte> wire);
@@ -171,4 +178,4 @@ struct OperatorFrame final {
  */
 [[nodiscard]] Result<std::vector<std::byte>> receive_operator_frame(int fd);
 
-}  // namespace wspctl::operator_protocol
+} // namespace wspctl::operator_protocol

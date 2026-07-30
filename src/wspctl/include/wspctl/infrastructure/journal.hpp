@@ -42,20 +42,23 @@ struct JournalRecord final {
 };
 
 /**
- * @brief 以 (runtime_key, request_id) 索引的崩溃安全 journal / Crash-safe journal indexed by runtime and request.
+ * @brief 以 (runtime_key, request_id) 索引的崩溃安全 journal / Crash-safe journal indexed by
+ * runtime and request.
  *
  * 同 ID 不同哈希绝不重新执行；pending 在重启后返回 in-doubt，避免副作用重复。
- * Same ID with another hash is never re-executed; pending becomes in-doubt after restart to avoid duplicate effects.
+ * Same ID with another hash is never re-executed; pending becomes in-doubt after restart to avoid
+ * duplicate effects.
  */
 class Journal final {
 public:
     /**
-     * @brief 打开 state root 下各 runtime control tree 的 journal / Open journals below runtime control trees in a state root.
+     * @brief 打开 state root 下各 runtime control tree 的 journal / Open journals below runtime
+     * control trees in a state root.
      * @param state_root 受 broker 管理的绝对状态根 / Broker-managed absolute state root.
      * @note 构造不创建 ``state_root/journal``；每个调用只会打开 quota service 已创建并验证的
-     *       ``runtimes/<hash>/control/journal``。 Construction never creates ``state_root/journal``;
-     *       each invocation only opens ``runtimes/<hash>/control/journal`` created and verified by
-     *       the quota service.
+     *       ``runtimes/<hash>/control/journal``。 Construction never creates
+     * ``state_root/journal``; each invocation only opens ``runtimes/<hash>/control/journal``
+     * created and verified by the quota service.
      */
     explicit Journal(std::filesystem::path state_root);
 
@@ -65,9 +68,8 @@ public:
      * @param request_id 稳定调用标识 / Stable invocation ID.
      * @return 无记录、记录或错误 / No record, record, or error.
      */
-    [[nodiscard]] Result<std::optional<JournalRecord>> lookup(
-        const std::string& runtime_key,
-        const std::string& request_id) const;
+    [[nodiscard]] Result<std::optional<JournalRecord>> lookup(const std::string& runtime_key,
+                                                              const std::string& request_id) const;
 
     /**
      * @brief 在启动副作用前写入 pending 记录 / Persist a pending record before side effects begin.
@@ -82,17 +84,19 @@ public:
      * @param result 已完成结果 / Completed result.
      * @return 成功或 I/O 错误 / Success or I/O error.
      */
-    [[nodiscard]] Result<void> complete(
-        const ExecuteRequest& request,
-        const ExecutionResult& result) const;
+    [[nodiscard]] Result<void> complete(const ExecuteRequest& request,
+                                        const ExecutionResult& result) const;
 
     /**
-     * @brief 在文件原子 publish 前写入 pending 记录 / Persist a pending record before atomic file publish.
-     * @param request 已 seal、待 publish 的文件开始请求 / Sealed file-begin request awaiting publish.
+     * @brief 在文件原子 publish 前写入 pending 记录 / Persist a pending record before atomic file
+     * publish.
+     * @param request 已 seal、待 publish 的文件开始请求 / Sealed file-begin request awaiting
+     * publish.
      * @return 成功或冲突 / Success or conflict.
      * @note 调用者必须只在 PID 1 已校验 bytes/SHA-256 并 fdatasync 临时文件后调用；因此损坏的
-     * chunk stream 不会留下 pending。/ Callers must invoke this only after PID 1 verified bytes/SHA-256
-     * and fdatasynced the temporary file, so malformed chunk streams leave no pending record.
+     * chunk stream 不会留下 pending。/ Callers must invoke this only after PID 1 verified
+     * bytes/SHA-256 and fdatasynced the temporary file, so malformed chunk streams leave no pending
+     * record.
      */
     [[nodiscard]] Result<void> begin_payload(const PayloadBeginRequest& request) const;
 
@@ -102,23 +106,22 @@ public:
      * @param result 已原子 publish 的文件收据 / Receipt for the atomically published file.
      * @return 成功或 I/O 错误 / Success or an I/O error.
      */
-    [[nodiscard]] Result<void> complete_payload(
-        const PayloadBeginRequest& request,
-        const PayloadResult& result) const;
+    [[nodiscard]] Result<void> complete_payload(const PayloadBeginRequest& request,
+                                                const PayloadResult& result) const;
 
 private:
     /** @brief 状态根目录 / State root directory. */
     std::filesystem::path state_root_;
 
     /**
-     * @brief 得到 control project 内不含用户路径片段的记录路径 / Get a record path inside the control project without user-controlled path segments.
+     * @brief 得到 control project 内不含用户路径片段的记录路径 / Get a record path inside the
+     * control project without user-controlled path segments.
      * @param runtime_key runtime 标识 / Runtime key.
      * @param request_id 调用标识 / Invocation ID.
      * @return SHA-256 命名的记录路径 / SHA-256-named record path.
      */
-    [[nodiscard]] std::filesystem::path record_path(
-        const std::string& runtime_key,
-        const std::string& request_id) const;
+    [[nodiscard]] std::filesystem::path record_path(const std::string& runtime_key,
+                                                    const std::string& request_id) const;
 };
 
-}  // namespace wspctl
+} // namespace wspctl

@@ -22,9 +22,11 @@ struct SupervisorConfig final {
     int task_cgroup_kill_fd{-1};
     /** @brief broker 预打开的 task cgroup.events FD / Broker-preopened task cgroup.events FD. */
     int task_cgroup_events_fd{-1};
-    /** @brief PID 1 持有的 /workspace 目录 FD，用于 completion 前 syncfs / PID 1-held /workspace directory FD for syncfs before completion. */
+    /** @brief PID 1 持有的 /workspace 目录 FD，用于 completion 前 syncfs / PID 1-held /workspace
+     * directory FD for syncfs before completion. */
     int workspace_fd{-1};
-    /** @brief 仅 CTest 可替换的 workspace host path / CTest-only replacement for the workspace host path. */
+    /** @brief 仅 CTest 可替换的 workspace host path / CTest-only replacement for the workspace host
+     * path. */
     std::string test_workspace_root{"/workspace"};
     /** @brief task 降权 UID / Task privilege-drop UID. */
     uid_t sandbox_uid{};
@@ -36,7 +38,8 @@ struct SupervisorConfig final {
  * @brief runtime PID 1 supervisor / Runtime PID 1 supervisor.
  *
  * 它不是 shell：只接受已验证帧，启动直接 argv，回收僵尸，并以进程组处理超时。
- * It is not a shell: it accepts only validated frames, starts direct argv, reaps zombies, and handles timeout by process group.
+ * It is not a shell: it accepts only validated frames, starts direct argv, reaps zombies, and
+ * handles timeout by process group.
  */
 class Supervisor final {
 public:
@@ -46,7 +49,8 @@ public:
      */
     explicit Supervisor(SupervisorConfig config);
 
-    /** @brief 析构时丢弃未发布的文件临时层 / Discard an unpublished file staging layer on destruction. */
+    /** @brief 析构时丢弃未发布的文件临时层 / Discard an unpublished file staging layer on
+     * destruction. */
     ~Supervisor();
 
     /**
@@ -60,7 +64,8 @@ public:
      * @param request 已校验请求 / Validated request.
      * @return 结果或 supervisor 错误 / Result or supervisor error.
      * @note 此函数同时供 CTest 验证 timeout/output 行为；生产路径通过 serve 调用它。
-     *       This function also lets CTest verify timeout/output behavior; production invokes it via serve.
+     *       This function also lets CTest verify timeout/output behavior; production invokes it via
+     * serve.
      */
     [[nodiscard]] Result<ExecutionResult> execute_once(const ExecuteRequest& request);
 
@@ -123,4 +128,4 @@ private:
     std::unique_ptr<ActivePayload> active_payload_;
 };
 
-}  // namespace wspctl
+} // namespace wspctl

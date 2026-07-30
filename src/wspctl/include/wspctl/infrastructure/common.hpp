@@ -48,8 +48,7 @@ struct Error final {
 };
 
 /** @brief 带 Error 的 std::expected 别名 / std::expected alias carrying Error. */
-template <typename Value>
-using Result = std::expected<Value, Error>;
+template <typename Value> using Result = std::expected<Value, Error>;
 
 /**
  * @brief 构造错误值 / Construct an error value.
@@ -71,4 +70,4 @@ using Result = std::expected<Value, Error>;
     return make_error(code, std::string(operation) + ": " + std::strerror(errno));
 }
 
-}  // namespace wspctl
+} // namespace wspctl

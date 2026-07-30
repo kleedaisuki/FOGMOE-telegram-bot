@@ -31,9 +31,11 @@ void expect(const bool condition, const std::string& message) {
  * @brief 以精确 argv 运行 CLI / Run the CLI with an exact argv.
  * @param executable 已构建 wspctl 的绝对路径 / Absolute path of the built wspctl.
  * @param arguments 不含 argv[0] 的参数 / Arguments excluding argv[0].
- * @return child 的普通退出码；exec/wait 失败为 -1 / Normal child exit code; -1 for exec/wait failure.
+ * @return child 的普通退出码；exec/wait 失败为 -1 / Normal child exit code; -1 for exec/wait
+ * failure.
  */
-[[nodiscard]] int run_cli(const std::string& executable, const std::vector<std::string>& arguments) {
+[[nodiscard]] int run_cli(const std::string& executable,
+                          const std::vector<std::string>& arguments) {
     std::vector<std::string> storage;
     storage.reserve(arguments.size() + 1U);
     storage.push_back(executable);
@@ -59,7 +61,7 @@ void expect(const bool condition, const std::string& message) {
     return WEXITSTATUS(status);
 }
 
-}  // namespace
+} // namespace
 
 /**
  * @brief operator CLI CTest 入口 / Operator CLI CTest entry point.
@@ -74,13 +76,12 @@ int main(const int argc, char* argv[]) {
     }
     const std::string executable(argv[1]);
     expect(run_cli(executable, {"--help"}) == 0, "wspctl --help succeeds without an endpoint");
-    expect(
-        run_cli(executable, {
-            "--socket", "/tmp/wspctl-operator-test.sock", "status", "--runtime",
-            "123e4567-e89b-12d3-a456-426614174000", "--runtime", "123e4567-e89b-12d3-a456-426614174001"}) == 64,
-        "wspctl rejects duplicate --runtime before connecting");
-    expect(
-        run_cli(executable, {"--socket", "relative.sock", "status", "--runtime", "123e4567-e89b-12d3-a456-426614174000"}) == 64,
-        "wspctl rejects a relative operator endpoint before connecting");
+    expect(run_cli(executable, {"--socket", "/tmp/wspctl-operator-test.sock", "status", "--runtime",
+                                "123e4567-e89b-12d3-a456-426614174000", "--runtime",
+                                "123e4567-e89b-12d3-a456-426614174001"}) == 64,
+           "wspctl rejects duplicate --runtime before connecting");
+    expect(run_cli(executable, {"--socket", "relative.sock", "status", "--runtime",
+                                "123e4567-e89b-12d3-a456-426614174000"}) == 64,
+           "wspctl rejects a relative operator endpoint before connecting");
     return g_failures == 0U ? EXIT_SUCCESS : EXIT_FAILURE;
 }

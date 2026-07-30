@@ -2,10 +2,9 @@
 
 namespace wspctl::application {
 
-domain::Result<void> RuntimeActivationService::activate(
-    domain::Runtime& runtime,
-    const domain::ActivationId& activation,
-    RuntimeActivationPort& port) const {
+domain::Result<void> RuntimeActivationService::activate(domain::Runtime& runtime,
+                                                        const domain::ActivationId& activation,
+                                                        RuntimeActivationPort& port) const {
     if (const auto started = runtime.begin_activation(activation); !started) {
         return std::unexpected(started.error());
     }
@@ -24,10 +23,9 @@ domain::Result<void> RuntimeActivationService::activate(
     return {};
 }
 
-domain::Result<void> RuntimeActivationService::retire(
-    domain::Runtime& runtime,
-    const domain::ActivationId& activation,
-    RuntimeActivationPort& port) const {
+domain::Result<void> RuntimeActivationService::retire(domain::Runtime& runtime,
+                                                      const domain::ActivationId& activation,
+                                                      RuntimeActivationPort& port) const {
     if (const auto retiring = runtime.begin_retirement(activation); !retiring) {
         return std::unexpected(retiring.error());
     }
@@ -42,10 +40,9 @@ domain::Result<void> RuntimeActivationService::retire(
     return {};
 }
 
-domain::Result<void> RuntimeActivationService::abort(
-    domain::Runtime& runtime,
-    const domain::ActivationId& activation,
-    RuntimeActivationPort& port) const {
+domain::Result<void> RuntimeActivationService::abort(domain::Runtime& runtime,
+                                                     const domain::ActivationId& activation,
+                                                     RuntimeActivationPort& port) const {
     runtime.fail();
     if (const auto retired = port.retire(runtime.id(), activation); !retired) {
         return std::unexpected(retired.error());
@@ -53,4 +50,4 @@ domain::Result<void> RuntimeActivationService::abort(
     return {};
 }
 
-}  // namespace wspctl::application
+} // namespace wspctl::application
