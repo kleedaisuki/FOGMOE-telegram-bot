@@ -315,9 +315,17 @@ ctest --test-dir build/wspctl-prod \
 ./statusWspctl.sh
 tail -n 100 "$(find logs -maxdepth 1 -name 'wspctl_install_*.log' -printf '%T@ %p\n' \
   | sort -nr | head -n 1 | cut -d' ' -f2-)"
-sudo wspctl status <runtime>
-sudo wspctl workspace ls <runtime> /workspace
+RUNTIME=123e4567-e89b-12d3-a456-426614174000
+sudo wspctl status --runtime "$RUNTIME"
+sudo wspctl dashboard --runtime "$RUNTIME"
+sudo wspctl dashboard --runtime "$RUNTIME" --watch --refresh 2
+sudo wspctl workspace ls --runtime "$RUNTIME" --path /workspace
 ```
+
+`dashboard` 默认只读取一次快照；`--watch` 只在 stdout 为 TTY 时持续刷新，`Ctrl-C` 以 130 退出。
+交互 TTY 默认显示宽度自适应的彩色 ASCII 页面，`NO_COLOR=1` 或 `--plain` 禁用 ANSI；pipe/redirect
+下的 `status` 与 `workspace ls` 保持无 ANSI 的稳定记录。退出码为：0 成功、64 用法错误、66
+对象不存在、69 endpoint 不可用、70 软件/协议错误、77 权限错误。
 
 operator endpoint 来自 `run/operator`，Bot container 只看到只读的 `run/bot`。不要通过 group ACL 或
 world-readable socket 合并两个身份。

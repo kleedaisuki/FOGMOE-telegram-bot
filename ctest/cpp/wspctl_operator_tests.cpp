@@ -10,6 +10,7 @@
 #include "wspctl/infrastructure/operator_protocol.hpp"
 #include "wspctl/infrastructure/operator_workspace_reader.hpp"
 #include "wspctl/infrastructure/protocol.hpp"
+#include "wspctl/presentation/operator_cli.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -20,9 +21,11 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -83,6 +86,349 @@ ready_status(const wspctl::domain::RuntimeId& runtime) {
  */
 [[nodiscard]] wspctl::domain::OperatorWorkspaceStatus ready_status() {
     return ready_status(test_runtime());
+}
+
+/**
+ * @brief 计算移除 ANSI SGR 后的单行可见宽度 / Compute one line's visible width after removing
+ * ANSI SGR.
+ * @param line 待检查行 / Line to inspect.
+ * @return 可见 ASCII 列数 / Visible ASCII column count.
+ */
+[[nodiscard]] std::size_t visible_width(const std::string_view line) {
+    /** @brief 可见字符数 / Visible character count. */
+    std::size_t width{0U};
+    /** @brief 当前扫描位置 / Current scan position. */
+    std::size_t index{0U};
+    while (index < line.size()) {
+        if (line[index] != '\x1b') {
+            ++width;
+            ++index;
+            continue;
+        }
+        ++index;
+        if (index < line.size() && line[index] == '[') {
+            ++index;
+            while (index < line.size() && line[index] != 'm') {
+                ++index;
+            }
+            if (index < line.size()) {
+                ++index;
+            }
+        }
+    }
+    return width;
+}
+
+/**
+ * @brief 验证每个输出行不超过给定可见宽度 / Verify every output line fits a visible width.
+ * @param rendered 完整渲染输出 / Complete rendered output.
+ * @param columns 最大列数 / Maximum columns.
+ * @return 是否全部行均满足宽度 / Whether every line fits.
+ */
+[[nodiscard]] bool all_lines_fit(const std::string_view rendered, const std::size_t columns) {
+    /** @brief 当前行开始位置 / Current line start. */
+    std::size_t begin{0U};
+    while (begin < rendered.size()) {
+        /** @brief 当前行结束位置 / Current line end. */
+        const std::size_t end = rendered.find('\n', begin);
+        /** @brief 当前行 view / Current line view. */
+        const std::string_view line = rendered.substr(
+            begin, end == std::string_view::npos ? rendered.size() - begin : end - begin);
+        if (visible_width(line) > columns) {
+            return false;
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        begin = end + 1U;
+    }
+    return true;
+}
+
+/**
+ * @brief 测试类型化 CLI 路由拒绝非法 option 状态 / Test typed CLI routing rejects invalid option
+ * states.
+ */
+void test_operator_cli_typed_routing() {
+    /** @brief CLI presentation 命名空间别名 / CLI presentation namespace alias. */
+    namespace cli = wspctl::presentation::operator_cli;
+    /** @brief 测试 endpoint / Test endpoint. */
+    constexpr std::string_view kSocket{"/tmp/wspctl-operator.sock"};
+    /** @brief 测试 UUID / Test UUID. */
+    constexpr std::string_view kRuntime{"123e4567-e89b-12d3-a456-426614174000"};
+
+    /** @brief 合法 dashboard watch 参数 / Valid dashboard-watch arguments. */
+    const std::vector<std::string_view> watch_arguments{
+        "--socket", kSocket, "dashboard", "--runtime", kRuntime, "--watch", "--refresh", "7",
+    };
+    /** @brief 已解析 watch 调用 / Parsed watch invocation. */
+    const auto watch = cli::parse_arguments(watch_arguments, "");
+    /** @brief watch 命令 view / Watch-command view. */
+    const auto* const watch_command =
+        watch ? std::get_if<cli::DashboardCommand>(&watch->command) : nullptr;
+    expect(watch_command != nullptr && watch_command->watch &&
+               watch_command->refresh == std::chrono::seconds{7},
+           "route dashboard watch into a complete typed command");
+
+    /** @brief 合法一次性 dashboard 参数 / Valid one-shot dashboard arguments. */
+    const std::vector<std::string_view> snapshot_arguments{
+        "--plain", "--socket", kSocket, "dashboard", "--runtime", kRuntime,
+    };
+    /** @brief 已解析 snapshot 调用 / Parsed snapshot invocation. */
+    const auto snapshot = cli::parse_arguments(snapshot_arguments, "");
+    /** @brief snapshot 命令 view / Snapshot-command view. */
+    const auto* const snapshot_command =
+        snapshot ? std::get_if<cli::DashboardCommand>(&snapshot->command) : nullptr;
+    expect(snapshot_command != nullptr && !snapshot_command->watch &&
+               snapshot->color == cli::ColorMode::never,
+           "route a plain one-shot dashboard without an implicit watch");
+
+    /** @brief 缺少 watch 的 refresh 参数 / Refresh arguments missing watch. */
+    const std::vector<std::string_view> orphan_refresh{
+        "--socket", kSocket, "dashboard", "--runtime", kRuntime, "--refresh", "2",
+    };
+    expect(!cli::parse_arguments(orphan_refresh, "").has_value(),
+           "reject refresh without watch before any gateway call");
+
+    /** @brief 重复 runtime 的 status 参数 / Status arguments with duplicate runtime. */
+    const std::vector<std::string_view> duplicate_runtime{
+        "--socket", kSocket, "status", "--runtime", kRuntime, "--runtime", kRuntime,
+    };
+    expect(!cli::parse_arguments(duplicate_runtime, "").has_value(),
+           "reject duplicate runtime before any gateway call");
+
+    /** @brief 合法 workspace 参数 / Valid workspace arguments. */
+    const std::vector<std::string_view> listing_arguments{
+        "--socket", kSocket, "workspace", "ls", "--path", "/workspace/logs", "--runtime", kRuntime,
+    };
+    /** @brief 已解析 listing 调用 / Parsed listing invocation. */
+    const auto listing = cli::parse_arguments(listing_arguments, "");
+    /** @brief listing 命令 view / Listing-command view. */
+    const auto* const listing_command =
+        listing ? std::get_if<cli::WorkspaceListCommand>(&listing->command) : nullptr;
+    expect(listing_command != nullptr && listing_command->path.value() == "/workspace/logs",
+           "route workspace ls with a validated logical path");
+
+    /** @brief 无 endpoint 的子命令 help / Subcommand help without an endpoint. */
+    const std::vector<std::string_view> subcommand_help{"workspace", "ls", "--help"};
+    /** @brief 已解析子命令 help / Parsed subcommand help. */
+    const auto help = cli::parse_arguments(subcommand_help, "");
+    expect(help.has_value() && std::holds_alternative<cli::HelpCommand>(help->command),
+           "subcommand help never requires an operator endpoint");
+}
+
+/**
+ * @brief 测试 TTY、NO_COLOR 与显式色彩策略 / Test TTY, NO_COLOR, and explicit color policies.
+ */
+void test_operator_cli_color_policy() {
+    /** @brief CLI presentation 命名空间别名 / CLI presentation namespace alias. */
+    namespace cli = wspctl::presentation::operator_cli;
+    /** @brief 支持 ANSI 的 TTY / ANSI-capable TTY. */
+    const cli::TerminalProfile tty{
+        .is_tty = true,
+        .no_color = false,
+        .dumb_terminal = false,
+        .columns = 80U,
+    };
+    /** @brief 设置 NO_COLOR 的 TTY / TTY with NO_COLOR set. */
+    const cli::TerminalProfile no_color{
+        .is_tty = true,
+        .no_color = true,
+        .dumb_terminal = false,
+        .columns = 80U,
+    };
+    /** @brief 非 TTY pipe / Non-TTY pipe. */
+    const cli::TerminalProfile pipe{
+        .is_tty = false,
+        .no_color = false,
+        .dumb_terminal = false,
+        .columns = 80U,
+    };
+    expect(tty.use_color(cli::ColorMode::automatic),
+           "automatic color is enabled only for a capable TTY");
+    expect(!no_color.use_color(cli::ColorMode::automatic) &&
+               !pipe.use_color(cli::ColorMode::automatic),
+           "NO_COLOR and non-TTY output disable automatic ANSI");
+    expect(no_color.use_color(cli::ColorMode::always),
+           "explicit --color always overrides environment auto-detection");
+    expect(!tty.use_color(cli::ColorMode::never), "explicit plain mode disables ANSI on a TTY");
+}
+
+/**
+ * @brief 测试 dashboard ANSI、窄终端与缺失 quota 渲染 / Test dashboard ANSI, narrow-terminal,
+ * and missing-quota rendering.
+ */
+void test_operator_dashboard_rendering() {
+    /** @brief CLI presentation 命名空间别名 / CLI presentation namespace alias. */
+    namespace cli = wspctl::presentation::operator_cli;
+    /** @brief ready dashboard 状态 / Ready dashboard status. */
+    const auto ready = ready_status();
+    /** @brief 彩色宽屏 dashboard / Colored wide dashboard. */
+    const std::string colored = cli::render_dashboard(ready, cli::RenderOptions{
+                                                                 .color = true,
+                                                                 .interactive = true,
+                                                                 .columns = 88U,
+                                                                 .watching = false,
+                                                             });
+    /** @brief 纯文本宽屏 dashboard / Plain wide dashboard. */
+    const std::string plain = cli::render_dashboard(ready, cli::RenderOptions{
+                                                               .color = false,
+                                                               .interactive = false,
+                                                               .columns = 88U,
+                                                               .watching = false,
+                                                           });
+    expect(colored.find("\x1b[") != std::string::npos, "colored dashboard contains ANSI SGR");
+    expect(plain.find('\x1b') == std::string::npos &&
+               plain.find("READ-ONLY SNAPSHOT") != std::string::npos,
+           "plain dashboard contains no ANSI and labels snapshot semantics");
+    expect(all_lines_fit(colored, 88U), "wide colored dashboard respects visible terminal width");
+
+    /** @brief 32-column dashboard / 32-column dashboard. */
+    const std::string narrow = cli::render_dashboard(ready, cli::RenderOptions{
+                                                                .color = false,
+                                                                .interactive = true,
+                                                                .columns = 32U,
+                                                                .watching = true,
+                                                            });
+    expect(narrow.find("READ-ONLY WATCH") != std::string::npos && all_lines_fit(narrow, 32U),
+           "narrow dashboard switches layout and keeps every line bounded");
+
+    /** @brief 极窄 dashboard / Very narrow dashboard. */
+    const std::string very_narrow = cli::render_dashboard(ready, cli::RenderOptions{
+                                                                     .color = false,
+                                                                     .interactive = true,
+                                                                     .columns = 16U,
+                                                                     .watching = false,
+                                                                 });
+    expect(all_lines_fit(very_narrow, 16U),
+           "very narrow dashboard never exceeds the reported terminal width");
+
+    /** @brief 超额 quota fixture / Over-limit quota fixture. */
+    const auto over_limit_quota =
+        wspctl::domain::WorkspaceQuotaUsage::create(4'097U, 4'096U, 2U, 64U);
+    expect(over_limit_quota.has_value(), "create over-limit quota fixture");
+    if (over_limit_quota.has_value()) {
+        /** @brief 超额 quota 状态 / Over-limit quota status. */
+        const auto over_limit = wspctl::domain::OperatorWorkspaceStatus::create(
+            test_runtime(), wspctl::domain::WorkspacePersistence::ready,
+            wspctl::domain::WorkspaceActivity::ready, *over_limit_quota);
+        expect(over_limit.has_value(), "create over-limit dashboard fixture");
+        if (over_limit.has_value()) {
+            /** @brief 超额 quota dashboard / Over-limit quota dashboard. */
+            const std::string over_limit_page =
+                cli::render_dashboard(*over_limit, cli::RenderOptions{
+                                                       .color = false,
+                                                       .interactive = false,
+                                                       .columns = 80U,
+                                                       .watching = false,
+                                                   });
+            expect(over_limit_page.find("DEGRADED") != std::string::npos &&
+                       over_limit_page.find('!') != std::string::npos,
+                   "quota overage changes aggregate health and uses a non-color cue");
+        }
+    }
+
+    /** @brief 尚无 workspace 的合法状态 / Valid status without a workspace. */
+    const auto absent = wspctl::domain::OperatorWorkspaceStatus::create(
+        test_runtime(), wspctl::domain::WorkspacePersistence::absent,
+        wspctl::domain::WorkspaceActivity::inactive, std::nullopt);
+    expect(absent.has_value(), "create missing-workspace dashboard fixture");
+    if (absent.has_value()) {
+        /** @brief 缺失 quota dashboard / Missing-quota dashboard. */
+        const std::string missing = cli::render_dashboard(*absent, cli::RenderOptions{
+                                                                       .color = false,
+                                                                       .interactive = false,
+                                                                       .columns = 80U,
+                                                                       .watching = false,
+                                                                   });
+        expect(missing.find("unavailable") != std::string::npos &&
+                   missing.find("EMPTY") != std::string::npos,
+               "missing workspace is informative rather than rendered as zero usage");
+    }
+
+    /** @brief 非交互 help / Non-interactive help. */
+    const std::string piped_help = cli::render_help(cli::RenderOptions{
+        .color = false,
+        .interactive = false,
+        .columns = 80U,
+        .watching = false,
+    });
+    expect(piped_help.find("______") == std::string::npos &&
+               piped_help.find('\x1b') == std::string::npos,
+           "non-interactive help omits ASCII logo and ANSI");
+
+    /** @brief 显式 plain 的交互 help / Explicitly plain interactive help. */
+    const std::string plain_tty_help = cli::render_help(cli::RenderOptions{
+        .color = false,
+        .interactive = true,
+        .columns = 80U,
+        .watching = false,
+    });
+    expect(plain_tty_help.find("______") == std::string::npos &&
+               plain_tty_help.find('\x1b') == std::string::npos,
+           "plain interactive help omits decorative logo for accessibility");
+
+    /** @brief 彩色交互 help / Colored interactive help. */
+    const std::string colored_tty_help = cli::render_help(cli::RenderOptions{
+        .color = true,
+        .interactive = true,
+        .columns = 80U,
+        .watching = false,
+    });
+    expect(colored_tty_help.find("______") != std::string::npos &&
+               colored_tty_help.find("\x1b[") != std::string::npos,
+           "capable interactive TTY receives the compact colored ASCII logo");
+
+    /** @brief 空 listing 路径 / Empty-listing path. */
+    const auto root_path = wspctl::domain::OperatorWorkspacePath::parse("/workspace");
+    expect(root_path.has_value(), "parse empty-listing fixture path");
+    if (root_path.has_value()) {
+        /** @brief 空 workspace listing / Empty workspace listing. */
+        const wspctl::domain::WorkspaceListing empty_listing{
+            .path = *root_path,
+            .entries = {},
+            .truncated = false,
+        };
+        /** @brief 空 listing 页面 / Empty-listing page. */
+        const std::string empty_page =
+            cli::render_listing_page(empty_listing, cli::RenderOptions{
+                                                        .color = false,
+                                                        .interactive = false,
+                                                        .columns = 16U,
+                                                        .watching = false,
+                                                    });
+        expect(empty_page.find("No entries") != std::string::npos &&
+                   empty_page.find('\x1b') == std::string::npos && all_lines_fit(empty_page, 16U),
+               "empty listing is explicit, plain, and narrow-terminal safe");
+    }
+}
+
+/**
+ * @brief 测试稳定退出码和 terminal-safe 可操作错误 / Test stable exit codes and terminal-safe,
+ * actionable errors.
+ */
+void test_operator_cli_failure_contract() {
+    /** @brief CLI presentation 命名空间别名 / CLI presentation namespace alias. */
+    namespace cli = wspctl::presentation::operator_cli;
+    expect(cli::exit_code_for(wspctl::make_error(wspctl::ErrorCode::not_found, "missing")) ==
+                   cli::ExitCode::not_found &&
+               cli::exit_code_for(wspctl::make_error(wspctl::ErrorCode::authentication_failed,
+                                                     "denied")) == cli::ExitCode::permission &&
+               cli::exit_code_for(wspctl::make_error(wspctl::ErrorCode::io_failure, "down")) ==
+                   cli::ExitCode::unavailable,
+           "map important operator failures to stable documented exit codes");
+    /** @brief 带控制字符的模拟错误 / Simulated error carrying control characters. */
+    std::string hostile_message{"down\n"};
+    hostile_message.push_back('\x1b');
+    hostile_message.append("[31m");
+    /** @brief 已安全渲染错误 / Safely rendered error. */
+    const std::string rendered =
+        cli::render_failure("dashboard query", wspctl::make_error(wspctl::ErrorCode::io_failure,
+                                                                  std::move(hostile_message)));
+    expect(rendered.find('\x1b') == std::string::npos &&
+               rendered.find("%0A%1B[31m") != std::string::npos &&
+               rendered.find("hint:") != std::string::npos,
+           "failure diagnostics encode controls and provide a next action");
 }
 
 /** @brief 测试 workspace logical-path 与 filename 编码领域约束 / Test workspace logical-path and
@@ -355,6 +701,10 @@ void test_reader_uses_upper_dirfd_and_refuses_symlink_traversal() {
  * @return 成功为 0 / Zero on success.
  */
 int main() {
+    test_operator_cli_typed_routing();
+    test_operator_cli_color_policy();
+    test_operator_dashboard_rendering();
+    test_operator_cli_failure_contract();
     test_domain_path_and_filename_encoding();
     test_endpoint_separation_policy();
     test_protocol_isolation_and_round_trip();

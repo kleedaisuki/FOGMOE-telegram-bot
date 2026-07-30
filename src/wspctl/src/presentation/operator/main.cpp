@@ -1,10 +1,15 @@
-#include "wspctl/domain/operator_workspace.hpp"
-#include "wspctl/domain/runtime.hpp"
+#include "wspctl/presentation/operator_cli.hpp"
 #include "wspctl/presentation/operator_gateway.hpp"
 
+#include <cerrno>
+#include <csignal>
 #include <cstdio>
 #include <string>
 #include <string_view>
+#include <time.h>
+#include <unistd.h>
+#include <variant>
+#include <vector>
 
 #ifndef WSPCTL_DEFAULT_OPERATOR_SOCKET
 /** @brief 非 host 安装构建不提供默认 endpoint / Non-host-install builds provide no default
@@ -14,202 +19,223 @@
 
 namespace {
 
+/** @brief operator CLI presentation 命名空间别名 / Operator CLI presentation namespace alias. */
+namespace cli = wspctl::presentation::operator_cli;
+
+/** @brief watch 是否收到 SIGINT / Whether watch has received SIGINT. */
+volatile std::sig_atomic_t g_interrupted{0};
+
+/** @brief dashboard refresh timer 的等待结果 / Wait result for the dashboard refresh timer. */
+enum class RefreshWait : unsigned char {
+    /** @brief 周期正常结束 / Refresh period elapsed normally. */
+    elapsed = 0,
+    /** @brief 用户发出 SIGINT / User sent SIGINT. */
+    interrupted = 1,
+    /** @brief timer syscall 失败 / Timer syscall failed. */
+    failed = 2,
+};
+
 /**
- * @brief 输出 `wspctl` operator inspection 用法 / Print `wspctl` operator-inspection usage.
- * @param stream 输出流 / Output stream.
+ * @brief 将 SIGINT 转换为可观测 watch 状态 / Convert SIGINT into observable watch state.
+ * @param signal_number 收到的 signal 编号 / Received signal number.
  */
-void print_usage(FILE* const stream) {
-    std::fputs(
-        "usage:\n"
-        "  wspctl [--socket ABSOLUTE_SOCKET] status --runtime RUNTIME_UUID\n"
-        "  wspctl [--socket ABSOLUTE_SOCKET] workspace ls --runtime RUNTIME_UUID [--path "
-        "/workspace]\n"
-        "\n"
-        "wspctl is a read-only operator inspection client. It never starts a runtime, executes\n"
-        "a command, writes a workspace, or reads file contents. workspace ls shows the persistent\n"
-        "OverlayFS upper layer rather than a synthetic merged lower+upper filesystem. Operator\n"
-        "sockets normally belong to root; installed host builds default to their CMake-fixed\n"
-        "operator endpoint, so invoke `sudo wspctl ...` unless deployment explicitly configures\n"
-        "another trusted operator UID. Non-host builds require --socket.\n",
-        stream);
+extern "C" void handle_interrupt(const int signal_number) noexcept {
+    if (signal_number == SIGINT) {
+        g_interrupted = 1;
+    }
 }
 
 /**
- * @brief 将任意 bytes 渲染为 terminal-safe ASCII / Render arbitrary bytes as terminal-safe ASCII.
- * @param value 待渲染 bytes / Bytes to render.
- * @param preserve_slash 是否保留 `/` / Whether to preserve `/`.
- * @return 只含安全 ASCII 与 `%HH` 的文本 / Text containing only safe ASCII and `%HH`.
+ * @brief 将完整字符串写入 stdio stream / Write a complete string to a stdio stream.
+ * @param stream 目标 stream / Destination stream.
+ * @param value 待写字符串 / String to write.
  */
-[[nodiscard]] std::string terminal_safe_text(const std::string_view value,
-                                             const bool preserve_slash) {
-    constexpr std::string_view kDigits{"0123456789ABCDEF"};
-    std::string rendered;
-    rendered.reserve(value.size() * 3U);
-    for (const unsigned char byte : value) {
-        const bool safe =
-            (byte >= static_cast<unsigned char>('a') && byte <= static_cast<unsigned char>('z')) ||
-            (byte >= static_cast<unsigned char>('A') && byte <= static_cast<unsigned char>('Z')) ||
-            (byte >= static_cast<unsigned char>('0') && byte <= static_cast<unsigned char>('9')) ||
-            byte == static_cast<unsigned char>('.') || byte == static_cast<unsigned char>('_') ||
-            byte == static_cast<unsigned char>('-') ||
-            (preserve_slash && byte == static_cast<unsigned char>('/'));
-        if (safe) {
-            rendered.push_back(static_cast<char>(byte));
-            continue;
+void write_text(FILE* const stream, const std::string& value) {
+    static_cast<void>(std::fwrite(value.data(), sizeof(char), value.size(), stream));
+}
+
+/**
+ * @brief 构造当前 stdout 的确定性渲染选项 / Build deterministic render options for current stdout.
+ * @param profile stdout 终端能力 / Stdout terminal capabilities.
+ * @param color 用户色彩策略 / User color policy.
+ * @param watching 是否为 watch dashboard / Whether this is a watch dashboard.
+ * @return 完整渲染选项 / Complete render options.
+ */
+[[nodiscard]] cli::RenderOptions make_render_options(const cli::TerminalProfile& profile,
+                                                     const cli::ColorMode color,
+                                                     const bool watching) noexcept {
+    return cli::RenderOptions{
+        .color = profile.use_color(color),
+        .interactive = profile.is_tty,
+        .columns = profile.columns,
+        .watching = watching,
+    };
+}
+
+/**
+ * @brief 安装 watch 的 SIGINT handler / Install the SIGINT handler for watch mode.
+ * @return 是否成功安装 / Whether installation succeeded.
+ */
+[[nodiscard]] bool install_interrupt_handler() noexcept {
+    /** @brief 新 SIGINT action / New SIGINT action. */
+    struct sigaction action {};
+    action.sa_handler = handle_interrupt;
+    if (sigemptyset(&action.sa_mask) != 0) {
+        return false;
+    }
+    action.sa_flags = 0;
+    return sigaction(SIGINT, &action, nullptr) == 0;
+}
+
+/**
+ * @brief 等待下一次 dashboard refresh 或 SIGINT / Wait for the next dashboard refresh or SIGINT.
+ * @param interval 刷新周期 / Refresh period.
+ * @return elapsed、interrupted 或 failed / Elapsed, interrupted, or failed.
+ */
+[[nodiscard]] RefreshWait wait_for_refresh(const std::chrono::seconds interval) noexcept {
+    /** @brief 尚需等待的 timespec / Remaining timespec to wait. */
+    timespec remaining{
+        .tv_sec = static_cast<time_t>(interval.count()),
+        .tv_nsec = 0,
+    };
+    while (g_interrupted == 0) {
+        /** @brief 被 signal 打断时内核返回的剩余时间 / Kernel-returned remaining time after a
+         * signal. */
+        timespec next{};
+        if (nanosleep(&remaining, &next) == 0) {
+            return g_interrupted == 0 ? RefreshWait::elapsed : RefreshWait::interrupted;
         }
-        rendered.push_back('%');
-        rendered.push_back(kDigits[(byte >> 4U) & 0x0fU]);
-        rendered.push_back(kDigits[byte & 0x0fU]);
-    }
-    return rendered;
-}
-
-/**
- * @brief 将 persistence 枚举写为稳定文本 / Render a persistence enum as stable text.
- * @param persistence 待渲染 persistence / Persistence to render.
- * @return 稳定 ASCII 名称 / Stable ASCII name.
- */
-[[nodiscard]] std::string_view
-persistence_name(const wspctl::domain::WorkspacePersistence persistence) noexcept {
-    switch (persistence) {
-    case wspctl::domain::WorkspacePersistence::absent:
-        return "absent";
-    case wspctl::domain::WorkspacePersistence::ready:
-        return "ready";
-    }
-    return "unknown";
-}
-
-/**
- * @brief 将 activity 枚举写为稳定文本 / Render an activity enum as stable text.
- * @param activity 待渲染 activity / Activity to render.
- * @return 稳定 ASCII 名称 / Stable ASCII name.
- */
-[[nodiscard]] std::string_view
-activity_name(const wspctl::domain::WorkspaceActivity activity) noexcept {
-    switch (activity) {
-    case wspctl::domain::WorkspaceActivity::inactive:
-        return "inactive";
-    case wspctl::domain::WorkspaceActivity::activating:
-        return "activating";
-    case wspctl::domain::WorkspaceActivity::ready:
-        return "ready";
-    case wspctl::domain::WorkspaceActivity::executing:
-        return "executing";
-    case wspctl::domain::WorkspaceActivity::retiring:
-        return "retiring";
-    case wspctl::domain::WorkspaceActivity::failed:
-        return "failed";
-    }
-    return "unknown";
-}
-
-/**
- * @brief 将 entry kind 渲染为单字母文本 / Render an entry kind as one-letter text.
- * @param kind 待渲染 entry kind / Entry kind to render.
- * @return 单字母稳定类型文本 / One-letter stable type text.
- */
-[[nodiscard]] char entry_kind_name(const wspctl::domain::WorkspaceEntryKind kind) noexcept {
-    switch (kind) {
-    case wspctl::domain::WorkspaceEntryKind::regular_file:
-        return 'f';
-    case wspctl::domain::WorkspaceEntryKind::directory:
-        return 'd';
-    case wspctl::domain::WorkspaceEntryKind::symbolic_link:
-        return 'l';
-    }
-    return '?';
-}
-
-/**
- * @brief 输出只读 runtime 状态 / Print a read-only runtime status.
- * @param status allowlisted runtime 状态 / Allowlisted runtime status.
- */
-void print_status(const wspctl::domain::OperatorWorkspaceStatus& status) {
-    std::printf("runtime=%s\n", status.runtime().value().c_str());
-    std::printf("persistence=%s\n", persistence_name(status.persistence()).data());
-    std::printf("activity=%s\n", activity_name(status.activity()).data());
-    if (!status.quota().has_value()) {
-        std::fputs(
-            "quota_used_bytes=-\nquota_hard_bytes=-\nquota_used_inodes=-\nquota_hard_inodes=-\n",
-            stdout);
-        return;
-    }
-    std::printf("quota_used_bytes=%llu\n",
-                static_cast<unsigned long long>(status.quota()->used_bytes()));
-    std::printf("quota_hard_bytes=%llu\n",
-                static_cast<unsigned long long>(status.quota()->hard_bytes()));
-    std::printf("quota_used_inodes=%llu\n",
-                static_cast<unsigned long long>(status.quota()->used_inodes()));
-    std::printf("quota_hard_inodes=%llu\n",
-                static_cast<unsigned long long>(status.quota()->hard_inodes()));
-}
-
-/**
- * @brief 输出一个安全编码的 workspace listing / Print one safely encoded workspace listing.
- * @param listing 有界 workspace listing / Bounded workspace listing.
- */
-void print_listing(const wspctl::domain::WorkspaceListing& listing) {
-    const std::string safe_path = terminal_safe_text(listing.path.value(), true);
-    std::printf("path=%s\n", safe_path.c_str());
-    std::printf("truncated=%s\n", listing.truncated ? "true" : "false");
-    std::fputs("kind\tsize_bytes\tencoded_name\n", stdout);
-    for (const wspctl::domain::WorkspaceEntry& entry : listing.entries) {
-        std::printf("%c\t%llu\t%s\n", entry_kind_name(entry.kind()),
-                    static_cast<unsigned long long>(entry.size_bytes()),
-                    entry.encoded_name().c_str());
-    }
-}
-
-/**
- * @brief 从命令行取出一个唯一 option 值 / Extract one unique option value from command-line
- * arguments.
- * @param argc 参数数 / Argument count.
- * @param argv 参数数组 / Argument vector.
- * @param begin 开始搜索的 index / Index at which to start searching.
- * @param option 所需 option 名 / Required option name.
- * @param output 输出值 / Output value.
- * @return 是否恰好取到一个值 / Whether exactly one value was found.
- */
-[[nodiscard]] bool take_unique_option(const int argc, char* const argv[], const int begin,
-                                      const std::string_view option, std::string& output) {
-    bool found{false};
-    for (int index = begin; index < argc; ++index) {
-        if (std::string_view(argv[index]) != option) {
-            continue;
+        if (errno != EINTR) {
+            return RefreshWait::failed;
         }
-        if (index + 1 >= argc || found) {
-            return false;
-        }
-        output = argv[index + 1];
-        found = true;
-        ++index;
+        remaining = next;
     }
-    return found;
+    return RefreshWait::interrupted;
 }
 
 /**
- * @brief 检查 argv 区间只由已知二值 option 组成 / Check an argv range contains only known binary
- * options.
- * @param argc 参数数 / Argument count.
- * @param argv 参数数组 / Argument vector.
- * @param begin 开始 index / Start index.
- * @param first 允许的第一个 option / First allowed option.
- * @param second 允许的第二个 option；空字符串表示无第二项 / Second allowed option; empty means
- * none.
- * @return 参数形状是否合法 / Whether the argument shape is valid.
+ * @brief 输出一个结构化 native 失败并返回稳定退出码 / Print one structured native failure and
+ * return its stable exit code.
+ * @param action 失败操作名 / Failed action name.
+ * @param error native 错误 / Native error.
+ * @return 稳定 CLI 退出码 / Stable CLI exit code.
  */
-[[nodiscard]] bool contains_only_binary_options(const int argc, char* const argv[], int begin,
-                                                const std::string_view first,
-                                                const std::string_view second) {
-    while (begin < argc) {
-        const std::string_view option(argv[begin]);
-        if ((option != first && option != second) || begin + 1 >= argc) {
-            return false;
-        }
-        begin += 2;
+[[nodiscard]] int report_failure(const std::string_view action, const wspctl::Error& error) {
+    write_text(stderr, cli::render_failure(action, error));
+    return static_cast<int>(cli::exit_code_for(error));
+}
+
+/**
+ * @brief 执行 status 只读查询 / Execute a read-only status query.
+ * @param command 类型化 status 命令 / Typed status command.
+ * @param invocation 完整 CLI 调用 / Complete CLI invocation.
+ * @param profile stdout 终端能力 / Stdout terminal capabilities.
+ * @return 稳定 CLI 退出码 / Stable CLI exit code.
+ */
+[[nodiscard]] int run_status(const cli::StatusCommand& command, const cli::Invocation& invocation,
+                             const cli::TerminalProfile& profile) {
+    /** @brief operator gateway / Operator gateway. */
+    const wspctl::presentation::OperatorGatewayClient client(invocation.socket_path);
+    /** @brief allowlisted 状态结果 / Allowlisted status result. */
+    const auto status = client.status(command.runtime);
+    if (!status) {
+        return report_failure("status query", status.error());
     }
-    return true;
+    if (profile.is_tty) {
+        write_text(stdout, cli::render_dashboard(
+                               *status, make_render_options(profile, invocation.color, false)));
+    } else {
+        write_text(stdout, cli::render_status_record(*status));
+    }
+    return static_cast<int>(cli::ExitCode::success);
+}
+
+/**
+ * @brief 执行 workspace ls 只读查询 / Execute a read-only workspace ls query.
+ * @param command 类型化 listing 命令 / Typed listing command.
+ * @param invocation 完整 CLI 调用 / Complete CLI invocation.
+ * @param profile stdout 终端能力 / Stdout terminal capabilities.
+ * @return 稳定 CLI 退出码 / Stable CLI exit code.
+ */
+[[nodiscard]] int run_listing(const cli::WorkspaceListCommand& command,
+                              const cli::Invocation& invocation,
+                              const cli::TerminalProfile& profile) {
+    /** @brief operator gateway / Operator gateway. */
+    const wspctl::presentation::OperatorGatewayClient client(invocation.socket_path);
+    /** @brief 有界 listing 结果 / Bounded listing result. */
+    const auto listing = client.list(command.runtime, command.path);
+    if (!listing) {
+        return report_failure("workspace listing", listing.error());
+    }
+    if (profile.is_tty) {
+        write_text(stdout, cli::render_listing_page(
+                               *listing, make_render_options(profile, invocation.color, false)));
+    } else {
+        write_text(stdout, cli::render_listing_record(*listing));
+    }
+    return static_cast<int>(cli::ExitCode::success);
+}
+
+/**
+ * @brief 执行一次性或 watch dashboard / Execute a one-shot or watch dashboard.
+ * @param command 类型化 dashboard 命令 / Typed dashboard command.
+ * @param invocation 完整 CLI 调用 / Complete CLI invocation.
+ * @param profile stdout 终端能力 / Stdout terminal capabilities.
+ * @return 稳定 CLI 退出码 / Stable CLI exit code.
+ */
+[[nodiscard]] int run_dashboard(const cli::DashboardCommand& command,
+                                const cli::Invocation& invocation,
+                                const cli::TerminalProfile& profile) {
+    if (command.watch && !profile.is_tty) {
+        std::fputs("wspctl: dashboard --watch requires stdout connected to a TTY\n"
+                   "hint: omit --watch for one pipe-friendly snapshot\n",
+                   stderr);
+        return static_cast<int>(cli::ExitCode::usage);
+    }
+    if (command.watch && !install_interrupt_handler()) {
+        std::fputs("wspctl: dashboard watch failed: cannot install SIGINT handler\n", stderr);
+        return static_cast<int>(cli::ExitCode::software);
+    }
+    /** @brief operator gateway / Operator gateway. */
+    const wspctl::presentation::OperatorGatewayClient client(invocation.socket_path);
+    /** @brief dashboard 渲染选项 / Dashboard render options. */
+    const cli::RenderOptions options =
+        make_render_options(profile, invocation.color, command.watch);
+    /** @brief 是否正在输出第一帧 / Whether the first frame is being emitted. */
+    bool first_frame{true};
+    while (g_interrupted == 0) {
+        /** @brief 最新 allowlisted 快照 / Latest allowlisted snapshot. */
+        const auto status = client.status(command.runtime);
+        if (!status) {
+            return report_failure("dashboard query", status.error());
+        }
+        if (!first_frame) {
+            if (options.color) {
+                std::fputs("\x1b[H\x1b[2J", stdout);
+            } else {
+                std::fputs("\n--- refresh ---\n", stdout);
+            }
+        }
+        write_text(stdout, cli::render_dashboard(*status, options));
+        static_cast<void>(std::fflush(stdout));
+        first_frame = false;
+        if (!command.watch) {
+            return static_cast<int>(cli::ExitCode::success);
+        }
+        /** @brief refresh timer 等待结果 / Refresh-timer wait result. */
+        const RefreshWait waited = wait_for_refresh(command.refresh);
+        if (waited == RefreshWait::failed) {
+            std::fputs("wspctl: dashboard watch failed: refresh timer could not be scheduled\n"
+                       "hint: retry the one-shot dashboard without --watch\n",
+                       stderr);
+            return static_cast<int>(cli::ExitCode::software);
+        }
+        if (waited == RefreshWait::interrupted) {
+            break;
+        }
+    }
+    std::fputs("\nwatch stopped\n", stderr);
+    return static_cast<int>(cli::ExitCode::interrupted);
 }
 
 } // namespace
@@ -218,87 +244,47 @@ void print_listing(const wspctl::domain::WorkspaceListing& listing) {
  * @brief wspctl operator inspection 入口 / wspctl operator-inspection entry point.
  * @param argc 参数数 / Argument count.
  * @param argv 参数数组 / Argument vector.
- * @return POSIX 退出码 / POSIX exit code.
+ * @return 稳定 POSIX/sysexits 风格退出码 / Stable POSIX/sysexits-style exit code.
  */
 int main(const int argc, char* argv[]) {
-    if (argc == 2 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
-        print_usage(stdout);
-        return 0;
+    /** @brief 不含 argv[0] 的只读参数 view / Read-only argument view excluding argv[0]. */
+    std::vector<std::string_view> arguments;
+    arguments.reserve(argc > 1 ? static_cast<std::size_t>(argc - 1) : 0U);
+    for (int index = 1; index < argc; ++index) {
+        arguments.emplace_back(argv[index]);
     }
-    int command_index{1};
-    std::string socket_path{WSPCTL_DEFAULT_OPERATOR_SOCKET};
-    if (argc > 1 && std::string_view(argv[1]) == "--socket") {
-        if (argc < 4) {
-            print_usage(stderr);
-            return 64;
+    /** @brief 类型化命令解析结果 / Typed command parse result. */
+    const auto invocation =
+        cli::parse_arguments(arguments, std::string_view{WSPCTL_DEFAULT_OPERATOR_SOCKET});
+    if (!invocation) {
+        std::fputs("wspctl: ", stderr);
+        write_text(stderr, invocation.error().message);
+        std::fputc('\n', stderr);
+        if (invocation.error().show_usage) {
+            std::fputs("hint: run wspctl --help\n", stderr);
         }
-        socket_path = argv[2];
-        command_index = 3;
+        return static_cast<int>(cli::ExitCode::usage);
     }
-    if (command_index >= argc || socket_path.empty()) {
-        print_usage(stderr);
-        return 64;
+
+    /** @brief stdout 终端能力快照 / Stdout terminal-capability snapshot. */
+    const cli::TerminalProfile profile = cli::detect_terminal_profile(STDOUT_FILENO);
+    if (std::holds_alternative<cli::HelpCommand>(invocation->command)) {
+        write_text(stdout,
+                   cli::render_help(make_render_options(profile, invocation->color, false)));
+        return static_cast<int>(cli::ExitCode::success);
     }
-    if (!wspctl::presentation::OperatorGatewayClient::validate_socket_path(socket_path)) {
-        std::fputs("wspctl: --socket must be an absolute AF_UNIX endpoint\n", stderr);
-        return 64;
+    if (const auto* const command = std::get_if<cli::StatusCommand>(&invocation->command);
+        command != nullptr) {
+        return run_status(*command, *invocation, profile);
     }
-    const std::string_view command(argv[command_index]);
-    wspctl::presentation::OperatorGatewayClient client(socket_path);
-    if (command == "status") {
-        std::string runtime_text;
-        if (!contains_only_binary_options(argc, argv, command_index + 1, "--runtime", "") ||
-            !take_unique_option(argc, argv, command_index + 1, "--runtime", runtime_text)) {
-            print_usage(stderr);
-            return 64;
-        }
-        const auto runtime = wspctl::domain::RuntimeId::parse(runtime_text);
-        if (!runtime) {
-            std::fputs("wspctl: --runtime must be a canonical lowercase UUID\n", stderr);
-            return 64;
-        }
-        const auto status = client.status(*runtime);
-        if (!status) {
-            std::fputs("wspctl: operator status query failed\n", stderr);
-            return status.error().code == wspctl::ErrorCode::not_found ? 66 : 69;
-        }
-        print_status(*status);
-        return 0;
+    if (const auto* const command = std::get_if<cli::WorkspaceListCommand>(&invocation->command);
+        command != nullptr) {
+        return run_listing(*command, *invocation, profile);
     }
-    if (command == "workspace" && argc >= command_index + 4 &&
-        std::string_view(argv[command_index + 1]) == "ls") {
-        std::string runtime_text;
-        std::string path_text{"/workspace"};
-        if (!contains_only_binary_options(argc, argv, command_index + 2, "--runtime", "--path") ||
-            !take_unique_option(argc, argv, command_index + 2, "--runtime", runtime_text)) {
-            print_usage(stderr);
-            return 64;
-        }
-        bool seen_path{false};
-        for (int index = command_index + 2; index < argc; index += 2) {
-            if (std::string_view(argv[index]) == "--path") {
-                if (seen_path) {
-                    print_usage(stderr);
-                    return 64;
-                }
-                path_text = argv[index + 1];
-                seen_path = true;
-            }
-        }
-        const auto runtime = wspctl::domain::RuntimeId::parse(runtime_text);
-        const auto path = wspctl::domain::OperatorWorkspacePath::parse(path_text);
-        if (!runtime || !path) {
-            std::fputs("wspctl: --runtime or --path is invalid\n", stderr);
-            return 64;
-        }
-        const auto listing = client.list(*runtime, *path);
-        if (!listing) {
-            std::fputs("wspctl: operator workspace listing failed\n", stderr);
-            return listing.error().code == wspctl::ErrorCode::not_found ? 66 : 69;
-        }
-        print_listing(*listing);
-        return 0;
+    if (const auto* const command = std::get_if<cli::DashboardCommand>(&invocation->command);
+        command != nullptr) {
+        return run_dashboard(*command, *invocation, profile);
     }
-    print_usage(stderr);
-    return 64;
+    std::fputs("wspctl: internal command routing error\n", stderr);
+    return static_cast<int>(cli::ExitCode::software);
 }
