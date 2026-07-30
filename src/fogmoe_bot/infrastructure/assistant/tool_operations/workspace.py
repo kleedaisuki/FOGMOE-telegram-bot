@@ -102,13 +102,20 @@ async def execute_run_bash(
         result = await runtime_process.run_bash(command)
     except WorkspaceInvocationOutcomeUnknownError as error:
         if error.request_id != command.request_id:
-            raise ValueError("Workspace journal returned an unexpected request ID") from error
+            raise ValueError(
+                "Workspace journal returned an unexpected request ID"
+            ) from error
         # This result is terminal for the current durable receipt. Releasing the claim would
         # retry the identical journal key and violate the native at-most-once boundary.
-        return {
+        outcome: dict[str, JsonValue] = {
             "status": "outcome_unknown",
             "replayed_by_runtime": False,
         }
+        if error.diagnostic_code is not None:
+            outcome["diagnostic_code"] = error.diagnostic_code
+        if error.diagnostic_message is not None:
+            outcome["diagnostic_message"] = error.diagnostic_message
+        return outcome
     return {
         "status": (
             "timed_out"

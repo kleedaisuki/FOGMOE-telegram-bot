@@ -74,6 +74,24 @@ class WorkspaceRuntimeProtocolError(WorkspaceRuntimeUnavailableError):
     """
 
 
+class WorkspaceQuotaRecoveryRequiredError(WorkspaceRuntimeUnavailableError):
+    """@brief quota 布局需要安全恢复 / The quota layout requires safe recovery.
+
+    @note 该错误发生在任何用户 invocation 被接收之前；它绝不表示命令副作用未知。
+        This error occurs before any user invocation is accepted and never means command side
+        effects are indeterminate.
+    """
+
+
+class WorkspaceBindingQuarantinedError(WorkspaceQuotaRecoveryRequiredError):
+    """@brief runtime quota binding 已被持久隔离 / The runtime quota binding is durably quarantined.
+
+    @note 自动恢复无法证明数据与 project binding 一致时使用；operator 修复前不得执行命令。
+        Used when automatic recovery cannot prove data/project-binding consistency; commands must
+        not run until an operator repairs the binding.
+    """
+
+
 class WorkspaceFileReplayNotFoundError(RuntimeError):
     """@brief native 已明确证明 payload journal 不存在 / Native explicitly proved that a payload journal does not exist.
 
@@ -115,10 +133,18 @@ class WorkspaceInvocationOutcomeUnknownError(RuntimeError):
         decides whether to issue a new invocation.
     """
 
-    def __init__(self, request_id: WorkspaceRequestId) -> None:
+    def __init__(
+        self,
+        request_id: WorkspaceRequestId,
+        *,
+        diagnostic_code: str | None = None,
+        diagnostic_message: str | None = None,
+    ) -> None:
         """@brief 构造不可判定结果异常 / Construct an indeterminate-outcome exception.
 
         @param request_id pending journal 的请求标识 / Request ID of the pending journal.
+        @param diagnostic_code native 安全机器码 / Safe native machine code.
+        @param diagnostic_message native 安全运维消息 / Safe native operator message.
         @return None / None.
         @raise TypeError 请求标识不是强类型值对象时抛出 /
             Raised when the request ID is not the strong value object.
@@ -130,6 +156,10 @@ class WorkspaceInvocationOutcomeUnknownError(RuntimeError):
             )
         self.request_id = request_id
         """@brief 结果不可判定的稳定请求标识 / Stable request ID with indeterminate outcome."""
+        self.diagnostic_code = _normalize_diagnostic_code(diagnostic_code)
+        """@brief 规范化 native 机器诊断码 / Normalized native diagnostic code."""
+        self.diagnostic_message = _normalize_diagnostic_message(diagnostic_message)
+        """@brief 规范化 native 运维消息 / Normalized native operator message."""
         super().__init__(f"Workspace invocation outcome is unknown: {request_id}")
 
 
@@ -162,8 +192,10 @@ def _normalize_diagnostic_message(value: str | None) -> str | None:
 
 
 __all__ = [
+    "WorkspaceBindingQuarantinedError",
     "WorkspaceFileReplayNotFoundError",
     "WorkspaceInvocationOutcomeUnknownError",
+    "WorkspaceQuotaRecoveryRequiredError",
     "WorkspaceRuntimeProtocolError",
     "WorkspaceRuntimeUnavailableError",
 ]

@@ -37,7 +37,9 @@ from fogmoe_bot.application.assistant.tools.catalog import (  # noqa: E402
     InvalidToolArguments,
 )
 from fogmoe_bot.application.workspace.errors import (  # noqa: E402
+    WorkspaceBindingQuarantinedError,
     WorkspaceInvocationOutcomeUnknownError,
+    WorkspaceQuotaRecoveryRequiredError,
     WorkspaceRuntimeProtocolError,
     WorkspaceRuntimeUnavailableError,
 )
@@ -463,7 +465,9 @@ class _SelectiveBlockingFactory:
         if key == self._blocked_key:
             self.blocked_entered.set()
             if not self.release.wait(timeout=3.0):
-                raise TimeoutError("test blocked RuntimeProcess factory was not released")
+                raise TimeoutError(
+                    "test blocked RuntimeProcess factory was not released"
+                )
         try:
             return self._processes[key]
         except KeyError as error:
@@ -479,6 +483,8 @@ class _RecordingRuntimeProcess:
         exit_code: int | None,
         timed_out: bool = False,
         outcome_unknown: bool = False,
+        diagnostic_code: str | None = None,
+        diagnostic_message: str | None = None,
     ) -> None:
         """@brief 配置返回结果 / Configure the returned result.
 
@@ -486,12 +492,16 @@ class _RecordingRuntimeProcess:
         @param timed_out 是否超时 / Whether the command timed out.
         @param outcome_unknown 是否报告不可判定的 journal outcome /
             Whether to report an indeterminate journal outcome.
+        @param diagnostic_code 不可判定结果的安全机器码 / Safe machine code for an indeterminate outcome.
+        @param diagnostic_message 不可判定结果的安全消息 / Safe message for an indeterminate outcome.
         @return None / None.
         """
 
         self.exit_code = exit_code
         self.timed_out = timed_out
         self.outcome_unknown = outcome_unknown
+        self.diagnostic_code = diagnostic_code
+        self.diagnostic_message = diagnostic_message
         self.commands: list[RunBashCommand] = []
 
     async def run_bash(self, command: RunBashCommand) -> RunBashResult:
@@ -503,7 +513,11 @@ class _RecordingRuntimeProcess:
 
         self.commands.append(command)
         if self.outcome_unknown:
-            raise WorkspaceInvocationOutcomeUnknownError(command.request_id)
+            raise WorkspaceInvocationOutcomeUnknownError(
+                command.request_id,
+                diagnostic_code=self.diagnostic_code,
+                diagnostic_message=self.diagnostic_message,
+            )
         return RunBashResult(
             stdout="stdout",
             stderr="stderr",
@@ -734,7 +748,9 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsInstance(result, InvalidToolArguments)
 
-    def test_catalog_rejects_command_and_stdin_that_native_cannot_transport(self) -> None:
+    def test_catalog_rejects_command_and_stdin_that_native_cannot_transport(
+        self,
+    ) -> None:
         """@brief catalog 在 receipt 前拒绝 native argv/NUL 不可表示的 payload / Catalog rejects payloads unrepresentable by native argv/NUL before a receipt.
 
         @return None / None.
@@ -805,7 +821,9 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
             return (key.value,)
 
         with (
-            mock.patch.object(database_module, "transaction", lambda: _FakeTransaction()),
+            mock.patch.object(
+                database_module, "transaction", lambda: _FakeTransaction()
+            ),
             mock.patch.object(database_module, "execute", fake_execute),
             mock.patch.object(database_module, "fetch_one", fake_fetch_one),
         ):
@@ -844,7 +862,9 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(factory.created_keys, [])
         await runner.close()
 
-    async def test_runner_is_lazy_cached_and_binds_native_idempotency_fields(self) -> None:
+    async def test_runner_is_lazy_cached_and_binds_native_idempotency_fields(
+        self,
+    ) -> None:
         """@brief Runner 懒创建一次 client，并传递稳定去重字段 / Runner lazily creates one client and passes stable deduplication fields.
 
         @return None / None.
@@ -866,7 +886,9 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(factory.created_keys, [key])
         self.assertEqual(len(factory.created_activation_ids), 1)
         self.assertTrue(factory.created_activation_ids[0].startswith("activation:"))
-        self.assertEqual(process.calls[0][0][0:4], ["/bin/bash", "--noprofile", "--norc", "-c"])
+        self.assertEqual(
+            process.calls[0][0][0:4], ["/bin/bash", "--noprofile", "--norc", "-c"]
+        )
         self.assertEqual(process.calls[0][1]["cwd"], "/workspace/project")
         self.assertNotIn("activation_id", process.calls[0][1])
         self.assertNotIn("activation_id", process.calls[1][1])
@@ -876,7 +898,9 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.12)
         self.assertEqual(process.close_count, 1)
 
-    async def test_add_file_reuses_cache_and_forwards_only_typed_ingress_fields(self) -> None:
+    async def test_add_file_reuses_cache_and_forwards_only_typed_ingress_fields(
+        self,
+    ) -> None:
         """@brief add_file 复用已缓存 handle，并仅向 native 转发受限 ingress 字段 / add_file reuses the cached handle and forwards only constrained ingress fields to native.
 
         @return None / None.
@@ -908,7 +932,9 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call["request_hash"], "b" * 64)
         await runner.close()
 
-    async def test_add_file_and_run_bash_never_mutate_one_workspace_concurrently(self) -> None:
+    async def test_add_file_and_run_bash_never_mutate_one_workspace_concurrently(
+        self,
+    ) -> None:
         """@brief add_file 与 run_bash 必须共享同一 per-runtime lock / add_file and run_bash must share one per-runtime lock.
 
         @return None / None.
@@ -961,7 +987,9 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
             await runner.add_file(_file_command())
         await runner.close()
 
-    async def test_slow_client_creation_does_not_block_another_runtime_key(self) -> None:
+    async def test_slow_client_creation_does_not_block_another_runtime_key(
+        self,
+    ) -> None:
         """@brief 一个 key 的慢 client 创建不串行化另一个 key / A slow client creation for one key does not serialize another key.
 
         @return None / None.
@@ -1100,8 +1128,10 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
                 runner.run_bash(_command(scope=scope_three, request_id="fifo:three"))
             )
             await _wait_until(
-                lambda: tuple(runner._execution_admission._ready_keys)
-                == (key_two, key_three)
+                lambda: (
+                    tuple(runner._execution_admission._ready_keys)
+                    == (key_two, key_three)
+                )
             )
 
             process_one.release.set()
@@ -1121,11 +1151,7 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
             process_three.release.set()
             await asyncio.gather(
                 first,
-                *(
-                    task
-                    for task in (second, third)
-                    if task is not None
-                ),
+                *(task for task in (second, third) if task is not None),
                 return_exceptions=True,
             )
             await runner.close()
@@ -1165,9 +1191,7 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
         try:
             self.assertTrue(await asyncio.to_thread(noisy_process.entered.wait, 1.0))
             noisy_second = asyncio.create_task(
-                runner.run_bash(
-                    _command(scope=noisy_scope, request_id="noisy:second")
-                )
+                runner.run_bash(_command(scope=noisy_scope, request_id="noisy:second"))
             )
             quiet = asyncio.create_task(
                 runner.run_bash(_command(scope=quiet_scope, request_id="quiet:first"))
@@ -1196,7 +1220,9 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
             )
             await runner.close()
 
-    async def test_same_runtime_commands_are_serialized_above_global_capacity(self) -> None:
+    async def test_same_runtime_commands_are_serialized_above_global_capacity(
+        self,
+    ) -> None:
         """@brief 即使全局容量更大，同一 runtime 的命令仍只能逐个执行 / Even above global capacity, commands from one runtime still execute one at a time.
 
         @return None / None.
@@ -1219,9 +1245,7 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
             second = asyncio.create_task(
                 runner.run_bash(_command(scope=scope, request_id="serial:second"))
             )
-            await _wait_until(
-                lambda: runner._cache[key].active_count == 2
-            )
+            await _wait_until(lambda: runner._cache[key].active_count == 2)
             await asyncio.sleep(0.02)
             self.assertEqual(len(process.calls), 1)
 
@@ -1237,7 +1261,9 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
             )
             await runner.close()
 
-    async def test_admission_cancellation_and_duplicate_release_do_not_leak_a_slot(self) -> None:
+    async def test_admission_cancellation_and_duplicate_release_do_not_leak_a_slot(
+        self,
+    ) -> None:
         """@brief 取消等待者与重复 release 都不能遗失公平调度 slot / Cancelling a waiter and double release must not lose a fair-scheduler slot.
 
         @return None / None.
@@ -1249,9 +1275,7 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
         final_key = WorkspaceRuntimeKey.new()
         first_lease = await scheduler.acquire(first_key)
         cancelled_waiter = asyncio.create_task(scheduler.acquire(cancelled_key))
-        await _wait_until(
-            lambda: tuple(scheduler._ready_keys) == (cancelled_key,)
-        )
+        await _wait_until(lambda: tuple(scheduler._ready_keys) == (cancelled_key,))
         cancelled_waiter.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await cancelled_waiter
@@ -1328,7 +1352,9 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
                 return_exceptions=True,
             )
 
-    async def test_cancellation_keeps_active_process_open_until_native_returns(self) -> None:
+    async def test_cancellation_keeps_active_process_open_until_native_returns(
+        self,
+    ) -> None:
         """@brief 取消调用方不能提前关闭仍在执行的 native client / Cancelling a caller cannot close a still-running native client early.
 
         @return None / None.
@@ -1427,7 +1453,9 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(lifecycle_task, timeout=1.0)
         self.assertEqual(process.close_count, 1)
 
-    async def test_lifecycle_cancellation_detaches_active_native_call_promptly(self) -> None:
+    async def test_lifecycle_cancellation_detaches_active_native_call_promptly(
+        self,
+    ) -> None:
         """@brief service cancellation 立即 detach active call，而非拖住 Bot shutdown / Service cancellation promptly detaches an active call instead of holding Bot shutdown.
 
         @return None / None.
@@ -1473,26 +1501,47 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
             await runner.run_bash(_command())
         await runner.close()
 
-    async def test_structured_pending_journal_error_becomes_outcome_unknown(self) -> None:
+    async def test_structured_pending_journal_error_becomes_outcome_unknown(
+        self,
+    ) -> None:
         """@brief 仅结构化 invocation_in_doubt 可终结为不可判定结果 / Only structured invocation_in_doubt terminates as an indeterminate outcome.
 
         @return None / None.
         """
 
-        process = _FakeNativeProcess(
-            execute_error=_NativeRuntimeProcessError("invocation_in_doubt")
+        native_error = _NativeRuntimeProcessError(
+            "invocation_in_doubt",
+            "  supervisor disconnected after command acceptance\n  ",
         )
+        process = _FakeNativeProcess(execute_error=native_error)
+        factory = _FakeFactory(process)
         runner = WspctlRuntimeProcess(
             registry=_StaticRegistry(WorkspaceRuntimeKey.new()),
-            process_factory=_FakeFactory(process),
+            process_factory=factory,
         )
-        with self.assertRaises(WorkspaceInvocationOutcomeUnknownError):
+        with self.assertRaises(WorkspaceInvocationOutcomeUnknownError) as captured:
             await runner.run_bash(_command())
+        self.assertEqual(captured.exception.diagnostic_code, "invocation_in_doubt")
+        self.assertEqual(
+            captured.exception.diagnostic_message,
+            "supervisor disconnected after command acceptance",
+        )
+        self.assertEqual(len(factory.created_activation_ids), 1)
+
+        process.execute_error = None
+        result_after_failure = await runner.run_bash(
+            _command(request_id="turn:after-failure:call:0")
+        )
+        self.assertEqual(result_after_failure.exit_code, 0)
+        self.assertEqual(len(factory.created_activation_ids), 2)
+        await _wait_until(lambda: process.close_count == 1)
         await runner.close()
 
         tool_runner = _RecordingRuntimeProcess(
             exit_code=None,
             outcome_unknown=True,
+            diagnostic_code="invocation_in_doubt",
+            diagnostic_message="supervisor disconnected after command acceptance",
         )
         result = await execute_run_bash(
             _tool_request(group_id=None, message_thread_id=None),
@@ -1501,8 +1550,52 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             result,
-            {"status": "outcome_unknown", "replayed_by_runtime": False},
+            {
+                "status": "outcome_unknown",
+                "replayed_by_runtime": False,
+                "diagnostic_code": "invocation_in_doubt",
+                "diagnostic_message": "supervisor disconnected after command acceptance",
+            },
         )
+
+    async def test_quota_recovery_codes_are_typed_unavailable_and_retire_handle(
+        self,
+    ) -> None:
+        """@brief quota recovery/quarantine 不得变成 outcome_unknown，且故障 handle 必须退役 /
+        Quota recovery/quarantine must not become outcome_unknown and the failed handle must retire.
+
+        @return None / None.
+        """
+
+        cases = (
+            ("quota_recovery_required", WorkspaceQuotaRecoveryRequiredError),
+            ("binding_quarantined", WorkspaceBindingQuarantinedError),
+        )
+        for code, expected_type in cases:
+            with self.subTest(code=code):
+                native_error = _NativeRuntimeProcessError(
+                    code, "quota binding requires operator recovery"
+                )
+                process = _FakeNativeProcess(execute_error=native_error)
+                factory = _FakeFactory(process)
+                runner = WspctlRuntimeProcess(
+                    registry=_StaticRegistry(WorkspaceRuntimeKey.new()),
+                    process_factory=factory,
+                )
+                with self.assertRaises(expected_type) as captured:
+                    await runner.run_bash(_command())
+                self.assertNotIsInstance(
+                    captured.exception, WorkspaceInvocationOutcomeUnknownError
+                )
+                self.assertEqual(captured.exception.diagnostic_code, code)
+                process.execute_error = None
+                recovered = await runner.run_bash(
+                    _command(request_id=f"turn:{code}:call:1")
+                )
+                self.assertTrue(recovered.succeeded)
+                self.assertEqual(len(factory.created_activation_ids), 2)
+                await _wait_until(lambda: process.close_count == 1)
+                await runner.close()
 
     async def test_structured_native_failure_preserves_safe_diagnostics(self) -> None:
         """@brief native 机器码与安全消息穿过应用异常 / Native machine code and safe message survive application translation.
@@ -1559,7 +1652,34 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(WorkspaceRuntimeUnavailableError):
                 factory.create(WorkspaceRuntimeKey.new(), "activation-test")
 
-    async def test_deadline_admission_never_dispatches_a_command_that_cannot_finish(self) -> None:
+    def test_native_constructor_preserves_quota_recovery_subtypes(self) -> None:
+        """@brief RuntimeProcess 构造期 quota 故障保留可操作类型 / Preserve actionable quota
+        subtypes raised while constructing RuntimeProcess.
+
+        @return None / None.
+        """
+
+        factory = WspctlRuntimeProcessFactory("/run/fogmoe-wspctl/wspctld.sock")
+        cases = (
+            ("quota_recovery_required", WorkspaceQuotaRecoveryRequiredError),
+            ("binding_quarantined", WorkspaceBindingQuarantinedError),
+        )
+        for code, expected_type in cases:
+            with self.subTest(code=code):
+                native_module = mock.Mock()
+                native_module.RuntimeProcess.side_effect = _NativeRuntimeProcessError(
+                    code, "quota binding requires operator recovery"
+                )
+                with mock.patch.object(
+                    importlib, "import_module", return_value=native_module
+                ):
+                    with self.assertRaises(expected_type) as captured:
+                        factory.create(WorkspaceRuntimeKey.new(), f"activation-{code}")
+                self.assertEqual(captured.exception.diagnostic_code, code)
+
+    async def test_deadline_admission_never_dispatches_a_command_that_cannot_finish(
+        self,
+    ) -> None:
         """@brief attempt 余量不足时不触碰 native/journal / Insufficient attempt headroom does not touch native or the journal.
 
         @return None / None.
@@ -1569,9 +1689,7 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
         request = _tool_request(
             group_id=None,
             message_thread_id=None,
-            execution_deadline_monotonic=(
-                asyncio.get_running_loop().time() + 10.0
-            ),
+            execution_deadline_monotonic=(asyncio.get_running_loop().time() + 10.0),
             timeout_seconds=30,
         )
         result = await execute_run_bash(
@@ -1590,7 +1708,9 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(remaining_seconds, 10)
         self.assertFalse(result["replayed_by_runtime"])
 
-    async def test_deadline_admission_preserves_requested_timeout_and_hash(self) -> None:
+    async def test_deadline_admission_preserves_requested_timeout_and_hash(
+        self,
+    ) -> None:
         """@brief 余量充足时传递原 timeout/hash，绝不动态缩短 / Sufficient headroom preserves the original timeout/hash without dynamic shortening.
 
         @return None / None.
@@ -1600,9 +1720,7 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
         request = _tool_request(
             group_id=None,
             message_thread_id=None,
-            execution_deadline_monotonic=(
-                asyncio.get_running_loop().time() + 60.0
-            ),
+            execution_deadline_monotonic=(asyncio.get_running_loop().time() + 60.0),
             timeout_seconds=30,
         )
         result = await execute_run_bash(
@@ -1618,7 +1736,9 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command.timeout_seconds, 30)
         self.assertEqual(str(command.request_hash), request.request_hash)
 
-    async def test_cache_entry_binds_activation_once_without_execute_override(self) -> None:
+    async def test_cache_entry_binds_activation_once_without_execute_override(
+        self,
+    ) -> None:
         """@brief 同一 cache entry 只在创建时绑定一次 activation，执行调用不得覆写它 / One cache entry binds an activation only at creation, and execute calls cannot override it.
 
         @return None / None.

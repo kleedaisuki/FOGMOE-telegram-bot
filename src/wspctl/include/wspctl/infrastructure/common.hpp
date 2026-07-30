@@ -31,6 +31,8 @@ enum class ErrorCode : unsigned short {
     io_failure,
     journal_conflict,
     invocation_in_doubt,
+    quota_recovery_required,
+    binding_quarantined,
     child_failure,
     internal,
 };

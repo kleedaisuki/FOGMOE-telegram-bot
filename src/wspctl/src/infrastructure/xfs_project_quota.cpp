@@ -80,9 +80,140 @@ constexpr std::string_view kWorkspaceLowerDirectoryName{"workspace-lower"};
 /** @brief 一次 crash recovery 最多扫描的 activation staging 子目录数 / Maximum activation-staging
  * children scanned in one crash recovery. */
 constexpr std::size_t kMaxActivationStagingEntries{256U};
+/** @brief project tree 允许的最大目录深度 / Maximum permitted project-tree directory depth. */
+constexpr std::size_t kMaxProjectTreeDepth{256U};
 /** @brief process-local suffix sequence for atomic registry temporary names / Process-local suffix
  * sequence for atomic registry temporary names. */
 std::atomic<std::uint64_t> g_temporary_sequence{0U};
+
+/**
+ * @brief 项目树校验所需的最小 XFS v5 bulkstat UAPI / Minimal XFS v5 bulkstat UAPI required for
+ * project-tree verification.
+ * @note 精确复制自 Linux 6.12 ``fs/xfs/libxfs/xfs_fs.h`` 的稳定 userspace ABI；发行版未安装
+ *       xfsprogs development header 时仍保持与内核契约一致。任何布局/尺寸不符都会在编译期
+ *       失败，运行期不支持 ioctl 则 fail closed。/ Copied exactly from the stable userspace ABI
+ *       in Linux 6.12 ``fs/xfs/libxfs/xfs_fs.h``. Layout mismatches fail at compile time, and a
+ *       kernel that does not support the ioctl fails closed at runtime.
+ * @see https://github.com/torvalds/linux/blob/v6.12/fs/xfs/libxfs/xfs_fs.h
+ */
+namespace xfs_bulkstat_uapi {
+
+/** @brief bulk inode request header / Bulk-inode request header. */
+struct BulkIreq final {
+    /** @brief first inode number / First inode number. */
+    std::uint64_t ino;
+    /** @brief request flags / Request flags. */
+    std::uint32_t flags;
+    /** @brief input record capacity / Input record capacity. */
+    std::uint32_t icount;
+    /** @brief output record count / Output record count. */
+    std::uint32_t ocount;
+    /** @brief optional allocation-group number / Optional allocation-group number. */
+    std::uint32_t agno;
+    /** @brief ABI-reserved zero words / ABI-reserved zero words. */
+    std::uint64_t reserved[5];
+};
+
+/** @brief XFS v5 bulkstat record / XFS v5 bulkstat record. */
+struct Bulkstat final {
+    /** @brief inode number / Inode number. */
+    std::uint64_t ino;
+    /** @brief logical size / Logical size. */
+    std::uint64_t size;
+    /** @brief allocated block count / Allocated block count. */
+    std::uint64_t blocks;
+    /** @brief XFS inode flags / XFS inode flags. */
+    std::uint64_t xflags;
+    /** @brief access time seconds / Access-time seconds. */
+    std::int64_t atime;
+    /** @brief modification time seconds / Modification-time seconds. */
+    std::int64_t mtime;
+    /** @brief change time seconds / Change-time seconds. */
+    std::int64_t ctime;
+    /** @brief birth time seconds / Birth-time seconds. */
+    std::int64_t btime;
+    /** @brief inode generation / Inode generation. */
+    std::uint32_t generation;
+    /** @brief owner UID / Owner UID. */
+    std::uint32_t uid;
+    /** @brief owner GID / Owner GID. */
+    std::uint32_t gid;
+    /** @brief XFS project ID / XFS project ID. */
+    std::uint32_t project_id;
+    /** @brief access-time nanoseconds / Access-time nanoseconds. */
+    std::uint32_t atime_nsec;
+    /** @brief modification-time nanoseconds / Modification-time nanoseconds. */
+    std::uint32_t mtime_nsec;
+    /** @brief change-time nanoseconds / Change-time nanoseconds. */
+    std::uint32_t ctime_nsec;
+    /** @brief birth-time nanoseconds / Birth-time nanoseconds. */
+    std::uint32_t btime_nsec;
+    /** @brief preferred block size / Preferred block size. */
+    std::uint32_t block_size;
+    /** @brief encoded device number / Encoded device number. */
+    std::uint32_t device;
+    /** @brief CoW extent-size hint in blocks / CoW extent-size hint in blocks. */
+    std::uint32_t cow_extent_size_blocks;
+    /** @brief extent-size hint in blocks / Extent-size hint in blocks. */
+    std::uint32_t extent_size_blocks;
+    /** @brief hard-link count / Hard-link count. */
+    std::uint32_t link_count;
+    /** @brief 32-bit data-fork extent count / 32-bit data-fork extent count. */
+    std::uint32_t extents;
+    /** @brief attribute-fork extent count / Attribute-fork extent count. */
+    std::uint32_t attribute_extents;
+    /** @brief record version / Record version. */
+    std::uint16_t version;
+    /** @brief inode fork offset / Inode fork offset. */
+    std::uint16_t fork_offset;
+    /** @brief sick metadata flags / Sick metadata flags. */
+    std::uint16_t sick;
+    /** @brief checked metadata flags / Checked metadata flags. */
+    std::uint16_t checked;
+    /** @brief inode type and permission mode / Inode type and permission mode. */
+    std::uint16_t mode;
+    /** @brief ABI padding / ABI padding. */
+    std::uint16_t pad2;
+    /** @brief 64-bit data-fork extent count / 64-bit data-fork extent count. */
+    std::uint64_t extents64;
+    /** @brief ABI-reserved zero words / ABI-reserved zero words. */
+    std::uint64_t pad[6];
+};
+
+/** @brief header-only ioctl encoding type / Header-only ioctl encoding type. */
+struct BulkstatRequestHeader final {
+    /** @brief request header / Request header. */
+    BulkIreq header;
+};
+
+/** @brief one-record userspace request buffer / One-record userspace request buffer. */
+struct BulkstatSingleRequest final {
+    /** @brief request header / Request header. */
+    BulkIreq header;
+    /** @brief one output record / One output record. */
+    Bulkstat record;
+};
+
+/** @brief request 64-bit extent counter / Request the 64-bit extent counter. */
+constexpr std::uint32_t kIreqNextents64{1U << 2U};
+/** @brief v5 inode record version / V5 inode record version. */
+constexpr std::uint16_t kBulkstatVersionV5{5U};
+/** @brief stable XFS v5 bulkstat ioctl number / Stable XFS v5 bulkstat ioctl number. */
+constexpr unsigned long kBulkstatIoctl{_IOR('X', 127, BulkstatRequestHeader)};
+
+static_assert(sizeof(BulkIreq) == 64U && alignof(BulkIreq) == 8U);
+static_assert(offsetof(BulkIreq, reserved) == 24U);
+static_assert(sizeof(Bulkstat) == 192U && alignof(Bulkstat) == 8U);
+static_assert(offsetof(Bulkstat, project_id) == 76U);
+static_assert(offsetof(Bulkstat, version) == 124U);
+static_assert(offsetof(Bulkstat, mode) == 132U);
+static_assert(offsetof(Bulkstat, extents64) == 136U);
+static_assert(sizeof(BulkstatRequestHeader) == 64U);
+static_assert(offsetof(BulkstatSingleRequest, record) == 64U);
+static_assert(sizeof(BulkstatSingleRequest) == 256U);
+static_assert(_IOC_SIZE(kBulkstatIoctl) == sizeof(BulkstatRequestHeader));
+
+} // namespace xfs_bulkstat_uapi
 
 /**
  * @brief quota pair 的持久化恢复状态 / Persisted recovery state of a quota pair.
@@ -188,6 +319,37 @@ private:
 };
 
 /**
+ * @brief DIR stream 的 RAII owner / RAII owner for a DIR stream.
+ */
+class DirectoryStream final {
+public:
+    /**
+     * @brief 接管一个 stream / Take ownership of one stream.
+     * @param stream 要接管的 stream / Stream to own.
+     */
+    explicit DirectoryStream(DIR* const stream = nullptr) noexcept : stream_(stream) {}
+    /** @brief 析构时关闭 stream / Close the stream on destruction. */
+    ~DirectoryStream() {
+        if (stream_ != nullptr) {
+            static_cast<void>(closedir(stream_));
+        }
+    }
+    /** @brief stream 不能复制 / Streams cannot be copied. */
+    DirectoryStream(const DirectoryStream&) = delete;
+    /** @brief stream 不能复制赋值 / Streams cannot be copy-assigned. */
+    DirectoryStream& operator=(const DirectoryStream&) = delete;
+    /**
+     * @brief 取得借用 stream / Get the borrowed stream.
+     * @return 借用 stream / Borrowed stream.
+     */
+    [[nodiscard]] DIR* get() const noexcept { return stream_; }
+
+private:
+    /** @brief 被拥有的 directory stream / Owned directory stream. */
+    DIR* stream_;
+};
+
+/**
  * @brief 一个 activation staging 目录的不可重用身份 / Non-reusable identity of one
  * activation-staging directory.
  */
@@ -281,6 +443,29 @@ struct ActivationStagingParent final {
 }
 
 /**
+ * @brief 判断 metadata 是否为可收紧的 root-owned 真实目录 / Check whether metadata is a trusted
+ * root-owned real directory that may be tightened.
+ * @param metadata 待判断的 inode metadata / Inode metadata to inspect.
+ * @return root owner 且 group/other 不可写时为真 / True for a root-owned directory not writable
+ * by group or other.
+ */
+[[nodiscard]] bool is_trusted_root_owned_directory(const struct stat& metadata) noexcept {
+    return S_ISDIR(metadata.st_mode) && metadata.st_uid == 0U &&
+           (metadata.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+/**
+ * @brief 判断 metadata 是否满足精确 private root directory 契约 / Check whether metadata meets the
+ * exact private-root-directory contract.
+ * @param metadata 待判断的 inode metadata / Inode metadata to inspect.
+ * @return 精确 root:root 0700 真实目录时为真 / True for an exact root:root 0700 real directory.
+ */
+[[nodiscard]] bool is_private_root_owned_directory(const struct stat& metadata) noexcept {
+    return S_ISDIR(metadata.st_mode) && metadata.st_uid == 0U && metadata.st_gid == 0U &&
+           (metadata.st_mode & 07777U) == 0700U;
+}
+
+/**
  * @brief 校验已存在目录为 root-owned private directory / Validate an existing directory is
  * root-owned and private.
  * @param path 要校验的路径 / Path to validate.
@@ -294,11 +479,10 @@ struct ActivationStagingParent final {
     if (lstat(path.c_str(), &metadata) != 0) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "lstat " + std::string(purpose)));
     }
-    if (!S_ISDIR(metadata.st_mode) || metadata.st_uid != 0U ||
-        (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+    if (!is_private_root_owned_directory(metadata)) {
         return std::unexpected(
             make_error(ErrorCode::io_failure,
-                       std::string(purpose) + " is not a private root-owned directory"));
+                       std::string(purpose) + " is not an exact root:root 0700 directory"));
     }
     return {};
 }
@@ -323,6 +507,83 @@ struct ActivationStagingParent final {
 }
 
 /**
+ * @brief 通过稳定 FD 创建或收紧一个 root-owned private directory / Create or tighten a
+ * root-owned private directory through stable FDs.
+ * @param path 直接父目录已存在的目标目录 / Target directory whose direct parent exists.
+ * @param purpose 诊断语义 / Diagnostic purpose.
+ * @param allow_creation 是否允许创建缺失目录 / Whether a missing directory may be created.
+ * @return 成功或 fail-closed I/O/ownership 错误 / Success or a fail-closed I/O/ownership error.
+ * @note 只有既有 root-owned 且 group/other 不可写的目录可收紧；所有 chown/chmod/readback
+ *       均作用于打开后的 inode。/ Only an existing root-owned directory that is not writable by
+ *       group/other may be tightened; chown, chmod, and readback all operate on the opened inode.
+ */
+[[nodiscard]] Result<void> converge_private_directory_fd(const std::filesystem::path& path,
+                                                         const std::string_view purpose,
+                                                         const bool allow_creation) {
+    /** @brief direct-parent path / Direct-parent path. */
+    const std::filesystem::path parent_path = path.parent_path();
+    /** @brief single safe basename / Single safe basename. */
+    const std::string name = path.filename().string();
+    if (parent_path.empty() || !is_safe_component(name)) {
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "unsafe private-directory target"));
+    }
+    /** @brief stable parent-directory FD / Stable parent-directory FD. */
+    FileDescriptor parent_fd(
+        open(parent_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    if (parent_fd.get() < 0) {
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "open parent of " + std::string(purpose)));
+    }
+    /** @brief whether this call created the target / Whether this call created the target. */
+    bool created{false};
+    if (allow_creation) {
+        if (mkdirat(parent_fd.get(), name.c_str(), 0700) == 0) {
+            created = true;
+        } else if (errno != EEXIST) {
+            return std::unexpected(
+                errno_error(ErrorCode::io_failure, "mkdir " + std::string(purpose)));
+        }
+    }
+    /** @brief stable no-follow target-directory FD / Stable no-follow target-directory FD. */
+    FileDescriptor descriptor(
+        openat(parent_fd.get(), name.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    if (descriptor.get() < 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "open " + std::string(purpose)));
+    }
+    /** @brief target metadata before any mutation / Target metadata before any mutation. */
+    struct stat metadata {};
+    if (fstat(descriptor.get(), &metadata) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "fstat " + std::string(purpose)));
+    }
+    if (!is_trusted_root_owned_directory(metadata)) {
+        return std::unexpected(make_error(
+            ErrorCode::io_failure,
+            std::string(purpose) +
+                " is not a trusted root-owned directory; refusing ownership or mode repair"));
+    }
+    if (fchown(descriptor.get(), 0, 0) != 0 || fchmod(descriptor.get(), 0700) != 0 ||
+        fsync(descriptor.get()) != 0) {
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "tighten " + std::string(purpose)));
+    }
+    /** @brief target metadata after FD-based repair / Target metadata after FD-based repair. */
+    struct stat readback {};
+    if (fstat(descriptor.get(), &readback) != 0 || !is_private_root_owned_directory(readback) ||
+        readback.st_dev != metadata.st_dev || readback.st_ino != metadata.st_ino) {
+        return std::unexpected(
+            make_error(ErrorCode::io_failure,
+                       std::string(purpose) + " failed exact root:root 0700 identity readback"));
+    }
+    if ((created || metadata.st_gid != 0U || (metadata.st_mode & 07777U) != 0700U) &&
+        fsync(parent_fd.get()) != 0) {
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "fsync parent of " + std::string(purpose)));
+    }
+    return {};
+}
+
+/**
  * @brief 创建或收紧一个 root-owned private directory / Create or tighten one root-owned private
  * directory.
  * @param path 直接父目录已存在的目标目录 / Target directory whose direct parent exists.
@@ -331,21 +592,19 @@ struct ActivationStagingParent final {
  */
 [[nodiscard]] Result<void> ensure_private_directory(const std::filesystem::path& path,
                                                     const std::string_view purpose) {
-    if (mkdir(path.c_str(), 0700) != 0 && errno != EEXIST) {
-        return std::unexpected(errno_error(ErrorCode::io_failure, "mkdir " + std::string(purpose)));
-    }
-    if (const auto valid = validate_private_directory(path, purpose); !valid) {
-        return std::unexpected(valid.error());
-    }
-    if (chmod(path.c_str(), 0700) != 0) {
-        return std::unexpected(errno_error(ErrorCode::io_failure, "chmod " + std::string(purpose)));
-    }
-    if (const std::filesystem::path parent = path.parent_path(); !parent.empty()) {
-        if (const auto synced = sync_directory(parent, "quota directory parent"); !synced) {
-            return std::unexpected(synced.error());
-        }
-    }
-    return sync_directory(path, purpose);
+    return converge_private_directory_fd(path, purpose, true);
+}
+
+/**
+ * @brief 仅收紧一个必须已存在的 root-owned private directory / Tighten one root-owned private
+ * directory that must already exist.
+ * @param path 必须已存在的目录 / Directory that must already exist.
+ * @param purpose 诊断语义 / Diagnostic purpose.
+ * @return 成功或 I/O/ownership 错误 / Success or an I/O/ownership error.
+ */
+[[nodiscard]] Result<void> tighten_existing_private_directory(const std::filesystem::path& path,
+                                                              const std::string_view purpose) {
+    return converge_private_directory_fd(path, purpose, false);
 }
 
 /**
@@ -796,10 +1055,16 @@ struct ActivationStagingParent final {
     if (!*runtimes_exists) {
         return {};
     }
-    if (const auto valid =
-            validate_private_directory(runtimes_directory, "runtime state directory");
-        !valid) {
-        return std::unexpected(valid.error());
+    /** @brief runtime parent metadata inspected without following symlinks /
+     * Runtime-parent metadata inspected without following symlinks. */
+    struct stat runtimes_metadata {};
+    if (lstat(runtimes_directory.c_str(), &runtimes_metadata) != 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "lstat runtime state directory"));
+    }
+    if (!is_trusted_root_owned_directory(runtimes_metadata)) {
+        return std::unexpected(
+            make_error(ErrorCode::sandbox_preflight_failed,
+                       "runtime state directory is not trusted root-owned state"));
     }
     /** @brief iterator construction error / Iterator construction error. */
     std::error_code error;
@@ -993,11 +1258,58 @@ read_project_quota_accounting(const std::filesystem::path& mount_path,
 }
 
 /**
- * @brief 设置一个目录的 project ID 和 PROJINHERIT 并读回 / Set and read back a directory's project
- * ID and PROJINHERIT.
+ * @brief 在已验证目录 FD 上设置并持久化 project ID 与 PROJINHERIT / Set and persist a project ID
+ * and PROJINHERIT on an already-validated directory FD.
+ * @param descriptor 已由调用方验证身份与 owner 的目录 FD / Directory FD whose identity and owner
+ * were validated by the caller.
+ * @param project_id expected project ID / Expected project ID.
+ * @param purpose 诊断语义 / Diagnostic purpose.
+ * @return 成功或 ioctl/fsync/readback 错误 / Success or an ioctl/fsync/readback error.
+ * @note 此底层函数不决定 owner 策略；root-owned layout 与 Agent-owned upper 必须先走各自的
+ *       allowlist 验证。/ This low-level function does not decide owner policy; root-owned layout
+ *       and the Agent-owned upper must first pass their distinct allowlist checks.
+ */
+[[nodiscard]] Result<void> assign_project_attributes_fd(const int descriptor,
+                                                        const std::uint32_t project_id,
+                                                        const std::string_view purpose) {
+    if (descriptor < 0) {
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid XFS project-directory FD"));
+    }
+    /** @brief existing XFS inode attributes / Existing XFS inode attributes. */
+    fsxattr attributes{};
+    if (ioctl(descriptor, FS_IOC_FSGETXATTR, &attributes) != 0) {
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure,
+                        "FS_IOC_FSGETXATTR before " + std::string(purpose) + " assignment"));
+    }
+    attributes.fsx_projid = project_id;
+    attributes.fsx_xflags |= FS_XFLAG_PROJINHERIT;
+    if (ioctl(descriptor, FS_IOC_FSSETXATTR, &attributes) != 0 || fsync(descriptor) != 0) {
+        return std::unexpected(errno_error(
+            ErrorCode::io_failure, "persist " + std::string(purpose) + " project assignment"));
+    }
+    /** @brief assignment readback attributes / Assignment readback attributes. */
+    fsxattr readback{};
+    if (ioctl(descriptor, FS_IOC_FSGETXATTR, &readback) != 0) {
+        return std::unexpected(errno_error(
+            ErrorCode::io_failure, "FS_IOC_FSGETXATTR " + std::string(purpose) + " readback"));
+    }
+    if (readback.fsx_projid != project_id || (readback.fsx_xflags & FS_XFLAG_PROJINHERIT) == 0U) {
+        return std::unexpected(
+            make_error(ErrorCode::io_failure,
+                       std::string(purpose) +
+                           " project ID or PROJINHERIT differs from the required contract"));
+    }
+    return {};
+}
+
+/**
+ * @brief 设置一个 root-owned 目录的 project ID 和 PROJINHERIT 并读回 / Set and read back a
+ * root-owned directory's project ID and PROJINHERIT.
  * @param path root-owned directory / Root-owned directory.
  * @param project_id expected project ID / Expected project ID.
- * @return 成功或 ioctl/readback 错误 / Success or an ioctl/readback error.
+ * @return 成功或 owner/ioctl/readback 错误 / Success or an owner/ioctl/readback error.
  */
 [[nodiscard]] Result<void> assign_project_directory(const std::filesystem::path& path,
                                                     const std::uint32_t project_id) {
@@ -1013,42 +1325,7 @@ read_project_quota_accounting(const std::filesystem::path& mount_path,
         return std::unexpected(
             make_error(ErrorCode::io_failure, "XFS project directory is not private root-owned"));
     }
-    /** @brief existing XFS inode attributes / Existing XFS inode attributes. */
-    fsxattr attributes{};
-    if (ioctl(descriptor.get(), FS_IOC_FSGETXATTR, &attributes) != 0) {
-        return std::unexpected(
-            errno_error(ErrorCode::io_failure, "FS_IOC_FSGETXATTR before project assignment"));
-    }
-    attributes.fsx_projid = project_id;
-    attributes.fsx_xflags |= FS_XFLAG_PROJINHERIT;
-    if (ioctl(descriptor.get(), FS_IOC_FSSETXATTR, &attributes) != 0) {
-        return std::unexpected(
-            errno_error(ErrorCode::io_failure, "FS_IOC_FSSETXATTR project assignment"));
-    }
-    /** @brief assignment readback attributes / Assignment readback attributes. */
-    fsxattr readback{};
-    if (ioctl(descriptor.get(), FS_IOC_FSGETXATTR, &readback) != 0) {
-        return std::unexpected(
-            errno_error(ErrorCode::io_failure, "FS_IOC_FSGETXATTR project assignment readback"));
-    }
-    if (readback.fsx_projid != project_id || (readback.fsx_xflags & FS_XFLAG_PROJINHERIT) == 0U) {
-        return std::unexpected(make_error(
-            ErrorCode::io_failure,
-            "XFS project ID or PROJINHERIT readback differs from the required contract"));
-    }
-    return {};
-}
-
-/**
- * @brief 判断 metadata 是否属于 private root-owned directory / Check whether metadata belongs to a
- * private root-owned directory.
- * @param metadata 待判断的 inode metadata / Inode metadata to inspect.
- * @return 是 private root-owned directory 时为真 / True when this is a private root-owned
- * directory.
- */
-[[nodiscard]] bool is_private_root_owned_directory(const struct stat& metadata) noexcept {
-    return S_ISDIR(metadata.st_mode) && metadata.st_uid == 0U &&
-           (metadata.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+    return assign_project_attributes_fd(descriptor.get(), project_id, "XFS project directory");
 }
 
 /**
@@ -1103,6 +1380,325 @@ read_project_quota_accounting(const std::filesystem::path& mount_path,
 }
 
 /**
+ * @brief 比较两次 no-follow stat 的目录项身份 / Compare entry identity from two no-follow stat
+ * observations.
+ * @param left earlier metadata / Earlier metadata.
+ * @param right later metadata / Later metadata.
+ * @return device、inode 与 mode 完全相同时为真 / True when device, inode, and mode are identical.
+ */
+[[nodiscard]] bool same_entry_identity(const struct stat& left, const struct stat& right) noexcept {
+    return left.st_dev == right.st_dev && left.st_ino == right.st_ino &&
+           left.st_mode == right.st_mode;
+}
+
+/**
+ * @brief 比较目录扫描前后的稳定快照 / Compare stable directory snapshots before and after a scan.
+ * @param left earlier metadata / Earlier metadata.
+ * @param right later metadata / Later metadata.
+ * @return 身份、mtime 与 ctime 未变化时为真 / True when identity, mtime, and ctime are unchanged.
+ */
+[[nodiscard]] bool same_directory_snapshot(const struct stat& left,
+                                           const struct stat& right) noexcept {
+    return same_entry_identity(left, right) && left.st_mtim.tv_sec == right.st_mtim.tv_sec &&
+           left.st_mtim.tv_nsec == right.st_mtim.tv_nsec &&
+           left.st_ctim.tv_sec == right.st_ctim.tv_sec &&
+           left.st_ctim.tv_nsec == right.st_ctim.tv_nsec;
+}
+
+/**
+ * @brief 用 v5 bulkstat 按精确 inode 读取 project metadata / Read project metadata for one exact
+ * inode through v5 bulkstat.
+ * @param mount_fd 已打开 XFS mount FD / Open XFS mount FD.
+ * @param inode exact inode number / Exact inode number.
+ * @return kernel bulkstat record 或 fail-closed 错误 / Kernel bulkstat record or a fail-closed
+ * error.
+ */
+[[nodiscard]] Result<xfs_bulkstat_uapi::Bulkstat> read_xfs_bulkstat_inode(const int mount_fd,
+                                                                          const ino_t inode) {
+    if (mount_fd < 0 || inode == 0U) {
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid XFS bulkstat inode request"));
+    }
+    /** @brief single-record request and output buffer / Single-record request and output buffer. */
+    xfs_bulkstat_uapi::BulkstatSingleRequest request{};
+    request.header.ino = static_cast<std::uint64_t>(inode);
+    request.header.flags = xfs_bulkstat_uapi::kIreqNextents64;
+    request.header.icount = 1U;
+    if (ioctl(mount_fd, xfs_bulkstat_uapi::kBulkstatIoctl, &request) != 0) {
+        if (errno == ENOTTY || errno == EOPNOTSUPP || errno == EINVAL) {
+            return std::unexpected(
+                make_error(ErrorCode::io_failure,
+                           "kernel/XFS ABI does not support required v5 single-inode bulkstat"));
+        }
+        return std::unexpected(errno_error(ErrorCode::io_failure, "XFS_IOC_BULKSTAT single inode"));
+    }
+    if (request.header.ocount != 1U || request.record.ino != static_cast<std::uint64_t>(inode)) {
+        return std::unexpected(make_error(ErrorCode::io_failure,
+                                          "XFS bulkstat did not return the exact requested inode"));
+    }
+    return request.record;
+}
+
+/**
+ * @brief 将 no-follow stat 与 XFS bulkstat 的 project contract 交叉验证 / Cross-check a no-follow
+ * stat observation against the XFS bulkstat project contract.
+ * @param mount_fd 已打开 XFS mount FD / Open XFS mount FD.
+ * @param metadata no-follow metadata / No-follow metadata.
+ * @param project_id expected project ID / Expected project ID.
+ * @param purpose diagnostic purpose / Diagnostic purpose.
+ * @return 成功或 fail-closed mismatch / Success or a fail-closed mismatch.
+ */
+[[nodiscard]] Result<void> verify_inode_project_bulkstat(const int mount_fd,
+                                                         const struct stat& metadata,
+                                                         const std::uint32_t project_id,
+                                                         const std::string_view purpose) {
+    const auto record = read_xfs_bulkstat_inode(mount_fd, metadata.st_ino);
+    if (!record) {
+        return std::unexpected(record.error());
+    }
+    const bool supported_version = record->version == xfs_bulkstat_uapi::kBulkstatVersionV5;
+    const bool identity_matches =
+        record->ino == static_cast<std::uint64_t>(metadata.st_ino) &&
+        record->mode == static_cast<std::uint16_t>(metadata.st_mode) &&
+        record->uid == static_cast<std::uint32_t>(metadata.st_uid) &&
+        record->gid == static_cast<std::uint32_t>(metadata.st_gid) &&
+        record->link_count == static_cast<std::uint32_t>(metadata.st_nlink);
+    if (!supported_version || record->sick != 0U || !identity_matches) {
+        return std::unexpected(
+            make_error(ErrorCode::io_failure,
+                       std::string(purpose) +
+                           " inode metadata is unsupported, sick, or changed during bulkstat"));
+    }
+    if (record->project_id != project_id) {
+        return std::unexpected(make_error(
+            ErrorCode::io_failure,
+            std::string(purpose) + " contains an inode assigned to another XFS project"));
+    }
+    if (S_ISDIR(metadata.st_mode) &&
+        (record->xflags & static_cast<std::uint64_t>(FS_XFLAG_PROJINHERIT)) == 0U) {
+        return std::unexpected(
+            make_error(ErrorCode::io_failure,
+                       std::string(purpose) + " contains a directory without PROJINHERIT"));
+    }
+    return {};
+}
+
+/**
+ * @brief 从一个已打开目录递归校验所有直接与间接 inode / Recursively validate every direct and
+ * indirect inode below one open directory.
+ * @param mount_fd opened XFS mount FD / Opened XFS mount FD.
+ * @param directory_fd opened current directory FD / Opened current-directory FD.
+ * @param expected_device required filesystem device / Required filesystem device.
+ * @param project_id expected project ID / Expected project ID.
+ * @param maximum_inodes hard traversal bound / Hard traversal bound.
+ * @param observed_inodes mutable observed inode-entry count / Mutable observed inode-entry count.
+ * @param directory_inodes visited directory inode set / Set of visited directory inodes.
+ * @param depth current recursion depth / Current recursion depth.
+ * @param purpose diagnostic purpose / Diagnostic purpose.
+ * @return 成功或 fail-closed traversal/mismatch 错误 / Success or a fail-closed traversal/mismatch
+ * error.
+ */
+[[nodiscard]] Result<void>
+verify_project_tree_directory(const int mount_fd, const int directory_fd,
+                              const dev_t expected_device, const std::uint32_t project_id,
+                              const std::uint64_t maximum_inodes, std::uint64_t& observed_inodes,
+                              std::unordered_set<std::uint64_t>& directory_inodes,
+                              const std::size_t depth, const std::string_view purpose) {
+    if (depth > kMaxProjectTreeDepth) {
+        return std::unexpected(
+            make_error(ErrorCode::io_failure, "XFS project tree exceeds maximum directory depth"));
+    }
+    /** @brief current directory snapshot before enumeration /
+     * Current-directory snapshot before enumeration. */
+    struct stat directory_before {};
+    if (fstat(directory_fd, &directory_before) != 0 || directory_before.st_dev != expected_device ||
+        !S_ISDIR(directory_before.st_mode)) {
+        return std::unexpected(
+            make_error(ErrorCode::io_failure, "XFS project directory crossed a filesystem"));
+    }
+    /** @brief duplicate FD consumed by fdopendir / Duplicate FD consumed by fdopendir. */
+    const int scan_fd = fcntl(directory_fd, F_DUPFD_CLOEXEC, 3);
+    if (scan_fd < 0) {
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "duplicate XFS project directory FD"));
+    }
+    /** @brief owned directory stream / Owned directory stream. */
+    DirectoryStream stream(fdopendir(scan_fd));
+    if (stream.get() == nullptr) {
+        /** @brief fdopendir failure errno / fdopendir failure errno. */
+        const int saved_errno = errno;
+        static_cast<void>(close(scan_fd));
+        errno = saved_errno;
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "open XFS project directory stream"));
+    }
+    for (;;) {
+        errno = 0;
+        /** @brief next directory entry / Next directory entry. */
+        dirent* const entry = readdir(stream.get());
+        if (entry == nullptr) {
+            if (errno != 0) {
+                return std::unexpected(
+                    errno_error(ErrorCode::io_failure, "scan XFS project directory"));
+            }
+            break;
+        }
+        const std::string_view name{entry->d_name};
+        if (name == "." || name == "..") {
+            continue;
+        }
+        if (!is_safe_component(name)) {
+            return std::unexpected(
+                make_error(ErrorCode::io_failure, "XFS project tree contains an unsafe name"));
+        }
+        /** @brief no-follow metadata before bulkstat / No-follow metadata before bulkstat. */
+        struct stat before {};
+        if (fstatat(directory_fd, entry->d_name, &before, AT_SYMLINK_NOFOLLOW) != 0) {
+            return std::unexpected(
+                errno_error(ErrorCode::io_failure, "stat XFS project-tree entry"));
+        }
+        if (before.st_dev != expected_device || ++observed_inodes > maximum_inodes) {
+            return std::unexpected(
+                make_error(ErrorCode::io_failure,
+                           before.st_dev != expected_device
+                               ? "XFS project tree crosses the configured filesystem"
+                               : "XFS project tree exceeds its configured hard inode bound"));
+        }
+        if (const auto checked =
+                verify_inode_project_bulkstat(mount_fd, before, project_id, purpose);
+            !checked) {
+            return std::unexpected(checked.error());
+        }
+        if (S_ISDIR(before.st_mode)) {
+            if (!directory_inodes.insert(static_cast<std::uint64_t>(before.st_ino)).second) {
+                return std::unexpected(make_error(ErrorCode::io_failure,
+                                                  "XFS project tree contains a directory cycle"));
+            }
+            /** @brief no-follow child directory FD / No-follow child-directory FD. */
+            FileDescriptor child(openat(directory_fd, entry->d_name,
+                                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+            /** @brief opened child metadata / Opened child metadata. */
+            struct stat opened {};
+            if (child.get() < 0 || fstat(child.get(), &opened) != 0 ||
+                !same_entry_identity(before, opened)) {
+                return std::unexpected(make_error(
+                    ErrorCode::io_failure,
+                    "XFS project directory changed identity before recursive verification"));
+            }
+            if (const auto nested = verify_project_tree_directory(
+                    mount_fd, child.get(), expected_device, project_id, maximum_inodes,
+                    observed_inodes, directory_inodes, depth + 1U, purpose);
+                !nested) {
+                return std::unexpected(nested.error());
+            }
+        }
+        /** @brief no-follow metadata after bulkstat/recursion /
+         * No-follow metadata after bulkstat/recursion. */
+        struct stat after {};
+        if (fstatat(directory_fd, entry->d_name, &after, AT_SYMLINK_NOFOLLOW) != 0 ||
+            !same_entry_identity(before, after)) {
+            return std::unexpected(make_error(
+                ErrorCode::io_failure,
+                "XFS project-tree entry changed identity during recursive verification"));
+        }
+    }
+    /** @brief current directory snapshot after enumeration /
+     * Current-directory snapshot after enumeration. */
+    struct stat directory_after {};
+    if (fstat(directory_fd, &directory_after) != 0 ||
+        !same_directory_snapshot(directory_before, directory_after)) {
+        return std::unexpected(
+            make_error(ErrorCode::io_failure,
+                       "XFS project directory changed while its descendants were verified"));
+    }
+    return {};
+}
+
+/**
+ * @brief 递归、只读验证 project root 下每个 inode / Recursively and read-only verify every inode
+ * below a project root.
+ * @param mount_path configured XFS mount / Configured XFS mount.
+ * @param root_path project root path / Project-root path.
+ * @param project_id expected project ID / Expected project ID.
+ * @param maximum_inodes hard traversal bound / Hard traversal bound.
+ * @param purpose diagnostic purpose / Diagnostic purpose.
+ * @return 成功或 fail-closed mismatch/traversal 错误 / Success or a fail-closed mismatch/traversal
+ * error.
+ */
+[[nodiscard]] Result<void> verify_project_tree_recursive(const std::filesystem::path& mount_path,
+                                                         const std::filesystem::path& root_path,
+                                                         const std::uint32_t project_id,
+                                                         const std::uint64_t maximum_inodes,
+                                                         const std::string_view purpose) {
+    /** @brief XFS mount FD used by bulkstat / XFS mount FD used by bulkstat. */
+    FileDescriptor mount_fd(
+        open(mount_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    /** @brief no-follow project root FD / No-follow project-root FD. */
+    FileDescriptor root_fd(
+        open(root_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    if (mount_fd.get() < 0 || root_fd.get() < 0) {
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "open XFS project tree for verification"));
+    }
+    /** @brief configured XFS mount metadata / Configured XFS-mount metadata. */
+    struct stat mount_metadata {};
+    /** @brief project-root metadata / Project-root metadata. */
+    struct stat root_metadata {};
+    if (fstat(mount_fd.get(), &mount_metadata) != 0 || fstat(root_fd.get(), &root_metadata) != 0 ||
+        !S_ISDIR(root_metadata.st_mode) || root_metadata.st_dev == 0 ||
+        root_metadata.st_dev != mount_metadata.st_dev || maximum_inodes == 0U) {
+        return std::unexpected(
+            make_error(ErrorCode::io_failure,
+                       "XFS project-tree root is invalid or crosses the configured filesystem"));
+    }
+    if (const auto root_checked =
+            verify_inode_project_bulkstat(mount_fd.get(), root_metadata, project_id, purpose);
+        !root_checked) {
+        return std::unexpected(root_checked.error());
+    }
+    /** @brief number of verified inode entries including root /
+     * Number of verified inode entries including root. */
+    std::uint64_t observed_inodes{1U};
+    if (observed_inodes > maximum_inodes) {
+        return std::unexpected(
+            make_error(ErrorCode::io_failure, "XFS project root exceeds hard inode bound"));
+    }
+    /** @brief visited directory inode identities / Visited directory inode identities. */
+    std::unordered_set<std::uint64_t> directory_inodes{
+        static_cast<std::uint64_t>(root_metadata.st_ino)};
+    return verify_project_tree_directory(mount_fd.get(), root_fd.get(), root_metadata.st_dev,
+                                         project_id, maximum_inodes, observed_inodes,
+                                         directory_inodes, 0U, purpose);
+}
+
+/**
+ * @brief 判断 metadata 是否为 owner 明确且 mode 严格的 workspace upper / Check whether metadata
+ * is a workspace upper with an explicitly allowed owner and strict mode.
+ * @param metadata 待判断的 inode metadata / Inode metadata to inspect.
+ * @param config quota 与具名 Agent 身份契约 / Quota and named-Agent identity contract.
+ * @return root:root、旧 nobody:nobody 或当前 Agent 所有且 mode 为 0700 时为真 / True when owned
+ * by root:root, legacy nobody:nobody, or the current Agent with mode 0700.
+ */
+[[nodiscard]] bool
+is_private_workspace_upper_directory(const struct stat& metadata,
+                                     const XfsProjectQuotaConfig& config) noexcept {
+    /** @brief 旧版 workspace nobody UID / Legacy workspace nobody UID. */
+    constexpr uid_t kLegacyNobodyUid{65534U};
+    /** @brief 旧版 workspace nobody GID / Legacy workspace nobody GID. */
+    constexpr gid_t kLegacyNobodyGid{65534U};
+    /** @brief 首次 activation 前的 root owner / Root owner before the first activation. */
+    const bool initial_owner = metadata.st_uid == 0U && metadata.st_gid == 0U;
+    /** @brief 可迁移的旧 nobody owner / Migratable legacy nobody owner. */
+    const bool legacy_owner =
+        metadata.st_uid == kLegacyNobodyUid && metadata.st_gid == kLegacyNobodyGid;
+    /** @brief 当前配置的具名 Agent owner / Currently configured named-Agent owner. */
+    const bool agent_owner =
+        metadata.st_uid == config.workspace_uid && metadata.st_gid == config.workspace_gid;
+    return S_ISDIR(metadata.st_mode) && (metadata.st_mode & 0777U) == 0700U &&
+           (initial_owner || legacy_owner || agent_owner);
+}
+
+/**
  * @brief 校验 Agent-owned Overlay upper 根 / Validate the Agent-owned Overlay upper root.
  * @param path persistent Overlay upper root / Persistent Overlay upper root.
  * @param project_id expected workspace project ID / Expected workspace project ID.
@@ -1126,19 +1722,141 @@ read_project_quota_accounting(const std::filesystem::path& mount_path,
     if (fstat(descriptor.get(), &metadata) != 0) {
         return std::unexpected(errno_error(ErrorCode::io_failure, "stat Overlay upper root"));
     }
-    constexpr uid_t kLegacyNobodyUid{65534U};
-    constexpr gid_t kLegacyNobodyGid{65534U};
-    const bool initial_owner = metadata.st_uid == 0U && metadata.st_gid == 0U;
-    const bool legacy_owner =
-        metadata.st_uid == kLegacyNobodyUid && metadata.st_gid == kLegacyNobodyGid;
-    const bool agent_owner =
-        metadata.st_uid == config.workspace_uid && metadata.st_gid == config.workspace_gid;
-    if (!S_ISDIR(metadata.st_mode) || (metadata.st_mode & 0777U) != 0700U ||
-        (!initial_owner && !legacy_owner && !agent_owner)) {
+    if (!is_private_workspace_upper_directory(metadata, config)) {
         return std::unexpected(make_error(
             ErrorCode::io_failure, "Overlay upper root is not private or has an unexpected owner"));
     }
     return verify_project_attributes_fd(descriptor.get(), project_id, "Overlay upper root");
+}
+
+/**
+ * @brief 判断一个已打开目录是否为空 / Determine whether an already-open directory is empty.
+ * @param descriptor 已验证的目录 FD / Verified directory FD.
+ * @param purpose 诊断语义 / Diagnostic purpose.
+ * @return 空目录为 true、存在直接子项为 false，或扫描错误 / True for an empty directory, false
+ * when a direct child exists, or a scan error.
+ */
+[[nodiscard]] Result<bool> directory_is_empty_fd(const int descriptor,
+                                                 const std::string_view purpose) {
+    /** @brief 供 fdopendir 消费的独立扫描 FD / Independent scan FD consumed by fdopendir. */
+    const int scan_fd = fcntl(descriptor, F_DUPFD_CLOEXEC, 3);
+    if (scan_fd < 0) {
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "duplicate " + std::string(purpose) + " FD"));
+    }
+    /** @brief 自动接管 scan_fd 的目录流 / Directory stream taking ownership of scan_fd. */
+    DIR* const directory = fdopendir(scan_fd);
+    if (directory == nullptr) {
+        /** @brief fdopendir 失败时保留的 errno / Saved errno when fdopendir fails. */
+        const int saved_errno = errno;
+        static_cast<void>(close(scan_fd));
+        errno = saved_errno;
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "open " + std::string(purpose) + " stream"));
+    }
+    for (;;) {
+        errno = 0;
+        /** @brief 当前目录项 / Current directory entry. */
+        dirent* const entry = readdir(directory);
+        if (entry == nullptr) {
+            /** @brief readdir 结束时的 errno / errno observed when readdir finishes. */
+            const int read_error = errno;
+            static_cast<void>(closedir(directory));
+            if (read_error != 0) {
+                errno = read_error;
+                return std::unexpected(
+                    errno_error(ErrorCode::io_failure, "scan " + std::string(purpose)));
+            }
+            return true;
+        }
+        const std::string_view name{entry->d_name};
+        if (name == "." || name == "..") {
+            continue;
+        }
+        static_cast<void>(closedir(directory));
+        return false;
+    }
+}
+
+/**
+ * @brief 创建或幂等修复允许由 Agent 持有的 Overlay upper 根 / Create or idempotently reconcile
+ * the Overlay upper root that the Agent may own.
+ * @param path persistent Overlay upper root / Persistent Overlay upper root.
+ * @param project_id expected workspace project ID / Expected workspace project ID.
+ * @param config quota and Agent identity contract / Quota and Agent identity contract.
+ * @return 成功或 fail-closed owner/mode/ioctl 错误 / Success or a fail-closed
+ * owner/mode/ioctl error.
+ * @note 该恢复只接受显式 owner allowlist 与精确 0700，不会 chown、放宽 mode、递归改写或删除
+ *       workspace 数据。/ Recovery accepts only the explicit owner allowlist and exact 0700; it
+ *       never chowns, loosens mode, recursively rewrites, or deletes workspace data.
+ */
+[[nodiscard]] Result<void>
+reconcile_workspace_upper_directory(const std::filesystem::path& path,
+                                    const std::uint32_t project_id,
+                                    const XfsProjectQuotaConfig& config) {
+    /** @brief 本次 reconcile 是否新建 upper / Whether this reconcile created the upper. */
+    bool created{false};
+    if (mkdir(path.c_str(), 0700) == 0) {
+        created = true;
+    } else if (errno != EEXIST) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "mkdir Overlay upper root"));
+    }
+    /** @brief no-follow upper-root descriptor / No-follow upper-root descriptor. */
+    FileDescriptor descriptor(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    if (descriptor.get() < 0) {
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "open Overlay upper root for reconciliation"));
+    }
+    /** @brief upper-root metadata / Upper-root metadata. */
+    struct stat metadata {};
+    if (fstat(descriptor.get(), &metadata) != 0) {
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "stat Overlay upper root for reconciliation"));
+    }
+    if (!is_private_workspace_upper_directory(metadata, config)) {
+        return std::unexpected(make_error(
+            ErrorCode::io_failure,
+            "Overlay upper root reconciliation rejected an unexpected owner, type, or mode"));
+    }
+    /** @brief upper 当前 project assignment 的只读验证结果 / Read-only validation of the upper's
+     * current project assignment. */
+    const auto verified =
+        verify_project_attributes_fd(descriptor.get(), project_id, "Overlay upper root");
+    if (!verified) {
+        /** @brief 是否仍为首次 activation 前的可信 root owner / Whether the trusted pre-activation
+         * root owner still owns the upper. */
+        const bool initial_owner = metadata.st_uid == 0U && metadata.st_gid == 0U;
+        if (!initial_owner) {
+            return std::unexpected(make_error(
+                ErrorCode::io_failure,
+                "existing Agent-owned Overlay upper project assignment cannot be rewritten: " +
+                    verified.error().message));
+        }
+        /** @brief root-owned upper 是否仍为空 crash residue / Whether the root-owned upper remains
+         * empty crash residue. */
+        const auto empty = directory_is_empty_fd(descriptor.get(), "Overlay upper root");
+        if (!empty) {
+            return std::unexpected(empty.error());
+        }
+        if (!*empty) {
+            return std::unexpected(
+                make_error(ErrorCode::io_failure,
+                           "nonempty Overlay upper project assignment differs from the registry"));
+        }
+        if (const auto assigned =
+                assign_project_attributes_fd(descriptor.get(), project_id, "Overlay upper root");
+            !assigned) {
+            return std::unexpected(assigned.error());
+        }
+    }
+    if (created) {
+        if (fsync(descriptor.get()) != 0) {
+            return std::unexpected(
+                errno_error(ErrorCode::io_failure, "fsync newly created Overlay upper root"));
+        }
+        return sync_directory(path.parent_path(), "Overlay upper parent after creation");
+    }
+    return {};
 }
 
 /**
@@ -1157,6 +1875,59 @@ read_project_quota_accounting(const std::filesystem::path& mount_path,
             errno_error(ErrorCode::io_failure, "open XFS project directory for readback"));
     }
     return verify_project_directory_fd(descriptor.get(), project_id, "XFS project directory");
+}
+
+/**
+ * @brief 创建或幂等修复一个 root-owned project 目录 / Create or idempotently reconcile one
+ * root-owned project directory.
+ * @param path quota-owned directory / Quota-owned directory.
+ * @param project_id expected project ID / Expected project ID.
+ * @param purpose 诊断语义 / Diagnostic purpose.
+ * @return 成功或 fail-closed owner/content/ioctl 错误 / Success or a fail-closed
+ * owner/content/ioctl error.
+ * @note 已有非空树若 project assignment 不一致则保持隔离；只允许为空的 crash residue 接受
+ *       assignment 修复，从而不会只改根 inode 而把既有子树留在另一 project。/ An existing
+ *       nonempty tree with a mismatched project assignment remains quarantined; only empty crash
+ *       residue may be repaired, avoiding a root-only relabel that leaves descendants in another
+ *       project.
+ */
+[[nodiscard]] Result<void> reconcile_root_owned_project_directory(const std::filesystem::path& path,
+                                                                  const std::uint32_t project_id,
+                                                                  const std::string_view purpose) {
+    if (const auto ensured = ensure_private_directory(path, purpose); !ensured) {
+        return std::unexpected(ensured.error());
+    }
+    /** @brief no-follow project-directory descriptor / No-follow project-directory descriptor. */
+    FileDescriptor descriptor(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    if (descriptor.get() < 0) {
+        return std::unexpected(errno_error(ErrorCode::io_failure, "open " + std::string(purpose)));
+    }
+    /** @brief project-directory metadata / Project-directory metadata. */
+    struct stat metadata {};
+    if (fstat(descriptor.get(), &metadata) != 0 || !is_private_root_owned_directory(metadata)) {
+        return std::unexpected(
+            make_error(ErrorCode::io_failure,
+                       std::string(purpose) + " is not a private root-owned directory"));
+    }
+    /** @brief 当前 project assignment 的只读验证结果 / Read-only validation of the current
+     * project assignment. */
+    const auto verified = verify_project_attributes_fd(descriptor.get(), project_id, purpose);
+    if (verified) {
+        return {};
+    }
+    /** @brief mismatch 目录是否是可安全修复的空 residue / Whether the mismatched directory is empty
+     * residue safe to repair. */
+    const auto empty = directory_is_empty_fd(descriptor.get(), purpose);
+    if (!empty) {
+        return std::unexpected(empty.error());
+    }
+    if (!*empty) {
+        return std::unexpected(
+            make_error(ErrorCode::io_failure,
+                       std::string(purpose) +
+                           " is nonempty and its project assignment differs from the registry"));
+    }
+    return assign_project_attributes_fd(descriptor.get(), project_id, purpose);
 }
 
 /**
@@ -1653,6 +2424,15 @@ remove_scanned_activation_staging_entry(const ActivationStagingParent& parent,
     if (const auto shape = validate_binding_shape(state_root, config, binding); !shape) {
         return std::unexpected(shape.error());
     }
+    for (const std::pair<std::filesystem::path, std::string_view>& directory : {
+             std::pair{state_root / kRuntimesDirectoryName, std::string_view{"runtime state root"}},
+             std::pair{binding.runtime_dir, std::string_view{"runtime state directory"}},
+         }) {
+        if (const auto checked = validate_private_directory(directory.first, directory.second);
+            !checked) {
+            return std::unexpected(checked.error());
+        }
+    }
     if (const auto control =
             verify_project_directory(binding.control_dir, binding.control_project_id);
         !control) {
@@ -1689,6 +2469,40 @@ remove_scanned_activation_staging_entry(const ActivationStagingParent& parent,
             binding.workspace_dir / kUpperDirectoryName, binding.workspace_project_id, config);
         !upper) {
         return std::unexpected(upper.error());
+    }
+    return {};
+}
+
+/**
+ * @brief 在晋升 ready 前递归证明两个 project tree 的所有 inode / Recursively prove every inode
+ * in both project trees before promotion to ready.
+ * @param config quota configuration / Quota configuration.
+ * @param binding binding being promoted / Binding being promoted.
+ * @return 成功或 fail-closed recursive-verification 错误 / Success or a fail-closed recursive
+ * verification error.
+ * @note 调用方必须持有 registry exclusion，并在既有 runtime 上持有 activation exclusion；普通
+ *       ready 快路径不能扫描正在合法写入的 workspace。晋升后 sandbox seccomp 会拒绝
+ *       ``FS_IOC_FSSETXATTR``/``FS_IOC_SETFLAGS``，因此 payload 不能破坏已证明的 project
+ *       inheritance。/ The caller must hold registry exclusion and, for an existing runtime,
+ *       activation exclusion. The normal ready fast path must not scan a workspace that may be
+ *       receiving legitimate writes. After promotion, sandbox seccomp rejects
+ *       ``FS_IOC_FSSETXATTR``/``FS_IOC_SETFLAGS``, so payload code cannot invalidate the proven
+ *       project inheritance.
+ */
+[[nodiscard]] Result<void>
+verify_project_trees_before_promotion(const XfsProjectQuotaConfig& config,
+                                      const RuntimeQuotaBinding& binding) {
+    if (const auto control_tree = verify_project_tree_recursive(
+            config.mount_path, binding.control_dir, binding.control_project_id,
+            config.control_hard_inodes, "runtime control project tree");
+        !control_tree) {
+        return std::unexpected(control_tree.error());
+    }
+    if (const auto workspace_tree = verify_project_tree_recursive(
+            config.mount_path, binding.workspace_dir, binding.workspace_project_id,
+            config.workspace_hard_inodes, "runtime workspace project tree");
+        !workspace_tree) {
+        return std::unexpected(workspace_tree.error());
     }
     return {};
 }
@@ -1736,16 +2550,20 @@ remove_scanned_activation_staging_entry(const ActivationStagingParent& parent,
 }
 
 /**
- * @brief 在已预留 pair 上创建并验证 runtime base layout / Create and validate the runtime base
- * layout on an already-reserved pair.
+ * @brief 为 allocating pair 幂等创建 verified runtime layout / Idempotently provision a verified
+ * runtime layout for an allocating pair.
  * @param state_root configured state root / Configured state root.
  * @param config quota configuration / Quota configuration.
  * @param binding allocated binding / Allocated binding.
- * @return 成功或 provisioning 错误 / Success or a provisioning error.
+ * @return 成功或 fail-closed reconciliation 错误 / Success or a fail-closed reconciliation error.
+ * @note 现有非空 project tree 不会被递归重标或删除；无法证明安全的布局由调用方保持
+ *       quarantine。/ Existing nonempty project trees are never recursively relabeled or deleted;
+ *       the caller keeps layouts that cannot be proven safe quarantined.
  */
-[[nodiscard]] Result<void> provision_runtime_layout(const std::filesystem::path& state_root,
-                                                    const XfsProjectQuotaConfig& config,
-                                                    const RuntimeQuotaBinding& binding) {
+[[nodiscard]] Result<void>
+provision_allocating_runtime_layout(const std::filesystem::path& state_root,
+                                    const XfsProjectQuotaConfig& config,
+                                    const RuntimeQuotaBinding& binding) {
     if (const auto runtimes =
             ensure_private_directory(state_root / kRuntimesDirectoryName, "runtime state root");
         !runtimes) {
@@ -1756,25 +2574,31 @@ remove_scanned_activation_staging_entry(const ActivationStagingParent& parent,
         !runtime) {
         return std::unexpected(runtime.error());
     }
-    if (const auto control =
-            ensure_private_directory(binding.control_dir, "runtime control directory");
+    if (const auto control = reconcile_root_owned_project_directory(
+            binding.control_dir, binding.control_project_id, "runtime control directory");
         !control) {
         return std::unexpected(control.error());
     }
-    if (const auto workspace =
-            ensure_private_directory(binding.workspace_dir, "runtime workspace directory");
+    if (const auto workspace = reconcile_root_owned_project_directory(
+            binding.workspace_dir, binding.workspace_project_id, "runtime workspace directory");
         !workspace) {
         return std::unexpected(workspace.error());
     }
-    if (const auto control_assignment =
-            assign_project_directory(binding.control_dir, binding.control_project_id);
-        !control_assignment) {
-        return std::unexpected(control_assignment.error());
+    for (const std::pair<std::filesystem::path, std::uint32_t>& directory : {
+             std::pair{binding.control_dir / kJournalDirectoryName, binding.control_project_id},
+             std::pair{binding.control_dir / kMountsDirectoryName, binding.control_project_id},
+             std::pair{binding.workspace_dir / kWorkDirectoryName, binding.workspace_project_id},
+         }) {
+        if (const auto reconciled = reconcile_root_owned_project_directory(
+                directory.first, directory.second, "quota-owned runtime layout directory");
+            !reconciled) {
+            return std::unexpected(reconciled.error());
+        }
     }
-    if (const auto workspace_assignment =
-            assign_project_directory(binding.workspace_dir, binding.workspace_project_id);
-        !workspace_assignment) {
-        return std::unexpected(workspace_assignment.error());
+    if (const auto upper = reconcile_workspace_upper_directory(
+            binding.workspace_dir / kUpperDirectoryName, binding.workspace_project_id, config);
+        !upper) {
+        return std::unexpected(upper.error());
     }
     if (const auto control_limits =
             set_project_hard_limits(config.mount_path, binding.control_project_id,
@@ -1788,23 +2612,103 @@ remove_scanned_activation_staging_entry(const ActivationStagingParent& parent,
         !workspace_limits) {
         return std::unexpected(workspace_limits.error());
     }
-    for (const std::pair<std::filesystem::path, std::uint32_t>& directory : {
-             std::pair{binding.control_dir / kJournalDirectoryName, binding.control_project_id},
-             std::pair{binding.control_dir / kMountsDirectoryName, binding.control_project_id},
-             std::pair{binding.workspace_dir / kUpperDirectoryName, binding.workspace_project_id},
-             std::pair{binding.workspace_dir / kWorkDirectoryName, binding.workspace_project_id},
+    if (const auto ready = verify_ready_binding(state_root, config, binding); !ready) {
+        return std::unexpected(ready.error());
+    }
+    return verify_project_trees_before_promotion(config, binding);
+}
+
+/**
+ * @brief 严格恢复必须完整存在的 ready/quarantined layout / Strictly reconcile a ready or
+ * quarantined layout that must already exist in full.
+ * @param state_root configured state root / Configured state root.
+ * @param config quota configuration / Quota configuration.
+ * @param binding persisted binding / Persisted binding.
+ * @return 成功或 fail-closed recovery error / Success or a fail-closed recovery error.
+ * @note 此路径不创建目录、不重新分配 project ID、不递归改写或删除数据。只允许通过已打开 FD
+ *       将可信 root-owned mode/GID drift 收紧到 root:root 0700，并恢复配置声明的 hard
+ *       limits。/ This path creates no directories, reassigns no project IDs, and never recursively
+ *       rewrites or deletes data. It may only tighten trusted root-owned mode/GID drift through an
+ *       open FD and restore configured hard limits.
+ */
+[[nodiscard]] Result<void>
+reconcile_existing_runtime_layout(const std::filesystem::path& state_root,
+                                  const XfsProjectQuotaConfig& config,
+                                  const RuntimeQuotaBinding& binding) {
+    for (const std::pair<std::filesystem::path, std::string_view>& directory : {
+             std::pair{state_root / kRuntimesDirectoryName, std::string_view{"runtime state root"}},
+             std::pair{binding.runtime_dir, std::string_view{"runtime state directory"}},
+             std::pair{binding.control_dir, std::string_view{"runtime control directory"}},
+             std::pair{binding.workspace_dir, std::string_view{"runtime workspace directory"}},
+             std::pair{binding.control_dir / kJournalDirectoryName,
+                       std::string_view{"runtime journal directory"}},
+             std::pair{binding.control_dir / kMountsDirectoryName,
+                       std::string_view{"runtime mounts directory"}},
+             std::pair{binding.workspace_dir / kWorkDirectoryName,
+                       std::string_view{"runtime work directory"}},
          }) {
-        if (const auto created =
-                ensure_private_directory(directory.first, "quota-owned runtime layout directory");
-            !created) {
-            return std::unexpected(created.error());
-        }
-        if (const auto assigned = assign_project_directory(directory.first, directory.second);
-            !assigned) {
-            return std::unexpected(assigned.error());
+        if (const auto tightened =
+                tighten_existing_private_directory(directory.first, directory.second);
+            !tightened) {
+            return std::unexpected(tightened.error());
         }
     }
-    return verify_ready_binding(state_root, config, binding);
+    for (const std::pair<std::filesystem::path, std::uint32_t>& directory : {
+             std::pair{binding.control_dir, binding.control_project_id},
+             std::pair{binding.workspace_dir, binding.workspace_project_id},
+             std::pair{binding.control_dir / kJournalDirectoryName, binding.control_project_id},
+             std::pair{binding.control_dir / kMountsDirectoryName, binding.control_project_id},
+             std::pair{binding.workspace_dir / kWorkDirectoryName, binding.workspace_project_id},
+         }) {
+        if (const auto checked = verify_project_directory(directory.first, directory.second);
+            !checked) {
+            return std::unexpected(checked.error());
+        }
+    }
+    if (const auto upper = verify_workspace_upper_directory(
+            binding.workspace_dir / kUpperDirectoryName, binding.workspace_project_id, config);
+        !upper) {
+        return std::unexpected(upper.error());
+    }
+    if (const auto control_limits =
+            set_project_hard_limits(config.mount_path, binding.control_project_id,
+                                    config.control_hard_bytes, config.control_hard_inodes);
+        !control_limits) {
+        return std::unexpected(control_limits.error());
+    }
+    if (const auto workspace_limits =
+            set_project_hard_limits(config.mount_path, binding.workspace_project_id,
+                                    config.workspace_hard_bytes, config.workspace_hard_inodes);
+        !workspace_limits) {
+        return std::unexpected(workspace_limits.error());
+    }
+    if (const auto ready = verify_ready_binding(state_root, config, binding); !ready) {
+        return std::unexpected(ready.error());
+    }
+    return verify_project_trees_before_promotion(config, binding);
+}
+
+/**
+ * @brief 在 activation exclusion 下严格恢复既有 layout / Strictly reconcile an existing layout
+ * under activation exclusion.
+ * @param state_root configured state root / Configured state root.
+ * @param config quota configuration / Quota configuration.
+ * @param binding persisted binding / Persisted binding.
+ * @return 成功、busy 或 fail-closed recovery error / Success, busy, or a fail-closed recovery
+ * error.
+ * @note 递归 promotion proof 不能与合法 Agent 写入并发；跨 broker activation flock 是这条
+ *       边界的唯一真实同步原语。/ Recursive promotion proof cannot race legitimate Agent writes;
+ *       the cross-broker activation flock is the real synchronization primitive for this boundary.
+ */
+[[nodiscard]] Result<void>
+reconcile_existing_runtime_layout_exclusive(const std::filesystem::path& state_root,
+                                            const XfsProjectQuotaConfig& config,
+                                            const RuntimeQuotaBinding& binding) {
+    const auto activation_lock = lock_runtime_activation(binding);
+    if (!activation_lock) {
+        return std::unexpected(activation_lock.error());
+    }
+    return reconcile_existing_runtime_layout(state_root, config, binding);
 }
 
 /**
@@ -2327,7 +3231,14 @@ Result<void> XfsProjectQuota::validate_activation_lease(const RuntimeActivationL
     if (const auto preflight = preflight_xfs_project_quota(config_, state_root_); !preflight) {
         return std::unexpected(preflight.error());
     }
-    return verify_ready_binding(state_root_, config_, lease.binding_);
+    if (const auto verified = verify_ready_binding(state_root_, config_, lease.binding_);
+        !verified) {
+        return std::unexpected(
+            make_error(ErrorCode::quota_recovery_required,
+                       "runtime activation lease quota binding failed verification: " +
+                           verified.error().message));
+    }
+    return {};
 }
 
 Result<RuntimeQuotaBinding>
@@ -2356,33 +3267,68 @@ XfsProjectQuota::ensure_runtime(const std::string_view runtime_key) const {
     if (existing != snapshot->records.end()) {
         RegistryRecord record = existing->second;
         RuntimeQuotaBinding binding = make_binding(state_root_, parsed_runtime->value(), record);
+        if (record.state == RegistryState::allocating) {
+            if (const auto provisioned =
+                    provision_allocating_runtime_layout(state_root_, config_, binding);
+                !provisioned) {
+                return std::unexpected(
+                    make_error(ErrorCode::quota_recovery_required,
+                               "runtime XFS quota provisioning remains incomplete: " +
+                                   provisioned.error().message));
+            }
+            record.state = RegistryState::ready;
+            if (const auto persisted = write_registry_record(*registry_root, record); !persisted) {
+                return std::unexpected(
+                    make_error(ErrorCode::quota_recovery_required,
+                               "verified XFS quota provisioning could not persist ready state"));
+            }
+            return binding;
+        }
         if (record.state == RegistryState::ready) {
             if (const auto verified = verify_ready_binding(state_root_, config_, binding);
                 verified) {
                 return binding;
-            } else {
-                record.state = RegistryState::quarantined;
-                if (const auto persisted = write_registry_record(*registry_root, record);
-                    !persisted) {
-                    return std::unexpected(persisted.error());
-                }
-                return std::unexpected(
-                    make_error(ErrorCode::invocation_in_doubt,
-                               "ready XFS quota binding failed readback and was quarantined"));
             }
-        }
-        if (record.state == RegistryState::allocating) {
+            const auto reconciled =
+                reconcile_existing_runtime_layout_exclusive(state_root_, config_, binding);
+            if (reconciled) {
+                return binding;
+            }
+            if (reconciled.error().code == ErrorCode::busy) {
+                return std::unexpected(reconciled.error());
+            }
             record.state = RegistryState::quarantined;
             if (const auto persisted = write_registry_record(*registry_root, record); !persisted) {
-                return std::unexpected(persisted.error());
+                return std::unexpected(make_error(
+                    ErrorCode::quota_recovery_required,
+                    "XFS quota recovery failed and quarantine persistence is uncertain"));
             }
-            return std::unexpected(make_error(ErrorCode::invocation_in_doubt,
-                                              "interrupted XFS quota provisioning was quarantined; "
-                                              "operator recovery is required"));
+            return std::unexpected(make_error(
+                ErrorCode::binding_quarantined,
+                "runtime XFS quota binding was quarantined after strict recovery failed: " +
+                    reconciled.error().message));
         }
-        return std::unexpected(
-            make_error(ErrorCode::invocation_in_doubt,
-                       "runtime XFS quota binding is quarantined; operator recovery is required"));
+        const auto reconciled =
+            reconcile_existing_runtime_layout_exclusive(state_root_, config_, binding);
+        if (reconciled) {
+            if (record.state == RegistryState::quarantined) {
+                record.state = RegistryState::ready;
+                if (const auto persisted = write_registry_record(*registry_root, record);
+                    !persisted) {
+                    return std::unexpected(
+                        make_error(ErrorCode::quota_recovery_required,
+                                   "verified XFS quota recovery could not persist ready state"));
+                }
+            }
+            return binding;
+        }
+        if (reconciled.error().code == ErrorCode::busy) {
+            return std::unexpected(reconciled.error());
+        }
+        return std::unexpected(make_error(
+            ErrorCode::binding_quarantined,
+            "runtime XFS quota binding remains quarantined after reconciliation failed: " +
+                reconciled.error().message));
     }
     RegistryRecord record{
         .runtime_key = parsed_runtime->value(),
@@ -2422,7 +3368,7 @@ XfsProjectQuota::ensure_runtime(const std::string_view runtime_key) const {
     }
     if (*existing_runtime_dir) {
         return std::unexpected(make_error(
-            ErrorCode::invocation_in_doubt,
+            ErrorCode::quota_recovery_required,
             "runtime state exists without a quota registry record; explicit recovery is required"));
     }
     if (const auto next = write_next_project_id(*registry_root, snapshot->next_project_id + 2U);
@@ -2432,20 +3378,17 @@ XfsProjectQuota::ensure_runtime(const std::string_view runtime_key) const {
     if (const auto persisted = write_registry_record(*registry_root, record); !persisted) {
         return std::unexpected(persisted.error());
     }
-    if (const auto provisioned = provision_runtime_layout(state_root_, config_, binding);
+    if (const auto provisioned = provision_allocating_runtime_layout(state_root_, config_, binding);
         !provisioned) {
-        record.state = RegistryState::quarantined;
-        if (const auto quarantined = write_registry_record(*registry_root, record); !quarantined) {
-            return std::unexpected(quarantined.error());
-        }
-        return std::unexpected(
-            make_error(ErrorCode::invocation_in_doubt,
-                       "XFS quota provisioning failed and the project pair was quarantined"));
+        return std::unexpected(make_error(
+            ErrorCode::quota_recovery_required,
+            "XFS quota provisioning failed with its project pair reserved for recovery: " +
+                provisioned.error().message));
     }
     record.state = RegistryState::ready;
     if (const auto persisted = write_registry_record(*registry_root, record); !persisted) {
         return std::unexpected(
-            make_error(ErrorCode::invocation_in_doubt,
+            make_error(ErrorCode::quota_recovery_required,
                        "XFS layout is provisioned but ready registry persistence failed"));
     }
     return binding;
@@ -2500,17 +3443,22 @@ XfsProjectQuota::find_ready_runtime(const std::string_view runtime_key) const {
         return std::unexpected(
             make_error(ErrorCode::not_found, "runtime has no persisted XFS quota binding"));
     }
-    if (existing->second.state != RegistryState::ready) {
-        return std::unexpected(make_error(
-            ErrorCode::invocation_in_doubt,
-            "runtime XFS quota binding is not ready; replay cannot provision or recover it"));
+    if (existing->second.state == RegistryState::allocating) {
+        return std::unexpected(
+            make_error(ErrorCode::quota_recovery_required,
+                       "runtime XFS quota binding is still allocating; replay remains read-only"));
+    }
+    if (existing->second.state == RegistryState::quarantined) {
+        return std::unexpected(
+            make_error(ErrorCode::binding_quarantined,
+                       "runtime XFS quota binding is quarantined; replay remains read-only"));
     }
 
     RuntimeQuotaBinding binding =
         make_binding(state_root_, parsed_runtime->value(), existing->second);
     if (const auto verified = verify_ready_binding(state_root_, config_, binding); !verified) {
         return std::unexpected(make_error(
-            ErrorCode::invocation_in_doubt,
+            ErrorCode::quota_recovery_required,
             "ready XFS quota binding failed read-only verification: " + verified.error().message));
     }
     return binding;
@@ -2520,7 +3468,7 @@ Result<domain::WorkspaceQuotaUsage>
 XfsProjectQuota::read_workspace_quota_usage(const RuntimeQuotaBinding& binding) const {
     if (const auto verified = verify_ready_binding(state_root_, config_, binding); !verified) {
         return std::unexpected(
-            make_error(ErrorCode::invocation_in_doubt,
+            make_error(ErrorCode::quota_recovery_required,
                        "workspace quota binding failed read-only verification before usage query"));
     }
     const auto quota =
@@ -2558,7 +3506,10 @@ XfsProjectQuota::acquire_activation_lease(const std::string_view runtime_key) co
         return std::unexpected(lock.error());
     }
     if (const auto verified = verify_ready_binding(state_root_, config_, *binding); !verified) {
-        return std::unexpected(verified.error());
+        return std::unexpected(
+            make_error(ErrorCode::quota_recovery_required,
+                       "runtime quota binding changed after activation lock acquisition: " +
+                           verified.error().message));
     }
     return RuntimeActivationLease{std::move(*binding), lock->release()};
 }

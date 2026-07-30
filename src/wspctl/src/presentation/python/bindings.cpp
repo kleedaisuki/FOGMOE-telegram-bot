@@ -118,6 +118,10 @@ void translate_native_failure(std::exception_ptr pointer) {
         return "journal_conflict";
     case ErrorCode::invocation_in_doubt:
         return "invocation_in_doubt";
+    case ErrorCode::quota_recovery_required:
+        return "quota_recovery_required";
+    case ErrorCode::binding_quarantined:
+        return "binding_quarantined";
     case ErrorCode::child_failure:
         return "child_failure";
     case ErrorCode::internal:

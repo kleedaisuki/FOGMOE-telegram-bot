@@ -415,6 +415,12 @@ void test_operator_cli_failure_contract() {
                cli::exit_code_for(wspctl::make_error(wspctl::ErrorCode::authentication_failed,
                                                      "denied")) == cli::ExitCode::permission &&
                cli::exit_code_for(wspctl::make_error(wspctl::ErrorCode::io_failure, "down")) ==
+                   cli::ExitCode::unavailable &&
+               cli::exit_code_for(wspctl::make_error(wspctl::ErrorCode::quota_recovery_required,
+                                                     "recover quota")) ==
+                   cli::ExitCode::unavailable &&
+               cli::exit_code_for(wspctl::make_error(wspctl::ErrorCode::binding_quarantined,
+                                                     "quarantined quota")) ==
                    cli::ExitCode::unavailable,
            "map important operator failures to stable documented exit codes");
     /** @brief 带控制字符的模拟错误 / Simulated error carrying control characters. */

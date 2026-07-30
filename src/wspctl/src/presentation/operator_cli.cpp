@@ -1198,6 +1198,8 @@ ExitCode exit_code_for(const Error& error) noexcept {
     case ErrorCode::busy:
     case ErrorCode::timeout:
     case ErrorCode::io_failure:
+    case ErrorCode::quota_recovery_required:
+    case ErrorCode::binding_quarantined:
         return ExitCode::unavailable;
     case ErrorCode::malformed_frame:
     case ErrorCode::frame_too_large:

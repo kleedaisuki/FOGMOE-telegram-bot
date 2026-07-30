@@ -12,8 +12,10 @@ from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from fogmoe_bot.application.workspace.errors import (
+    WorkspaceBindingQuarantinedError,
     WorkspaceFileReplayNotFoundError,
     WorkspaceInvocationOutcomeUnknownError,
+    WorkspaceQuotaRecoveryRequiredError,
     WorkspaceRuntimeProtocolError,
     WorkspaceRuntimeUnavailableError,
 )
@@ -220,10 +222,8 @@ class WspctlRuntimeProcessFactory:
             process_type = getattr(native_module, "RuntimeProcess")
             process = process_type(self._socket_path, str(key), activation_id)
         except Exception as error:
-            raise WorkspaceRuntimeUnavailableError(
-                "wspctl native runtime is unavailable",
-                diagnostic_code=_native_error_code(error),
-                diagnostic_message=_native_error_message(error),
+            raise _native_runtime_unavailable_error(
+                error, "wspctl native runtime is unavailable"
             ) from error
         if (
             not callable(getattr(process, "execute", None))
@@ -248,6 +248,7 @@ class _CachedRuntimeProcess:
     @param idle_event 所有已借出任务结束时置位 / Set when all borrowed tasks have finished.
     @param close_lock 串行化 native client close 的锁 / Lock serializing native-client close.
     @param closed native client 是否已关闭 / Whether the native client has been closed.
+    @param reusable native client 是否仍可接受新调用 / Whether the native client may accept another call.
     """
 
     process: NativeRuntimeProcess
@@ -257,6 +258,7 @@ class _CachedRuntimeProcess:
     idle_event: asyncio.Event = field(default_factory=asyncio.Event)
     close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     closed: bool = False
+    reusable: bool = True
 
     def __post_init__(self) -> None:
         """@brief 将新 cache entry 初始化为空闲状态 / Initialize a new cache entry as idle.
@@ -857,9 +859,11 @@ class WspctlRuntimeProcess(RuntimeProcess):
             if self._closed:
                 raise WorkspaceRuntimeUnavailableError("Workspace runner is closed")
             entry = self._cache.get(key)
-            if entry is not None:
+            if entry is not None and entry.reusable:
                 self._borrow_cached_entry_locked(entry)
                 return entry
+            if entry is not None:
+                del self._cache[key]
             pending = self._pending_creations.get(key)
             if pending is None:
                 pending = _PendingRuntimeProcess(
@@ -996,7 +1000,9 @@ class WspctlRuntimeProcess(RuntimeProcess):
         if entry.active_count != 0:
             return False
         entry.idle_event.set()
-        if self._closed or self._cache.get(key) is not entry:
+        if self._closed or self._cache.get(key) is not entry or not entry.reusable:
+            if self._cache.get(key) is entry:
+                del self._cache[key]
             return True
         entry.idle_task = asyncio.create_task(
             self._retire_after_idle(key, entry),
@@ -1062,7 +1068,12 @@ class WspctlRuntimeProcess(RuntimeProcess):
         diagnostic_code, diagnostic_message = _workspace_error_diagnostics(
             outcome.error
         )
-        raise WorkspaceRuntimeUnavailableError(
+        error_type = (
+            type(outcome.error)
+            if isinstance(outcome.error, WorkspaceRuntimeUnavailableError)
+            else WorkspaceRuntimeUnavailableError
+        )
+        raise error_type(
             "wspctl RuntimeProcess creation failed",
             diagnostic_code=diagnostic_code,
             diagnostic_message=diagnostic_message,
@@ -1086,13 +1097,21 @@ class WspctlRuntimeProcess(RuntimeProcess):
         # it is stable across many Turns, while request_id remains Turn+invocation scoped for
         # journal idempotency.  It must not be part of the transport-neutral application command.
         async with entry.execution_lock:
+            if not entry.reusable:
+                raise WorkspaceRuntimeUnavailableError(
+                    "Workspace native handle was retired after an earlier failure"
+                )
             lease = await self._execution_admission.acquire(key)
             try:
-                return await asyncio.to_thread(
-                    _execute_native_process,
-                    entry.process,
-                    command,
-                )
+                try:
+                    return await asyncio.to_thread(
+                        _execute_native_process,
+                        entry.process,
+                        command,
+                    )
+                except BaseException:
+                    entry.reusable = False
+                    raise
             finally:
                 await lease.release()
 
@@ -1111,13 +1130,21 @@ class WspctlRuntimeProcess(RuntimeProcess):
         """
 
         async with entry.execution_lock:
+            if not entry.reusable:
+                raise WorkspaceRuntimeUnavailableError(
+                    "Workspace native handle was retired after an earlier failure"
+                )
             lease = await self._execution_admission.acquire(key)
             try:
-                return await asyncio.to_thread(
-                    _add_file_native_process,
-                    entry.process,
-                    command,
-                )
+                try:
+                    return await asyncio.to_thread(
+                        _add_file_native_process,
+                        entry.process,
+                        command,
+                    )
+                except BaseException:
+                    entry.reusable = False
+                    raise
             finally:
                 await lease.release()
 
@@ -1140,13 +1167,21 @@ class WspctlRuntimeProcess(RuntimeProcess):
         """
 
         async with entry.execution_lock:
+            if not entry.reusable:
+                raise WorkspaceRuntimeUnavailableError(
+                    "Workspace native handle was retired after an earlier failure"
+                )
             lease = await self._execution_admission.acquire(key)
             try:
-                return await asyncio.to_thread(
-                    _replay_file_native_process,
-                    entry.process,
-                    command,
-                )
+                try:
+                    return await asyncio.to_thread(
+                        _replay_file_native_process,
+                        entry.process,
+                        command,
+                    )
+                except BaseException:
+                    entry.reusable = False
+                    raise
             finally:
                 await lease.release()
 
@@ -1293,11 +1328,13 @@ def _execute_native_process(
         raise
     except Exception as error:
         if _native_error_code(error) == "invocation_in_doubt":
-            raise WorkspaceInvocationOutcomeUnknownError(command.request_id) from error
-        raise WorkspaceRuntimeUnavailableError(
-            "wspctl RuntimeProcess execution failed",
-            diagnostic_code=_native_error_code(error),
-            diagnostic_message=_native_error_message(error),
+            raise WorkspaceInvocationOutcomeUnknownError(
+                command.request_id,
+                diagnostic_code=_native_error_code(error),
+                diagnostic_message=_native_error_message(error),
+            ) from error
+        raise _native_runtime_unavailable_error(
+            error, "wspctl RuntimeProcess execution failed"
         ) from error
     return _decode_native_result(raw_result, command)
 
@@ -1331,11 +1368,13 @@ def _add_file_native_process(
         raise
     except Exception as error:
         if _native_error_code(error) == "invocation_in_doubt":
-            raise WorkspaceInvocationOutcomeUnknownError(command.request_id) from error
-        raise WorkspaceRuntimeUnavailableError(
-            "wspctl RuntimeProcess payload ingress failed",
-            diagnostic_code=_native_error_code(error),
-            diagnostic_message=_native_error_message(error),
+            raise WorkspaceInvocationOutcomeUnknownError(
+                command.request_id,
+                diagnostic_code=_native_error_code(error),
+                diagnostic_message=_native_error_message(error),
+            ) from error
+        raise _native_runtime_unavailable_error(
+            error, "wspctl RuntimeProcess payload ingress failed"
         ) from error
     return _decode_native_file_result(raw_result, command)
 
@@ -1375,11 +1414,13 @@ def _replay_file_native_process(
         if error_code == "not_found":
             raise WorkspaceFileReplayNotFoundError(command.request_id) from error
         if error_code == "invocation_in_doubt":
-            raise WorkspaceInvocationOutcomeUnknownError(command.request_id) from error
-        raise WorkspaceRuntimeUnavailableError(
-            "wspctl RuntimeProcess payload replay failed",
-            diagnostic_code=error_code,
-            diagnostic_message=_native_error_message(error),
+            raise WorkspaceInvocationOutcomeUnknownError(
+                command.request_id,
+                diagnostic_code=error_code,
+                diagnostic_message=_native_error_message(error),
+            ) from error
+        raise _native_runtime_unavailable_error(
+            error, "wspctl RuntimeProcess payload replay failed"
         ) from error
     return _decode_native_file_result(raw_result, command, require_replayed=True)
 
@@ -1535,6 +1576,35 @@ def _native_error_message(error: Exception) -> str | None:
 
     message = getattr(error, "message", None)
     return message if isinstance(message, str) else None
+
+
+def _native_runtime_unavailable_error(
+    error: Exception, message: str
+) -> WorkspaceRuntimeUnavailableError:
+    """@brief 将 pre-invocation native 故障映射为精确 unavailable 子类型 /
+    Map a pre-invocation native failure to its precise unavailable subtype.
+
+    @param error native client 抛出的异常 / Exception raised by the native client.
+    @param message 调用方安全的稳定摘要 / Stable caller-safe summary.
+    @return 保留安全诊断的 Workspace unavailable 错误 / Workspace unavailable error preserving safe diagnostics.
+    @note quota recovery 与 binding quarantine 绝不能伪装成 invocation outcome unknown。/
+        Quota recovery and binding quarantine must never masquerade as an indeterminate invocation
+        outcome.
+    """
+
+    code = _native_error_code(error)
+    error_type: type[WorkspaceRuntimeUnavailableError]
+    if code == "binding_quarantined":
+        error_type = WorkspaceBindingQuarantinedError
+    elif code == "quota_recovery_required":
+        error_type = WorkspaceQuotaRecoveryRequiredError
+    else:
+        error_type = WorkspaceRuntimeUnavailableError
+    return error_type(
+        message,
+        diagnostic_code=code,
+        diagnostic_message=_native_error_message(error),
+    )
 
 
 def _workspace_error_diagnostics(

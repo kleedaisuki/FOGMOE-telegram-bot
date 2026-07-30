@@ -178,10 +178,12 @@ private:
  * service.
  *
  * registry 以 ``allocating``、``ready``、``quarantined`` 三态保存 project pair。任一不确定
- * provisioning 结果只会进入 quarantine，绝不复用 ID 或创建无 quota upperdir。/ The registry
- * persists project pairs in ``allocating``, ``ready``, and ``quarantined`` states. Any uncertain
- * provisioning result enters quarantine only; it never reuses an ID or creates an unquoted
- * upperdir.
+ * provisioning 结果进入 quarantine 且 ID 永不复用；后续调用只在 owner、mode、路径身份和空
+ * crash residue 均可证明安全时幂等 reconcile，再以 project/limit readback 晋升 ready。/ The
+ * registry persists project pairs in ``allocating``, ``ready``, and ``quarantined`` states. Any
+ * uncertain provisioning result enters quarantine and its IDs are never reused; a later call
+ * reconciles idempotently only when owner, mode, path identity, and empty crash residue are proven
+ * safe, then promotes to ready after project/limit readback.
  */
 class XfsProjectQuota final {
 public:
@@ -198,9 +200,11 @@ public:
      * verified project pair before journal lookup.
      * @param runtime_key canonical runtime UUID / Canonical runtime UUID.
      * @return 已 ready 的 binding，或 fail-closed 错误 / Ready binding, or a fail-closed error.
-     * @note 该操作在 durable registry lock 下完成；``allocating`` 的 crash residue 进入
-     *       quarantine，而不是猜测恢复。 This completes under the durable registry lock;
-     *       crash residue in ``allocating`` is quarantined rather than guessed into recovery.
+     * @note 该操作在 durable registry lock 下完成；``allocating``/``quarantined`` residue 只有
+     *       通过严格、无数据删除的确定性 reconcile 才能晋升，否则保持 quarantine。/ This
+     *       completes under the durable registry lock; ``allocating``/``quarantined`` residue is
+     *       promoted only by strict deterministic reconciliation without data deletion, otherwise
+     *       it remains quarantined.
      */
     [[nodiscard]] Result<RuntimeQuotaBinding> ensure_runtime(std::string_view runtime_key) const;
 

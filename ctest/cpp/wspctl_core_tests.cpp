@@ -382,6 +382,21 @@ void test_protocol() {
     truncated.pop_back();
     expect(!wspctl::decode_frame(truncated).has_value(), "reject truncated frame");
 
+    for (const wspctl::ErrorCode code : {
+             wspctl::ErrorCode::quota_recovery_required,
+             wspctl::ErrorCode::binding_quarantined,
+         }) {
+        /** @brief quota recovery wire error / Quota-recovery wire error. */
+        const wspctl::Error quota_error = wspctl::make_error(code, "quota recovery is required");
+        const auto encoded_error = wspctl::encode_error(quota_error);
+        const auto decoded_error =
+            encoded_error ? wspctl::decode_error(*encoded_error)
+                          : wspctl::Result<wspctl::Error>{std::unexpected(encoded_error.error())};
+        expect(decoded_error.has_value() && decoded_error->code == code &&
+                   decoded_error->message == quota_error.message,
+               "round-trip typed quota recovery error through broker protocol");
+    }
+
     const wspctl::RuntimeStatusRequest status_request{
         .runtime_key = original.runtime_key,
         .activation_id = "activation-status-test",

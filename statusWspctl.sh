@@ -340,7 +340,7 @@ report_storage() {
         warning "state mount 不满足强制 XFS project-quota contract"
     fi
     sudo df --human-readable --output=size,used,avail,pcent,target "$STATE_ROOT" 2>/dev/null || warning "无法读取 state block capacity"
-    sudo df --human-readable --inodes --output=itotal,iused,iavail,ipcent,target "$STATE_ROOT" 2>/dev/null || warning "无法读取 state inode capacity"
+    sudo df --human-readable --output=itotal,iused,iavail,ipcent,target "$STATE_ROOT" 2>/dev/null || warning "无法读取 state inode capacity"
     sudo xfs_quota -x -c 'state -p' "$STATE_ROOT" 2>/dev/null || warning "无法读取 XFS project-quota accounting/enforcement"
 }
 
@@ -357,11 +357,11 @@ report_runtime_aggregates() {
         return 0
     fi
     runtime_count="$(sudo find "$STATE_ROOT/runtimes" -mindepth 1 -maxdepth 1 -type d -printf . 2>/dev/null | wc -c)"
-    record_count="$(sudo find "$STATE_ROOT/registry/records" -mindepth 1 -maxdepth 1 -type f -printf . 2>/dev/null | wc -c)"
+    record_count="$(sudo find "$STATE_ROOT/quota-registry/runtimes" -mindepth 1 -maxdepth 1 -type f -printf . 2>/dev/null | wc -c)"
     journal_count="$(sudo find "$STATE_ROOT/runtimes" -type f -path '*/control/journal/*' -printf . 2>/dev/null | wc -c)"
     info "runtime directories=$runtime_count registry records=$record_count journal records=$journal_count"
     sudo test -d "$STATE_ROOT/runtimes" && aggregate_paths+=("$STATE_ROOT/runtimes")
-    sudo test -d "$STATE_ROOT/registry" && aggregate_paths+=("$STATE_ROOT/registry")
+    sudo test -d "$STATE_ROOT/quota-registry" && aggregate_paths+=("$STATE_ROOT/quota-registry")
     if (( ${#aggregate_paths[@]} > 0 )); then
         sudo du --summarize --human-readable "${aggregate_paths[@]}" 2>/dev/null \
             || warning "无法读取 runtime/registry aggregate disk usage"

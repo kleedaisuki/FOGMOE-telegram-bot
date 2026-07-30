@@ -3097,64 +3097,80 @@ Result<RuntimeStatusResult> Broker::read_runtime_status(const RuntimeStatusReque
         const domain::Error& error = !runtime ? runtime.error() : activation.error();
         return std::unexpected(transport_error(error));
     }
+    /** @brief runtime quota binding 的只读持久状态 / Read-only persistent state of the runtime
+     * quota binding. */
+    const auto persisted_binding = quota_.find_ready_runtime(runtime->value());
+    /** @brief quota registry 是否明确存在待恢复状态 / Whether the quota registry explicitly
+     * reports pending recovery. */
+    const bool quota_cleanup_pending =
+        !persisted_binding &&
+        (persisted_binding.error().code == ErrorCode::quota_recovery_required ||
+         persisted_binding.error().code == ErrorCode::binding_quarantined);
+    if (!persisted_binding && persisted_binding.error().code != ErrorCode::not_found &&
+        !quota_cleanup_pending) {
+        return std::unexpected(persisted_binding.error());
+    }
     const application::RuntimeStatusQuery query(*runtime, *activation);
-    BrokerRuntimeStatusPort port([this](const application::RuntimeStatusQuery& observed_query)
-                                     -> domain::Result<application::RuntimeStatus> {
-        std::shared_ptr<RuntimeSession> session;
-        std::optional<domain::ActivationId> activating_owner;
-        bool launch_quarantined = false;
-        {
-            // Do not take a session mutex while holding sessions_mutex: retirement takes the
-            // inverse (session -> map) order after slow cleanup. Copying the shared_ptr keeps the
-            // session alive after this map observation without adding a dispatch reference.
-            std::lock_guard map_lock(state_->sessions_mutex);
-            const auto existing = state_->sessions.find(observed_query.runtime().value());
-            if (existing != state_->sessions.end()) {
-                session = existing->second;
-            } else if (const auto activating =
-                           state_->activating.find(observed_query.runtime().value());
-                       activating != state_->activating.end()) {
-                activating_owner = activating->second;
-            } else {
-                launch_quarantined =
-                    state_->launch_unknown.contains(observed_query.runtime().value());
+    BrokerRuntimeStatusPort port(
+        [this, quota_cleanup_pending](const application::RuntimeStatusQuery& observed_query)
+            -> domain::Result<application::RuntimeStatus> {
+            std::shared_ptr<RuntimeSession> session;
+            std::optional<domain::ActivationId> activating_owner;
+            bool launch_quarantined = false;
+            {
+                // Do not take a session mutex while holding sessions_mutex: retirement takes the
+                // inverse (session -> map) order after slow cleanup. Copying the shared_ptr keeps
+                // the session alive after this map observation without adding a dispatch reference.
+                std::lock_guard map_lock(state_->sessions_mutex);
+                const auto existing = state_->sessions.find(observed_query.runtime().value());
+                if (existing != state_->sessions.end()) {
+                    session = existing->second;
+                } else if (const auto activating =
+                               state_->activating.find(observed_query.runtime().value());
+                           activating != state_->activating.end()) {
+                    activating_owner = activating->second;
+                } else {
+                    launch_quarantined =
+                        state_->launch_unknown.contains(observed_query.runtime().value());
+                }
             }
-        }
-        if (!session) {
-            const domain::RuntimeState state = launch_quarantined ? domain::RuntimeState::failed
-                                               : activating_owner.has_value()
-                                                   ? domain::RuntimeState::activating
-                                                   : domain::RuntimeState::dormant;
-            const auto snapshot = domain::RuntimeSnapshot::create(observed_query.runtime(), state,
-                                                                  std::move(activating_owner));
-            if (!snapshot) {
-                return std::unexpected(snapshot.error());
+            if (!session) {
+                const bool cleanup_pending = launch_quarantined || quota_cleanup_pending;
+                const domain::RuntimeState state = cleanup_pending ? domain::RuntimeState::failed
+                                                   : activating_owner.has_value()
+                                                       ? domain::RuntimeState::activating
+                                                       : domain::RuntimeState::dormant;
+                const auto snapshot = domain::RuntimeSnapshot::create(
+                    observed_query.runtime(), state, std::move(activating_owner));
+                if (!snapshot) {
+                    return std::unexpected(snapshot.error());
+                }
+                return application::RuntimeStatus::create(observed_query, *snapshot, false,
+                                                          std::nullopt, config_.idle_ttl, 0U,
+                                                          cleanup_pending);
             }
-            return application::RuntimeStatus::create(observed_query, *snapshot, false,
-                                                      std::nullopt, config_.idle_ttl, 0U,
-                                                      launch_quarantined);
-        }
 
-        std::lock_guard session_lock(session->mutex);
-        const domain::RuntimeSnapshot snapshot = session->runtime.snapshot();
-        std::optional<std::chrono::milliseconds> idle_for;
-        if (snapshot.state() == domain::RuntimeState::ready) {
-            const auto now = std::chrono::steady_clock::now();
-            const auto elapsed =
-                std::chrono::duration_cast<std::chrono::milliseconds>(now - session->last_used);
-            idle_for = std::max(std::chrono::milliseconds::zero(), elapsed);
-        }
-        // "alive" means healthy and reusable, not merely that an untrusted PID might still exist
-        // during a failed cleanup. `cleanup_pending` is the explicit signal for that latter case.
-        const bool supervisor_alive = !session->poisoned &&
-                                      snapshot.state() != domain::RuntimeState::failed &&
-                                      !launcher_exited(session->launcher_pidfd);
-        return application::RuntimeStatus::create(
-            observed_query, snapshot, supervisor_alive, idle_for, config_.idle_ttl,
-            static_cast<std::uint64_t>(
-                session->dispatch_references.load(std::memory_order_acquire)),
-            session->poisoned);
-    });
+            std::lock_guard session_lock(session->mutex);
+            const domain::RuntimeSnapshot snapshot = session->runtime.snapshot();
+            std::optional<std::chrono::milliseconds> idle_for;
+            if (snapshot.state() == domain::RuntimeState::ready) {
+                const auto now = std::chrono::steady_clock::now();
+                const auto elapsed =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - session->last_used);
+                idle_for = std::max(std::chrono::milliseconds::zero(), elapsed);
+            }
+            // "alive" means healthy and reusable, not merely that an untrusted PID might still
+            // exist during a failed cleanup. `cleanup_pending` is the explicit signal for that
+            // latter case.
+            const bool supervisor_alive = !session->poisoned &&
+                                          snapshot.state() != domain::RuntimeState::failed &&
+                                          !launcher_exited(session->launcher_pidfd);
+            return application::RuntimeStatus::create(
+                observed_query, snapshot, supervisor_alive, idle_for, config_.idle_ttl,
+                static_cast<std::uint64_t>(
+                    session->dispatch_references.load(std::memory_order_acquire)),
+                session->poisoned || quota_cleanup_pending);
+        });
     application::RuntimeStatusService service;
     const auto observed = service.inspect(query, port);
     if (!observed) {
