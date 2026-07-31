@@ -22,10 +22,10 @@ from fogmoe_bot.application.workspace.errors import (
 from fogmoe_bot.application.workspace.models import (
     MAX_BASH_OUTPUT_LIMIT_BYTES,
     RunBashCommand,
-    WorkspaceRelativePath,
 )
 from fogmoe_bot.application.workspace.ports import RuntimeProcess
 from fogmoe_bot.domain.conversation.payloads import JsonValue
+from fogmoe_bot.domain.workspace.path import WorkspaceRelativePath
 from fogmoe_bot.domain.workspace.runtime import (
     WorkspaceRequestHash,
     WorkspaceRequestId,

@@ -47,7 +47,6 @@ from fogmoe_bot.application.workspace.models import (  # noqa: E402
     AddFileCommand,
     RunBashCommand,
     RunBashResult,
-    WorkspaceRelativePath,
 )
 from fogmoe_bot.domain.conversation.identity import (  # noqa: E402
     ConversationId,
@@ -55,6 +54,7 @@ from fogmoe_bot.domain.conversation.identity import (  # noqa: E402
     TurnId,
 )
 from fogmoe_bot.domain.conversation.payloads import JsonObject  # noqa: E402
+from fogmoe_bot.domain.workspace.path import WorkspaceRelativePath  # noqa: E402
 from fogmoe_bot.domain.workspace.runtime import (  # noqa: E402
     WorkspaceRequestHash,
     WorkspaceRequestId,
@@ -715,6 +715,52 @@ def _tool_request(
 
 class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
     """@brief 强类型 scope、registry 和 native adapter 的异步合约 / Async contracts for typed scopes, registry, and native adapter."""
+
+    def test_relative_runtime_path_is_a_domain_owned_value_object(self) -> None:
+        """@brief runtime 路径语义归领域且应用模型不再伪装拥有它 /
+        Runtime-path semantics are domain-owned and no longer masquerade as an application model.
+
+        @return None / None.
+        """
+
+        domain_path = _WORKSPACE_DOMAIN_ROOT / "path.py"
+        application_path = _WORKSPACE_APPLICATION_ROOT / "models.py"
+        domain_tree = ast.parse(
+            domain_path.read_text(encoding="utf-8"),
+            filename=str(domain_path),
+        )
+        application_tree = ast.parse(
+            application_path.read_text(encoding="utf-8"),
+            filename=str(application_path),
+        )
+
+        self.assertIn(
+            "WorkspaceRelativePath",
+            {
+                node.name
+                for node in ast.walk(domain_tree)
+                if isinstance(node, ast.ClassDef)
+            },
+        )
+        self.assertNotIn(
+            "WorkspaceRelativePath",
+            {
+                node.name
+                for node in ast.walk(application_tree)
+                if isinstance(node, ast.ClassDef)
+            },
+        )
+        self.assertFalse(
+            hasattr(
+                importlib.import_module("fogmoe_bot.application.workspace.models"),
+                "WorkspaceRelativePath",
+            )
+        )
+        self.assertEqual(
+            WorkspaceRelativePath("project/src").runtime_path, "/workspace/project/src"
+        )
+        with self.assertRaises(ValueError):
+            WorkspaceRelativePath("../host")
 
     def test_scope_rejects_conversation_and_topic_substitution(self) -> None:
         """@brief Runtime scope 只接受用户或整群 ID / Runtime scope accepts only user or whole-group IDs.
