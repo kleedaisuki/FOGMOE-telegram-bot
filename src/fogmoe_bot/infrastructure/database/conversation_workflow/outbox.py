@@ -142,13 +142,13 @@ def _validate_outbound_idempotency(
     """@brief 验证重复 outbox 副作用语义一致 / Verify duplicate outbox-effect semantics."""
 
     if (
-        existing.message_id != requested.message_id
-        or existing.conversation_id != requested.conversation_id
-        or existing.turn_id != requested.turn_id
-        or existing.delivery_stream_id != requested.delivery_stream_id
-        or existing.kind != requested.kind
-        or existing.payload != requested.payload
-        or existing.idempotency_key != requested.idempotency_key
+        existing.draft.message_id != requested.message_id
+        or existing.draft.conversation_id != requested.conversation_id
+        or existing.draft.turn_id != requested.turn_id
+        or existing.draft.delivery_stream_id != requested.delivery_stream_id
+        or existing.draft.kind != requested.kind
+        or existing.draft.payload != requested.payload
+        or existing.draft.idempotency_key != requested.idempotency_key
     ):
         raise IdempotencyConflictError(
             f"Outbound {requested.message_id} or idempotency key was reused with different semantics"
@@ -488,11 +488,11 @@ class PostgresOutboxRepository:
                         "Outbound claim SQL diverged from the domain claim transition"
                     )
                 if (
-                    claim.message.turn_id is not None
-                    and claim.message.kind != SEND_TELEGRAM_ASSISTANT_PROGRESS
+                    claim.message.draft.turn_id is not None
+                    and claim.message.draft.kind != SEND_TELEGRAM_ASSISTANT_PROGRESS
                 ):
                     turn = await _load_turn_for_mutation(
-                        claim.message.turn_id,
+                        claim.message.draft.turn_id,
                         connection=connection,
                     )
                     if previous_status not in {
@@ -505,7 +505,7 @@ class PostgresOutboxRepository:
                         )
                     if turn.state is not TurnState.WAITING_DELIVERY:
                         raise ConcurrentTurnUpdateError(
-                            f"Claimable outbound {claim.message.message_id} requires a "
+                            f"Claimable outbound {claim.message.draft.message_id} requires a "
                             f"waiting_delivery turn, found {turn.state.value}"
                         )
                 claims.append(claim)
@@ -514,7 +514,7 @@ class PostgresOutboxRepository:
             sorted(
                 claims,
                 key=lambda claim: (
-                    str(claim.message.delivery_stream_id),
+                    str(claim.message.draft.delivery_stream_id),
                     int(claim.message.stream_sequence),
                 ),
             )
@@ -628,7 +628,7 @@ class PostgresOutboxRepository:
                     delivered_at,
                     target.external_message_id,
                     target.updated_at,
-                    str(claim.message.message_id),
+                    str(claim.message.draft.message_id),
                     claim.expected_version,
                     str(claim.token),
                 ),
@@ -637,7 +637,7 @@ class PostgresOutboxRepository:
             _require_claim_update(
                 rowcount,
                 "outbound",
-                str(claim.message.message_id),
+                str(claim.message.draft.message_id),
             )
             await self._complete_delivery_turn_if_settled(
                 claim,
@@ -673,7 +673,7 @@ class PostgresOutboxRepository:
                     target.next_attempt_at,
                     target.updated_at,
                     target.last_error,
-                    str(claim.message.message_id),
+                    str(claim.message.draft.message_id),
                     claim.expected_version,
                     str(claim.token),
                 ),
@@ -682,7 +682,7 @@ class PostgresOutboxRepository:
             _require_claim_update(
                 rowcount,
                 "outbound",
-                str(claim.message.message_id),
+                str(claim.message.draft.message_id),
             )
 
     async def dead_letter_outbound(
@@ -712,7 +712,7 @@ class PostgresOutboxRepository:
                     target.version,
                     target.updated_at,
                     target.last_error,
-                    str(claim.message.message_id),
+                    str(claim.message.draft.message_id),
                     claim.expected_version,
                     str(claim.token),
                 ),
@@ -721,7 +721,7 @@ class PostgresOutboxRepository:
             _require_claim_update(
                 rowcount,
                 "outbound",
-                str(claim.message.message_id),
+                str(claim.message.draft.message_id),
             )
             await self._fail_delivery_turn(
                 claim,
@@ -752,8 +752,8 @@ class PostgresOutboxRepository:
         A single outbox success is not Turn success; state advances only when every message for the Turn is delivered.
         """
 
-        turn_id = claim.message.turn_id
-        if turn_id is None or claim.message.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS:
+        turn_id = claim.message.draft.turn_id
+        if turn_id is None or claim.message.draft.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS:
             return None
         remaining_row = await db.fetch_one(
             "SELECT EXISTS ("
@@ -776,7 +776,7 @@ class PostgresOutboxRepository:
             return None
         if turn.state is not TurnState.WAITING_DELIVERY:
             raise ConcurrentTurnUpdateError(
-                f"Outbound {claim.message.message_id} requires a waiting_delivery turn, "
+                f"Outbound {claim.message.draft.message_id} requires a waiting_delivery turn, "
                 f"found {turn.state.value}"
             )
         updated = turn.transition(
@@ -807,15 +807,15 @@ class PostgresOutboxRepository:
         @return 已失败的回合；独立副作用时为 None / Failed Turn, or None for standalone effects.
         """
 
-        turn_id = claim.message.turn_id
-        if turn_id is None or claim.message.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS:
+        turn_id = claim.message.draft.turn_id
+        if turn_id is None or claim.message.draft.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS:
             return None
         turn = await _load_turn_for_mutation(turn_id, connection=connection)
         if turn.state is TurnState.FAILED_FINAL:
             return None
         if turn.state is not TurnState.WAITING_DELIVERY:
             raise ConcurrentTurnUpdateError(
-                f"Outbound {claim.message.message_id} requires a waiting_delivery turn, "
+                f"Outbound {claim.message.draft.message_id} requires a waiting_delivery turn, "
                 f"found {turn.state.value}"
             )
         updated = turn.transition(
@@ -848,8 +848,8 @@ class PostgresOutboxRepository:
             acknowledgement will no longer advance the already failed Turn.
         """
 
-        turn_id = claim.message.turn_id
-        if turn_id is None or claim.message.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS:
+        turn_id = claim.message.draft.turn_id
+        if turn_id is None or claim.message.draft.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS:
             return
         reason = OutboundFailure(_DELIVERY_PLAN_CANCELLED_ERROR)
         while True:
@@ -892,7 +892,7 @@ class PostgresOutboxRepository:
                 "candidates.previous_lease_expires_at",
                 (
                     str(turn_id),
-                    str(claim.message.message_id),
+                    str(claim.message.draft.message_id),
                     SEND_TELEGRAM_ASSISTANT_PROGRESS.value,
                     _BULK_TRANSITION_BATCH_SIZE,
                     occurred_at,

@@ -1,4 +1,4 @@
-"""Transactional outbox 领域模型 / Transactional-outbox domain model."""
+"""@brief Transactional outbox 领域模型 / Transactional-outbox domain model."""
 
 from __future__ import annotations
 
@@ -325,23 +325,32 @@ class InvalidOutboundTransition(RuntimeError):
 class OutboundMessage:
     """@brief 拥有投递生命周期、版本与 attempt 的聚合根 / Aggregate root owning delivery lifecycle, version, and attempts.
 
-    @param _draft 不可变出站意图 / Immutable outbound intent.
-    @param _stream_sequence 投递流内单调序号 / Monotonic sequence in the delivery stream.
-    @param _state 穷尽生命周期状态 / Exhaustive lifecycle state.
-    @param _version 乐观并发版本 / Optimistic-concurrency version.
-    @param _attempt_count 已成功领取次数 / Number of successful claims.
-    @param _updated_at 最近转换时刻 / Most recent transition time.
+    @param draft 不可变出站意图 / Immutable outbound intent.
+    @param stream_sequence 投递流内单调序号 / Monotonic sequence in the delivery stream.
+    @param state 穷尽生命周期状态 / Exhaustive lifecycle state.
+    @param version 乐观并发版本 / Optimistic-concurrency version.
+    @param attempt_count 已成功领取次数 / Number of successful claims.
+    @param updated_at 最近转换时刻 / Most recent transition time.
     @note 新消息必须经 ``enqueue``，数据库 hydration 必须经 ``restore``；调用方不能任意拼装
         status 与 nullable 字段。/ New messages go through ``enqueue`` and database hydration
         goes through ``restore``; callers cannot arbitrarily combine status and nullable fields.
     """
 
-    _draft: OutboundDraft
-    _stream_sequence: MessageSequence
-    _state: OutboundState
-    _version: int
-    _attempt_count: int
-    _updated_at: datetime
+    draft: OutboundDraft
+    stream_sequence: MessageSequence
+    state: OutboundState
+    version: int
+    attempt_count: int
+    updated_at: datetime
+
+    def __new__(cls, *_args: object, **_kwargs: object) -> Self:
+        """@brief 禁止绕过命名构造器 / Prevent bypassing the named constructors.
+
+        @return 永不返回 / Never returns.
+        @raise TypeError 始终抛出，强制使用 enqueue 或 restore / Always raised; use enqueue or restore.
+        """
+
+        raise TypeError("Use OutboundMessage.enqueue() or OutboundMessage.restore()")
 
     @classmethod
     def _create(
@@ -398,12 +407,12 @@ class OutboundMessage:
             raise ValueError("Outbound retry time cannot precede updated_at")
 
         message = object.__new__(cls)
-        object.__setattr__(message, "_draft", draft)
-        object.__setattr__(message, "_stream_sequence", stream_sequence)
-        object.__setattr__(message, "_state", state)
-        object.__setattr__(message, "_version", version)
-        object.__setattr__(message, "_attempt_count", attempt_count)
-        object.__setattr__(message, "_updated_at", timestamp)
+        object.__setattr__(message, "draft", draft)
+        object.__setattr__(message, "stream_sequence", stream_sequence)
+        object.__setattr__(message, "state", state)
+        object.__setattr__(message, "version", version)
+        object.__setattr__(message, "attempt_count", attempt_count)
+        object.__setattr__(message, "updated_at", timestamp)
         return message
 
     @classmethod
@@ -525,77 +534,23 @@ class OutboundMessage:
         )
 
     @property
-    def draft(self) -> OutboundDraft:
-        """@brief 返回不可变出站意图 / Return the immutable outbound intent.
-
-        @return 出站意图 / Outbound intent.
-        """
-
-        return self._draft
-
-    @property
-    def state(self) -> OutboundState:
-        """@brief 返回穷尽生命周期状态 / Return the exhaustive lifecycle state.
-
-        @return 生命周期状态 / Lifecycle state.
-        """
-
-        return self._state
-
-    @property
     def status(self) -> OutboundStatus:
         """@brief 返回稳定持久化状态 / Return the stable persisted status.
 
         @return 状态枚举 / Status enum.
         """
 
-        if isinstance(self._state, AwaitingOutboundDelivery):
+        if isinstance(self.state, AwaitingOutboundDelivery):
             return OutboundStatus.PENDING
-        if isinstance(self._state, ProcessingOutboundDelivery):
+        if isinstance(self.state, ProcessingOutboundDelivery):
             return OutboundStatus.PROCESSING
-        if isinstance(self._state, WaitingOutboundRetry):
+        if isinstance(self.state, WaitingOutboundRetry):
             return OutboundStatus.RETRY_WAIT
-        if isinstance(self._state, DeliveredOutboundMessage):
+        if isinstance(self.state, DeliveredOutboundMessage):
             return OutboundStatus.DELIVERED
-        if isinstance(self._state, DeadLetteredOutboundMessage):
+        if isinstance(self.state, DeadLetteredOutboundMessage):
             return OutboundStatus.FAILED_FINAL
         return OutboundStatus.CANCELLED
-
-    @property
-    def stream_sequence(self) -> MessageSequence:
-        """@brief 返回投递流序号 / Return the delivery-stream sequence.
-
-        @return 单调序号 / Monotonic sequence.
-        """
-
-        return self._stream_sequence
-
-    @property
-    def version(self) -> int:
-        """@brief 返回乐观版本 / Return the optimistic version.
-
-        @return 非负版本 / Non-negative version.
-        """
-
-        return self._version
-
-    @property
-    def attempt_count(self) -> int:
-        """@brief 返回领取次数 / Return the claim-attempt count.
-
-        @return 非负领取次数 / Non-negative claim count.
-        """
-
-        return self._attempt_count
-
-    @property
-    def updated_at(self) -> datetime:
-        """@brief 返回最近转换时刻 / Return the most recent transition time.
-
-        @return UTC 时刻 / UTC instant.
-        """
-
-        return self._updated_at
 
     @property
     def next_attempt_at(self) -> datetime | None:
@@ -604,8 +559,8 @@ class OutboundMessage:
         @return 待领取/重试时刻，其他状态为 None / Claim time for pending/retry states, otherwise None.
         """
 
-        if isinstance(self._state, AwaitingOutboundDelivery | WaitingOutboundRetry):
-            return self._state.claimable_at
+        if isinstance(self.state, AwaitingOutboundDelivery | WaitingOutboundRetry):
+            return self.state.claimable_at
         return None
 
     @property
@@ -615,8 +570,8 @@ class OutboundMessage:
         @return 成功时刻或 None / Delivery time or None.
         """
 
-        if isinstance(self._state, DeliveredOutboundMessage):
-            return self._state.delivered_at
+        if isinstance(self.state, DeliveredOutboundMessage):
+            return self.state.delivered_at
         return None
 
     @property
@@ -626,8 +581,8 @@ class OutboundMessage:
         @return 外部 ID 或 None / External identifier or None.
         """
 
-        if isinstance(self._state, DeliveredOutboundMessage):
-            return self._state.external_message_id
+        if isinstance(self.state, DeliveredOutboundMessage):
+            return self.state.external_message_id
         return None
 
     @property
@@ -637,83 +592,11 @@ class OutboundMessage:
         @return 摘要或 None / Summary or None.
         """
 
-        if isinstance(self._state, WaitingOutboundRetry | DeadLetteredOutboundMessage):
-            return self._state.failure.summary
-        if isinstance(self._state, CancelledOutboundMessage):
-            return self._state.reason.summary if self._state.reason else None
+        if isinstance(self.state, WaitingOutboundRetry | DeadLetteredOutboundMessage):
+            return self.state.failure.summary
+        if isinstance(self.state, CancelledOutboundMessage):
+            return self.state.reason.summary if self.state.reason else None
         return None
-
-    @property
-    def message_id(self) -> OutboundMessageId:
-        """@brief 返回出站消息 ID / Return the outbound-message ID.
-
-        @return 出站消息 ID / Outbound-message ID.
-        """
-
-        return self._draft.message_id
-
-    @property
-    def conversation_id(self) -> ConversationId:
-        """@brief 返回来源会话 / Return the source conversation.
-
-        @return 会话 ID / Conversation ID.
-        """
-
-        return self._draft.conversation_id
-
-    @property
-    def turn_id(self) -> TurnId | None:
-        """@brief 返回可选来源回合 / Return the optional source Turn.
-
-        @return 回合 ID，独立副作用为 None / Turn ID, or None for a standalone effect.
-        """
-
-        return self._draft.turn_id
-
-    @property
-    def delivery_stream_id(self) -> DeliveryStreamId:
-        """@brief 返回外部投递流 / Return the external delivery stream.
-
-        @return 投递流 ID / Delivery-stream ID.
-        """
-
-        return self._draft.delivery_stream_id
-
-    @property
-    def kind(self) -> OutboundKind:
-        """@brief 返回动作类型 / Return the action kind.
-
-        @return 动作类型 / Action kind.
-        """
-
-        return self._draft.kind
-
-    @property
-    def payload(self) -> JsonObject:
-        """@brief 返回隔离的动作载荷 / Return an isolated action payload.
-
-        @return 深拷贝 JSON 载荷 / Deep-copied JSON payload.
-        """
-
-        return deepcopy(self._draft.payload)
-
-    @property
-    def idempotency_key(self) -> str:
-        """@brief 返回副作用幂等键 / Return the effect idempotency key.
-
-        @return 幂等键 / Idempotency key.
-        """
-
-        return self._draft.idempotency_key
-
-    @property
-    def created_at(self) -> datetime:
-        """@brief 返回创建时间 / Return the creation time.
-
-        @return UTC 创建时间 / UTC creation time.
-        """
-
-        return self._draft.created_at
 
     def claim(
         self,
@@ -731,7 +614,7 @@ class OutboundMessage:
         @raise InvalidOutboundTransition 当前状态不可领取时抛出 / Raised when the current state is not claimable.
         """
 
-        if not isinstance(self._state, AwaitingOutboundDelivery | WaitingOutboundRetry):
+        if not isinstance(self.state, AwaitingOutboundDelivery | WaitingOutboundRetry):
             raise InvalidOutboundTransition(
                 f"Outbound state {self.status.value} cannot be claimed"
             )
@@ -739,18 +622,18 @@ class OutboundMessage:
             raise TypeError("Outbound claim requires a LeaseToken")
         timestamp = ensure_utc(claimed_at)
         lease_end = ensure_utc(lease_expires_at)
-        if timestamp < self._updated_at:
+        if timestamp < self.updated_at:
             raise ValueError("Outbound claim time cannot precede the current version")
-        if timestamp < self._state.claimable_at:
+        if timestamp < self.state.claimable_at:
             raise ValueError("Outbound message cannot be claimed before next_attempt_at")
         if lease_end <= timestamp:
             raise ValueError("Outbound lease must expire after claim time")
         processing = type(self)._create(
-            draft=self._draft,
-            stream_sequence=self._stream_sequence,
+            draft=self.draft,
+            stream_sequence=self.stream_sequence,
             state=ProcessingOutboundDelivery(),
-            version=self._version + 1,
-            attempt_count=self._attempt_count + 1,
+            version=self.version + 1,
+            attempt_count=self.attempt_count + 1,
             updated_at=timestamp,
         )
         return OutboundClaim.from_processing(
@@ -777,11 +660,11 @@ class OutboundMessage:
         self._require_claim(claim)
         timestamp = self._transition_time(delivered_at)
         target = type(self)._create(
-            draft=self._draft,
-            stream_sequence=self._stream_sequence,
+            draft=self.draft,
+            stream_sequence=self.stream_sequence,
             state=DeliveredOutboundMessage(timestamp, external_message_id),
-            version=self._version + 1,
-            attempt_count=self._attempt_count,
+            version=self.version + 1,
+            attempt_count=self.attempt_count,
             updated_at=timestamp,
         )
         return OutboundDeliverySucceeded(claim=claim, message=target)
@@ -811,11 +694,11 @@ class OutboundMessage:
         if not isinstance(failure, OutboundFailure):
             raise TypeError("Outbound retry requires an OutboundFailure")
         target = type(self)._create(
-            draft=self._draft,
-            stream_sequence=self._stream_sequence,
+            draft=self.draft,
+            stream_sequence=self.stream_sequence,
             state=WaitingOutboundRetry(retry_time, failure),
-            version=self._version + 1,
-            attempt_count=self._attempt_count,
+            version=self.version + 1,
+            attempt_count=self.attempt_count,
             updated_at=failure_time,
         )
         return OutboundRetryScheduled(claim=claim, message=target)
@@ -840,11 +723,11 @@ class OutboundMessage:
         if not isinstance(failure, OutboundFailure):
             raise TypeError("Outbound dead-letter transition requires an OutboundFailure")
         target = type(self)._create(
-            draft=self._draft,
-            stream_sequence=self._stream_sequence,
+            draft=self.draft,
+            stream_sequence=self.stream_sequence,
             state=DeadLetteredOutboundMessage(failure),
-            version=self._version + 1,
-            attempt_count=self._attempt_count,
+            version=self.version + 1,
+            attempt_count=self.attempt_count,
             updated_at=failure_time,
         )
         return OutboundDeadLettered(claim=claim, message=target)
@@ -879,11 +762,11 @@ class OutboundMessage:
         if not isinstance(failure, OutboundFailure):
             raise TypeError("Outbound lease recovery requires an OutboundFailure")
         target = type(self)._create(
-            draft=self._draft,
-            stream_sequence=self._stream_sequence,
+            draft=self.draft,
+            stream_sequence=self.stream_sequence,
             state=WaitingOutboundRetry(retry_time, failure),
-            version=self._version + 1,
-            attempt_count=self._attempt_count,
+            version=self.version + 1,
+            attempt_count=self.attempt_count,
             updated_at=recovery_time,
         )
         return OutboundLeaseRecovered(claim=claim, message=target)
@@ -902,7 +785,7 @@ class OutboundMessage:
         @raise InvalidOutboundTransition processing 或终态消息被取消时抛出 / Raised for processing or terminal messages.
         """
 
-        if not isinstance(self._state, AwaitingOutboundDelivery | WaitingOutboundRetry):
+        if not isinstance(self.state, AwaitingOutboundDelivery | WaitingOutboundRetry):
             raise InvalidOutboundTransition(
                 f"Outbound state {self.status.value} cannot be cancelled"
             )
@@ -910,11 +793,11 @@ class OutboundMessage:
             raise TypeError("Outbound cancellation requires an OutboundFailure or None")
         timestamp = self._transition_time(cancelled_at)
         target = type(self)._create(
-            draft=self._draft,
-            stream_sequence=self._stream_sequence,
+            draft=self.draft,
+            stream_sequence=self.stream_sequence,
             state=CancelledOutboundMessage(reason),
-            version=self._version + 1,
-            attempt_count=self._attempt_count,
+            version=self.version + 1,
+            attempt_count=self.attempt_count,
             updated_at=timestamp,
         )
         return OutboundCancelled(previous=self, message=target)
@@ -927,11 +810,11 @@ class OutboundMessage:
         @raise InvalidOutboundTransition capability 与聚合不匹配时抛出 / Raised when the capability does not match this aggregate.
         """
 
-        if not isinstance(self._state, ProcessingOutboundDelivery):
+        if not isinstance(self.state, ProcessingOutboundDelivery):
             raise InvalidOutboundTransition(
                 f"Outbound state {self.status.value} cannot be settled"
             )
-        if claim.message != self or claim.expected_version != self._version:
+        if claim.message != self or claim.expected_version != self.version:
             raise InvalidOutboundTransition(
                 "Outbound claim does not own this message version"
             )
@@ -944,7 +827,7 @@ class OutboundMessage:
         """
 
         timestamp = ensure_utc(occurred_at)
-        if timestamp < self._updated_at:
+        if timestamp < self.updated_at:
             raise ValueError("Outbound transition time cannot precede the current version")
         return timestamp
 
@@ -953,14 +836,23 @@ class OutboundMessage:
 class OutboundClaim:
     """@brief 携带 version/token/lease ownership 的投递 capability / Delivery capability carrying version, token, and lease ownership.
 
-    @param _message 已进入 processing 的聚合 / Aggregate in processing state.
-    @param _token 本次 fencing token / Fencing token for this claim.
-    @param _lease_expires_at 可回收时刻 / Lease-recovery eligibility time.
+    @param message 已进入 processing 的聚合 / Aggregate in processing state.
+    @param token 本次 fencing token / Fencing token for this claim.
+    @param lease_expires_at 可回收时刻 / Lease-recovery eligibility time.
     """
 
-    _message: OutboundMessage
-    _token: LeaseToken
-    _lease_expires_at: datetime
+    message: OutboundMessage
+    token: LeaseToken
+    lease_expires_at: datetime
+
+    def __new__(cls, *_args: object, **_kwargs: object) -> Self:
+        """@brief 禁止伪造投递 capability / Prevent forging a delivery capability.
+
+        @return 永不返回 / Never returns.
+        @raise TypeError 始终抛出，capability 只能由领取流程签发 / Always raised; claims are issued only by the claim flow.
+        """
+
+        raise TypeError("Outbound claims are issued by OutboundMessage.claim()")
 
     @classmethod
     def from_processing(
@@ -988,28 +880,10 @@ class OutboundClaim:
         if lease_end <= message.updated_at:
             raise ValueError("Outbound lease must expire after claim time")
         claim = object.__new__(cls)
-        object.__setattr__(claim, "_message", message)
-        object.__setattr__(claim, "_token", token)
-        object.__setattr__(claim, "_lease_expires_at", lease_end)
+        object.__setattr__(claim, "message", message)
+        object.__setattr__(claim, "token", token)
+        object.__setattr__(claim, "lease_expires_at", lease_end)
         return claim
-
-    @property
-    def message(self) -> OutboundMessage:
-        """@brief 返回 owned processing 聚合 / Return the owned processing aggregate.
-
-        @return processing 聚合 / Processing aggregate.
-        """
-
-        return self._message
-
-    @property
-    def token(self) -> LeaseToken:
-        """@brief 返回 fencing token / Return the fencing token.
-
-        @return token / Token.
-        """
-
-        return self._token
 
     @property
     def expected_version(self) -> int:
@@ -1018,16 +892,7 @@ class OutboundClaim:
         @return 乐观版本 / Optimistic version.
         """
 
-        return self._message.version
-
-    @property
-    def lease_expires_at(self) -> datetime:
-        """@brief 返回租约可回收时刻 / Return the lease-recovery eligibility time.
-
-        @return UTC 时刻 / UTC instant.
-        """
-
-        return self._lease_expires_at
+        return self.message.version
 
 
 @dataclass(frozen=True, slots=True)

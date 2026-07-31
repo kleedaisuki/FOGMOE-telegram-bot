@@ -69,6 +69,15 @@ def _processing_claim() -> tuple[OutboundMessage, OutboundClaim]:
     return claim.message, claim
 
 
+def test_aggregate_and_claim_cannot_be_forged_through_public_construction() -> None:
+    """@brief 聚合和 capability 必须由领域流程签发 / Aggregate and capability must be issued by domain flows."""
+
+    with pytest.raises(TypeError, match="OutboundMessage.enqueue"):
+        OutboundMessage()
+    with pytest.raises(TypeError, match="issued by OutboundMessage.claim"):
+        OutboundClaim()
+
+
 def test_outbound_aggregate_owns_retry_reclaim_and_success_lifecycle() -> None:
     """@brief 聚合拥有 claim→retry→claim→success 全部转换 / The aggregate owns claim-to-retry-to-reclaim-to-success transitions."""
 
@@ -245,14 +254,14 @@ def test_message_payload_projection_cannot_mutate_the_owned_intent() -> None:
     """@brief payload projection 不允许调用方修改聚合意图 / Payload projection cannot mutate the aggregate's intent."""
 
     message = OutboundMessage.enqueue(_draft(), stream_sequence=MessageSequence(1))
-    projected = message.payload
+    projected = message.draft.payload
     projected["text"] = "mutated"
     nested = projected["metadata"]
     assert isinstance(nested, dict)
     nested["reply"] = False
 
-    assert message.payload["text"] == "hello"
-    assert message.payload["metadata"] == {"reply": True}
+    assert message.draft.payload["text"] == "hello"
+    assert message.draft.payload["metadata"] == {"reply": True}
 
 
 def test_outbox_worker_persists_domain_settlements_instead_of_setter_calls() -> None:

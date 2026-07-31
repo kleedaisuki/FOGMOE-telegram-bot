@@ -205,7 +205,7 @@ class _Delivery:
         @return 固定回执 / Fixed receipt.
         """
 
-        self.started.append(message.message_id)
+        self.started.append(message.draft.message_id)
         if self.release is not None:
             await self.release.wait()
         if isinstance(self.result, Exception):

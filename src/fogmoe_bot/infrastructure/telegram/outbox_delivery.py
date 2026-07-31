@@ -254,21 +254,21 @@ class TelegramOutboxDeliveryAdapter:
         """
 
         try:
-            if message.kind in {
+            if message.draft.kind in {
                 SEND_TELEGRAM_MESSAGE,
                 SEND_TELEGRAM_ASSISTANT_PROGRESS,
             }:
-                return await self._deliver_message(message.payload)
-            if message.kind == EDIT_TELEGRAM_MESSAGE:
-                return await self._deliver_edit(message.payload)
-            if message.kind == SEND_TELEGRAM_STICKER:
-                return await self._deliver_sticker(message.payload)
-            if message.kind == SEND_TELEGRAM_PHOTO:
-                return await self._deliver_photo(message.payload)
-            if message.kind == SEND_TELEGRAM_ARTIFACT:
-                return await self._deliver_artifact(message.payload)
+                return await self._deliver_message(message.draft.payload)
+            if message.draft.kind == EDIT_TELEGRAM_MESSAGE:
+                return await self._deliver_edit(message.draft.payload)
+            if message.draft.kind == SEND_TELEGRAM_STICKER:
+                return await self._deliver_sticker(message.draft.payload)
+            if message.draft.kind == SEND_TELEGRAM_PHOTO:
+                return await self._deliver_photo(message.draft.payload)
+            if message.draft.kind == SEND_TELEGRAM_ARTIFACT:
+                return await self._deliver_artifact(message.draft.payload)
             raise OutboundPayloadError(
-                f"Unsupported outbound kind: {message.kind.value}",
+                f"Unsupported outbound kind: {message.draft.kind.value}",
                 category=DeliveryErrorCategory.UNSUPPORTED_KIND,
             )
         except DeliveryError:

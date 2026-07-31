@@ -474,9 +474,9 @@ class OutboxWorker:
             kind=SpanKind.PRODUCER,
             parent=message.draft.trace_context,
             attributes={
-                "fogmoe.outbound.id": str(message.message_id),
-                "fogmoe.turn.id": str(message.turn_id) if message.turn_id else "",
-                "fogmoe.outbound.kind": message.kind.value,
+                "fogmoe.outbound.id": str(message.draft.message_id),
+                "fogmoe.turn.id": str(message.draft.turn_id) if message.draft.turn_id else "",
+                "fogmoe.outbound.kind": message.draft.kind.value,
                 "fogmoe.outbox.attempt": message.attempt_count,
             },
         ) as span:
@@ -493,7 +493,7 @@ class OutboxWorker:
                     MetricName.OUTBOX_OUTCOMES,
                     attributes={
                         "outcome": Outcome.TIMEOUT,
-                        "message.kind": message.kind.value,
+                        "message.kind": message.draft.kind.value,
                     },
                 )
                 await self._finalize_failure(claim, error)
@@ -505,7 +505,7 @@ class OutboxWorker:
                     MetricName.OUTBOX_OUTCOMES,
                     attributes={
                         "outcome": Outcome.FAILURE,
-                        "message.kind": message.kind.value,
+                        "message.kind": message.draft.kind.value,
                     },
                 )
                 await self._finalize_failure(claim, error)
@@ -521,7 +521,7 @@ class OutboxWorker:
                 MetricName.OUTBOX_OUTCOMES,
                 attributes={
                     "outcome": Outcome.SUCCESS,
-                    "message.kind": message.kind.value,
+                    "message.kind": message.draft.kind.value,
                 },
             )
 
@@ -622,7 +622,7 @@ class OutboxWorker:
                 except Exception:
                     logger.exception(
                         "Outbox claim could not be finalized: message_id=%s",
-                        work.claim.message.message_id,
+                        work.claim.message.draft.message_id,
                     )
                 finally:
                     capacity.put_nowait(None)
@@ -661,7 +661,7 @@ class OutboxWorker:
                 MetricName.OUTBOX_OUTCOMES,
                 attributes={
                     "outcome": Outcome.RETRY,
-                    "message.kind": claim.message.kind.value,
+                    "message.kind": claim.message.draft.kind.value,
                 },
             )
             return
@@ -675,7 +675,7 @@ class OutboxWorker:
             MetricName.OUTBOX_OUTCOMES,
             attributes={
                 "outcome": Outcome.DROPPED,
-                "message.kind": claim.message.kind.value,
+                "message.kind": claim.message.draft.kind.value,
             },
         )
 

@@ -282,7 +282,7 @@ def test_progress_outbound_is_claimable_while_its_turn_is_processing(
     )
 
     assert len(claims) == 1
-    assert claims[0].message.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS
+    assert claims[0].message.draft.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS
     assert claims[0].message.status is OutboundStatus.PROCESSING
 
 
@@ -423,7 +423,7 @@ def test_claim_standalone_outbound_does_not_load_or_transition_a_turn(
     )
 
     assert len(claims) == 1
-    assert claims[0].message.turn_id is None
+    assert claims[0].message.draft.turn_id is None
     assert claims[0].message.status is OutboundStatus.PROCESSING
 
 
@@ -599,7 +599,7 @@ def test_standalone_outbox_uses_one_short_transaction_and_persists_null_turn(
     result = asyncio.run(PostgresOutboxRepository().enqueue_standalone_outbound(draft))
 
     assert result.inserted is True
-    assert result.message.turn_id is None
+    assert result.message.draft.turn_id is None
     assert insert_params is not None
     assert insert_params[2] is None
     assert insert_params[-4:] == (
