@@ -216,27 +216,56 @@ class AgentExecutionConfig:
         )
 
 
-@dataclass(slots=True)
 class AgentExecutionState:
-    """@brief 单 attempt 的可重建执行状态 / Rebuildable execution state for one attempt.
+    """@brief 单 attempt 的封闭过程管理器 / Closed process manager for one attempt.
 
-    @param context 当前 attempt-local ContextState / Current attempt-local ContextState.
-    @param config 当前 route/model 配置 / Current route/model configuration.
-    @param base_messages attempt 开始前的 canonical 消息 / Canonical messages at attempt start.
-    @param messages 含瞬时工具交换的当前模型历史 / Current model history including transient tool exchanges.
-    @param persistable_messages 可进入下一轮 Conversation 的新增消息 /
-        New messages eligible for the next Conversation context.
-    @param events 已形成的 durable runtime events / Durable runtime events already formed.
-    @param step 当前 provider step 序号 / Current provider-step ordinal.
+    transient 模型历史、可持久化历史、runtime events 与 provider step 必须一起推进；
+    它们不是可由 orchestration 随意改写的独立列表。/ Transient model history,
+    persistable history, runtime events, and the provider step advance together; they are not
+    independent lists for orchestration code to mutate arbitrarily.
     """
 
-    context: ContextState
-    config: AgentExecutionConfig
-    base_messages: tuple[CanonicalMessage, ...]
-    messages: list[CanonicalMessage]
-    persistable_messages: list[CanonicalMessage] = field(default_factory=list)
-    events: list[RuntimeEvent] = field(default_factory=list)
-    step: int = 0
+    __slots__ = (
+        "_base_messages",
+        "_config",
+        "_context",
+        "_events",
+        "_messages",
+        "_persistable_messages",
+        "_step",
+    )
+
+    def __init__(
+        self,
+        *,
+        context: ContextState,
+        config: AgentExecutionConfig,
+        base_messages: tuple[CanonicalMessage, ...],
+    ) -> None:
+        """@brief 建立初始 attempt 状态 / Establish initial attempt state.
+
+        @param context attempt-local 上下文 / Attempt-local context.
+        @param config 已验证 route/model 配置 / Validated route/model configuration.
+        @param base_messages attempt 起始历史 / History at attempt start.
+        @return None / None.
+        @note 调用方应使用 ``from_context``，避免分别派生 context 与 base history。/
+            Callers should use ``from_context`` so context and base history cannot be derived
+            separately.
+        """
+
+        if not isinstance(context, ContextState):
+            raise TypeError("context must be a ContextState")
+        if not isinstance(config, AgentExecutionConfig):
+            raise TypeError("config must be an AgentExecutionConfig")
+        if base_messages != context.messages:
+            raise ValueError("base_messages must be the current ContextState history")
+        self._context = context
+        self._config = config
+        self._base_messages = base_messages
+        self._messages = list(base_messages)
+        self._persistable_messages: list[CanonicalMessage] = []
+        self._events: list[RuntimeEvent] = []
+        self._step = 0
 
     @classmethod
     def from_context(
@@ -251,12 +280,207 @@ class AgentExecutionState:
         @return 新状态 / New state.
         """
 
-        messages = tuple(context.messages)
         return cls(
             context=context,
             config=config,
-            base_messages=messages,
-            messages=list(messages),
+            base_messages=context.messages,
+        )
+
+    @property
+    def context(self) -> ContextState:
+        """@brief 返回 attempt-local 上下文 / Return the attempt-local context.
+
+        @return 由本过程管理器拥有的 ContextState / ContextState owned by this process manager.
+        """
+
+        return self._context
+
+    @property
+    def config(self) -> AgentExecutionConfig:
+        """@brief 返回固定 route/model 配置 / Return the fixed route/model configuration.
+
+        @return 本 attempt 配置 / Configuration for this attempt.
+        """
+
+        return self._config
+
+    @property
+    def messages(self) -> tuple[CanonicalMessage, ...]:
+        """@brief 返回当前 transient 模型历史 / Return current transient model history.
+
+        @return 不可变消息快照 / Immutable message snapshot.
+        """
+
+        return tuple(self._messages)
+
+    @property
+    def events(self) -> tuple[RuntimeEvent, ...]:
+        """@brief 返回已记录 runtime events / Return recorded runtime events.
+
+        @return 不可变事件快照 / Immutable event snapshot.
+        """
+
+        return tuple(self._events)
+
+    @property
+    def step(self) -> int:
+        """@brief 返回当前 provider step / Return the current provider step.
+
+        @return 从零开始的 step 序号 / Zero-based step ordinal.
+        """
+
+        return self._step
+
+    def record_tool_plan(self, completion: AssistantCompletion) -> None:
+        """@brief 记录将被执行的 Assistant 工具计划 / Record an Assistant tool plan to execute.
+
+        @param completion 已 checkpoint 且包含工具调用的 completion /
+            Checkpointed completion containing tool calls.
+        @return None / None.
+        """
+
+        if not completion.tool_calls:
+            raise ValueError("tool plan must contain at least one tool call")
+        self._messages.append(completion.message)
+
+    def record_tool_result(
+        self,
+        *,
+        completion: AssistantCompletion,
+        result: ToolRuntimeResult,
+        first: bool,
+    ) -> None:
+        """@brief 原子记录一个 receipt-backed 工具交换 / Atomically record one receipt-backed tool exchange.
+
+        @param completion 调用来源消息 / Source completion.
+        @param result durable tool receipt 的规范结果 / Canonical result of the durable tool receipt.
+        @param first 是否为来源消息的首个调用 / Whether this is the source message's first call.
+        @return None / None.
+        """
+
+        call_event: AssistantToolCallEvent = {
+            "type": "assistant_tool_call",
+            "tool_name": result.name,
+            "arguments": cast(JsonValue, result.arguments),
+            "tool_call_id": result.provider_call_id,
+            "invocation_id": result.invocation_id,
+        }
+        if first:
+            call_event["assistant_message"] = completion.message.to_json()
+        if result.validation_error is not None:
+            call_event["validation_error"] = result.validation_error
+        ephemeral = result.result_residency is ToolResultResidency.AGENT_TURN
+        if ephemeral:
+            call_event["ephemeral"] = True
+        self._events.append(call_event)
+        self._messages.append(
+            CanonicalMessage(
+                MessageRole.TOOL,
+                (
+                    ToolResultPart(
+                        result.provider_call_id,
+                        result.name,
+                        cast(FrozenJsonValue, result.public_result),
+                        is_error=result.validation_error is not None,
+                    ),
+                ),
+            )
+        )
+        result_event: ToolResultEvent = {
+            "type": "tool_result",
+            "tool_name": result.name,
+            "arguments": result.arguments,
+            "result": result.public_result,
+            "tool_call_id": result.provider_call_id,
+            "invocation_id": result.invocation_id,
+            "effect_kind": result.effect_kind,
+            "replayed": result.replayed,
+        }
+        if ephemeral:
+            result_event["ephemeral"] = True
+        self._events.append(result_event)
+
+    def retain_conversation_tool_exchange(
+        self,
+        *,
+        completion: AssistantCompletion,
+        results: tuple[ToolRuntimeResult, ...],
+    ) -> None:
+        """@brief 保留仅可进入未来 Conversation 的工具交换 / Retain only tool exchanges eligible for future Conversation history.
+
+        @param completion 原始 Assistant 工具计划 / Original Assistant tool plan.
+        @param results 按调用顺序排列的 receipt 结果 / Receipt results in call order.
+        @return None / None.
+        """
+
+        persistent = tuple(
+            result
+            for result in results
+            if result.result_residency is ToolResultResidency.CONVERSATION
+        )
+        persistent_ids = {result.provider_call_id for result in persistent}
+        retained_parts = tuple(
+            part
+            for part in completion.message.parts
+            if (
+                (isinstance(part, TextPart) and part.text.strip())
+                or (isinstance(part, ToolCallPart) and part.call_id in persistent_ids)
+            )
+        )
+        if retained_parts:
+            self._persistable_messages.append(
+                CanonicalMessage(
+                    MessageRole.ASSISTANT,
+                    retained_parts,
+                    completion.message.policy,
+                    completion.message.meta,
+                )
+            )
+        for result in persistent:
+            self._persistable_messages.append(
+                CanonicalMessage(
+                    MessageRole.TOOL,
+                    (
+                        ToolResultPart(
+                            result.provider_call_id,
+                            result.name,
+                            cast(FrozenJsonValue, result.public_result),
+                            is_error=result.validation_error is not None,
+                        ),
+                    ),
+                )
+            )
+
+    def advance_after_tools(self) -> None:
+        """@brief 在完整工具 step 后推进 provider 序号 / Advance the provider ordinal after a complete tool step.
+
+        @return None / None.
+        @raise ValueError 已达到配置上限时抛出 / Raised when the configured limit is exhausted.
+        """
+
+        if self._step >= self._config.max_iterations:
+            raise ValueError("cannot advance beyond the tool iteration limit")
+        self._step += 1
+
+    def finish(self, completion: AssistantCompletion) -> AgentResponse:
+        """@brief 提交最终 Assistant 消息并更新 ContextState / Commit the final Assistant message and update ContextState.
+
+        @param completion 不含工具调用的最终 completion / Final completion without tool calls.
+        @return 封闭且可持久化的 Agent 响应 / Closed, persistable Agent response.
+        """
+
+        if completion.tool_calls:
+            raise ValueError("final completion cannot contain tool calls")
+        self._messages.append(completion.message)
+        self._persistable_messages.append(completion.message)
+        self._context.record_agent_history(
+            [*self._base_messages, *self._persistable_messages]
+        )
+        return AgentResponse(
+            completion.content,
+            tuple(self._events),
+            self._context,
+            tuple(self._persistable_messages),
         )
 
 
@@ -369,7 +593,7 @@ class AgentLoop:
                 raise ValueError(
                     "provider returned tool calls while tools were disabled"
                 )
-            current.messages.append(completion.message)
+            current.record_tool_plan(completion)
             try:
                 await self._execute_calls(
                     current,
@@ -390,7 +614,7 @@ class AgentLoop:
                 raise ResumableAgentInterruptedError(
                     str(error) or error.__class__.__name__
                 ) from error
-            current.step += 1
+            current.advance_after_tools()
 
         completion = await self._complete_step(
             current,
@@ -833,15 +1057,13 @@ class AgentLoop:
                         "fogmoe.tool.replayed": result.replayed,
                     },
                 )
-            self._append_call(
-                state,
+            state.record_tool_result(
                 completion=completion,
                 result=result,
                 first=ordinal == 0,
             )
             results.append(result)
-        _append_persistable_tool_exchange(
-            state,
+        state.retain_conversation_tool_exchange(
             completion=completion,
             results=tuple(results),
         )
@@ -1006,65 +1228,6 @@ class AgentLoop:
         await self._generation_fence.assert_current_generation(
             tool_context.generation_fence
         )
-
-    @staticmethod
-    def _append_call(
-        state: AgentExecutionState,
-        *,
-        completion: AssistantCompletion,
-        result: ToolRuntimeResult,
-        first: bool,
-    ) -> None:
-        """@brief 追加事件与 canonical tool message / Append events and a canonical tool message.
-
-        @param state 当前状态 / Current state.
-        @param completion 调用来源消息 / Source message.
-        @param result receipt 结果 / Receipt result.
-        @param first 是否本消息第一调用 / Whether this is the first call in the message.
-        @return None / None.
-        """
-
-        call_event: AssistantToolCallEvent = {
-            "type": "assistant_tool_call",
-            "tool_name": result.name,
-            "arguments": cast(JsonValue, result.arguments),
-            "tool_call_id": result.provider_call_id,
-            "invocation_id": result.invocation_id,
-        }
-        if first:
-            call_event["assistant_message"] = completion.message.to_json()
-        if result.validation_error is not None:
-            call_event["validation_error"] = result.validation_error
-        ephemeral = result.result_residency is ToolResultResidency.AGENT_TURN
-        if ephemeral:
-            call_event["ephemeral"] = True
-        state.events.append(call_event)
-        state.messages.append(
-            CanonicalMessage(
-                MessageRole.TOOL,
-                (
-                    ToolResultPart(
-                        result.provider_call_id,
-                        result.name,
-                        cast(FrozenJsonValue, result.public_result),
-                        is_error=result.validation_error is not None,
-                    ),
-                ),
-            )
-        )
-        result_event: ToolResultEvent = {
-            "type": "tool_result",
-            "tool_name": result.name,
-            "arguments": result.arguments,
-            "result": result.public_result,
-            "tool_call_id": result.provider_call_id,
-            "invocation_id": result.invocation_id,
-            "effect_kind": result.effect_kind,
-            "replayed": result.replayed,
-        }
-        if ephemeral:
-            result_event["ephemeral"] = True
-        state.events.append(result_event)
 
 
 def _completion_request_hash(
@@ -1275,20 +1438,7 @@ def _final_response(
     @return Agent response / Agent response.
     """
 
-    state.messages.append(completion.message)
-    state.persistable_messages.append(completion.message)
-    state.context.record_agent_history(
-        [
-            *state.base_messages,
-            *state.persistable_messages,
-        ]
-    )
-    return AgentResponse(
-        completion.content,
-        tuple(state.events),
-        state.context,
-        tuple(state.persistable_messages),
-    )
+    return state.finish(completion)
 
 
 def _memory_scope(
@@ -1322,59 +1472,6 @@ def _current_query(context: ContextState) -> str:
         if message.role is MessageRole.USER and message.text.strip():
             return message.text.strip()
     raise ValueError("ContextState has no current user query for WorkingMemory")
-
-
-def _append_persistable_tool_exchange(
-    state: AgentExecutionState,
-    *,
-    completion: AssistantCompletion,
-    results: tuple[ToolRuntimeResult, ...],
-) -> None:
-    """@brief 仅保留 Conversation 驻留的工具交换 / Retain only conversation-resident tool exchanges.
-
-    @param state 当前执行状态 / Current execution state.
-    @param completion 原始 Assistant tool-call 消息 / Original Assistant tool-call message.
-    @param results 已执行结果 / Executed results.
-    @return None / None.
-    """
-
-    persistent = tuple(
-        result
-        for result in results
-        if result.result_residency is ToolResultResidency.CONVERSATION
-    )
-    persistent_ids = {result.provider_call_id for result in persistent}
-    retained_parts = tuple(
-        part
-        for part in completion.message.parts
-        if (
-            (isinstance(part, TextPart) and part.text.strip())
-            or (isinstance(part, ToolCallPart) and part.call_id in persistent_ids)
-        )
-    )
-    if retained_parts:
-        state.persistable_messages.append(
-            CanonicalMessage(
-                MessageRole.ASSISTANT,
-                retained_parts,
-                completion.message.policy,
-                completion.message.meta,
-            )
-        )
-    for result in persistent:
-        state.persistable_messages.append(
-            CanonicalMessage(
-                MessageRole.TOOL,
-                (
-                    ToolResultPart(
-                        result.provider_call_id,
-                        result.name,
-                        cast(FrozenJsonValue, result.public_result),
-                        is_error=result.validation_error is not None,
-                    ),
-                ),
-            )
-        )
 
 
 __all__ = [

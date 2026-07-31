@@ -11,7 +11,11 @@ from uuid import uuid4
 import pytest
 from observability_testkit import make_telemetry
 
-from fogmoe_bot.application.assistant.agent_loop import AgentExecutionConfig, AgentLoop
+from fogmoe_bot.application.assistant.agent_loop import (
+    AgentExecutionConfig,
+    AgentExecutionState,
+    AgentLoop,
+)
 from fogmoe_bot.application.assistant.completion import (
     AgentCheckpointConflictError,
     AgentStepCheckpoint,
@@ -560,6 +564,33 @@ def _context() -> ContextState:
         messages=[text_message(MessageRole.USER, "remember me")],
         tool_context={},
     )
+
+
+def test_agent_execution_state_closes_parallel_mutable_histories() -> None:
+    """@brief Agent attempt 只暴露不可变快照且拒绝错配 base history / Agent attempts expose only immutable snapshots and reject mismatched base history.
+
+    @return None / None.
+    """
+
+    context = _context()
+    config = AgentExecutionConfig(route=_route(), model="model")
+    state = AgentExecutionState.from_context(context, config)
+
+    assert state.context is context
+    assert state.config is config
+    assert state.messages == context.messages
+    assert isinstance(state.messages, tuple)
+    assert state.events == ()
+    assert state.step == 0
+    assert not hasattr(state.messages, "append")
+    assert not hasattr(state.events, "append")
+
+    with pytest.raises(ValueError, match="base_messages"):
+        AgentExecutionState(
+            context=context,
+            config=config,
+            base_messages=(),
+        )
 
 
 def _tool_context(
