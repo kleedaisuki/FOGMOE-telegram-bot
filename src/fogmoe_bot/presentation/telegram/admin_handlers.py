@@ -164,34 +164,42 @@ class TelegramAnnouncementOutboundFactory:
         @return Telegram standalone outbox 命令 / Telegram standalone-outbox command.
         """
 
-        conversation_id = ConversationId(f"admin-announcement:{claim.announcement_id}")
-        if claim.recipient_kind is AnnouncementRecipientKind.USER:
-            text = f"📢 公告 Announcement\n\n{claim.body}"
-        elif claim.recipient_kind is AnnouncementRecipientKind.GROUP:
-            text = f"📢 群组公告 Group Announcement\n\n{claim.body}"
+        recipient = claim.recipient
+        """@brief 领取的 durable recipient / Claimed durable recipient."""
+        content = claim.content
+        """@brief claim 时冻结的公告内容 / Announcement content frozen at claim time."""
+        conversation_id = ConversationId(
+            f"admin-announcement:{recipient.announcement_id}"
+        )
+        if recipient.recipient_kind is AnnouncementRecipientKind.USER:
+            text = f"📢 公告 Announcement\n\n{content.body}"
+        elif recipient.recipient_kind is AnnouncementRecipientKind.GROUP:
+            text = f"📢 群组公告 Group Announcement\n\n{content.body}"
         else:
             text = (
                 "📢 公告投递完成 Announcement delivery completed\n\n"
-                f"受众 Audience: {claim.recipient_count}\n"
-                f"成功 Delivered: {claim.delivered_count}\n"
-                f"失败 Failed: {claim.failed_count}"
+                f"受众 Audience: {content.counts.recipients}\n"
+                f"成功 Delivered: {content.counts.delivered}\n"
+                f"失败 Failed: {content.counts.failed}"
             )
         return StandaloneOutboundCommand(
             conversation_id=conversation_id,
             delivery_stream_id=delivery_stream_for_chat(
-                claim.chat_id,
-                claim.message_thread_id,
+                recipient.chat_id,
+                recipient.message_thread_id,
             ),
             kind=SEND_TELEGRAM_MESSAGE,
             payload={
-                "chat_id": claim.chat_id,
+                "chat_id": recipient.chat_id,
                 "text": text,
-                "message_thread_id": claim.message_thread_id,
-                "reply_to_message_id": claim.reply_to_message_id,
+                "message_thread_id": recipient.message_thread_id,
+                "reply_to_message_id": recipient.reply_to_message_id,
                 "disable_web_page_preview": True,
             },
-            idempotency_key=(f"recipient:{claim.recipient_kind.value}:{claim.chat_id}"),
-            created_at=claim.announcement_created_at,
+            idempotency_key=(
+                f"recipient:{recipient.recipient_kind.value}:{recipient.chat_id}"
+            ),
+            created_at=content.announcement_created_at,
         )
 
 

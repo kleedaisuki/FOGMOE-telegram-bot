@@ -14,7 +14,10 @@ from fogmoe_bot.application.runtime import (
     SystemUtcClock,
     UtcClock,
 )
-from fogmoe_bot.domain.admin import AnnouncementRecipientClaim
+from fogmoe_bot.domain.admin.recipient import (
+    AnnouncementFailureCategory,
+    AnnouncementRecipientClaim,
+)
 from fogmoe_bot.domain.conversation.identity import OutboundMessageId
 
 from .ports import AdminAnnouncementOperations, AnnouncementOutboundFactory
@@ -201,35 +204,35 @@ class AdminRuntime:
                 command.conversation_id,
                 command.idempotency_key,
             )
-            await self._operations.mark_expanded(
-                claim,
+            expanded = claim.expand(
                 outbound_message_id=message_id,
                 completed_at=self._clock.now(),
             )
+            await self._operations.persist_expanded(expanded)
         except asyncio.CancelledError:
             raise
         except Exception as error:
             logger.exception(
                 "Admin announcement receipt expansion failed: announcement=%s kind=%s chat=%s attempt=%s",
-                claim.announcement_id,
-                claim.recipient_kind.value,
-                claim.chat_id,
-                claim.attempt_count,
+                claim.recipient.announcement_id,
+                claim.recipient.recipient_kind.value,
+                claim.recipient.chat_id,
+                claim.recipient.attempt_count,
             )
-            category = type(error).__name__[:100] or "unknown"
+            category = AnnouncementFailureCategory.from_exception(error)
             now = self._clock.now()
-            if claim.attempt_count >= self._max_attempts:
-                await self._operations.mark_failed_final(
-                    claim,
+            if claim.recipient.attempt_count >= self._max_attempts:
+                dead_letter = claim.dead_letter(
                     failed_at=now,
-                    error_category=category,
+                    failure=category,
                 )
+                await self._operations.persist_dead_letter(dead_letter)
                 return
-            await self._operations.schedule_retry(
-                claim,
-                retry_at=now + self._retry_delay(claim.attempt_count),
-                error_category=category,
+            retry = claim.retry(
+                retry_at=now + self._retry_delay(claim.recipient.attempt_count),
+                failure=category,
             )
+            await self._operations.persist_retry(retry)
 
     def _retry_delay(self, attempt_count: int) -> timedelta:
         """@brief 计算 capped exponential backoff / Calculate capped exponential backoff.

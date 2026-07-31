@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
 
 import pytest
 
@@ -17,12 +16,23 @@ from fogmoe_bot.application.admin.models import (
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
-from fogmoe_bot.domain.admin import (
+from fogmoe_bot.domain.admin.announcement import (
+    AnnouncementDeliveryCounts,
+    AnnouncementDispatchContent,
     AnnouncementId,
-    AnnouncementRecipientClaim,
-    AnnouncementRecipientKind,
 )
-from fogmoe_bot.domain.conversation.identity import OutboundMessageId
+from fogmoe_bot.domain.admin.recipient import (
+    AnnouncementClaimToken,
+    AnnouncementRecipient,
+    AnnouncementRecipientClaim,
+    AnnouncementRecipientDeadLettered,
+    AnnouncementRecipientExpanded,
+    AnnouncementRecipientKind,
+    AnnouncementRecipientRetryScheduled,
+    AnnouncementRecipientStatus,
+    FailedAnnouncementRecipient,
+    RetryWaitingAnnouncementRecipient,
+)
 from fogmoe_bot.presentation.telegram.admin_handlers import (
     TelegramAnnouncementOutboundFactory,
 )
@@ -34,11 +44,16 @@ NOW = datetime(2030, 1, 1, tzinfo=UTC)
 class FixedClock:
     """@brief 可控 UTC 时钟 / Controllable UTC clock."""
 
-    def __init__(self) -> None:
-        """@brief 初始化固定时间 / Initialize the fixed instant."""
+    def __init__(self, events: list[str] | None = None) -> None:
+        """@brief 初始化固定时间 / Initialize the fixed instant.
+
+        @param events 可选调用顺序记录 / Optional call-order recording.
+        """
 
         self.value = NOW
         """@brief 当前 UTC 时间 / Current UTC instant."""
+        self.events = events
+        """@brief 可选调用顺序记录 / Optional call-order recording."""
 
     def now(self) -> datetime:
         """@brief 返回当前时间 / Return current time.
@@ -46,19 +61,34 @@ class FixedClock:
         @return aware UTC 时间 / Aware UTC instant.
         """
 
+        if self.events is not None:
+            self.events.append("clock")
         return self.value
 
 
 class RecordingOutbound:
     """@brief 以确定性 identity 去重的测试 outbox / Test outbox deduplicating by deterministic identity."""
 
-    def __init__(self) -> None:
-        """@brief 初始化记录 / Initialize recordings."""
+    def __init__(
+        self,
+        events: list[str] | None = None,
+        *,
+        fail: bool = False,
+    ) -> None:
+        """@brief 初始化记录 / Initialize recordings.
+
+        @param events 可选调用顺序记录 / Optional call-order recording.
+        @param fail 是否注入 enqueue 失败 / Whether to inject an enqueue failure.
+        """
 
         self.calls: list[StandaloneOutboundCommand] = []
         """@brief 所有 enqueue 尝试 / Every enqueue attempt."""
         self.effects: dict[tuple[str, str], StandaloneOutboundCommand] = {}
         """@brief 已提交语义副作用 / Committed semantic effects."""
+        self.events = events
+        """@brief 可选调用顺序记录 / Optional call-order recording."""
+        self.fail = fail
+        """@brief 是否注入 enqueue 失败 / Whether to inject an enqueue failure."""
 
     async def enqueue(self, command: StandaloneOutboundCommand) -> None:
         """@brief 幂等记录命令 / Idempotently record a command.
@@ -67,6 +97,10 @@ class RecordingOutbound:
         @return None / None.
         """
 
+        if self.events is not None:
+            self.events.append("outbox")
+        if self.fail:
+            raise RuntimeError("temporary outbound failure")
         self.calls.append(command)
         self.effects.setdefault(
             (str(command.conversation_id), command.idempotency_key), command
@@ -77,20 +111,23 @@ class ScriptedOperations:
     """@brief 可脚本化公告回执端口 / Scriptable announcement-receipt port."""
 
     def __init__(
-        self, claim_batches: list[tuple[AnnouncementRecipientClaim, ...]]
+        self,
+        claim_batches: list[tuple[AnnouncementRecipientClaim, ...]],
+        events: list[str] | None = None,
     ) -> None:
         """@brief 注入每轮领取 / Inject claim batches per pass.
 
         @param claim_batches 领取脚本 / Claim script.
+        @param events 可选调用顺序记录 / Optional call-order recording.
         """
 
         self.claim_batches = claim_batches
         """@brief 剩余领取脚本 / Remaining claim script."""
-        self.mark_calls: list[tuple[AnnouncementRecipientClaim, OutboundMessageId]] = []
+        self.mark_calls: list[AnnouncementRecipientExpanded] = []
         """@brief 终结调用 / Finalization calls."""
-        self.retry_calls: list[AnnouncementRecipientClaim] = []
+        self.retry_calls: list[AnnouncementRecipientRetryScheduled] = []
         """@brief 重试调用 / Retry calls."""
-        self.fail_calls: list[AnnouncementRecipientClaim] = []
+        self.fail_calls: list[AnnouncementRecipientDeadLettered] = []
         """@brief 最终失败调用 / Final-failure calls."""
         self.cancel_first_mark = False
         """@brief 首次终结时模拟 kill-9 取消 / Simulate kill-9 cancellation on first finalization."""
@@ -100,6 +137,8 @@ class ScriptedOperations:
         """@brief 投递完成推进调用数 / Delivery-completion promotion call count."""
         self.claim_calls = 0
         """@brief 公告领取调用数 / Announcement-claim call count."""
+        self.events = events
+        """@brief 可选调用顺序记录 / Optional call-order recording."""
 
     async def accept(self, command: RequestAnnouncement) -> AnnouncementAcceptance:
         """@brief 拒绝此 runtime 测试范围外的公告创建 / Reject announcement creation outside this runtime-test scope.
@@ -133,6 +172,8 @@ class ScriptedOperations:
         """
 
         del now, limit
+        if self.events is not None:
+            self.events.append("promote")
         self.promote_calls += 1
         return 0
 
@@ -152,69 +193,82 @@ class ScriptedOperations:
         """
 
         del now, lease_for
+        if self.events is not None:
+            self.events.append("claim")
         self.claim_calls += 1
         batch = self.claim_batches.pop(0) if self.claim_batches else ()
         return batch[:limit]
 
-    async def mark_expanded(
+    async def persist_expanded(
         self,
-        claim: AnnouncementRecipientClaim,
-        *,
-        outbound_message_id: OutboundMessageId,
-        completed_at: datetime,
+        decision: AnnouncementRecipientExpanded,
     ) -> bool:
         """@brief 记录终结或模拟取消 / Record finalization or simulate cancellation.
 
-        @param claim 领取 / Claim.
-        @param outbound_message_id outbox ID / Outbox ID.
-        @param completed_at 终结时间 / Completion instant.
+        @param decision expanded 领域决策 / Expanded domain decision.
         @return True / True.
         """
 
-        del completed_at
         if self.cancel_first_mark:
             self.cancel_first_mark = False
             raise asyncio.CancelledError
-        self.mark_calls.append((claim, outbound_message_id))
+        if self.events is not None:
+            self.events.append("persist_expanded")
+        self.mark_calls.append(decision)
         return True
 
-    async def schedule_retry(
+    async def persist_retry(
         self,
-        claim: AnnouncementRecipientClaim,
-        *,
-        retry_at: datetime,
-        error_category: str,
+        decision: AnnouncementRecipientRetryScheduled,
     ) -> bool:
         """@brief 记录重试 / Record a retry.
 
-        @param claim 领取 / Claim.
-        @param retry_at 重试时间 / Retry instant.
-        @param error_category 错误分类 / Error category.
+        @param decision retry-wait 领域决策 / Retry-wait domain decision.
         @return True / True.
         """
 
-        del retry_at, error_category
-        self.retry_calls.append(claim)
+        if self.events is not None:
+            self.events.append("persist_retry")
+        self.retry_calls.append(decision)
         return True
 
-    async def mark_failed_final(
+    async def persist_dead_letter(
         self,
-        claim: AnnouncementRecipientClaim,
-        *,
-        failed_at: datetime,
-        error_category: str,
+        decision: AnnouncementRecipientDeadLettered,
     ) -> bool:
         """@brief 记录最终失败 / Record a final failure.
 
-        @param claim 领取 / Claim.
-        @param failed_at 失败时间 / Failure instant.
-        @param error_category 错误分类 / Error category.
+        @param decision failed-final 领域决策 / Failed-final domain decision.
         @return True / True.
         """
 
-        del failed_at, error_category
-        self.fail_calls.append(claim)
+        if self.events is not None:
+            self.events.append("persist_dead_letter")
+        self.fail_calls.append(decision)
         return True
+
+
+class RecordingFactory:
+    """@brief 记录 factory 调用顺序的 Telegram 代理 / Telegram factory proxy recording call order."""
+
+    def __init__(self, events: list[str]) -> None:
+        """@brief 保存顺序记录 / Store the call-order recording.
+
+        @param events 共享顺序记录 / Shared call-order recording.
+        """
+
+        self._events = events
+        self._delegate = TelegramAnnouncementOutboundFactory()
+
+    def build(self, claim: AnnouncementRecipientClaim) -> StandaloneOutboundCommand:
+        """@brief 记录并委托构造 / Record and delegate construction.
+
+        @param claim 领取能力 / Claim capability.
+        @return Telegram outbox 命令 / Telegram outbox command.
+        """
+
+        self._events.append("factory")
+        return self._delegate.build(claim)
 
 
 class PeriodicRecoveryOperations(ScriptedOperations):
@@ -267,21 +321,42 @@ def _claim(
     """
 
     del token
-    return AnnouncementRecipientClaim(
+    previous_attempts = attempt - 1
+    recipient = AnnouncementRecipient.restore(
         announcement_id=AnnouncementId.for_idempotency_key("announcement:1"),
         recipient_kind=AnnouncementRecipientKind.USER,
         chat_id=42,
         message_thread_id=None,
         reply_to_message_id=None,
-        body="hello",
-        recipient_count=1,
-        delivered_count=0,
-        failed_count=0,
-        claim_token=uuid4(),
-        attempt_count=attempt,
-        announcement_created_at=NOW,
+        status=(
+            AnnouncementRecipientStatus.PENDING
+            if previous_attempts == 0
+            else AnnouncementRecipientStatus.RETRY_WAIT
+        ),
+        attempt_count=previous_attempts,
+        next_attempt_at=NOW,
+        claim_token=None,
+        lease_expires_at=None,
+        outbound_message_id=None,
+        last_error=None if previous_attempts == 0 else "previous_error",
+        created_at=NOW,
+        updated_at=NOW,
+        expanded_at=None,
+        terminal_at=None,
+    )
+    return recipient.claim(
+        token=AnnouncementClaimToken.new(),
         claimed_at=NOW,
         lease_expires_at=NOW + timedelta(minutes=1),
+        content=AnnouncementDispatchContent(
+            body="hello",
+            counts=AnnouncementDeliveryCounts(
+                recipients=1,
+                delivered=0,
+                failed=0,
+            ),
+            announcement_created_at=NOW,
+        ),
     )
 
 
@@ -309,7 +384,10 @@ def test_kill_after_outbox_commit_replays_one_semantic_effect() -> None:
     assert len(outbound.effects) == 1
     assert outbound.calls[0] == outbound.calls[1]
     assert len(operations.mark_calls) == 1
-    assert operations.mark_calls[0][0].claim_token == second.claim_token
+    assert (
+        operations.mark_calls[0].claim.capability.token
+        == second.capability.token
+    )
 
 
 def test_run_once_is_a_deterministic_business_pass_without_recovery() -> None:
@@ -327,6 +405,79 @@ def test_run_once_is_a_deterministic_business_pass_without_recovery() -> None:
     assert operations.recover_calls == 0
     assert operations.promote_calls == 1
     assert operations.claim_calls == 1
+
+
+def test_success_preserves_clock_factory_outbox_and_persistence_order() -> None:
+    """@brief 成功路径保持既有 clock/outbox 调用顺序 / Success preserves the established clock/outbox call order."""
+
+    events: list[str] = []
+    operations = ScriptedOperations([(_claim(),)], events)
+    runtime = AdminRuntime(
+        operations=operations,
+        outbound=RecordingOutbound(events),
+        factory=RecordingFactory(events),
+        clock=FixedClock(events),
+    )
+
+    assert asyncio.run(runtime.run_once()) == 1
+    assert events == [
+        "clock",
+        "promote",
+        "claim",
+        "factory",
+        "outbox",
+        "clock",
+        "persist_expanded",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("attempt", "expected_event"),
+    ((1, "persist_retry"), (8, "persist_dead_letter")),
+)
+def test_failure_policy_produces_typed_retry_or_dead_letter(
+    attempt: int,
+    expected_event: str,
+) -> None:
+    """@brief runtime 仅选择 capped retry 或最终失败策略 / Runtime only selects capped retry or final-failure policy.
+
+    @param attempt 当前尝试序号 / Current attempt number.
+    @param expected_event 预期持久化决策 / Expected persistence decision.
+    """
+
+    events: list[str] = []
+    operations = ScriptedOperations([(_claim(attempt=attempt),)], events)
+    runtime = AdminRuntime(
+        operations=operations,
+        outbound=RecordingOutbound(events, fail=True),
+        factory=RecordingFactory(events),
+        clock=FixedClock(events),
+        max_attempts=8,
+        initial_retry=timedelta(seconds=1),
+    )
+
+    assert asyncio.run(runtime.run_once()) == 1
+    assert events == [
+        "clock",
+        "promote",
+        "claim",
+        "factory",
+        "outbox",
+        "clock",
+        expected_event,
+    ]
+    if attempt == 1:
+        state = operations.retry_calls[0].recipient.state
+        assert isinstance(state, RetryWaitingAnnouncementRecipient)
+        assert state.next_attempt_at == NOW + timedelta(seconds=1)
+        assert state.failure.value == "RuntimeError"
+        assert operations.fail_calls == []
+    else:
+        state = operations.fail_calls[0].recipient.state
+        assert isinstance(state, FailedAnnouncementRecipient)
+        assert state.terminal_at == NOW
+        assert state.failure.value == "RuntimeError"
+        assert operations.retry_calls == []
 
 
 @pytest.mark.parametrize("fail_first", [False, True], ids=["steady", "retry"])

@@ -56,6 +56,12 @@
 
 每个受众都有独立的持久化投递记录；后台 worker 使用 lease（租约）与 fencing（隔离令牌）恢复重试。所有受众进入成功或失败终态后，机器人会回复到发出命令的聊天/Topic，报告总受众数、成功数和失败数。因此：
 
+受众回执按 `blocked → pending → processing → expanded | retry_wait | failed_final`
+显式推进；`blocked` 只用于等待受众投递完成的管理员回执。结算只接受当前
+`processing` 行持有的 claim token，陈旧 worker 的写入返回 stale 而不会覆盖新 lease。
+该表没有虚构的版本号；过期 lease 恢复为 `retry_wait` 时保留既有 attempt count，下一次
+真正领取才增加一次尝试数。
+
 - 不要因暂未看到最终报告而重复发送同一通知；先等待投递完成。
 - 同一 Telegram Update 的重放使用稳定幂等键（idempotency key），不会创建第二份公告；回复会标注为 replay。
 - 重新手动发送一条新的 Telegram 消息会产生新的 Update，并被视为新的公告请求。

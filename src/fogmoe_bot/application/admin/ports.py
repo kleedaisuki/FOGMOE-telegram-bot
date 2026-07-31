@@ -9,9 +9,12 @@ from typing import Protocol
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
-from fogmoe_bot.domain.admin import AnnouncementRecipientClaim
-from fogmoe_bot.domain.conversation.identity import OutboundMessageId
-
+from fogmoe_bot.domain.admin.recipient import (
+    AnnouncementRecipientClaim,
+    AnnouncementRecipientDeadLettered,
+    AnnouncementRecipientExpanded,
+    AnnouncementRecipientRetryScheduled,
+)
 from .models import AdminStats, AnnouncementAcceptance, LogTail, RequestAnnouncement
 
 
@@ -85,52 +88,37 @@ class AdminAnnouncementOperations(Protocol):
 
         ...
 
-    async def mark_expanded(
+    async def persist_expanded(
         self,
-        claim: AnnouncementRecipientClaim,
-        *,
-        outbound_message_id: OutboundMessageId,
-        completed_at: datetime,
+        decision: AnnouncementRecipientExpanded,
     ) -> bool:
-        """@brief 用 fencing token 终结出站回执 / Finalize an outbound receipt with its fencing token.
+        """@brief 持久化 token-fenced expanded 决策 / Persist a token-fenced expanded decision.
 
-        @param claim 领取凭证 / Claim receipt.
-        @param outbound_message_id 确定性 outbox 消息 ID / Deterministic outbox message ID.
-        @param completed_at 终结时间 / Completion instant.
+        @param decision 领域 expanded 决策 / Domain expanded decision.
         @return token 仍有效且终结成功时为 True / True when the token was current and finalization succeeded.
         """
 
         ...
 
-    async def schedule_retry(
+    async def persist_retry(
         self,
-        claim: AnnouncementRecipientClaim,
-        *,
-        retry_at: datetime,
-        error_category: str,
+        decision: AnnouncementRecipientRetryScheduled,
     ) -> bool:
-        """@brief 用 fencing token 安排重试 / Schedule a retry with the fencing token.
+        """@brief 持久化 token-fenced retry-wait 决策 / Persist a token-fenced retry-wait decision.
 
-        @param claim 领取凭证 / Claim receipt.
-        @param retry_at 下次尝试时间 / Next-attempt instant.
-        @param error_category 有界错误分类 / Bounded error category.
+        @param decision 领域 retry-wait 决策 / Domain retry-wait decision.
         @return token 仍有效时为 True / True when the token was current.
         """
 
         ...
 
-    async def mark_failed_final(
+    async def persist_dead_letter(
         self,
-        claim: AnnouncementRecipientClaim,
-        *,
-        failed_at: datetime,
-        error_category: str,
+        decision: AnnouncementRecipientDeadLettered,
     ) -> bool:
-        """@brief 用 fencing token 记录最终失败 / Record a final failure with the fencing token.
+        """@brief 持久化 token-fenced failed-final 决策 / Persist a token-fenced failed-final decision.
 
-        @param claim 领取凭证 / Claim receipt.
-        @param failed_at 失败时间 / Failure instant.
-        @param error_category 有界错误分类 / Bounded error category.
+        @param decision 领域 failed-final 决策 / Domain failed-final decision.
         @return token 仍有效时为 True / True when the token was current.
         """
 

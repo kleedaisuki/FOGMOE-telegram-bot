@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -13,13 +13,41 @@ from fogmoe_bot.application.admin.models import (
     AnnouncementAcceptance,
     RequestAnnouncement,
 )
-from fogmoe_bot.domain.admin.models import (
+from fogmoe_bot.domain.admin.announcement import (
+    AnnouncementDeliveryCounts,
+    AnnouncementDispatchContent,
     AnnouncementId,
-    AnnouncementRecipientClaim,
-    AnnouncementRecipientKind,
 )
-from fogmoe_bot.domain.conversation.identity import OutboundMessageId
+from fogmoe_bot.domain.admin.recipient import (
+    AnnouncementClaimToken,
+    AnnouncementCompletionReleased,
+    AnnouncementRecipient,
+    AnnouncementRecipientClaim,
+    AnnouncementRecipientDeadLettered,
+    AnnouncementRecipientExpanded,
+    AnnouncementRecipientKind,
+    AnnouncementRecipientLeaseRecovered,
+    AnnouncementRecipientRetryScheduled,
+    ExpandedAnnouncementRecipient,
+    FailedAnnouncementRecipient,
+    RetryWaitingAnnouncementRecipient,
+)
 from fogmoe_bot.infrastructure.database import db
+
+_RECIPIENT_COLUMNS = (
+    "announcement_id, recipient_kind, chat_id, message_thread_id, "
+    "reply_to_message_id, status, attempt_count, next_attempt_at, claim_token, "
+    "lease_expires_at, outbound_message_id, last_error, created_at, updated_at, "
+    "expanded_at, terminal_at"
+)
+"""@brief recipient 聚合的规范数据库列序 / Canonical database column order for recipient aggregates."""
+
+type _SettlementDecision = (
+    AnnouncementRecipientExpanded
+    | AnnouncementRecipientRetryScheduled
+    | AnnouncementRecipientDeadLettered
+)
+"""@brief processing claim 的穷尽结算决策 / Exhaustive settlement decisions for a processing claim."""
 
 
 class AnnouncementIdempotencyConflict(RuntimeError):
@@ -227,43 +255,81 @@ class PostgresAdminAnnouncementOperations:
         _require_positive_limit(limit)
         timestamp = _utc(now)
         async with db.transaction() as connection:
-            return await db.execute(
+            candidates = await db.fetch_all(
                 """
-                WITH candidates AS (
-                  SELECT announcement.announcement_id
-                  FROM admin.announcements AS announcement
-                  WHERE announcement.state = 'delivering'
-                    AND NOT EXISTS (
-                      SELECT 1
-                      FROM admin.announcement_recipients AS recipient
-                      JOIN conversation.outbound_messages AS outbound
-                        ON outbound.message_id = recipient.outbound_message_id
-                      WHERE recipient.announcement_id = announcement.announcement_id
-                        AND recipient.recipient_kind IN ('user', 'group')
-                        AND recipient.status = 'expanded'
-                        AND outbound.status NOT IN ('delivered', 'failed_final', 'cancelled')
-                    )
-                  ORDER BY announcement.created_at, announcement.announcement_id
-                  FOR UPDATE OF announcement SKIP LOCKED
-                  LIMIT %s
-                ), promoted AS (
-                  UPDATE admin.announcements AS announcement
-                  SET state = 'completed', completed_at = %s, updated_at = %s
-                  FROM candidates
-                  WHERE announcement.announcement_id = candidates.announcement_id
-                    AND announcement.state = 'delivering'
-                  RETURNING announcement.announcement_id
-                )
-                UPDATE admin.announcement_recipients AS completion
-                SET status = 'pending', next_attempt_at = %s, updated_at = %s
-                FROM promoted
-                WHERE completion.announcement_id = promoted.announcement_id
-                  AND completion.recipient_kind = 'completion'
-                  AND completion.status = 'blocked'
+                SELECT announcement.announcement_id
+                FROM admin.announcements AS announcement
+                WHERE announcement.state = 'delivering'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM admin.announcement_recipients AS recipient
+                    JOIN conversation.outbound_messages AS outbound
+                      ON outbound.message_id = recipient.outbound_message_id
+                    WHERE recipient.announcement_id = announcement.announcement_id
+                      AND recipient.recipient_kind IN ('user', 'group')
+                      AND recipient.status = 'expanded'
+                      AND outbound.status NOT IN ('delivered', 'failed_final', 'cancelled')
+                  )
+                ORDER BY announcement.created_at, announcement.announcement_id
+                FOR UPDATE OF announcement SKIP LOCKED
+                LIMIT %s
                 """,
-                (limit, timestamp, timestamp, timestamp, timestamp),
+                (limit,),
                 connection=connection,
             )
+            decisions: list[AnnouncementCompletionReleased] = []
+            """@brief 由锁定 blocked pre-state 产生的 release 决策 / Release decisions produced from locked blocked pre-states."""
+            for candidate in candidates:
+                announcement_id = AnnouncementId.parse(cast(UUID | str, candidate[0]))
+                pre_row = await db.fetch_one(
+                    f"SELECT {_qualified_recipient_columns('completion')} "
+                    "FROM admin.announcement_recipients AS completion "
+                    "WHERE completion.announcement_id = CAST(%s AS UUID) "
+                    "AND completion.recipient_kind = 'completion' "
+                    "AND completion.status = 'blocked' FOR UPDATE",
+                    (str(announcement_id),),
+                    connection=connection,
+                )
+                if pre_row is None:
+                    raise RuntimeError(
+                        "Delivering announcement has no blocked completion recipient"
+                    )
+                blocked = _restore_recipient(pre_row)
+                decision = blocked.release_completion(released_at=timestamp)
+                post_row = await db.fetch_one(
+                    "WITH promoted AS ("
+                    "UPDATE admin.announcements AS announcement SET "
+                    "state = 'completed', completed_at = %s, updated_at = %s "
+                    "WHERE announcement.announcement_id = CAST(%s AS UUID) "
+                    "AND announcement.state = 'delivering' "
+                    "RETURNING announcement.announcement_id) "
+                    "UPDATE admin.announcement_recipients AS completion SET "
+                    "status = 'pending', next_attempt_at = %s, updated_at = %s "
+                    "FROM promoted WHERE completion.announcement_id = "
+                    "promoted.announcement_id "
+                    "AND completion.recipient_kind = 'completion' "
+                    "AND completion.status = 'blocked' "
+                    f"RETURNING {_qualified_recipient_columns('completion')}",
+                    (
+                        timestamp,
+                        timestamp,
+                        str(announcement_id),
+                        timestamp,
+                        timestamp,
+                    ),
+                    connection=connection,
+                )
+                if post_row is None:
+                    raise RuntimeError(
+                        "Locked announcement completion could not be released"
+                    )
+                _require_expected_post_state(
+                    post_row,
+                    decision.recipient,
+                    operation="completion release",
+                )
+                decisions.append(decision)
+            return len(decisions)
 
     async def claim_ready(
         self,
@@ -296,7 +362,17 @@ class PostgresAdminAnnouncementOperations:
                   recipient.chat_id,
                   recipient.message_thread_id,
                   recipient.reply_to_message_id,
+                  recipient.status,
                   recipient.attempt_count,
+                  recipient.next_attempt_at,
+                  recipient.claim_token,
+                  recipient.lease_expires_at,
+                  recipient.outbound_message_id,
+                  recipient.last_error,
+                  recipient.created_at,
+                  recipient.updated_at,
+                  recipient.expanded_at,
+                  recipient.terminal_at,
                   announcement.body,
                   announcement.recipient_count,
                   announcement.created_at,
@@ -343,178 +419,243 @@ class PostgresAdminAnnouncementOperations:
                 connection=connection,
             )
             for row in rows:
-                token = uuid4()
-                rowcount = await db.execute(
+                recipient = _restore_recipient(row)
+                content = _dispatch_content(row)
+                token = AnnouncementClaimToken.new()
+                claim = recipient.claim(
+                    token=token,
+                    claimed_at=claimed_at,
+                    lease_expires_at=lease_expires_at,
+                    content=content,
+                )
+                post_row = await db.fetch_one(
                     "UPDATE admin.announcement_recipients SET "
                     "status = 'processing', attempt_count = attempt_count + 1, "
                     "next_attempt_at = NULL, claim_token = CAST(%s AS UUID), "
                     "lease_expires_at = %s, last_error = NULL, updated_at = %s "
                     "WHERE announcement_id = CAST(%s AS UUID) "
                     "AND recipient_kind = %s AND chat_id = %s "
-                    "AND status IN ('pending', 'retry_wait')",
+                    "AND status = %s "
+                    "RETURNING announcement_id, recipient_kind, chat_id, "
+                    "message_thread_id, reply_to_message_id, status, attempt_count, "
+                    "next_attempt_at, claim_token, lease_expires_at, "
+                    "outbound_message_id, last_error, created_at, updated_at, "
+                    "expanded_at, terminal_at",
                     (
                         str(token),
                         lease_expires_at,
                         claimed_at,
-                        str(row[0]),
-                        str(row[1]),
-                        _integer(row[2]),
+                        str(recipient.announcement_id),
+                        recipient.recipient_kind.value,
+                        recipient.chat_id,
+                        recipient.status.value,
                     ),
                     connection=connection,
                 )
-                if rowcount != 1:
+                if post_row is None:
                     raise RuntimeError(
                         "Locked announcement receipt could not be claimed"
                     )
-                claims.append(
-                    AnnouncementRecipientClaim(
-                        announcement_id=AnnouncementId.parse(cast(UUID | str, row[0])),
-                        recipient_kind=AnnouncementRecipientKind(str(row[1])),
-                        chat_id=_integer(row[2]),
-                        message_thread_id=_optional_integer(row[3]),
-                        reply_to_message_id=_optional_integer(row[4]),
-                        body=str(row[6]),
-                        recipient_count=_integer(row[7]),
-                        delivered_count=_integer(row[9]),
-                        failed_count=_integer(row[10]),
-                        claim_token=token,
-                        attempt_count=_integer(row[5]) + 1,
-                        announcement_created_at=_utc(cast(datetime, row[8])),
-                        claimed_at=claimed_at,
-                        lease_expires_at=lease_expires_at,
+                if _restore_recipient(post_row) != claim.recipient:
+                    raise RuntimeError(
+                        "Claimed announcement recipient disagrees with domain transition"
                     )
-                )
+                claims.append(claim)
         return tuple(claims)
 
-    async def mark_expanded(
+    async def _lock_processing_recipient(
         self,
-        claim: AnnouncementRecipientClaim,
+        connection: AsyncConnection,
         *,
-        outbound_message_id: OutboundMessageId,
-        completed_at: datetime,
-    ) -> bool:
-        """@brief 用 fencing token 终结回执并推进公告 / Finalize a receipt and advance its announcement with a fencing token.
+        recipient: AnnouncementRecipient,
+        token: AnnouncementClaimToken,
+    ) -> AnnouncementRecipient | None:
+        """@brief 锁定并恢复 settlement 的真实 processing pre-state / Lock and restore the real processing pre-state for settlement.
 
-        @param claim 领取凭证 / Claim receipt.
-        @param outbound_message_id 已入队的 outbox ID / Enqueued outbox ID.
-        @param completed_at 终结时间 / Completion instant.
+        @param connection 当前短事务连接 / Current short-transaction connection.
+        @param recipient 决策携带的后态 identity / Post-state identity carried by the decision.
+        @param token 原 claim fencing token / Original claim fencing token.
+        @return token 仍有效时的完整 pre-state，否则 None / Complete pre-state when the token is current, otherwise None.
+        """
+
+        row = await db.fetch_one(
+            f"SELECT {_RECIPIENT_COLUMNS} "
+            "FROM admin.announcement_recipients "
+            "WHERE announcement_id = CAST(%s AS UUID) "
+            "AND recipient_kind = %s AND chat_id = %s "
+            "AND status = 'processing' AND claim_token = CAST(%s AS UUID) "
+            "FOR UPDATE",
+            (
+                str(recipient.announcement_id),
+                recipient.recipient_kind.value,
+                recipient.chat_id,
+                str(token),
+            ),
+            connection=connection,
+        )
+        return None if row is None else _restore_recipient(row)
+
+    async def persist_expanded(
+        self,
+        decision: AnnouncementRecipientExpanded,
+    ) -> bool:
+        """@brief 持久化 expanded 决策并推进公告 / Persist an expanded decision and advance its announcement.
+
+        @param decision token-fenced 领域决策 / Token-fenced domain decision.
         @return token 仍有效时为 True / True when the token was current.
         """
 
-        timestamp = _utc(completed_at)
+        recipient = decision.recipient
         async with db.transaction() as connection:
-            rowcount = await db.execute(
+            pre = await self._lock_processing_recipient(
+                connection,
+                recipient=recipient,
+                token=decision.claim.capability.token,
+            )
+            if pre is None:
+                return False
+            expected = _apply_settlement_decision(decision, pre)
+            state = cast(ExpandedAnnouncementRecipient, expected.state)
+            post_row = await db.fetch_one(
                 "UPDATE admin.announcement_recipients SET "
                 "status = 'expanded', outbound_message_id = CAST(%s AS UUID), "
                 "expanded_at = %s, claim_token = NULL, lease_expires_at = NULL, "
                 "last_error = NULL, updated_at = %s "
                 "WHERE announcement_id = CAST(%s AS UUID) "
                 "AND recipient_kind = %s AND chat_id = %s "
-                "AND status = 'processing' AND claim_token = CAST(%s AS UUID)",
+                "AND status = 'processing' AND claim_token = CAST(%s AS UUID) "
+                f"RETURNING {_RECIPIENT_COLUMNS}",
                 (
-                    str(outbound_message_id),
-                    timestamp,
-                    timestamp,
-                    str(claim.announcement_id),
-                    claim.recipient_kind.value,
-                    claim.chat_id,
-                    str(claim.claim_token),
+                    str(state.outbound_message_id),
+                    state.expanded_at,
+                    expected.updated_at,
+                    str(expected.announcement_id),
+                    expected.recipient_kind.value,
+                    expected.chat_id,
+                    str(decision.claim.capability.token),
                 ),
                 connection=connection,
             )
-            if (
-                rowcount == 1
-                and claim.recipient_kind is not AnnouncementRecipientKind.COMPLETION
-            ):
+            if post_row is None:
+                raise RuntimeError("Locked announcement recipient could not be expanded")
+            _require_expected_post_state(
+                post_row,
+                expected,
+                operation="expanded settlement",
+            )
+            if expected.recipient_kind is not AnnouncementRecipientKind.COMPLETION:
                 await self._advance_audience_expansion(
                     connection,
-                    claim.announcement_id,
-                    now=timestamp,
+                    expected.announcement_id,
+                    now=expected.updated_at,
                 )
-            return rowcount == 1
+            return True
 
-    async def schedule_retry(
+    async def persist_retry(
         self,
-        claim: AnnouncementRecipientClaim,
-        *,
-        retry_at: datetime,
-        error_category: str,
+        decision: AnnouncementRecipientRetryScheduled,
     ) -> bool:
-        """@brief 用 fencing token 安排重试 / Schedule a retry with a fencing token.
+        """@brief 持久化 retry-wait 决策 / Persist a retry-wait decision.
 
-        @param claim 领取凭证 / Claim receipt.
-        @param retry_at 下次尝试时间 / Next-attempt instant.
-        @param error_category 错误分类 / Error category.
+        @param decision token-fenced 领域决策 / Token-fenced domain decision.
         @return token 仍有效时为 True / True when the token was current.
         """
 
-        timestamp = _utc(retry_at)
-        error = _error_category(error_category)
-        rowcount = await db.execute(
-            "UPDATE admin.announcement_recipients SET "
-            "status = 'retry_wait', next_attempt_at = %s, claim_token = NULL, "
-            "lease_expires_at = NULL, last_error = %s, updated_at = %s "
-            "WHERE announcement_id = CAST(%s AS UUID) "
-            "AND recipient_kind = %s AND chat_id = %s "
-            "AND status = 'processing' AND claim_token = CAST(%s AS UUID)",
-            (
-                timestamp,
-                error,
-                timestamp,
-                str(claim.announcement_id),
-                claim.recipient_kind.value,
-                claim.chat_id,
-                str(claim.claim_token),
-            ),
-        )
-        return rowcount == 1
-
-    async def mark_failed_final(
-        self,
-        claim: AnnouncementRecipientClaim,
-        *,
-        failed_at: datetime,
-        error_category: str,
-    ) -> bool:
-        """@brief 用 fencing token 记录最终失败并推进公告 / Record final failure and advance the announcement with a fencing token.
-
-        @param claim 领取凭证 / Claim receipt.
-        @param failed_at 失败时间 / Failure instant.
-        @param error_category 错误分类 / Error category.
-        @return token 仍有效时为 True / True when the token was current.
-        """
-
-        timestamp = _utc(failed_at)
-        error = _error_category(error_category)
+        recipient = decision.recipient
         async with db.transaction() as connection:
-            rowcount = await db.execute(
+            pre = await self._lock_processing_recipient(
+                connection,
+                recipient=recipient,
+                token=decision.claim.capability.token,
+            )
+            if pre is None:
+                return False
+            expected = _apply_settlement_decision(decision, pre)
+            state = cast(RetryWaitingAnnouncementRecipient, expected.state)
+            post_row = await db.fetch_one(
+                "UPDATE admin.announcement_recipients SET "
+                "status = 'retry_wait', next_attempt_at = %s, claim_token = NULL, "
+                "lease_expires_at = NULL, last_error = %s, updated_at = %s "
+                "WHERE announcement_id = CAST(%s AS UUID) "
+                "AND recipient_kind = %s AND chat_id = %s "
+                "AND status = 'processing' AND claim_token = CAST(%s AS UUID) "
+                f"RETURNING {_RECIPIENT_COLUMNS}",
+                (
+                    state.next_attempt_at,
+                    state.failure.value,
+                    expected.updated_at,
+                    str(expected.announcement_id),
+                    expected.recipient_kind.value,
+                    expected.chat_id,
+                    str(decision.claim.capability.token),
+                ),
+                connection=connection,
+            )
+            if post_row is None:
+                raise RuntimeError("Locked announcement recipient could not be retried")
+            _require_expected_post_state(
+                post_row,
+                expected,
+                operation="retry settlement",
+            )
+            return True
+
+    async def persist_dead_letter(
+        self,
+        decision: AnnouncementRecipientDeadLettered,
+    ) -> bool:
+        """@brief 持久化 failed-final 决策并推进公告 / Persist a failed-final decision and advance its announcement.
+
+        @param decision token-fenced 领域决策 / Token-fenced domain decision.
+        @return token 仍有效时为 True / True when the token was current.
+        """
+
+        recipient = decision.recipient
+        async with db.transaction() as connection:
+            pre = await self._lock_processing_recipient(
+                connection,
+                recipient=recipient,
+                token=decision.claim.capability.token,
+            )
+            if pre is None:
+                return False
+            expected = _apply_settlement_decision(decision, pre)
+            state = cast(FailedAnnouncementRecipient, expected.state)
+            post_row = await db.fetch_one(
                 "UPDATE admin.announcement_recipients SET "
                 "status = 'failed_final', terminal_at = %s, claim_token = NULL, "
                 "lease_expires_at = NULL, last_error = %s, updated_at = %s "
                 "WHERE announcement_id = CAST(%s AS UUID) "
                 "AND recipient_kind = %s AND chat_id = %s "
-                "AND status = 'processing' AND claim_token = CAST(%s AS UUID)",
+                "AND status = 'processing' AND claim_token = CAST(%s AS UUID) "
+                f"RETURNING {_RECIPIENT_COLUMNS}",
                 (
-                    timestamp,
-                    error,
-                    timestamp,
-                    str(claim.announcement_id),
-                    claim.recipient_kind.value,
-                    claim.chat_id,
-                    str(claim.claim_token),
+                    state.terminal_at,
+                    state.failure.value,
+                    expected.updated_at,
+                    str(expected.announcement_id),
+                    expected.recipient_kind.value,
+                    expected.chat_id,
+                    str(decision.claim.capability.token),
                 ),
                 connection=connection,
             )
-            if (
-                rowcount == 1
-                and claim.recipient_kind is not AnnouncementRecipientKind.COMPLETION
-            ):
+            if post_row is None:
+                raise RuntimeError(
+                    "Locked announcement recipient could not be dead-lettered"
+                )
+            _require_expected_post_state(
+                post_row,
+                expected,
+                operation="dead-letter settlement",
+            )
+            if expected.recipient_kind is not AnnouncementRecipientKind.COMPLETION:
                 await self._advance_audience_expansion(
                     connection,
-                    claim.announcement_id,
-                    now=timestamp,
+                    expected.announcement_id,
+                    now=expected.updated_at,
                 )
-            return rowcount == 1
+            return True
 
     async def _advance_audience_expansion(
         self,
@@ -555,29 +696,172 @@ class PostgresAdminAnnouncementOperations:
         _require_positive_limit(limit)
         timestamp = _utc(now)
         async with db.transaction() as connection:
-            return await db.execute(
-                """
-                WITH expired AS (
-                  SELECT announcement_id, recipient_kind, chat_id
-                  FROM admin.announcement_recipients
-                  WHERE status = 'processing' AND lease_expires_at <= %s
-                  ORDER BY lease_expires_at, announcement_id, recipient_kind, chat_id
-                  FOR UPDATE SKIP LOCKED
-                  LIMIT %s
-                )
-                UPDATE admin.announcement_recipients AS recipient
-                SET status = 'retry_wait', next_attempt_at = %s,
-                    claim_token = NULL, lease_expires_at = NULL,
-                    last_error = 'lease_expired', updated_at = %s
-                FROM expired
-                WHERE recipient.announcement_id = expired.announcement_id
-                  AND recipient.recipient_kind = expired.recipient_kind
-                  AND recipient.chat_id = expired.chat_id
-                  AND recipient.status = 'processing'
-                """,
-                (timestamp, limit, timestamp, timestamp),
+            rows = await db.fetch_all(
+                f"SELECT {_RECIPIENT_COLUMNS} "
+                "FROM admin.announcement_recipients "
+                "WHERE status = 'processing' AND lease_expires_at <= %s "
+                "ORDER BY lease_expires_at, announcement_id, recipient_kind, chat_id "
+                "FOR UPDATE SKIP LOCKED LIMIT %s",
+                (timestamp, limit),
                 connection=connection,
             )
+            decisions: list[AnnouncementRecipientLeaseRecovered] = []
+            """@brief 从真实 processing 行产生的恢复决策 / Recovery decisions produced from real processing rows."""
+            for row in rows:
+                processing = _restore_recipient(row)
+                decision = processing.recover_expired(recovered_at=timestamp)
+                recovered = decision.recipient
+                state = cast(RetryWaitingAnnouncementRecipient, recovered.state)
+                post_row = await db.fetch_one(
+                    "UPDATE admin.announcement_recipients SET "
+                    "status = 'retry_wait', next_attempt_at = %s, "
+                    "claim_token = NULL, lease_expires_at = NULL, "
+                    "last_error = %s, updated_at = %s "
+                    "WHERE announcement_id = CAST(%s AS UUID) "
+                    "AND recipient_kind = %s AND chat_id = %s "
+                    "AND status = 'processing' "
+                    "AND claim_token = CAST(%s AS UUID) "
+                    "AND lease_expires_at <= %s "
+                    f"RETURNING {_RECIPIENT_COLUMNS}",
+                    (
+                        state.next_attempt_at,
+                        state.failure.value,
+                        recovered.updated_at,
+                        str(recovered.announcement_id),
+                        recovered.recipient_kind.value,
+                        recovered.chat_id,
+                        str(decision.capability.token),
+                        timestamp,
+                    ),
+                    connection=connection,
+                )
+                if post_row is None:
+                    raise RuntimeError(
+                        "Locked expired announcement lease could not be recovered"
+                    )
+                _require_expected_post_state(
+                    post_row,
+                    recovered,
+                    operation="lease recovery",
+                )
+                decisions.append(decision)
+            return len(decisions)
+
+
+def _qualified_recipient_columns(alias: str) -> str:
+    """@brief 用内部 SQL alias 限定 recipient 列 / Qualify recipient columns with an internal SQL alias.
+
+    @param alias adapter 内部固定 alias / Adapter-internal fixed alias.
+    @return 规范限定列列表 / Canonical qualified column list.
+    @note alias 不接受用户输入 / The alias never receives user input.
+    """
+
+    return ", ".join(
+        f"{alias}.{column.strip()}" for column in _RECIPIENT_COLUMNS.split(",")
+    )
+
+
+def _apply_settlement_decision(
+    decision: _SettlementDecision,
+    pre_state: AnnouncementRecipient,
+) -> AnnouncementRecipient:
+    """@brief 在锁定的真实 pre-state 上重放并核对结算 / Replay and verify settlement on the locked real pre-state.
+
+    @param decision claim 产生的封闭决策 / Closed decision produced by the claim.
+    @param pre_state repository 锁定并恢复的 processing 聚合 / Processing aggregate locked and restored by the repository.
+    @return 从真实 pre-state 计算的精确后态 / Exact post-state calculated from the real pre-state.
+    @raise RuntimeError pre-state 与领域决策不一致时抛出 /
+        Raised when the pre-state disagrees with the domain decision.
+    """
+
+    if pre_state != decision.claim.recipient:
+        raise RuntimeError(
+            "Announcement settlement decision disagrees with database pre-state"
+        )
+    try:
+        expected = decision.apply_to(pre_state)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(
+            "Announcement settlement decision disagrees with database pre-state"
+        ) from error
+    if expected != decision.recipient:
+        raise RuntimeError(
+            "Announcement settlement decision disagrees with database pre-state"
+        )
+    return expected
+
+
+def _require_expected_post_state(
+    row: Sequence[object],
+    expected: AnnouncementRecipient,
+    *,
+    operation: str,
+) -> None:
+    """@brief restore SQL 后态并与领域决策逐字段比较 / Restore the SQL post-state and compare it field-for-field with the domain decision.
+
+    @param row UPDATE RETURNING 的完整 recipient 行 / Complete recipient row from UPDATE RETURNING.
+    @param expected 领域计算后态 / Domain-calculated post-state.
+    @param operation 错误上下文 / Error context.
+    @return None / None.
+    @raise RuntimeError SQL 后态不一致时抛出 / Raised when the SQL post-state disagrees.
+    """
+
+    actual = _restore_recipient(row)
+    if actual != expected:
+        raise RuntimeError(
+            f"Announcement {operation} post-state disagrees with domain transition"
+        )
+
+
+def _restore_recipient(row: Sequence[object]) -> AnnouncementRecipient:
+    """@brief 从固定 SQL 列序恢复 durable recipient / Restore a durable recipient from the fixed SQL column order.
+
+    @param row 前十六列为完整 recipient 持久化形状 / Row whose first sixteen columns are the complete recipient shape.
+    @return 已验证领域聚合 / Validated domain aggregate.
+    @raise ValueError 行字段不足或状态矩阵非法时抛出 / Raised for a short row or invalid state matrix.
+    """
+
+    if len(row) < 16:
+        raise ValueError("Announcement recipient row has fewer than sixteen fields")
+    return AnnouncementRecipient.restore(
+        announcement_id=AnnouncementId.parse(cast(UUID | str, row[0])),
+        recipient_kind=AnnouncementRecipientKind(str(row[1])),
+        chat_id=_integer(row[2]),
+        message_thread_id=_optional_integer(row[3]),
+        reply_to_message_id=_optional_integer(row[4]),
+        status=str(row[5]),
+        attempt_count=_integer(row[6]),
+        next_attempt_at=cast(datetime | None, row[7]),
+        claim_token=cast(UUID | str | None, row[8]),
+        lease_expires_at=cast(datetime | None, row[9]),
+        outbound_message_id=cast(UUID | str | None, row[10]),
+        last_error=None if row[11] is None else str(row[11]),
+        created_at=cast(datetime, row[12]),
+        updated_at=cast(datetime, row[13]),
+        expanded_at=cast(datetime | None, row[14]),
+        terminal_at=cast(datetime | None, row[15]),
+    )
+
+
+def _dispatch_content(row: Sequence[object]) -> AnnouncementDispatchContent:
+    """@brief 从 claim JOIN 列恢复不可变出站内容 / Restore immutable dispatch content from claim JOIN columns.
+
+    @param row recipient 十六列后附公告正文、总数、时间和终态计数 / Recipient columns followed by body, total, time, and terminal counts.
+    @return 已验证出站内容 / Validated dispatch content.
+    @raise ValueError 行字段不足或计数非法时抛出 / Raised for a short row or invalid counts.
+    """
+
+    if len(row) < 21:
+        raise ValueError("Announcement claim row has fewer than twenty-one fields")
+    return AnnouncementDispatchContent(
+        body=str(row[16]),
+        counts=AnnouncementDeliveryCounts(
+            recipients=_integer(row[17]),
+            delivered=_integer(row[19]),
+            failed=_integer(row[20]),
+        ),
+        announcement_created_at=cast(datetime, row[18]),
+    )
 
 
 def _integer(value: object) -> int:
@@ -626,17 +910,6 @@ def _require_positive_limit(limit: int) -> None:
 
     if isinstance(limit, bool) or limit < 1:
         raise ValueError("Admin batch limit must be positive")
-
-
-def _error_category(value: str) -> str:
-    """@brief 约束持久化错误分类 / Bound a persisted error category.
-
-    @param value 错误类别 / Error category.
-    @return 1-100 字符类别 / Category containing 1-100 characters.
-    """
-
-    normalized = value.strip()[:100]
-    return normalized or "unknown"
 
 
 __all__ = [

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
 
 from fogmoe_bot.application.admin.models import (
     AdminStats,
@@ -17,10 +16,16 @@ from fogmoe_bot.application.admin.service import AdminService
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
-from fogmoe_bot.domain.admin import (
+from fogmoe_bot.domain.admin.announcement import (
+    AnnouncementDeliveryCounts,
+    AnnouncementDispatchContent,
     AnnouncementId,
-    AnnouncementRecipientClaim,
+)
+from fogmoe_bot.domain.admin.recipient import (
+    AnnouncementClaimToken,
+    AnnouncementRecipient,
     AnnouncementRecipientKind,
+    AnnouncementRecipientStatus,
 )
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
@@ -213,21 +218,37 @@ def test_permission_denial_is_rendered_without_calling_projection() -> None:
 def test_completion_factory_reports_terminal_delivery_counts() -> None:
     """@brief 完成回执只在终态计数上渲染 / Completion outbound renders only terminal delivery counts."""
 
-    claim = AnnouncementRecipientClaim(
+    recipient = AnnouncementRecipient.restore(
         announcement_id=AnnouncementId.for_idempotency_key("announcement:done"),
         recipient_kind=AnnouncementRecipientKind.COMPLETION,
         chat_id=42,
         message_thread_id=7,
         reply_to_message_id=9,
-        body="secret body",
-        recipient_count=4,
-        delivered_count=3,
-        failed_count=1,
-        claim_token=uuid4(),
-        attempt_count=1,
-        announcement_created_at=NOW,
+        status=AnnouncementRecipientStatus.PENDING,
+        attempt_count=0,
+        next_attempt_at=NOW,
+        claim_token=None,
+        lease_expires_at=None,
+        outbound_message_id=None,
+        last_error=None,
+        created_at=NOW,
+        updated_at=NOW,
+        expanded_at=None,
+        terminal_at=None,
+    )
+    claim = recipient.claim(
+        token=AnnouncementClaimToken.new(),
         claimed_at=NOW,
         lease_expires_at=NOW + timedelta(minutes=1),
+        content=AnnouncementDispatchContent(
+            body="secret body",
+            counts=AnnouncementDeliveryCounts(
+                recipients=4,
+                delivered=3,
+                failed=1,
+            ),
+            announcement_created_at=NOW,
+        ),
     )
 
     outbound = TelegramAnnouncementOutboundFactory().build(claim)

@@ -140,7 +140,8 @@ def test_admin_announcement_snapshot_is_concurrent_replayable_and_fenced() -> No
             old_claims = tuple(claim for batch in concurrent_claims for claim in batch)
             assert len(old_claims) == 2
             old_identities = {
-                (claim.recipient_kind, claim.chat_id) for claim in old_claims
+                (claim.recipient.recipient_kind, claim.recipient.chat_id)
+                for claim in old_claims
             }
             assert len(old_identities) == 2
 
@@ -157,15 +158,29 @@ def test_admin_announcement_snapshot_is_concurrent_replayable_and_fenced() -> No
             new_claim = next(
                 claim
                 for claim in reclaimed
-                if (claim.recipient_kind, claim.chat_id) in old_identities
+                if (
+                    claim.recipient.recipient_kind,
+                    claim.recipient.chat_id,
+                )
+                in old_identities
             )
             old_claim = next(
                 claim
                 for claim in old_claims
-                if (claim.recipient_kind, claim.chat_id)
-                == (new_claim.recipient_kind, new_claim.chat_id)
+                if (
+                    claim.recipient.recipient_kind,
+                    claim.recipient.chat_id,
+                )
+                == (
+                    new_claim.recipient.recipient_kind,
+                    new_claim.recipient.chat_id,
+                )
             )
-            assert new_claim.claim_token != old_claim.claim_token
+            assert new_claim.capability.token != old_claim.capability.token
+            assert (
+                new_claim.recipient.attempt_count
+                == old_claim.recipient.attempt_count + 1
+            )
 
             outbound_command = factory.build(new_claim)
             await outbound.enqueue(outbound_command)
@@ -173,15 +188,17 @@ def test_admin_announcement_snapshot_is_concurrent_replayable_and_fenced() -> No
                 outbound_command.conversation_id,
                 outbound_command.idempotency_key,
             )
-            assert not await operations.mark_expanded(
-                old_claim,
-                outbound_message_id=deterministic_id,
-                completed_at=now + timedelta(seconds=3),
+            assert not await operations.persist_expanded(
+                old_claim.expand(
+                    outbound_message_id=deterministic_id,
+                    completed_at=now + timedelta(seconds=3),
+                )
             )
-            assert await operations.mark_expanded(
-                new_claim,
-                outbound_message_id=deterministic_id,
-                completed_at=now + timedelta(seconds=3),
+            assert await operations.persist_expanded(
+                new_claim.expand(
+                    outbound_message_id=deterministic_id,
+                    completed_at=now + timedelta(seconds=3),
+                )
             )
 
             replay = await operations.accept(command)
