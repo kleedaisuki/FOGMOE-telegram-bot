@@ -10,16 +10,18 @@ from uuid import uuid4
 import pytest
 from postgres_test_support import configure_bot_database
 
-from fogmoe_bot.application.user_profile.ports import DreamResult, StaleDreamClaimError
+from fogmoe_bot.application.user_profile.ports import (
+    DreamProfileUnchanged,
+    DreamProfileUpdated,
+)
+from fogmoe_bot.domain.user_profile.dream import DreamResult, StaleDreamClaimError
 from fogmoe_bot.domain.user_profile.models import (
     ProfileClaimKind,
     ProfileConfidence,
-    ProfileDocument,
     ProfileEvidence,
     ProfileMetadata,
     ProfilePatch,
     UpsertProfileClaim,
-    apply_profile_patch,
 )
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.user_profile.store import (
@@ -128,11 +130,19 @@ def test_projection_job_claim_and_revision_converge_under_concurrency(
             assert len(claims) == 1
             expired_claim = claims[0]
             assert (
-                await store.recover_expired_dream_leases(now=now + timedelta(minutes=1))
+                await store.recover_expired_dream_leases(
+                    now=now + timedelta(minutes=1),
+                    max_attempts=5,
+                    limit=1,
+                )
                 == 0
             )
             assert (
-                await store.recover_expired_dream_leases(now=now + timedelta(minutes=2))
+                await store.recover_expired_dream_leases(
+                    now=now + timedelta(minutes=2),
+                    max_attempts=5,
+                    limit=1,
+                )
                 == 1
             )
             reclaimed_batches = await asyncio.gather(
@@ -148,8 +158,10 @@ def test_projection_job_claim_and_revision_converge_under_concurrency(
             reclaimed = tuple(claim for batch in reclaimed_batches for claim in batch)
             assert len(reclaimed) == 1
             claim = reclaimed[0]
-            assert claim.claim_token != expired_claim.claim_token
-            assert claim.attempt_count == expired_claim.attempt_count + 1
+            assert claim.token != expired_claim.token
+            assert (
+                claim.activity.attempt_count == expired_claim.activity.attempt_count + 1
+            )
             event_id = claim.evidence[0].event_id
             result = DreamResult(
                 ProfilePatch(
@@ -166,39 +178,112 @@ def test_projection_job_claim_and_revision_converge_under_concurrency(
                 "test:profile-model",
                 1,
             )
-            document = apply_profile_patch(
-                ProfileDocument(),
-                result.patch,
-                evidence=claim.evidence,
-            )
             with pytest.raises(StaleDreamClaimError):
                 await store.complete_dream(
-                    expired_claim,
-                    result,
-                    document=document,
-                    completed_at=now + timedelta(minutes=2, seconds=1),
+                    expired_claim.prepare_completion(
+                        result,
+                        completed_at=now + timedelta(minutes=2, seconds=1),
+                    ),
                     refresh_after=timedelta(hours=6),
                 )
-            completed = await store.complete_dream(
-                claim,
-                result,
-                document=document,
-                completed_at=now + timedelta(minutes=2, seconds=1),
+            changed_receipt = await store.complete_dream(
+                claim.prepare_completion(
+                    result,
+                    completed_at=now + timedelta(minutes=2, seconds=1),
+                ),
                 refresh_after=timedelta(hours=6),
             )
 
-            assert completed is not None and completed.revision == 1
+            assert isinstance(changed_receipt, DreamProfileUpdated)
+            completed = changed_receipt.snapshot
+            assert completed.revision == 1
             pinned = await store.read_profile(user_id)
             assert pinned == completed
             assert pinned.document.claims[0].statement == "偏好绿茶"
             with pytest.raises(StaleDreamClaimError):
                 await store.complete_dream(
-                    claim,
-                    result,
-                    document=document,
-                    completed_at=now + timedelta(minutes=2, seconds=2),
+                    claim.prepare_completion(
+                        result,
+                        completed_at=now + timedelta(minutes=2, seconds=2),
+                    ),
                     refresh_after=timedelta(hours=6),
                 )
+
+            second_turn_id = uuid4()
+            second_occurred_at = now + timedelta(minutes=3)
+            async with db.transaction() as connection:
+                await db.execute(
+                    "INSERT INTO conversation.conversation_turns "
+                    "(turn_id, conversation_id, state, created_at, updated_at, "
+                    "completed_at, source_kind, source_key) VALUES "
+                    "(CAST(%s AS UUID), %s, 'delivered', %s, %s, %s, "
+                    "'scheduled.prompt', %s)",
+                    (
+                        str(second_turn_id),
+                        f"assistant-user:{user_id}",
+                        second_occurred_at,
+                        second_occurred_at,
+                        second_occurred_at,
+                        f"profile-no-op:{suffix}",
+                    ),
+                    connection=connection,
+                )
+            await store.project_evidence(
+                ProfileEvidence(
+                    event_id=0,
+                    source_turn_id=second_turn_id,
+                    owner_user_id=user_id,
+                    user_text="No preference change",
+                    assistant_text="Understood",
+                    occurred_at=second_occurred_at,
+                    metadata=ProfileMetadata("Klee", "klee", "CS researcher"),
+                ),
+                projected_at=second_occurred_at,
+            )
+            next_pass_at = now + timedelta(hours=7)
+            assert (
+                await store.enqueue_eligible(
+                    now=next_pass_at,
+                    limit=1,
+                    max_events_per_dream=16,
+                    max_evidence_chars=60_000,
+                )
+                == 1
+            )
+            no_op_claims = await store.claim_dreams(
+                now=next_pass_at,
+                limit=1,
+                lease_for=timedelta(minutes=2),
+            )
+            assert len(no_op_claims) == 1
+            no_op_claim = no_op_claims[0]
+            no_op_receipt = await store.complete_dream(
+                no_op_claim.prepare_completion(
+                    DreamResult(ProfilePatch(), "test:profile-model", 1),
+                    completed_at=next_pass_at + timedelta(seconds=1),
+                ),
+                refresh_after=timedelta(hours=6),
+            )
+
+            assert isinstance(no_op_receipt, DreamProfileUnchanged)
+            assert no_op_receipt.retained_revision == completed.revision
+            assert (
+                no_op_receipt.scheduler_head_event_id
+                == no_op_claim.activity.through_event_id
+            )
+            pinned_after_no_op = await store.read_profile(user_id)
+            assert pinned_after_no_op == completed
+            assert (
+                pinned_after_no_op.observed_through_event_id
+                == claim.activity.through_event_id
+            )
+            head_row = await db.fetch_one(
+                "SELECT observed_through_event_id FROM user_profile.profiles "
+                "WHERE user_id = %s",
+                (user_id,),
+            )
+            assert head_row is not None
+            assert head_row[0] == no_op_receipt.scheduler_head_event_id
         finally:
             await db.execute(
                 "DELETE FROM identity.users WHERE id = %s",

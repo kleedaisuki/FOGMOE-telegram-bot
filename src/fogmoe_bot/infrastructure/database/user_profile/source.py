@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fogmoe_bot.domain.conversation.identity import TELEGRAM_UPDATE_SOURCE_KIND
-from fogmoe_bot.domain.user_profile.models import ProfileEvidence
+from fogmoe_bot.domain.user_profile import ProfileEvidence
 from fogmoe_bot.infrastructure.database import db
 
 from .mapping import _map_source_evidence

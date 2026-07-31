@@ -5,26 +5,36 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 from typing import cast
-from uuid import UUID, uuid4
-
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.application.user_profile.ports import (
-    DreamClaim,
-    DreamResult,
-    StaleDreamClaimError,
+    DreamCommitReceipt,
+    DreamProfileUnchanged,
+    DreamProfileUpdated,
 )
-from fogmoe_bot.domain.temporal import ensure_utc
-from fogmoe_bot.domain.user_profile.models import (
+from fogmoe_bot.domain.user_profile import (
+    DreamActivity,
+    DreamActivityDraft,
+    DreamClaim,
+    DreamCompletionPrepared,
+    DreamFailedFinalDecision,
+    DreamFailure,
+    DreamLease,
+    DreamLeaseToken,
+    DreamRetryScheduled,
+    ProfileBaseline,
+    StaleDreamClaimError,
     DreamId,
     ProfileDocument,
     ProfileEvidence,
     UserProfileSnapshot,
 )
+from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.infrastructure.database import db
 
 from .locking import lock_user_profile
 from .mapping import (
+    _DREAM_ACTIVITY_COLUMNS,
     _EVIDENCE_COLUMNS,
     _document_json,
     _dream_identity,
@@ -32,13 +42,13 @@ from .mapping import (
     _integer,
     _json_object,
     _map_document,
+    _map_dream_activity,
     _map_evidence,
     _map_metadata,
     _map_snapshot,
     _metadata_json,
     _patch_json,
     _stored_evidence_semantics,
-    _uuid,
     _values,
 )
 
@@ -54,6 +64,10 @@ class PostgresUserProfileStore:
 
         @param user_id Profile owner / Profile owner.
         @return 当前 snapshot 或 None / Current snapshot or None.
+        @note snapshot watermark 是当前 immutable revision 的 provenance，不是可由
+            NO_OP Dream 独立推进的 scheduler head cursor。/ The snapshot watermark is
+            provenance for the current immutable revision, not the scheduler head cursor that
+            a NO_OP Dream may advance independently.
         """
 
         if isinstance(user_id, bool) or user_id <= 0:
@@ -82,6 +96,8 @@ class PostgresUserProfileStore:
         @param user_id Profile owner / Profile owner.
         @param connection acceptance transaction / Acceptance transaction.
         @return 当前 snapshot 或 None / Current snapshot or None.
+        @note snapshot watermark 是 current revision provenance / The snapshot watermark is
+            provenance for the current revision.
         """
 
         row = await db.fetch_one(
@@ -189,6 +205,10 @@ class PostgresUserProfileStore:
     ) -> int:
         """@brief 为到期 Profile 建立精确 source set 的 durable jobs / Enqueue durable jobs with exact source sets for due Profiles.
 
+        @param now 调度时间 / Scheduling time.
+        @param limit 单轮最大 job 数 / Maximum jobs per pass.
+        @param max_events_per_dream 单个 Dream 最大 evidence 数 / Maximum evidence items per Dream.
+        @param max_evidence_chars 单个 Dream 最大文本字符数 / Maximum text characters per Dream.
         @return 新建 job 数 / Number of inserted jobs.
         """
 
@@ -237,6 +257,11 @@ class PostgresUserProfileStore:
     ) -> int:
         """@brief 在已锁 Profile 行上形成一个 job / Form one job while its Profile row is locked.
 
+        @param user_id Profile owner / Profile owner.
+        @param now enqueue 时间 / Enqueue time.
+        @param max_events 单个 Dream 最大 evidence 数 / Maximum evidence items per Dream.
+        @param max_evidence_chars 单个 Dream 最大文本字符数 / Maximum text characters per Dream.
+        @param connection 持有 Profile 行锁的事务 / Transaction holding the Profile row lock.
         @return 插入为 1，竞态收敛为 0 / One when inserted, zero when a race converged.
         """
 
@@ -277,29 +302,50 @@ class PostgresUserProfileStore:
         dream_id = _dream_identity(
             user_id, base_revision, base_watermark, through_event_id
         )
+        pending = DreamActivity.enqueue(
+            DreamActivityDraft(
+                dream_id=dream_id,
+                owner_user_id=user_id,
+                baseline=ProfileBaseline(
+                    revision=base_revision,
+                    observed_through_event_id=base_watermark,
+                ),
+                through_event_id=through_event_id,
+                source_count=len(event_ids),
+                metadata=_map_metadata(latest_metadata),
+                created_at=now,
+            )
+        )
         row = await db.fetch_one(
             "INSERT INTO user_profile.dreams "
             "(dream_id, user_id, base_revision, base_observed_through_event_id, "
             "through_event_id, source_count, metadata, status, version, attempt_count, "
-            "next_attempt_at, created_at, updated_at) "
+            "next_attempt_at, result_patch, route_key, last_error, created_at, updated_at, "
+            "completed_at, claim_token, lease_expires_at) "
             "VALUES (CAST(%s AS UUID), %s, %s, %s, %s, %s, CAST(%s AS JSONB), "
-            "'pending', 0, 0, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING dream_id",
+            "%s, %s, %s, %s, NULL, NULL, NULL, %s, %s, NULL, NULL, NULL) "
+            "ON CONFLICT DO NOTHING RETURNING " + _DREAM_ACTIVITY_COLUMNS,
             (
-                str(dream_id),
-                user_id,
-                base_revision,
-                base_watermark,
-                through_event_id,
-                len(event_ids),
+                str(pending.dream_id),
+                pending.owner_user_id,
+                pending.baseline.revision,
+                pending.baseline.observed_through_event_id,
+                pending.through_event_id,
+                pending.source_count,
                 json.dumps(latest_metadata, ensure_ascii=False, sort_keys=True),
-                now,
-                now,
-                now,
+                pending.status.value,
+                pending.version,
+                pending.attempt_count,
+                pending.next_attempt_at,
+                pending.created_at,
+                pending.updated_at,
             ),
             connection=connection,
         )
         if row is None:
             return 0
+        if _map_dream_activity(row) != pending:
+            raise RuntimeError("Dream enqueue SQL diverged from the domain transition")
         for ordinal, event_id in enumerate(event_ids):
             await db.execute(
                 "INSERT INTO user_profile.dream_sources (dream_id, ordinal, event_id) "
@@ -324,6 +370,9 @@ class PostgresUserProfileStore:
     ) -> tuple[DreamClaim, ...]:
         """@brief 使用 SKIP LOCKED 领取并冻结 jobs / Claim and freeze jobs using SKIP LOCKED.
 
+        @param now 领取时间 / Claim time.
+        @param limit 单轮最大领取数 / Maximum claims per pass.
+        @param lease_for ownership 租约长度 / Ownership lease duration.
         @return claims / Claims.
         """
 
@@ -333,67 +382,84 @@ class PostgresUserProfileStore:
         claims: list[DreamClaim] = []
         async with db.transaction() as connection:
             candidates = await db.fetch_all(
-                "SELECT dream_id FROM user_profile.dreams "
+                "SELECT " + _DREAM_ACTIVITY_COLUMNS + " FROM user_profile.dreams "
                 "WHERE status IN ('pending','retry_wait') AND next_attempt_at <= %s "
                 "ORDER BY next_attempt_at, dream_id FOR UPDATE SKIP LOCKED LIMIT %s",
                 (timestamp, limit),
                 connection=connection,
             )
             for candidate in candidates:
-                dream_id = _uuid(_values(candidate, 1)[0])
-                token = uuid4()
+                previous = _map_dream_activity(candidate)
+                current_document, evidence = await self._load_dream_workload(
+                    previous,
+                    connection=connection,
+                )
+                token = DreamLeaseToken.new()
+                claim = previous.claim(
+                    token=token,
+                    claimed_at=timestamp,
+                    lease_expires_at=timestamp + lease_for,
+                    current_document=current_document,
+                    evidence=evidence,
+                )
+                target = claim.activity
                 row = await db.fetch_one(
-                    "UPDATE user_profile.dreams SET status = 'processing', "
-                    "version = version + 1, attempt_count = attempt_count + 1, "
-                    "next_attempt_at = NULL, claim_token = CAST(%s AS UUID), "
-                    "lease_expires_at = %s, last_error = NULL, updated_at = %s "
-                    "WHERE dream_id = CAST(%s AS UUID) "
-                    "AND status IN ('pending','retry_wait') RETURNING "
-                    "user_id, base_revision, base_observed_through_event_id, "
-                    "through_event_id, metadata, attempt_count",
+                    "UPDATE user_profile.dreams SET status = %s, version = %s, "
+                    "attempt_count = %s, next_attempt_at = %s, "
+                    "claim_token = CAST(%s AS UUID), lease_expires_at = %s, "
+                    "result_patch = NULL, route_key = NULL, last_error = %s, "
+                    "completed_at = NULL, updated_at = %s "
+                    "WHERE dream_id = CAST(%s AS UUID) AND status = %s "
+                    "AND version = %s AND attempt_count = %s "
+                    "AND next_attempt_at IS NOT DISTINCT FROM %s AND updated_at = %s "
+                    "AND claim_token IS NULL AND lease_expires_at IS NULL RETURNING "
+                    + _DREAM_ACTIVITY_COLUMNS,
                     (
+                        target.status.value,
+                        target.version,
+                        target.attempt_count,
+                        target.next_attempt_at,
                         str(token),
-                        timestamp + lease_for,
-                        timestamp,
-                        str(dream_id),
+                        claim.lease_expires_at,
+                        target.last_error,
+                        target.updated_at,
+                        str(previous.dream_id),
+                        previous.status.value,
+                        previous.version,
+                        previous.attempt_count,
+                        previous.next_attempt_at,
+                        previous.updated_at,
                     ),
                     connection=connection,
                 )
                 if row is None:
                     raise RuntimeError("Locked Dream candidate was not claimable")
-                claims.append(
-                    await self._load_claim(
-                        DreamId(dream_id),
-                        token,
-                        row,
-                        connection=connection,
+                if _map_dream_activity(row) != target:
+                    raise RuntimeError(
+                        "Dream claim SQL diverged from the domain transition"
                     )
-                )
+                claims.append(claim)
         return tuple(claims)
 
-    async def _load_claim(
+    async def _load_dream_workload(
         self,
-        dream_id: DreamId,
-        token: UUID,
-        row: object,
+        activity: DreamActivity,
         *,
         connection: AsyncConnection,
-    ) -> DreamClaim:
-        """@brief 从 processing 行加载冻结 Profile 与 evidence / Load the frozen Profile and evidence from a processing row."""
+    ) -> tuple[ProfileDocument, tuple[ProfileEvidence, ...]]:
+        """@brief 加载聚合冻结的 Profile 与 evidence / Load the Profile and evidence frozen by an aggregate.
 
-        values = _values(row, 6)
-        user_id = _integer(values[0])
-        base_revision = _integer(values[1])
-        base_watermark = _integer(values[2])
-        through_event_id = _integer(values[3])
-        metadata = _map_metadata(values[4])
-        attempt_count = _integer(values[5])
+        @param activity 已锁 Dream 聚合 / Locked Dream aggregate.
+        @param connection 当前 claim 或 settlement transaction / Current claim or settlement transaction.
+        @return 当前文档与有序 evidence / Current document and ordered evidence.
+        """
+
         document = ProfileDocument()
-        if base_revision > 0:
+        if activity.baseline.revision > 0:
             revision_row = await db.fetch_one(
                 "SELECT document FROM user_profile.profile_revisions "
                 "WHERE user_id = %s AND revision = %s",
-                (user_id, base_revision),
+                (activity.owner_user_id, activity.baseline.revision),
                 connection=connection,
             )
             if revision_row is None:
@@ -405,219 +471,451 @@ class PostgresUserProfileStore:
             + " FROM user_profile.dream_sources AS source "
             "JOIN user_profile.evidence_events AS evidence USING (event_id) "
             "WHERE source.dream_id = CAST(%s AS UUID) ORDER BY source.ordinal",
-            (str(dream_id),),
+            (str(activity.dream_id),),
             connection=connection,
         )
         evidence = tuple(_map_evidence(item) for item in evidence_rows)
-        return DreamClaim(
-            dream_id=dream_id,
-            owner_user_id=user_id,
-            base_revision=base_revision,
-            base_observed_through_event_id=base_watermark,
-            through_event_id=through_event_id,
-            current_document=document,
-            evidence=evidence,
-            metadata=metadata,
-            claim_token=token,
-            attempt_count=attempt_count,
-        )
+        return document, evidence
 
     async def complete_dream(
         self,
-        claim: DreamClaim,
-        result: DreamResult,
+        decision: DreamCompletionPrepared,
         *,
-        document: ProfileDocument,
-        completed_at: datetime,
         refresh_after: timedelta,
-    ) -> UserProfileSnapshot | None:
-        """@brief CAS/Fencing 提交 Profile revision 与 watermark / Commit a Profile revision and watermark using CAS and fencing.
+    ) -> DreamCommitReceipt:
+        """@brief 双重 Profile CAS 与 Dream fencing 下提交 completion / Commit completion under dual Profile CAS and Dream fencing.
 
-        @return 新 revision；文档未变为 None / New revision, or None when the document did not change.
+        @param decision 已验证 patch、时间与 lifecycle 的领域决定 / Domain decision with validated patch, time, and lifecycle.
+        @param refresh_after 无 backlog 时的下次 refresh 延迟 / Refresh delay when no backlog remains.
+        @return 显式 updated 或 NO_OP durable 回执 / Explicit updated or NO_OP durable receipt.
+        @raise StaleDreamClaimError capability、冻结 workload 或 Profile baseline 已失效 /
+            Capability, frozen workload, or Profile baseline is stale.
+        @raise RuntimeError SQL 后态偏离 canonical 领域决定 / SQL post-state diverged from the canonical domain decision.
         """
 
-        timestamp = ensure_utc(completed_at)
+        claim = decision.claim
+        target = decision.activity
+        result = target.result
+        timestamp = target.completed_at
+        if result is None or timestamp is None:  # pragma: no cover - closed decision.
+            raise AssertionError("Dream completion lost result metadata")
         if refresh_after <= timedelta():
             raise ValueError("Profile refresh_after must be positive")
         patch_json = _patch_json(result)
+        owner_user_id = claim.activity.owner_user_id
+        baseline = claim.activity.baseline
+        through_event_id = claim.activity.through_event_id
+        next_revision = baseline.revision + int(decision.changed)
+
         async with db.transaction() as connection:
-            await lock_user_profile(connection, claim.owner_user_id)
-            await self._lock_claim(claim, connection=connection)
+            await lock_user_profile(connection, owner_user_id)
+            current = await self._load_dream_for_update(
+                claim.activity.dream_id,
+                connection=connection,
+            )
+            self._require_current_claim(current, claim)
+            canonical_document, canonical_evidence = await self._load_dream_workload(
+                current,
+                connection=connection,
+            )
+            if (
+                canonical_document != claim.current_document
+                or canonical_evidence != claim.evidence
+            ):
+                raise StaleDreamClaimError(
+                    "Dream claim workload no longer matches durable sources"
+                )
+            canonical_decision = claim.prepare_completion(
+                result,
+                completed_at=timestamp,
+            )
+            if canonical_decision != decision:
+                raise StaleDreamClaimError(
+                    "Dream completion does not match its canonical claim evaluation"
+                )
+            decision = canonical_decision
+            target = decision.activity
             profile_row = await db.fetch_one(
                 "SELECT COALESCE(current_revision, 0), observed_through_event_id, created_at "
                 "FROM user_profile.profiles WHERE user_id = %s FOR UPDATE",
-                (claim.owner_user_id,),
+                (owner_user_id,),
                 connection=connection,
             )
             if profile_row is None:
                 raise StaleDreamClaimError("Dream Profile row no longer exists")
             profile_values = _values(profile_row, 3)
             if (
-                _integer(profile_values[0]) != claim.base_revision
-                or _integer(profile_values[1]) != claim.base_observed_through_event_id
+                _integer(profile_values[0]) != baseline.revision
+                or _integer(profile_values[1]) != baseline.observed_through_event_id
             ):
-                raise StaleDreamClaimError("Dream base Profile revision was superseded")
-            changed = document != claim.current_document
-            snapshot: UserProfileSnapshot | None = None
-            next_revision = claim.base_revision
-            if changed:
-                next_revision += 1
-                await db.execute(
+                raise StaleDreamClaimError("Dream Profile baseline was superseded")
+            profile_created_at = ensure_utc(cast(datetime, profile_values[2]))
+
+            revision_row: object | None = None
+            if decision.changed:
+                revision_row = await db.fetch_one(
                     "INSERT INTO user_profile.profile_revisions "
                     "(user_id, revision, document, observed_through_event_id, route_key, "
-                    "prompt_version, created_at) VALUES (%s, %s, CAST(%s AS JSONB), %s, %s, %s, %s)",
+                    "prompt_version, created_at) VALUES (%s, %s, CAST(%s AS JSONB), %s, %s, %s, %s) "
+                    "RETURNING user_id, revision, document, observed_through_event_id, "
+                    "created_at, route_key, prompt_version",
                     (
-                        claim.owner_user_id,
+                        owner_user_id,
                         next_revision,
                         json.dumps(
-                            _document_json(document), ensure_ascii=False, sort_keys=True
+                            _document_json(decision.document),
+                            ensure_ascii=False,
+                            sort_keys=True,
                         ),
-                        claim.through_event_id,
+                        through_event_id,
                         result.route_key,
                         result.prompt_version,
                         timestamp,
                     ),
                     connection=connection,
                 )
+                if revision_row is None:  # pragma: no cover - INSERT always returns.
+                    raise RuntimeError("Dream revision insert returned no post-state")
+
             more_row = await db.fetch_one(
                 "SELECT 1 FROM user_profile.evidence_events "
                 "WHERE owner_user_id = %s AND event_id > %s LIMIT 1",
-                (claim.owner_user_id, claim.through_event_id),
+                (owner_user_id, through_event_id),
                 connection=connection,
             )
-            next_eligible_at = (
-                timestamp if more_row is not None else timestamp + refresh_after
+            completion = decision.plan_profile_commit(
+                has_backlog=more_row is not None,
+                refresh_after=refresh_after,
             )
-            await db.execute(
+            if completion.profile_revision != next_revision:  # pragma: no cover
+                raise AssertionError("Dream completion revision plan diverged")
+            profile_post_row = await db.fetch_one(
                 "UPDATE user_profile.profiles SET current_revision = %s, "
                 "observed_through_event_id = %s, next_eligible_at = %s, updated_at = %s "
-                "WHERE user_id = %s",
+                "WHERE user_id = %s AND COALESCE(current_revision, 0) = %s "
+                "AND observed_through_event_id = %s RETURNING user_id, "
+                "COALESCE(current_revision, 0), observed_through_event_id, "
+                "next_eligible_at, created_at, updated_at",
                 (
-                    next_revision if next_revision > 0 else None,
-                    claim.through_event_id,
-                    next_eligible_at,
+                    completion.profile_revision
+                    if completion.profile_revision > 0
+                    else None,
+                    completion.observed_through_event_id,
+                    completion.next_eligible_at,
                     timestamp,
-                    claim.owner_user_id,
+                    owner_user_id,
+                    baseline.revision,
+                    baseline.observed_through_event_id,
                 ),
                 connection=connection,
             )
-            row = await db.fetch_one(
-                "UPDATE user_profile.dreams SET status = 'completed', claim_token = NULL, "
-                "lease_expires_at = NULL, result_patch = CAST(%s AS JSONB), route_key = %s, "
-                "completed_at = %s, updated_at = %s WHERE dream_id = CAST(%s AS UUID) "
-                "AND status = 'processing' AND claim_token = CAST(%s AS UUID) RETURNING dream_id",
+            if profile_post_row is None:
+                raise StaleDreamClaimError("Dream Profile baseline CAS was lost")
+            profile_post_values = _values(profile_post_row, 6)
+            persisted_profile_post_state = (
+                _integer(profile_post_values[0]),
+                _integer(profile_post_values[1]),
+                _integer(profile_post_values[2]),
+                ensure_utc(cast(datetime, profile_post_values[3])),
+                ensure_utc(cast(datetime, profile_post_values[4])),
+                ensure_utc(cast(datetime, profile_post_values[5])),
+            )
+            expected_profile_post_state = (
+                owner_user_id,
+                completion.profile_revision,
+                completion.observed_through_event_id,
+                completion.next_eligible_at,
+                profile_created_at,
+                timestamp,
+            )
+            if persisted_profile_post_state != expected_profile_post_state:
+                raise RuntimeError(
+                    "Dream Profile UPDATE diverged from the domain commit plan"
+                )
+
+            persisted_snapshot: UserProfileSnapshot | None = None
+            if revision_row is not None:
+                revision_values = _values(revision_row, 7)
+                persisted_snapshot = _map_snapshot(
+                    (
+                        revision_values[0],
+                        revision_values[1],
+                        revision_values[2],
+                        revision_values[3],
+                        profile_created_at,
+                        revision_values[4],
+                        revision_values[5],
+                        revision_values[6],
+                    )
+                )
+                expected_snapshot = completion.snapshot(
+                    profile_created_at=profile_created_at,
+                )
+                if persisted_snapshot != expected_snapshot:
+                    raise RuntimeError(
+                        "Dream revision INSERT diverged from the domain commit plan"
+                    )
+
+            dream_row = await db.fetch_one(
+                "UPDATE user_profile.dreams SET status = %s, version = %s, "
+                "attempt_count = %s, next_attempt_at = NULL, claim_token = NULL, "
+                "lease_expires_at = NULL, result_patch = CAST(%s AS JSONB), "
+                "route_key = %s, last_error = NULL, completed_at = %s, updated_at = %s "
+                "WHERE dream_id = CAST(%s AS UUID) AND status = 'processing' "
+                "AND version = %s AND attempt_count = %s AND updated_at = %s "
+                "AND claim_token = CAST(%s AS UUID) AND lease_expires_at = %s RETURNING "
+                + _DREAM_ACTIVITY_COLUMNS,
                 (
+                    target.status.value,
+                    target.version,
+                    target.attempt_count,
                     json.dumps(patch_json, ensure_ascii=False, sort_keys=True),
                     result.route_key,
                     timestamp,
-                    timestamp,
-                    str(claim.dream_id),
-                    str(claim.claim_token),
+                    target.updated_at,
+                    str(current.dream_id),
+                    claim.expected_version,
+                    claim.activity.attempt_count,
+                    claim.activity.updated_at,
+                    str(claim.token),
+                    claim.lease_expires_at,
+                ),
+                connection=connection,
+            )
+            if dream_row is None:
+                raise StaleDreamClaimError("Dream completion lost its fencing token")
+            if _map_dream_activity(dream_row) != target:
+                raise RuntimeError(
+                    "Dream completion SQL diverged from the domain transition"
+                )
+            if persisted_snapshot is not None:
+                return DreamProfileUpdated(persisted_snapshot)
+            return DreamProfileUnchanged(
+                owner_user_id=owner_user_id,
+                retained_revision=completion.profile_revision,
+                scheduler_head_event_id=completion.observed_through_event_id,
+            )
+
+    async def retry_dream(self, decision: DreamRetryScheduled) -> None:
+        """@brief fenced 持久化领域 retry 决定 / Persist a domain retry decision under fencing.
+
+        @param decision 已验证 retry settlement / Validated retry settlement.
+        @return None / None.
+        """
+
+        claim = decision.claim
+        target = decision.activity
+        retry_at = target.next_attempt_at
+        error = target.last_error
+        if retry_at is None or error is None:  # pragma: no cover - closed decision.
+            raise AssertionError("Dream retry lost its schedule or failure")
+        async with db.transaction() as connection:
+            current = await self._load_dream_for_update(
+                claim.activity.dream_id,
+                connection=connection,
+            )
+            self._require_current_claim(current, claim)
+            row = await db.fetch_one(
+                "UPDATE user_profile.dreams SET status = %s, version = %s, "
+                "attempt_count = %s, next_attempt_at = %s, claim_token = NULL, "
+                "lease_expires_at = NULL, result_patch = NULL, route_key = NULL, "
+                "last_error = %s, completed_at = NULL, updated_at = %s "
+                "WHERE dream_id = CAST(%s AS UUID) AND status = 'processing' "
+                "AND version = %s AND attempt_count = %s AND updated_at = %s "
+                "AND claim_token = CAST(%s AS UUID) AND lease_expires_at = %s RETURNING "
+                + _DREAM_ACTIVITY_COLUMNS,
+                (
+                    target.status.value,
+                    target.version,
+                    target.attempt_count,
+                    retry_at,
+                    error,
+                    target.updated_at,
+                    str(current.dream_id),
+                    claim.expected_version,
+                    claim.activity.attempt_count,
+                    claim.activity.updated_at,
+                    str(claim.token),
+                    claim.lease_expires_at,
                 ),
                 connection=connection,
             )
             if row is None:
-                raise StaleDreamClaimError("Dream completion lost its fencing token")
-            if changed:
-                snapshot = UserProfileSnapshot(
-                    user_id=claim.owner_user_id,
-                    revision=next_revision,
-                    document=document,
-                    observed_through_event_id=claim.through_event_id,
-                    created_at=cast(datetime, profile_values[2]),
-                    updated_at=timestamp,
-                    route_key=result.route_key,
-                    prompt_version=result.prompt_version,
+                raise StaleDreamClaimError("Dream retry lost its fencing token")
+            if _map_dream_activity(row) != target:
+                raise RuntimeError(
+                    "Dream retry SQL diverged from the domain transition"
                 )
-            return snapshot
 
-    async def retry_dream(
+    async def fail_dream(self, decision: DreamFailedFinalDecision) -> None:
+        """@brief fenced 持久化领域终败决定 / Persist a domain final-failure decision under fencing.
+
+        @param decision 已验证 final-failure settlement / Validated final-failure settlement.
+        @return None / None.
+        """
+
+        claim = decision.claim
+        target = decision.activity
+        error = target.last_error
+        completed_at = target.completed_at
+        if error is None or completed_at is None:  # pragma: no cover - closed decision.
+            raise AssertionError("Dream final failure lost terminal metadata")
+        async with db.transaction() as connection:
+            current = await self._load_dream_for_update(
+                claim.activity.dream_id,
+                connection=connection,
+            )
+            self._require_current_claim(current, claim)
+            row = await db.fetch_one(
+                "UPDATE user_profile.dreams SET status = %s, version = %s, "
+                "attempt_count = %s, next_attempt_at = NULL, claim_token = NULL, "
+                "lease_expires_at = NULL, result_patch = NULL, route_key = NULL, "
+                "last_error = %s, completed_at = %s, updated_at = %s "
+                "WHERE dream_id = CAST(%s AS UUID) AND status = 'processing' "
+                "AND version = %s AND attempt_count = %s AND updated_at = %s "
+                "AND claim_token = CAST(%s AS UUID) AND lease_expires_at = %s RETURNING "
+                + _DREAM_ACTIVITY_COLUMNS,
+                (
+                    target.status.value,
+                    target.version,
+                    target.attempt_count,
+                    error,
+                    completed_at,
+                    target.updated_at,
+                    str(current.dream_id),
+                    claim.expected_version,
+                    claim.activity.attempt_count,
+                    claim.activity.updated_at,
+                    str(claim.token),
+                    claim.lease_expires_at,
+                ),
+                connection=connection,
+            )
+            if row is None:
+                raise StaleDreamClaimError("Dream final failure lost its fencing token")
+            if _map_dream_activity(row) != target:
+                raise RuntimeError(
+                    "Dream final-failure SQL diverged from the domain transition"
+                )
+
+    async def recover_expired_dream_leases(
         self,
-        claim: DreamClaim,
         *,
-        failed_at: datetime,
-        retry_at: datetime,
-        error: str,
-    ) -> None:
-        """@brief fenced 安排 retry / Schedule a fenced retry."""
+        now: datetime,
+        max_attempts: int,
+        limit: int,
+    ) -> int:
+        """@brief 逐聚合回收过期 lease / Recover expired leases aggregate by aggregate.
 
-        failure_time = ensure_utc(failed_at)
-        retry_time = ensure_utc(retry_at)
-        if retry_time <= failure_time:
-            raise ValueError("Dream retry_at must follow failed_at")
-        row = await db.fetch_one(
-            "UPDATE user_profile.dreams SET status = 'retry_wait', next_attempt_at = %s, "
-            "claim_token = NULL, lease_expires_at = NULL, last_error = %s, updated_at = %s "
-            "WHERE dream_id = CAST(%s AS UUID) AND status = 'processing' "
-            "AND claim_token = CAST(%s AS UUID) RETURNING dream_id",
-            (
-                retry_time,
-                error[:1000],
-                failure_time,
-                str(claim.dream_id),
-                str(claim.claim_token),
-            ),
-        )
-        if row is None:
-            raise StaleDreamClaimError("Dream retry lost its fencing token")
-
-    async def fail_dream(
-        self,
-        claim: DreamClaim,
-        *,
-        failed_at: datetime,
-        error: str,
-    ) -> None:
-        """@brief fenced 终结 job / Finally fail a job."""
-
-        timestamp = ensure_utc(failed_at)
-        row = await db.fetch_one(
-            "UPDATE user_profile.dreams SET status = 'failed_final', next_attempt_at = NULL, "
-            "claim_token = NULL, lease_expires_at = NULL, last_error = %s, "
-            "completed_at = %s, updated_at = %s WHERE dream_id = CAST(%s AS UUID) "
-            "AND status = 'processing' AND claim_token = CAST(%s AS UUID) RETURNING dream_id",
-            (
-                error[:1000],
-                timestamp,
-                timestamp,
-                str(claim.dream_id),
-                str(claim.claim_token),
-            ),
-        )
-        if row is None:
-            raise StaleDreamClaimError("Dream final failure lost its fencing token")
-
-    async def recover_expired_dream_leases(self, *, now: datetime) -> int:
-        """@brief 回收过期 lease / Recover expired leases.
-
+        @param now 当前 UTC 时间 / Current UTC time.
+        @param max_attempts 包含 crash claim 的最大尝试数 / Maximum attempts including the crashed claim.
+        @param limit 单轮最大回收行数 / Maximum rows recovered per pass.
         @return 回收行数 / Recovered row count.
         """
 
         timestamp = ensure_utc(now)
-        return await db.execute(
-            "UPDATE user_profile.dreams SET status = 'retry_wait', next_attempt_at = %s, "
-            "claim_token = NULL, lease_expires_at = NULL, "
-            "last_error = COALESCE(last_error, 'recovered expired Dream lease'), "
-            "updated_at = %s WHERE status = 'processing' AND lease_expires_at <= %s",
-            (timestamp, timestamp, timestamp),
-        )
+        if (
+            isinstance(max_attempts, bool)
+            or not isinstance(max_attempts, int)
+            or max_attempts < 1
+        ):
+            raise ValueError("Dream recovery max_attempts must be positive")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 128
+        ):
+            raise ValueError("Dream recovery limit must be between 1 and 128")
+        failure = DreamFailure("recovered expired Dream lease")
+        async with db.transaction() as connection:
+            rows = await db.fetch_all(
+                "SELECT "
+                + _DREAM_ACTIVITY_COLUMNS
+                + " FROM user_profile.dreams WHERE status = 'processing' "
+                "AND lease_expires_at <= %s ORDER BY lease_expires_at, dream_id "
+                "LIMIT %s FOR UPDATE SKIP LOCKED",
+                (timestamp, limit),
+                connection=connection,
+            )
+            for row in rows:
+                previous = _map_dream_activity(row)
+                lease = DreamLease.restore(previous)
+                recovery = previous.recover_expired_lease(
+                    lease,
+                    recovered_at=timestamp,
+                    failure=failure,
+                    max_attempts=max_attempts,
+                )
+                target = recovery.activity
+                recovered_row = await db.fetch_one(
+                    "UPDATE user_profile.dreams SET status = %s, version = %s, "
+                    "attempt_count = %s, next_attempt_at = %s, claim_token = NULL, "
+                    "lease_expires_at = NULL, result_patch = NULL, route_key = NULL, "
+                    "last_error = %s, completed_at = %s, updated_at = %s "
+                    "WHERE dream_id = CAST(%s AS UUID) AND status = 'processing' "
+                    "AND version = %s AND attempt_count = %s AND updated_at = %s "
+                    "AND claim_token = CAST(%s AS UUID) AND lease_expires_at = %s RETURNING "
+                    + _DREAM_ACTIVITY_COLUMNS,
+                    (
+                        target.status.value,
+                        target.version,
+                        target.attempt_count,
+                        target.next_attempt_at,
+                        target.last_error,
+                        target.completed_at,
+                        target.updated_at,
+                        str(previous.dream_id),
+                        previous.version,
+                        previous.attempt_count,
+                        previous.updated_at,
+                        str(lease.token),
+                        lease.lease_expires_at,
+                    ),
+                    connection=connection,
+                )
+                if recovered_row is None:
+                    raise RuntimeError(
+                        "Locked expired Dream lease changed unexpectedly"
+                    )
+                if _map_dream_activity(recovered_row) != target:
+                    raise RuntimeError(
+                        "Dream lease-recovery SQL diverged from the domain transition"
+                    )
+            return len(rows)
 
     @staticmethod
-    async def _lock_claim(
-        claim: DreamClaim,
+    async def _load_dream_for_update(
+        dream_id: DreamId,
         *,
         connection: AsyncConnection,
-    ) -> None:
-        """@brief 锁定并验证 processing/fencing 状态 / Lock and validate processing/fencing state."""
+    ) -> DreamActivity:
+        """@brief 锁定并完整恢复 Dream 聚合 / Lock and fully restore a Dream aggregate.
+
+        @param dream_id Dream identity / Dream identity.
+        @param connection 当前短事务 / Current short transaction.
+        @return 完整聚合 / Complete aggregate.
+        """
 
         row = await db.fetch_one(
-            "SELECT status, claim_token FROM user_profile.dreams "
-            "WHERE dream_id = CAST(%s AS UUID) FOR UPDATE",
-            (str(claim.dream_id),),
+            "SELECT "
+            + _DREAM_ACTIVITY_COLUMNS
+            + " FROM user_profile.dreams WHERE dream_id = CAST(%s AS UUID) FOR UPDATE",
+            (str(dream_id),),
             connection=connection,
         )
         if row is None:
             raise StaleDreamClaimError("Dream no longer exists")
-        status, token = _values(row, 2)
-        if str(status) != "processing" or _uuid(token) != claim.claim_token:
+        return _map_dream_activity(row)
+
+    @staticmethod
+    def _require_current_claim(current: DreamActivity, claim: DreamClaim) -> None:
+        """@brief 验证完整 aggregate/version/token/expiry capability / Validate complete aggregate/version/token/expiry capability.
+
+        @param current 已锁 durable Dream 聚合 / Locked durable Dream aggregate.
+        @param claim 调用方 settlement capability / Caller settlement capability.
+        @return None / None.
+        @raise StaleDreamClaimError claim 不再拥有当前聚合 / Claim no longer owns the current aggregate.
+        """
+
+        if current != claim.activity or current.version != claim.expected_version:
             raise StaleDreamClaimError("Dream claim is stale")

@@ -11,8 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from fogmoe_bot.application.assistant.completion import AssistantCompletionPort
 from fogmoe_bot.application.observability.telemetry import Telemetry
 from fogmoe_bot.application.user_profile.ports import (
-    DreamClaim,
-    DreamResult,
     RetryableDreamingError,
 )
 from fogmoe_bot.domain.assistant.messages import CanonicalMessage, text_message
@@ -20,8 +18,10 @@ from fogmoe_bot.domain.assistant.request_metadata import normalize_request_meta
 from fogmoe_bot.domain.assistant.routing.models import ProviderRoute
 from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.domain.observability.signals import SpanKind
-from fogmoe_bot.domain.user_profile.models import (
+from fogmoe_bot.domain.user_profile import (
     DeleteProfileClaim,
+    DreamClaim,
+    DreamResult,
     ProfileClaimKind,
     ProfileConfidence,
     ProfilePatch,
@@ -119,6 +119,7 @@ class ProviderDreamingModel:
         @param request_timeout_seconds 单模型 timeout / Per-model timeout.
         @param telemetry typed telemetry / Typed telemetry.
         @param max_output_tokens 最大 JSON 输出 / Maximum JSON output.
+        @return None / None.
         @raise ValueError timeout 或输出预算非法 / Invalid timeout or output budget.
         """
 
@@ -192,7 +193,7 @@ def _render_claim(claim: DreamClaim) -> str:
     """
 
     current_profile = {
-        "revision": claim.base_revision,
+        "revision": claim.activity.baseline.revision,
         "claims": [
             {
                 "key": item.key,
@@ -206,10 +207,10 @@ def _render_claim(claim: DreamClaim) -> str:
         ],
     }
     metadata = {
-        "display_name": claim.metadata.display_name,
-        "username": claim.metadata.username,
-        "personal_info": claim.metadata.personal_info,
-        "provider": claim.metadata.provider,
+        "display_name": claim.activity.metadata.display_name,
+        "username": claim.activity.metadata.username,
+        "personal_info": claim.activity.metadata.personal_info,
+        "provider": claim.activity.metadata.provider,
     }
     evidence = [
         {

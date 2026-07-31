@@ -13,7 +13,13 @@ import pytest
 from fogmoe_bot.application.assistant.completion import AssistantCompletion
 from fogmoe_bot.application.observability.telemetry import Telemetry, TelemetryBuffer
 from fogmoe_bot.application.runtime import AdaptivePollingPolicy, UtcClock
-from fogmoe_bot.application.user_profile.ports import DreamClaim, DreamResult
+from fogmoe_bot.application.user_profile.ports import (
+    DreamCommitReceipt,
+    DreamProfileUnchanged,
+    DreamProfileUpdated,
+    DreamingModel,
+    RetryableDreamingError,
+)
 from fogmoe_bot.application.user_profile.worker import DreamingWorker
 from fogmoe_bot.domain.assistant.messages import text_message
 from fogmoe_bot.domain.assistant.routing.models import (
@@ -22,9 +28,19 @@ from fogmoe_bot.domain.assistant.routing.models import (
     RouteModel,
 )
 from fogmoe_bot.domain.conversation.message import MessageRole
-from fogmoe_bot.domain.user_profile.models import (
+from fogmoe_bot.domain.user_profile import (
+    DreamActivity,
+    DreamActivityDraft,
+    DreamClaim,
+    DreamCompletionPrepared,
+    DreamFailedFinalDecision,
+    DreamFailure,
+    DreamLeaseToken,
+    DreamResult,
+    DreamRetryScheduled,
     DeleteProfileClaim,
     DreamId,
+    ProfileBaseline,
     ProfileClaim,
     ProfileClaimKind,
     ProfileConfidence,
@@ -33,7 +49,7 @@ from fogmoe_bot.domain.user_profile.models import (
     ProfileMetadata,
     ProfilePatch,
     UpsertProfileClaim,
-    apply_profile_patch,
+    UserProfileSnapshot,
 )
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.user_profile.source import (
@@ -52,6 +68,27 @@ class _Clock(UtcClock):
         """@brief 返回固定时间 / Return the fixed time."""
 
         return NOW
+
+
+class _ClockAt(UtcClock):
+    """@brief 返回注入时刻的测试 UTC clock / Test UTC clock returning an injected instant."""
+
+    def __init__(self, instant: datetime) -> None:
+        """@brief 保存固定时刻 / Store the fixed instant.
+
+        @param instant 每次返回的 UTC 时刻 / UTC instant returned on every read.
+        @return None / None.
+        """
+
+        self._instant = instant
+
+    def now(self) -> datetime:
+        """@brief 返回注入时刻 / Return the injected instant.
+
+        @return 固定时刻 / Fixed instant.
+        """
+
+        return self._instant
 
 
 def _metadata() -> ProfileMetadata:
@@ -83,24 +120,36 @@ def _claim(*, evidence: tuple[ProfileEvidence, ...] | None = None) -> DreamClaim
     """@brief 构造 processing Dream claim / Build a processing Dream claim."""
 
     sources = evidence or (_evidence(1),)
-    return DreamClaim(
-        dream_id=DreamId(UUID("00000000-0000-0000-0000-000000000099")),
-        owner_user_id=42,
-        base_revision=0,
-        base_observed_through_event_id=0,
-        through_event_id=sources[-1].event_id,
+    pending = DreamActivity.enqueue(
+        DreamActivityDraft(
+            dream_id=DreamId(UUID("00000000-0000-0000-0000-000000000099")),
+            owner_user_id=42,
+            baseline=ProfileBaseline(
+                revision=0,
+                observed_through_event_id=0,
+            ),
+            through_event_id=sources[-1].event_id,
+            source_count=len(sources),
+            metadata=_metadata(),
+            created_at=NOW - timedelta(seconds=1),
+        )
+    )
+    return pending.claim(
+        token=DreamLeaseToken.parse(UUID("00000000-0000-0000-0000-000000000088")),
+        claimed_at=NOW,
+        lease_expires_at=NOW + timedelta(seconds=30),
         current_document=ProfileDocument(),
         evidence=sources,
-        metadata=_metadata(),
-        claim_token=UUID("00000000-0000-0000-0000-000000000088"),
-        attempt_count=1,
     )
 
 
 def test_profile_reducer_requires_current_batch_provenance_and_updates_by_stable_key() -> (
     None
 ):
-    """@brief reducer 只接受批内 provenance 且以稳定 key supersede / Reducer accepts only in-batch provenance and supersedes by stable key."""
+    """@brief document 只接受批内 provenance 且以稳定 key supersede / The document accepts only in-batch provenance and supersedes by stable key.
+
+    @return None / None.
+    """
 
     old = ProfileDocument(
         (
@@ -115,8 +164,7 @@ def test_profile_reducer_requires_current_batch_provenance_and_updates_by_stable
         )
     )
     new_evidence = (_evidence(2, "I now prefer tea, not coffee"),)
-    updated = apply_profile_patch(
-        old,
+    updated = old.apply(
         ProfilePatch(
             (
                 UpsertProfileClaim(
@@ -135,8 +183,7 @@ def test_profile_reducer_requires_current_batch_provenance_and_updates_by_stable
     assert updated.claims[0].statement == "现在偏好茶而非咖啡"
     assert updated.claims[0].evidence_event_ids == (2,)
     with pytest.raises(ValueError, match="outside the current batch"):
-        apply_profile_patch(
-            old,
+        old.apply(
             ProfilePatch(
                 (
                     DeleteProfileClaim(
@@ -147,6 +194,103 @@ def test_profile_reducer_requires_current_batch_provenance_and_updates_by_stable
             ),
             evidence=new_evidence,
         )
+
+
+def test_profile_patch_freezes_operations_and_operation_provenance() -> None:
+    """@brief patch 与 operation 切断调用方可变别名 / A patch and its operations sever caller-owned mutable aliases.
+
+    @return None / None.
+    """
+
+    evidence_ids = [1]
+    operation = UpsertProfileClaim(
+        key="drink.preference",
+        kind=ProfileClaimKind.PREFERENCE,
+        statement="偏好茶",
+        confidence=ProfileConfidence.EXPLICIT,
+        evidence_event_ids=evidence_ids,  # type: ignore[arg-type]
+    )
+    operations = [operation]
+    patch = ProfilePatch(operations)  # type: ignore[arg-type]
+
+    evidence_ids.clear()
+    operations.clear()
+
+    assert operation.evidence_event_ids == (1,)
+    assert patch.operations == (operation,)
+    with pytest.raises(TypeError, match="unknown operation"):
+        ProfilePatch((object(),))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "evidence_ids",
+    (
+        pytest.param((1, True), id="integer-then-boolean"),
+        pytest.param((True, 1), id="boolean-then-integer"),
+        pytest.param((1, 1.0), id="integer-then-float"),
+        pytest.param((1.0, 1), id="float-then-integer"),
+    ),
+)
+def test_operation_validates_types_before_deduplicating_equal_values(
+    evidence_ids: tuple[object, ...],
+) -> None:
+    """@brief provenance 在 Python 数值相等去重前校验实际类型 / Provenance validates actual types before Python numeric-equality deduplication.
+
+    @param evidence_ids 含伪整数的候选 IDs / Candidate IDs containing a pseudo-integer.
+    @return None / None.
+    """
+
+    with pytest.raises(ValueError, match="positive integer"):
+        DeleteProfileClaim(
+            key="drink.preference",
+            evidence_event_ids=evidence_ids,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        pytest.param("event_id", 1.0, id="floating-event-id"),
+        pytest.param("owner_user_id", 42.0, id="floating-owner-id"),
+        pytest.param("event_id", True, id="boolean-event-id"),
+        pytest.param("owner_user_id", True, id="boolean-owner-id"),
+    ),
+)
+def test_profile_evidence_rejects_values_that_are_not_actual_integers(
+    field: str,
+    value: object,
+) -> None:
+    """@brief evidence 在运行时拒绝 float/bool 伪整数 / Evidence rejects float and bool pseudo-integers at runtime.
+
+    @param field 被破坏的 identity 域 / Identity field under test.
+    @param value 非整数运行时值 / Non-integer runtime value.
+    @return None / None.
+    """
+
+    values: dict[str, object] = {
+        "event_id": 1,
+        "source_turn_id": UUID("00000000-0000-0000-0000-000000000001"),
+        "owner_user_id": 42,
+        "user_text": "I prefer tea",
+        "assistant_text": "Understood",
+        "occurred_at": NOW,
+        "metadata": _metadata(),
+    }
+    values[field] = value
+
+    with pytest.raises(ValueError):
+        ProfileEvidence(**values)  # type: ignore[arg-type]
+
+
+def test_profile_metadata_exposes_a_canonical_provider_key() -> None:
+    """@brief provider identity 在进入聚合前规范化为受限 key / Provider identity is normalized to a bounded key before entering the aggregate.
+
+    @return None / None.
+    """
+
+    assert ProfileMetadata("Klee", provider=" TELEGRAM ").provider == "telegram"
+    with pytest.raises(ValueError, match="canonical provider key"):
+        ProfileMetadata("Klee", provider="ß" * 32)
 
 
 class _Completion:
@@ -162,9 +306,7 @@ class _Completion:
         """@brief 记录 request 并返回输出 / Record the request and return output."""
 
         self.messages = kwargs["messages"]
-        return AssistantCompletion(
-            text_message(MessageRole.ASSISTANT, self._content)
-        )
+        return AssistantCompletion(text_message(MessageRole.ASSISTANT, self._content))
 
 
 def test_provider_dreaming_model_requires_strict_json_and_preserves_route_provenance() -> (
@@ -281,7 +423,7 @@ class _Store:
         self.claim_tasks: list[str] = []
         self.document: ProfileDocument | None = None
 
-    async def read_profile(self, user_id: int):
+    async def read_profile(self, user_id: int) -> UserProfileSnapshot | None:
         """@brief 本测试不读取 acceptance Profile / This test does not read an acceptance Profile."""
 
         raise AssertionError(user_id)
@@ -311,7 +453,13 @@ class _Store:
         self.enqueued = True
         return 1
 
-    async def claim_dreams(self, *, now: datetime, limit: int, lease_for: timedelta):
+    async def claim_dreams(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        lease_for: timedelta,
+    ) -> tuple[DreamClaim, ...]:
         """@brief durable job 只被领取一次 / Claim the durable job once."""
 
         assert now == NOW and limit == 1 and lease_for == timedelta(seconds=30)
@@ -324,36 +472,53 @@ class _Store:
 
     async def complete_dream(
         self,
-        claim: DreamClaim,
-        result: DreamResult,
+        decision: DreamCompletionPrepared,
         *,
-        document: ProfileDocument,
-        completed_at: datetime,
         refresh_after: timedelta,
-    ):
+    ) -> DreamCommitReceipt:
         """@brief 记录 reducer 结果并停止 / Record the reducer result and stop."""
 
-        assert claim.owner_user_id == 42
-        assert result.route_key == "test:model"
-        assert completed_at == NOW and refresh_after == timedelta(hours=6)
-        self.document = document
+        assert decision.claim.activity.owner_user_id == 42
+        assert decision.activity.result is not None
+        assert decision.activity.result.route_key == "test:model"
+        assert decision.activity.completed_at == NOW
+        assert refresh_after == timedelta(hours=6)
+        self.document = decision.document
         self.stop_event.set()
-        return None
+        snapshot = decision.plan_profile_commit(
+            has_backlog=False,
+            refresh_after=refresh_after,
+        ).snapshot(profile_created_at=NOW)
+        if snapshot is None:  # pragma: no cover - fixed model always changes.
+            raise AssertionError("Changed test completion did not create a snapshot")
+        return DreamProfileUpdated(snapshot)
 
-    async def retry_dream(self, claim: DreamClaim, **kwargs: object) -> None:
+    async def retry_dream(self, decision: DreamRetryScheduled) -> None:
         """@brief 成功场景不允许 retry / Reject retry in the success scenario."""
 
-        raise AssertionError((claim, kwargs))
+        raise AssertionError(decision)
 
-    async def fail_dream(self, claim: DreamClaim, **kwargs: object) -> None:
+    async def fail_dream(self, decision: DreamFailedFinalDecision) -> None:
         """@brief 成功场景不允许 final failure / Reject final failure in the success scenario."""
 
-        raise AssertionError((claim, kwargs))
+        raise AssertionError(decision)
 
-    async def recover_expired_dream_leases(self, *, now: datetime) -> int:
-        """@brief 验证启动 recovery / Verify startup recovery."""
+    async def recover_expired_dream_leases(
+        self,
+        *,
+        now: datetime,
+        max_attempts: int,
+        limit: int,
+    ) -> int:
+        """@brief 验证启动 recovery / Verify startup recovery.
 
-        assert now == NOW
+        @param now recovery 截止时间 / Recovery cutoff time.
+        @param max_attempts 最大尝试数 / Maximum attempts.
+        @param limit 单轮上限 / Per-pass limit.
+        @return 零个 recovered leases / Zero recovered leases.
+        """
+
+        assert now == NOW and max_attempts == 5 and limit == 2
         return 0
 
 
@@ -539,10 +704,22 @@ class _LeaseRecoveryStore(_Store):
         assert lease_for == timedelta(milliseconds=200)
         return ()
 
-    async def recover_expired_dream_leases(self, *, now: datetime) -> int:
-        """@brief 用真实 monotonic 时间记录单 owner 回收 / Record single-owner recovery using real monotonic time."""
+    async def recover_expired_dream_leases(
+        self,
+        *,
+        now: datetime,
+        max_attempts: int,
+        limit: int,
+    ) -> int:
+        """@brief 用真实 monotonic 时间记录单 owner 回收 / Record single-owner recovery using real monotonic time.
 
-        assert now == NOW
+        @param now recovery 截止时间 / Recovery cutoff time.
+        @param max_attempts 最大尝试数 / Maximum attempts.
+        @param limit 单轮上限 / Per-pass limit.
+        @return 零个 recovered leases / Zero recovered leases.
+        """
+
+        assert now == NOW and max_attempts == 5 and limit == 2
         self.recovery_times.append(time.monotonic())
         task = asyncio.current_task()
         self.recovery_tasks.append(task.get_name() if task is not None else "")
@@ -583,6 +760,242 @@ class _FailOnceProfileTelemetry(Telemetry):
             self._fail_next_counter = False
             raise ValueError("Span duration cannot be negative")
         return super().counter(name, value, unit=unit, attributes=attributes)
+
+
+class _ExitFailingTelemetryClock:
+    """@brief 仅在 span 退出读取时失败的 telemetry clock / Telemetry clock failing only when a span exits."""
+
+    def __init__(self) -> None:
+        """@brief 初始化 monotonic 读取次数 / Initialize the monotonic-read count.
+
+        @return None / None.
+        """
+
+        self.monotonic_calls = 0
+
+    def now(self) -> datetime:
+        """@brief 返回固定 telemetry 墙钟 / Return a fixed telemetry wall clock.
+
+        @return 固定 UTC 时刻 / Fixed UTC instant.
+        """
+
+        return NOW
+
+    def monotonic_ns(self) -> int:
+        """@brief 首次进入成功、退出时失败 / Succeed on entry and fail on exit.
+
+        @return 首次读取的单调值 / Monotonic value on the first read.
+        @raise RuntimeError span 退出故障 / Span-exit fault.
+        """
+
+        self.monotonic_calls += 1
+        if self.monotonic_calls > 1:
+            raise RuntimeError("telemetry span exit failed")
+        return 1
+
+
+class _EntryFailingTelemetryClock:
+    """@brief span 进入即失败的 telemetry clock / Telemetry clock failing when a span enters."""
+
+    def now(self) -> datetime:
+        """@brief 模拟 span 进入故障 / Simulate a span-entry fault.
+
+        @return 不返回 / Does not return.
+        @raise RuntimeError span 进入故障 / Span-entry fault.
+        """
+
+        raise RuntimeError("telemetry span entry failed")
+
+    def monotonic_ns(self) -> int:
+        """@brief 提供未使用的单调时钟值 / Provide an unused monotonic-clock value.
+
+        @return 固定单调值 / Fixed monotonic value.
+        """
+
+        return 1
+
+
+class _CountingDreamingModel:
+    """@brief 记录 provider 调用次数的 Dreaming model / Dreaming model recording provider-call count."""
+
+    def __init__(self) -> None:
+        """@brief 初始化调用计数 / Initialize call count.
+
+        @return None / None.
+        """
+
+        self.calls = 0
+
+    async def dream(self, claim: DreamClaim) -> DreamResult:
+        """@brief 记录调用并委托固定模型 / Record the call and delegate to the fixed model.
+
+        @param claim 冻结 Dream claim / Frozen Dream claim.
+        @return 合法 changed result / Valid changed result.
+        """
+
+        self.calls += 1
+        return await _Model().dream(claim)
+
+
+class _RetryableDreamingModel:
+    """@brief 总是报告可重试 provider 故障的模型 / Model always reporting a retryable provider fault."""
+
+    def __init__(self) -> None:
+        """@brief 初始化调用计数 / Initialize call count.
+
+        @return None / None.
+        """
+
+        self.calls = 0
+
+    async def dream(self, claim: DreamClaim) -> DreamResult:
+        """@brief 记录调用并抛出可重试故障 / Record the call and raise a retryable fault.
+
+        @param claim 冻结 Dream claim / Frozen Dream claim.
+        @return 不返回 / Does not return.
+        @raise RetryableDreamingError 模拟 provider 暂时不可用 /
+            Simulated transient provider unavailability.
+        """
+
+        del claim
+        self.calls += 1
+        raise RetryableDreamingError("provider unavailable")
+
+
+class _SettlementBoundaryStore(_Store):
+    """@brief 记录所有 Dream settlement 的边界 store / Boundary store recording every Dream settlement."""
+
+    def __init__(
+        self,
+        *,
+        completion_mode: str = "valid",
+        retry_mode: str = "valid",
+        fail_mode: str = "valid",
+    ) -> None:
+        """@brief 配置各 settlement acknowledgment 行为 / Configure each settlement-acknowledgment behavior.
+
+        @param completion_mode ``valid``、``unknown``、``wrong_receipt`` 或 ``blocked`` /
+            ``valid``, ``unknown``, ``wrong_receipt``, or ``blocked``.
+        @param retry_mode ``valid`` 或 ``unknown`` / ``valid`` or ``unknown``.
+        @param fail_mode ``valid`` 或 ``unknown`` / ``valid`` or ``unknown``.
+        @return None / None.
+        @raise ValueError 任一 settlement mode 非法 / Any settlement mode is invalid.
+        """
+
+        if completion_mode not in {"valid", "unknown", "wrong_receipt", "blocked"}:
+            raise ValueError("Unknown settlement-boundary test mode")
+        if retry_mode not in {"valid", "unknown"}:
+            raise ValueError("Unknown retry-settlement test mode")
+        if fail_mode not in {"valid", "unknown"}:
+            raise ValueError("Unknown final-settlement test mode")
+        super().__init__(asyncio.Event())
+        self.completion_mode = completion_mode
+        self.retry_mode = retry_mode
+        self.fail_mode = fail_mode
+        self.complete_calls = 0
+        self.retry_calls = 0
+        self.fail_calls = 0
+        self.completion_started = asyncio.Event()
+        self.completion_release = asyncio.Event()
+        self.retry_decision: DreamRetryScheduled | None = None
+        self.final_decision: DreamFailedFinalDecision | None = None
+
+    async def complete_dream(
+        self,
+        decision: DreamCompletionPrepared,
+        *,
+        refresh_after: timedelta,
+    ) -> DreamCommitReceipt:
+        """@brief 模拟 ACK unknown、错误回执或正常提交 / Simulate unknown ACK, wrong receipt, or normal commit.
+
+        @param decision completion 决定 / Completion decision.
+        @param refresh_after refresh delay / Refresh delay.
+        @return 配置的 durable receipt / Configured durable receipt.
+        @raise RuntimeError 模拟 commit outcome unknown / Simulated unknown commit outcome.
+        """
+
+        self.complete_calls += 1
+        self.completion_started.set()
+        if self.completion_mode == "blocked":
+            await self.completion_release.wait()
+        if self.completion_mode == "unknown":
+            self.document = decision.document
+            raise RuntimeError("commit acknowledgment was lost")
+        receipt = await super().complete_dream(
+            decision,
+            refresh_after=refresh_after,
+        )
+        if self.completion_mode == "wrong_receipt":
+            return DreamProfileUnchanged(
+                owner_user_id=decision.claim.activity.owner_user_id,
+                retained_revision=decision.claim.activity.baseline.revision,
+                scheduler_head_event_id=decision.claim.activity.through_event_id,
+            )
+        return receipt
+
+    async def retry_dream(self, decision: DreamRetryScheduled) -> None:
+        """@brief 记录 retry commit 并可选丢失 ACK / Record the retry commit and optionally lose its ACK.
+
+        @param decision retry 决定 / Retry decision.
+        @return None / None.
+        @raise RuntimeError 模拟 commit 后 acknowledgment 丢失 /
+            Simulated acknowledgment loss after the commit.
+        """
+
+        self.retry_calls += 1
+        self.retry_decision = decision
+        if self.retry_mode == "unknown":
+            raise RuntimeError("retry commit acknowledgment was lost")
+
+    async def fail_dream(self, decision: DreamFailedFinalDecision) -> None:
+        """@brief 记录 final commit 并可选丢失 ACK / Record the final commit and optionally lose its ACK.
+
+        @param decision final-failure 决定 / Final-failure decision.
+        @return None / None.
+        @raise RuntimeError 模拟 commit 后 acknowledgment 丢失 /
+            Simulated acknowledgment loss after the commit.
+        """
+
+        self.fail_calls += 1
+        self.final_decision = decision
+        if self.fail_mode == "unknown":
+            raise RuntimeError("final commit acknowledgment was lost")
+
+
+def _boundary_worker(
+    *,
+    store: _SettlementBoundaryStore,
+    model: DreamingModel,
+    telemetry: Telemetry,
+    max_attempts: int = 5,
+    clock: UtcClock | None = None,
+) -> DreamingWorker:
+    """@brief 构造直接执行单 claim 的边界 worker / Build a boundary worker that processes one claim directly.
+
+    @param store settlement recorder / Settlement recorder.
+    @param model provider-call recorder / Provider-call recorder.
+    @param telemetry observability recorder / Observability recorder.
+    @param max_attempts 最大尝试数 / Maximum attempts.
+    @param clock 可替换业务时钟 / Replaceable business clock.
+    @return 配置好的 worker / Configured worker.
+    """
+
+    return DreamingWorker(
+        source=_Source(),
+        store=store,
+        model=model,
+        telemetry=telemetry,
+        polling_policy=AdaptivePollingPolicy(0.001, 0.004, jitter_ratio=0.0),
+        worker_count=1,
+        batch_size=2,
+        source_batch_size=4,
+        max_events_per_dream=8,
+        refresh_after=timedelta(hours=6),
+        attempt_timeout=timedelta(seconds=20),
+        lease_for=timedelta(seconds=30),
+        max_attempts=max_attempts,
+        clock=clock or _Clock(),
+    )
 
 
 def _resilient_worker(
@@ -627,7 +1040,7 @@ def test_worker_has_one_source_owner_and_model_consumers_only_claim_jobs() -> No
         store = _Store(stop_event)
         worker = DreamingWorker(
             source=source,
-            store=store,  # type: ignore[arg-type]
+            store=store,
             model=_Model(),
             telemetry=Telemetry(TelemetryBuffer(64)),
             worker_count=4,
@@ -692,6 +1105,265 @@ def test_telemetry_failure_does_not_escape_dreaming_task_group() -> None:
         await asyncio.wait_for(worker.run(stop_event), timeout=1)
 
         assert source.calls >= 2
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ("settlement_unknown", "wrong_receipt", "counter", "span_exit"),
+)
+def test_settlement_and_post_commit_faults_never_resettle_the_claim(
+    fault: str,
+) -> None:
+    """@brief settlement outcome unknown 与提交后故障不得二次 retry/fail / Unknown settlement outcomes and post-commit faults must never retry or fail the claim again.
+
+    @param fault 注入的边界故障 / Injected boundary fault.
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 处理单 claim 并检查只发生一次 completion settlement / Process one claim and verify a single completion settlement.
+
+        @return None / None.
+        """
+
+        mode = {
+            "settlement_unknown": "unknown",
+            "wrong_receipt": "wrong_receipt",
+        }.get(fault, "valid")
+        store = _SettlementBoundaryStore(completion_mode=mode)
+        model = _CountingDreamingModel()
+        if fault == "counter":
+            telemetry = _FailOnceProfileTelemetry()
+        elif fault == "span_exit":
+            telemetry = Telemetry(
+                TelemetryBuffer(64),
+                clock=_ExitFailingTelemetryClock(),
+            )
+        else:
+            telemetry = Telemetry(TelemetryBuffer(64))
+        worker = _boundary_worker(
+            store=store,
+            model=model,
+            telemetry=telemetry,
+        )
+
+        await worker._process(_claim())
+
+        assert model.calls == 1
+        assert store.complete_calls == 1
+        assert store.retry_calls == 0
+        assert store.fail_calls == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("settlement", "max_attempts"),
+    (
+        pytest.param("retry", 5, id="retry"),
+        pytest.param("fail", 1, id="final-failure"),
+    ),
+)
+@pytest.mark.parametrize(
+    "post_commit_fault",
+    ("ack_unknown", "counter"),
+)
+def test_failure_settlement_post_commit_faults_never_resettle_the_claim(
+    settlement: str,
+    max_attempts: int,
+    post_commit_fault: str,
+) -> None:
+    """@brief retry/final commit 后故障不得对同一 claim 再结算 / Faults after retry/final commit must not resettle the same claim.
+
+    @param settlement 预期的 failure settlement 类型 / Expected failure-settlement kind.
+    @param max_attempts 决定 retry 或 final 的最大尝试数 / Attempt limit selecting retry or final.
+    @param post_commit_fault commit 后注入的 ACK 或 telemetry 故障 /
+        ACK or telemetry fault injected after commit.
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 触发 failure settlement 并验证唯一写边界 / Trigger failure settlement and verify the single write boundary.
+
+        @return None / None.
+        """
+
+        unknown_ack = post_commit_fault == "ack_unknown"
+        store = _SettlementBoundaryStore(
+            retry_mode="unknown" if unknown_ack and settlement == "retry" else "valid",
+            fail_mode="unknown" if unknown_ack and settlement == "fail" else "valid",
+        )
+        telemetry = (
+            _FailOnceProfileTelemetry()
+            if post_commit_fault == "counter"
+            else Telemetry(TelemetryBuffer(64))
+        )
+        worker = _boundary_worker(
+            store=store,
+            model=_RetryableDreamingModel(),
+            telemetry=telemetry,
+            max_attempts=max_attempts,
+        )
+        expected_error = RuntimeError if unknown_ack else ValueError
+
+        with pytest.raises(expected_error):
+            await worker._process(_claim())
+
+        assert store.complete_calls == 0
+        assert store.retry_calls == (settlement == "retry")
+        assert store.fail_calls == (settlement == "fail")
+        assert (store.retry_decision is not None) == (settlement == "retry")
+        assert (store.final_decision is not None) == (settlement == "fail")
+
+    asyncio.run(scenario())
+
+
+def test_completion_cancellation_propagates_without_resettling_the_claim() -> None:
+    """@brief completion 阻塞期取消必须传播且不得 retry/fail / Cancellation during blocked completion must propagate without retry/fail.
+
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 在 store completion 内取消任务并验证 settlement 计数 / Cancel inside store completion and verify settlement counts.
+
+        @return None / None.
+        """
+
+        store = _SettlementBoundaryStore(completion_mode="blocked")
+        model = _CountingDreamingModel()
+        worker = _boundary_worker(
+            store=store,
+            model=model,
+            telemetry=Telemetry(TelemetryBuffer(64)),
+        )
+        task = asyncio.create_task(worker._process(_claim()))
+        await asyncio.wait_for(store.completion_started.wait(), timeout=1)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert model.calls == 1
+        assert store.complete_calls == 1
+        assert store.retry_calls == 0
+        assert store.fail_calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_span_entry_failure_does_not_block_dream_business_processing() -> None:
+    """@brief span 进入失败仍执行并完成 Dream / A span-entry failure still executes and completes the Dream.
+
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 注入 span-entry fault 并验证业务 settlement / Inject a span-entry fault and verify business settlement.
+
+        @return None / None.
+        """
+
+        store = _SettlementBoundaryStore()
+        model = _CountingDreamingModel()
+        worker = _boundary_worker(
+            store=store,
+            model=model,
+            telemetry=Telemetry(
+                TelemetryBuffer(64),
+                clock=_EntryFailingTelemetryClock(),
+            ),
+        )
+
+        await worker._process(_claim())
+
+        assert model.calls == 1
+        assert store.complete_calls == 1
+        assert store.retry_calls == 0
+        assert store.fail_calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_span_exit_failure_preserves_retryable_business_error() -> None:
+    """@brief span 退出错误不得覆盖 provider 可重试错误 / A span-exit fault must not mask a retryable provider error.
+
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 同时注入 provider 与 span-exit 故障并验证 retry / Inject provider and span-exit faults and verify retry.
+
+        @return None / None.
+        """
+
+        store = _SettlementBoundaryStore()
+        model = _RetryableDreamingModel()
+        worker = _boundary_worker(
+            store=store,
+            model=model,
+            telemetry=Telemetry(
+                TelemetryBuffer(64),
+                clock=_ExitFailingTelemetryClock(),
+            ),
+        )
+
+        await worker._process(_claim())
+
+        assert model.calls == 1
+        assert store.complete_calls == 0
+        assert store.retry_calls == 1
+        assert store.fail_calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_claim_beyond_attempt_budget_fails_without_calling_provider() -> None:
+    """@brief 已超预算 claim 防御性终败且不再调用 provider / A claim beyond its attempt budget fails defensively without another provider call.
+
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 构造第二次 claim 并以 max_attempts=1 处理 / Build a second claim and process it with max_attempts=1.
+
+        @return None / None.
+        """
+
+        first = _claim()
+        second_claimed_at = NOW + timedelta(seconds=1)
+        retry = first.record_failure(
+            failed_at=NOW,
+            failure=DreamFailure("simulated crash recovery"),
+        ).schedule_retry(retry_at=second_claimed_at)
+        over_budget = retry.activity.claim(
+            token=DreamLeaseToken.parse(UUID("00000000-0000-0000-0000-000000000087")),
+            claimed_at=second_claimed_at,
+            lease_expires_at=second_claimed_at + timedelta(seconds=30),
+            current_document=first.current_document,
+            evidence=first.evidence,
+        )
+        assert over_budget.activity.attempt_count == 2
+        store = _SettlementBoundaryStore()
+        model = _CountingDreamingModel()
+        worker = _boundary_worker(
+            store=store,
+            model=model,
+            telemetry=Telemetry(TelemetryBuffer(64)),
+            max_attempts=1,
+            clock=_ClockAt(second_claimed_at),
+        )
+
+        await worker._process(over_budget)
+
+        assert model.calls == 0
+        assert store.complete_calls == 0
+        assert store.retry_calls == 0
+        assert store.fail_calls == 1
+        assert store.final_decision is not None
+        assert store.final_decision.activity.status.value == "failed_final"
 
     asyncio.run(scenario())
 

@@ -1,4 +1,4 @@
-"""@brief Dreaming 应用端口与 claim 值对象 / Dreaming application ports and claim values."""
+"""@brief Dreaming 应用端口 / Dreaming application ports."""
 
 from __future__ import annotations
 
@@ -6,102 +6,85 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
-from uuid import UUID
 
-from fogmoe_bot.domain.user_profile.models import (
-    DreamId,
-    ProfileDocument,
+from fogmoe_bot.domain.user_profile import (
+    DreamClaim,
+    DreamCompletionPrepared,
+    DreamFailedFinalDecision,
+    DreamResult,
+    DreamRetryScheduled,
     ProfileEvidence,
-    ProfileMetadata,
-    ProfilePatch,
     UserProfileSnapshot,
 )
 
 
 @dataclass(frozen=True, slots=True)
-class DreamClaim:
-    """@brief 带 lease/fencing 的冻结 Dreaming 输入 / Frozen Dreaming input with lease and fencing.
+class DreamProfileUpdated:
+    """@brief Dream 提交建立新 Profile revision 的显式回执 / Explicit receipt for a Dream commit that created a Profile revision.
 
-    @param dream_id 工作项 ID / Work-item identifier.
-    @param owner_user_id Profile owner / Profile owner.
-    @param base_revision 形成工作项时的 Profile revision，0 表示空 / Profile revision at scheduling; zero means empty.
-    @param base_observed_through_event_id 形成工作项时的 evidence watermark / Evidence watermark at scheduling.
-    @param through_event_id 本批上界 / Batch upper bound.
-    @param current_document 当前 Profile 文档 / Current Profile document.
-    @param evidence 冻结且按 event_id 排序的证据 / Frozen evidence ordered by event ID.
-    @param metadata 本批最新 acceptance 元信息 / Latest acceptance metadata in the batch.
-    @param claim_token fencing token / Fencing token.
-    @param attempt_count 已开始尝试次数 / Number of started attempts.
+    @param snapshot 已从持久化后态映射并校验的新 revision / New revision mapped and validated from persisted post-state.
     """
 
-    dream_id: DreamId
-    owner_user_id: int
-    base_revision: int
-    base_observed_through_event_id: int
-    through_event_id: int
-    current_document: ProfileDocument
-    evidence: tuple[ProfileEvidence, ...]
-    metadata: ProfileMetadata
-    claim_token: UUID
-    attempt_count: int
+    snapshot: UserProfileSnapshot
 
     def __post_init__(self) -> None:
-        """@brief 校验 claim 的用户、range 与顺序 / Validate claim owner, range, and ordering.
+        """@brief 校验 changed 回执 / Validate the changed receipt.
 
         @return None / None.
-        @raise ValueError claim 不一致 / Inconsistent claim.
+        @raise TypeError snapshot 类型非法 / Invalid snapshot type.
         """
 
-        if isinstance(self.owner_user_id, bool) or self.owner_user_id <= 0:
-            raise ValueError("Dream owner_user_id must be positive")
-        if isinstance(self.base_revision, bool) or self.base_revision < 0:
-            raise ValueError("Dream base_revision cannot be negative")
-        if (
-            isinstance(self.base_observed_through_event_id, bool)
-            or self.base_observed_through_event_id < 0
-        ):
-            raise ValueError("Dream base watermark cannot be negative")
-        if self.through_event_id <= self.base_observed_through_event_id:
-            raise ValueError("Dream through_event_id must advance the watermark")
-        if isinstance(self.attempt_count, bool) or self.attempt_count < 1:
-            raise ValueError("Dream attempt_count must be positive")
-        if not self.evidence:
-            raise ValueError("Dream claim requires evidence")
-        event_ids = tuple(item.event_id for item in self.evidence)
-        if event_ids != tuple(sorted(event_ids)) or len(set(event_ids)) != len(
-            event_ids
-        ):
-            raise ValueError("Dream evidence must be strictly event ordered")
-        if event_ids[-1] != self.through_event_id:
-            raise ValueError("Dream evidence does not reach its upper bound")
-        if any(item.owner_user_id != self.owner_user_id for item in self.evidence):
-            raise ValueError("Dream evidence crossed a user boundary")
+        if not isinstance(self.snapshot, UserProfileSnapshot):
+            raise TypeError("Updated Dream receipt requires a UserProfileSnapshot")
 
 
 @dataclass(frozen=True, slots=True)
-class DreamResult:
-    """@brief 模型产生的 patch 与 route provenance / Model patch with route provenance.
+class DreamProfileUnchanged:
+    """@brief Dream 提交仅推进调度 head cursor 的显式 NO_OP 回执 / Explicit NO_OP receipt for a Dream commit that advanced only the scheduling head cursor.
 
-    @param patch 结构化 Profile patch / Structured Profile patch.
-    @param route_key 实际 provider/model route / Actual provider/model route.
-    @param prompt_version Dreaming prompt 版本 / Dreaming-prompt version.
+    @param owner_user_id Profile owner / Profile owner.
+    @param retained_revision 保留的 immutable Profile revision；零表示尚无 revision /
+        Retained immutable Profile revision; zero means no revision exists yet.
+    @param scheduler_head_event_id 提交后 scheduler head cursor / Scheduler head cursor after commit.
+    @note ``UserProfileSnapshot.observed_through_event_id`` 属于当前 immutable revision 的
+        provenance watermark，并不是此处可继续前进的 scheduler head cursor。/
+        ``UserProfileSnapshot.observed_through_event_id`` is provenance for the current
+        immutable revision, not the independently advancing scheduler head cursor recorded here.
     """
 
-    patch: ProfilePatch
-    route_key: str
-    prompt_version: int
+    owner_user_id: int
+    retained_revision: int
+    scheduler_head_event_id: int
 
     def __post_init__(self) -> None:
-        """@brief 校验生成 provenance / Validate generation provenance.
+        """@brief 校验 NO_OP 回执 / Validate the NO_OP receipt.
 
         @return None / None.
-        @raise ValueError route 或版本非法 / Invalid route or version.
+        @raise ValueError owner、revision 或 cursor 非法 / Invalid owner, revision, or cursor.
         """
 
-        if not self.route_key.strip() or len(self.route_key) > 300:
-            raise ValueError("Dream route_key must contain 1-300 characters")
-        if isinstance(self.prompt_version, bool) or self.prompt_version <= 0:
-            raise ValueError("Dream prompt_version must be positive")
+        if (
+            isinstance(self.owner_user_id, bool)
+            or not isinstance(self.owner_user_id, int)
+            or self.owner_user_id <= 0
+        ):
+            raise ValueError("NO_OP Dream receipt owner_user_id must be positive")
+        if (
+            isinstance(self.retained_revision, bool)
+            or not isinstance(self.retained_revision, int)
+            or self.retained_revision < 0
+        ):
+            raise ValueError("NO_OP Dream receipt revision cannot be negative")
+        if (
+            isinstance(self.scheduler_head_event_id, bool)
+            or not isinstance(self.scheduler_head_event_id, int)
+            or self.scheduler_head_event_id <= 0
+        ):
+            raise ValueError("NO_OP Dream receipt cursor must be positive")
+
+
+type DreamCommitReceipt = DreamProfileUpdated | DreamProfileUnchanged
+"""@brief Dream/Profile 原子提交的穷尽回执和 / Exhaustive receipt sum for an atomic Dream/Profile commit."""
 
 
 class RetryableDreamingError(RuntimeError):
@@ -126,10 +109,6 @@ class RetryableDreamingError(RuntimeError):
         self.retry_after = retry_after
 
 
-class StaleDreamClaimError(RuntimeError):
-    """@brief Dream claim 已被回收或 Profile 已变更 / Dream claim was recovered or its Profile changed."""
-
-
 class ProfileEvidenceSource(Protocol):
     """@brief 未投影 Conversation Turn 来源 / Source of unprojected Conversation turns."""
 
@@ -151,6 +130,10 @@ class ProfileReader(Protocol):
 
         @param user_id Profile owner / Profile owner.
         @return snapshot；尚未形成则 None / Snapshot, or None before materialization.
+        @note snapshot watermark 是当前 immutable revision 的 provenance；NO_OP Dream 可在
+            不建立 revision 的前提下推进内部 scheduler head cursor。/
+            The snapshot watermark is provenance for the current immutable revision; a NO_OP
+            Dream may advance the internal scheduler head cursor without creating a revision.
         """
 
         ...
@@ -165,7 +148,12 @@ class ProfileStore(ProfileReader, Protocol):
         *,
         projected_at: datetime,
     ) -> None:
-        """@brief 幂等投影一条来源证据 / Idempotently project one source evidence item."""
+        """@brief 幂等投影一条来源证据 / Idempotently project one source evidence item.
+
+        @param evidence 待投影来源证据 / Source evidence to project.
+        @param projected_at 投影时间 / Projection time.
+        @return None / None.
+        """
 
         ...
 
@@ -177,7 +165,14 @@ class ProfileStore(ProfileReader, Protocol):
         max_events_per_dream: int,
         max_evidence_chars: int,
     ) -> int:
-        """@brief 为到期且存在新证据的 Profile 建立有界冻结 job / Enqueue bounded frozen jobs for due Profiles with new evidence."""
+        """@brief 为到期且存在新证据的 Profile 建立有界冻结 job / Enqueue bounded frozen jobs for due Profiles with new evidence.
+
+        @param now 调度时间 / Scheduling time.
+        @param limit 单轮最大 job 数 / Maximum jobs per pass.
+        @param max_events_per_dream 单个 Dream 最大 evidence 数 / Maximum evidence items per Dream.
+        @param max_evidence_chars 单个 Dream 最大文本字符数 / Maximum text characters per Dream.
+        @return 实际建立的 job 数 / Number of jobs actually enqueued.
+        """
 
         ...
 
@@ -188,48 +183,69 @@ class ProfileStore(ProfileReader, Protocol):
         limit: int,
         lease_for: timedelta,
     ) -> Sequence[DreamClaim]:
-        """@brief 领取 ready jobs / Claim ready jobs."""
+        """@brief 领取 ready jobs / Claim ready jobs.
+
+        @param now 领取时间 / Claim time.
+        @param limit 单轮最大领取数 / Maximum claims per pass.
+        @param lease_for ownership 租约长度 / Ownership lease duration.
+        @return 带冻结生成输入的 claims / Claims carrying frozen generation inputs.
+        """
 
         ...
 
     async def complete_dream(
         self,
-        claim: DreamClaim,
-        result: DreamResult,
+        decision: DreamCompletionPrepared,
         *,
-        document: ProfileDocument,
-        completed_at: datetime,
         refresh_after: timedelta,
-    ) -> UserProfileSnapshot | None:
-        """@brief fenced 提交 reducer 结果并推进 evidence watermark / Fenced commit of the reducer result and evidence watermark."""
+    ) -> DreamCommitReceipt:
+        """@brief fenced 提交已验证 Dream/Profile 决定 / Commit a validated Dream/Profile decision under fencing.
+
+        @param decision 已纯验证且赋时的 completion / Purely validated, timestamped completion.
+        @param refresh_after 无 backlog 时的刷新间隔 / Refresh interval when no backlog remains.
+        @return 显式 updated 或 NO_OP durable 回执 / Explicit updated or NO_OP durable receipt.
+        """
 
         ...
 
     async def retry_dream(
         self,
-        claim: DreamClaim,
-        *,
-        failed_at: datetime,
-        retry_at: datetime,
-        error: str,
+        decision: DreamRetryScheduled,
     ) -> None:
-        """@brief fenced 安排重试 / Schedule a fenced retry."""
+        """@brief fenced 持久化类型化重试 / Persist a typed retry under fencing.
+
+        @param decision 已验证 retry 决定 / Validated retry decision.
+        @return None / None.
+        """
 
         ...
 
     async def fail_dream(
         self,
-        claim: DreamClaim,
-        *,
-        failed_at: datetime,
-        error: str,
+        decision: DreamFailedFinalDecision,
     ) -> None:
-        """@brief fenced 终结损坏 job / Finally fail a corrupt job."""
+        """@brief fenced 持久化类型化终败 / Persist a typed final failure under fencing.
+
+        @param decision 已验证 final-failure 决定 / Validated final-failure decision.
+        @return None / None.
+        """
 
         ...
 
-    async def recover_expired_dream_leases(self, *, now: datetime) -> int:
-        """@brief 回收 crash/cancellation 遗留 lease / Recover leases left by crashes or cancellation."""
+    async def recover_expired_dream_leases(
+        self,
+        *,
+        now: datetime,
+        max_attempts: int,
+        limit: int,
+    ) -> int:
+        """@brief 回收 crash/cancellation 遗留 lease / Recover leases left by crashes or cancellation.
+
+        @param now recovery 截止时间 / Recovery cutoff time.
+        @param max_attempts 包含已 crash claim 的最大尝试数 / Maximum attempts including the crashed claim.
+        @param limit 单轮有界回收数 / Bounded recoveries per pass.
+        @return 实际回收的 lease 数 / Number of leases actually recovered.
+        """
 
         ...
 
@@ -238,18 +254,22 @@ class DreamingModel(Protocol):
     """@brief 无工具、无 mutation 的 Profile patch 模型 / Tool-free, mutation-free Profile patch model."""
 
     async def dream(self, claim: DreamClaim) -> DreamResult:
-        """@brief 从当前 Profile 与新证据提出 patch / Propose a patch from the current Profile and new evidence."""
+        """@brief 从当前 Profile 与新证据提出 patch / Propose a patch from the current Profile and new evidence.
+
+        @param claim 带冻结 Profile/evidence 的生成 capability / Generation capability with frozen Profile and evidence.
+        @return 结构化 patch 与 provenance / Structured patch and provenance.
+        """
 
         ...
 
 
 __all__ = [
-    "DreamClaim",
-    "DreamResult",
+    "DreamCommitReceipt",
+    "DreamProfileUnchanged",
+    "DreamProfileUpdated",
     "DreamingModel",
     "ProfileEvidenceSource",
     "ProfileReader",
     "ProfileStore",
     "RetryableDreamingError",
-    "StaleDreamClaimError",
 ]

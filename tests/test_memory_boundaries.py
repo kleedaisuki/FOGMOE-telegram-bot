@@ -127,7 +127,28 @@ def test_user_profile_domain_is_conversation_provider_and_storage_independent() 
         if target.startswith(forbidden)
     ]
     assert violations == []
-    for layer in ("domain", "application", "infrastructure"):
+    domain_package = SRC_ROOT / "domain" / "user_profile" / "__init__.py"
+    domain_facade = domain_package.read_text(encoding="utf-8")
+    assert "from .dream import" in domain_facade
+    assert "from .models import" in domain_facade
+    internal_profile_imports = [
+        (path, target)
+        for package in (
+            SRC_ROOT / "application" / "user_profile",
+            SRC_ROOT / "infrastructure" / "user_profile",
+            SRC_ROOT / "infrastructure" / "database" / "user_profile",
+        )
+        for path in _python_files(package)
+        for target in _imports(path)
+        if target.startswith(
+            (
+                "fogmoe_bot.domain.user_profile.dream",
+                "fogmoe_bot.domain.user_profile.models",
+            )
+        )
+    ]
+    assert internal_profile_imports == []
+    for layer in ("application", "infrastructure"):
         package = SRC_ROOT / layer / "user_profile" / "__init__.py"
         assert "from ." not in package.read_text(encoding="utf-8")
 
@@ -273,4 +294,5 @@ def test_forgetting_is_enforced_at_discovery_and_projection_commit() -> None:
     assert (
         "await lock_user_profile(connection, evidence.owner_user_id)" in profile_store
     )
-    assert "await lock_user_profile(connection, claim.owner_user_id)" in profile_store
+    assert "owner_user_id = claim.activity.owner_user_id" in profile_store
+    assert "await lock_user_profile(connection, owner_user_id)" in profile_store
