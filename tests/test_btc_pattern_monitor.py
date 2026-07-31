@@ -9,8 +9,8 @@ from fogmoe_bot.application.crypto.market_monitor import (
     BtcPatternMonitor,
     MonitorControlResult,
     PatternScan,
-    PatternTrigger,
 )
+from fogmoe_bot.domain.crypto.market_pattern import PatternTrigger
 
 
 class _Source:

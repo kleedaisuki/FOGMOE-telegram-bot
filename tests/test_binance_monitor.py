@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from requests.exceptions import ConnectionError
 
+from fogmoe_bot.application.crypto.market_monitor import PatternScan
 from fogmoe_bot.infrastructure.blocking import AsyncBlockingBulkhead
 from fogmoe_bot.infrastructure.crypto.binance_monitor import (
     BinanceBtcPatternSource,
@@ -81,6 +82,7 @@ def test_source_parses_pattern_and_evaluates_price() -> None:
         """
 
         client = _Client(_rows())
+        timeouts: list[int | None] = []
 
         def factory(timeout: int | None) -> BinanceClient:
             """@brief 返回 fake client / Return the fake client.
@@ -90,6 +92,7 @@ def test_source_parses_pattern_and_evaluates_price() -> None:
             """
 
             assert timeout in {None, 30}
+            timeouts.append(timeout)
             return client
 
         source = BinanceBtcPatternSource(
@@ -101,10 +104,60 @@ def test_source_parses_pattern_and_evaluates_price() -> None:
 
         assert scan.trigger is not None
         assert scan.trigger.price == 101
-        assert "当前价格: $101.00" in scan.messages[0]
+        assert scan.trigger.occurred_at == datetime.fromtimestamp(
+            1_700_000_900,
+            tz=timezone.utc,
+        )
+        assert scan.messages == (
+            "\n=== 检测到BTCUSDT事件合约模式目标 ===\n"
+            "当前价格: $101.00\n"
+            "时间单位: 10分钟\n"
+            "执行操作: 上涨\n"
+            "数量: 5.00 USDT\n"
+            "下次可用时间: 2026-01-01 00:10:00+00:00\n" + "=" * 35,
+        )
         result = await source.evaluate(scan.trigger)
-        assert "当前价格: $102.00" in result
-        assert "胜利" in result
+        assert result == (
+            "\n=== BTCUSDT事件合约模式结果检查 ===\n"
+            "触发时间: $1700000900.0\n"
+            "触发时价格: $101.00\n"
+            "当前价格: $102.00\n"
+            "价格变化: 0.99%\n"
+            "结果: 胜利 ✅\n"
+            "数量变化: +9.00 USDT\n" + "=" * 35
+        )
+        assert timeouts == [30, None]
+
+    asyncio.run(scenario())
+
+
+def test_source_preserves_insufficient_data_message_and_skips_clock() -> None:
+    """@brief 数据不足时保留文案且不读取展示时钟 / Insufficient data retains its message without reading the display clock."""
+
+    async def scenario() -> None:
+        """@brief 执行不足三根 K 线的扫描 / Scan fewer than three candles.
+
+        @return None / None.
+        """
+
+        client = _Client(_rows()[:2])
+
+        def unexpected_clock() -> datetime:
+            """@brief 拒绝未命中形态时读取时钟 / Reject a clock read without a pattern match.
+
+            @return 不返回 / Does not return.
+            @raise AssertionError 时钟被意外读取时抛出 / Raised if the clock is unexpectedly read.
+            """
+
+            raise AssertionError("clock must not be read")
+
+        source = BinanceBtcPatternSource(
+            client_factory=lambda timeout: client,
+            now=unexpected_clock,
+            bulkhead=AsyncBlockingBulkhead(),
+        )
+
+        assert await source.scan() == PatternScan(("获取数据不足",))
 
     asyncio.run(scenario())
 

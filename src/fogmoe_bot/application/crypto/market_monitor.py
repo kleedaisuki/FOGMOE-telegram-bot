@@ -5,26 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
+
+from fogmoe_bot.domain.crypto.market_pattern import PatternTrigger
 
 logger = logging.getLogger(__name__)
 
 BTC_MONITOR_DATA_KEY = "fogmoe.btc_monitor"
 """@brief 组合根保存监控服务的稳定键 / Stable composition-root key for the monitor service."""
-
-
-@dataclass(frozen=True, slots=True)
-class PatternTrigger:
-    """@brief 一次待复查的价格模式触发 / Price-pattern trigger awaiting evaluation.
-
-    @param price 触发价格 / Trigger price.
-    @param occurred_at K 线触发时间 / Candle trigger time.
-    """
-
-    price: float
-    occurred_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,5 +333,4 @@ __all__ = [
     "MonitorNotificationSink",
     "PatternScan",
     "PatternSource",
-    "PatternTrigger",
 ]

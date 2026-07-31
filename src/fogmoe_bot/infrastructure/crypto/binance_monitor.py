@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Protocol, cast
 
@@ -13,9 +13,12 @@ from binance.um_futures import UMFutures  # type: ignore[import-untyped]
 from requests.exceptions import ConnectionError, ReadTimeout
 from urllib3.exceptions import ProtocolError
 
-from fogmoe_bot.application.crypto.market_monitor import (
-    PatternScan,
+from fogmoe_bot.application.crypto.market_monitor import PatternScan
+from fogmoe_bot.domain.crypto.market_pattern import (
+    MarketCandle,
+    PatternEvaluation,
     PatternTrigger,
+    RedRedGreenPattern,
 )
 from fogmoe_bot.infrastructure.blocking import (
     AsyncBlockingBulkhead,
@@ -58,24 +61,6 @@ type ClientFactory = Callable[[int | None], BinanceClient]
 """@brief 可注入 Binance client factory / Injectable Binance-client factory."""
 
 
-@dataclass(frozen=True, slots=True)
-class _Candle:
-    """@brief 已校验 K 线 / Validated candle.
-
-    @param opened_at 开始时间 / Open time.
-    @param open 开盘价 / Open price.
-    @param high 最高价 / High price.
-    @param low 最低价 / Low price.
-    @param close 收盘价 / Close price.
-    """
-
-    opened_at: datetime
-    open: float
-    high: float
-    low: float
-    close: float
-
-
 def _default_client_factory(timeout: int | None) -> BinanceClient:
     """@brief 创建 Binance SDK client / Create a Binance SDK client.
 
@@ -97,8 +82,7 @@ class BinanceBtcPatternSource:
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], datetime] | None = None,
         bulkhead: AsyncBlockingBulkhead,
-        body_ratio_threshold: float = 0.7,
-        green_vs_red_ratio: float = 1.0,
+        pattern: RedRedGreenPattern = RedRedGreenPattern(),
     ) -> None:
         """@brief 创建数据源 / Create the source.
 
@@ -106,21 +90,17 @@ class BinanceBtcPatternSource:
         @param sleep 同步重试等待 / Synchronous retry sleep.
         @param now 可替换 UTC 时钟 / Replaceable UTC clock.
         @param bulkhead 同步 SDK 的有界隔舱 / Bounded bulkhead for the synchronous SDK.
-        @param body_ratio_threshold 第一红柱实体比例阈值 / First-red-candle body-ratio threshold.
-        @param green_vs_red_ratio 绿柱相对前红柱涨幅阈值 / Green-to-previous-red change threshold.
-        @raise ValueError 阈值非法时抛出 / Raised for invalid thresholds.
+        @param pattern 已建立阈值不变量的行情领域规则 / Market-domain rule with established threshold invariants.
+        @raise TypeError pattern 不是 RedRedGreenPattern 时抛出 / Raised when pattern is not RedRedGreenPattern.
         """
 
-        if not 0 <= body_ratio_threshold <= 1:
-            raise ValueError("body_ratio_threshold must be between zero and one")
-        if green_vs_red_ratio <= 0:
-            raise ValueError("green_vs_red_ratio must be positive")
+        if not isinstance(pattern, RedRedGreenPattern):
+            raise TypeError("pattern must be a RedRedGreenPattern")
         self._client_factory = client_factory
         self._sleep = sleep
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._bulkhead = bulkhead
-        self._body_ratio_threshold = body_ratio_threshold
-        self._green_vs_red_ratio = green_vs_red_ratio
+        self._pattern = pattern
 
     async def scan(self) -> PatternScan:
         """@brief 在线程中扫描模式 / Scan for a pattern in a worker thread.
@@ -170,28 +150,16 @@ class BinanceBtcPatternSource:
             if raw_rows is None or len(raw_rows) < 3:
                 return PatternScan(("获取数据不足",))
             candles = tuple(self._parse_candle(row) for row in raw_rows[:3])
-            if not (
-                candles[0].close < candles[0].open
-                and candles[1].close < candles[1].open
-                and candles[2].close > candles[2].open
-            ):
-                return PatternScan()
-
-            first_ratio = self._body_ratio(candles[0])
-            green_change = self._price_change(candles[2])
-            previous_red_change = abs(self._price_change(candles[1]))
-            if (
-                first_ratio < self._body_ratio_threshold
-                or green_change < previous_red_change * self._green_vs_red_ratio
-            ):
-                return PatternScan()
-
-            trigger = PatternTrigger(
-                price=candles[2].close,
-                occurred_at=candles[2].opened_at + timedelta(minutes=5),
+            trigger = self._pattern.detect(
+                first=candles[0],
+                second=candles[1],
+                third=candles[2],
             )
+            if trigger is None:
+                return PatternScan()
+
             message = self._format_trigger_message(
-                trigger.price,
+                trigger,
                 self._now() + timedelta(minutes=10),
             )
             return PatternScan((message,), trigger)
@@ -211,18 +179,12 @@ class BinanceBtcPatternSource:
         try:
             response = self._client_factory(None).mark_price("BTCUSDT")
             current_price = self._number(response.get("markPrice"))
-            price_change = (current_price - trigger.price) / trigger.price * 100
-            return self._format_result_message(
-                trigger,
-                current_price,
-                price_change,
-                current_price > trigger.price,
-            )
+            return self._format_result_message(trigger.evaluate(current_price))
         except Exception as error:
             return f"检查结果时发生错误: {error}"
 
     @classmethod
-    def _parse_candle(cls, row: Sequence[object]) -> _Candle:
+    def _parse_candle(cls, row: Sequence[object]) -> MarketCandle:
         """@brief 严格解析 SDK K 线行 / Strictly parse one SDK candle row.
 
         @param row SDK K 线行 / SDK candle row.
@@ -236,8 +198,9 @@ class BinanceBtcPatternSource:
             cls._number(row[0]) / 1000,
             tz=timezone.utc,
         )
-        return _Candle(
+        return MarketCandle(
             opened_at=opened_at,
+            closed_at=opened_at + timedelta(minutes=5),
             open=cls._number(row[1]),
             high=cls._number(row[2]),
             low=cls._number(row[3]),
@@ -257,43 +220,26 @@ class BinanceBtcPatternSource:
             raise ValueError(
                 f"Expected numeric Binance field, got {type(value).__name__}"
             )
-        return float(value)
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("Expected finite Binance numeric field")
+        return number
 
     @staticmethod
-    def _body_ratio(candle: _Candle) -> float:
-        """@brief 计算 K 线实体比例 / Calculate candle body ratio.
-
-        @param candle K 线 / Candle.
-        @return 实体占总长度比例 / Body-to-total-length ratio.
-        """
-
-        total = candle.high - candle.low
-        return 0.0 if total == 0 else abs(candle.close - candle.open) / total
-
-    @staticmethod
-    def _price_change(candle: _Candle) -> float:
-        """@brief 计算 K 线价格变化百分比 / Calculate candle percentage change.
-
-        @param candle K 线 / Candle.
-        @return 百分比变化 / Percentage change.
-        """
-
-        if candle.open == 0:
-            raise ValueError("Candle open price cannot be zero")
-        return (candle.close - candle.open) / candle.open * 100
-
-    @staticmethod
-    def _format_trigger_message(price: float, next_available: datetime) -> str:
+    def _format_trigger_message(
+        trigger: PatternTrigger,
+        next_available: datetime,
+    ) -> str:
         """@brief 格式化触发消息 / Format a trigger message.
 
-        @param price 触发价格 / Trigger price.
+        @param trigger 领域形态触发 / Domain pattern trigger.
         @param next_available 复查时间 / Evaluation time.
         @return 用户可见消息 / User-visible message.
         """
 
         return (
             "\n=== 检测到BTCUSDT事件合约模式目标 ===\n"
-            f"当前价格: ${price:,.2f}\n"
+            f"当前价格: ${trigger.price:,.2f}\n"
             "时间单位: 10分钟\n"
             "执行操作: 上涨\n"
             "数量: 5.00 USDT\n"
@@ -302,30 +248,24 @@ class BinanceBtcPatternSource:
 
     @staticmethod
     def _format_result_message(
-        trigger: PatternTrigger,
-        current_price: float,
-        price_change: float,
-        succeeded: bool,
+        evaluation: PatternEvaluation,
     ) -> str:
         """@brief 格式化复查结果 / Format an evaluation result.
 
-        @param trigger 原始触发 / Original trigger.
-        @param current_price 当前价格 / Current price.
-        @param price_change 价格变化百分比 / Percentage price change.
-        @param succeeded 是否上涨 / Whether price increased.
+        @param evaluation 领域复查结果 / Domain evaluation result.
         @return 用户可见消息 / User-visible message.
         """
 
         result = (
             "\n=== BTCUSDT事件合约模式结果检查 ===\n"
-            f"触发时间: ${trigger.occurred_at.timestamp()}\n"
-            f"触发时价格: ${trigger.price:,.2f}\n"
-            f"当前价格: ${current_price:,.2f}\n"
-            f"价格变化: {price_change:.2f}%\n"
+            f"触发时间: ${evaluation.trigger.occurred_at.timestamp()}\n"
+            f"触发时价格: ${evaluation.trigger.price:,.2f}\n"
+            f"当前价格: ${evaluation.current_price:,.2f}\n"
+            f"价格变化: {evaluation.percentage_change:.2f}%\n"
         )
         result += (
             "结果: 胜利 ✅\n数量变化: +9.00 USDT\n"
-            if succeeded
+            if evaluation.succeeded
             else "结果: 失败 ❌\n数量变化: -5.00 USDT\n"
         )
         return result + "=" * 35
