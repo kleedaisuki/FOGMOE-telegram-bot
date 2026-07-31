@@ -814,7 +814,8 @@ Telegram `sendMessage` 没有通用 idempotency key。若请求在服务端成�
 | `application/telegram/generated_*_sender.py`、`sticker_sender.py` | artifact store + `infrastructure/telegram/outbox_delivery.py` | image/audio/sticker 通过 typed transactional outbox 投递，不再以全局文件名交接 |
 | `application/telegram/command_cooldown.py` | `application/runtime` admission/rate-limit policy | 删除全局 dict/RLock |
 | `application/conversation_lock_manager.py` | 删除，由 `application/runtime/KeyedMailboxRuntime` 取代 | 不保留旧 context manager API |
-| `application/chat/group_chat_history.py` | 已替换为 `application/chat/group_messages.py` + canonical projection port | 删除 sync wrapper、旧 repository 与双写 |
+| `application/chat/group_chat_history.py` | 已替换为 `domain/chat/group_messages.py` + `application/chat/ports.py` | 消息身份、Topic、修订顺序、内容安全与窗口边界归领域；应用层只声明读写端口 |
+| `application/conversation/telegram_identity.py` | 已迁至 `domain/conversation/telegram_identity.py` | 私聊按用户、群聊按 `group + topic` 聚合是领域身份规则，不属于应用编排 |
 | `application/accounts/*` | `application/accounts/operations.py` + `infrastructure/database/account_operations.py` | service facade 与 sync/async 重复名已删除；handler 只依赖窄 account capability |
 | `application/assistant/agent_loop.py` | 保留在 `application/assistant`，改消费 typed tool/effect ports | 不属于 domain runtime |
 | 旧 Agent 工具目录 | 已删除；`application/assistant/tools/catalog.py` 只保留纯 typed catalog；I/O 均在 infrastructure adapter | domain→infra 20 条边归零 |

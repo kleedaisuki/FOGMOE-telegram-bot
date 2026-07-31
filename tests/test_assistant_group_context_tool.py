@@ -11,7 +11,6 @@ from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectRequest,
     ToolExecutionContext,
 )
-from fogmoe_bot.application.chat.group_messages import GroupMessage, GroupMessageKind
 from fogmoe_bot.application.memory.ports import WorkingMemoryQuery
 from fogmoe_bot.application.scheduling.service import SchedulingService
 from fogmoe_bot.application.timekeeping.service import TimeService
@@ -21,6 +20,13 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnId,
 )
 from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
+from fogmoe_bot.domain.chat.group_messages import (
+    GroupContextQuery,
+    GroupConversationScope,
+    GroupMessage,
+    GroupMessageIdentity,
+    GroupMessageKind,
+)
 from fogmoe_bot.domain.memory.models import WorkingMemory
 from fogmoe_bot.domain.temporal import UTC_TIME_ZONE
 from fogmoe_bot.infrastructure.assistant.tool_operations.dispatcher import (
@@ -50,21 +56,20 @@ class _Groups:
 
         raise AssertionError(observation)
 
-    async def fetch_before(
-        self,
-        group_id: int,
-        *,
-        message_thread_id: int | None,
-        before_message_id: int | None,
-        limit: int,
-    ) -> tuple[GroupMessage, ...]:
+    async def fetch_before(self, query: GroupContextQuery) -> tuple[GroupMessage, ...]:
         """@brief 返回一条规范消息 / Return one canonical message."""
 
-        self.calls.append((group_id, message_thread_id, before_message_id, limit))
+        self.calls.append(
+            (
+                query.scope.group_id,
+                query.scope.message_thread_id,
+                query.before_message_id,
+                query.limit,
+            )
+        )
         return self.messages or (
             GroupMessage(
-                group_id,
-                8,
+                GroupMessageIdentity(query.scope, 8),
                 42,
                 "Klee",
                 GroupMessageKind.TEXT,
@@ -201,28 +206,24 @@ def test_group_context_tool_keeps_a_recent_suffix_inside_its_hard_budget() -> No
 
         messages = tuple(
             GroupMessage(
-                -1001,
-                message_id,
+                GroupMessageIdentity(GroupConversationScope(-1001, 23), message_id),
                 41,
                 "Alice",
                 GroupMessageKind.TEXT,
                 "x" * 20_000,
                 NOW,
                 False,
-                message_thread_id=23,
             )
             for message_id in range(4, 8)
         ) + (
             GroupMessage(
-                -1001,
-                8,
+                GroupMessageIdentity(GroupConversationScope(-1001, 23), 8),
                 42,
                 "Klee",
                 GroupMessageKind.TEXT,
                 "newest",
                 NOW,
                 False,
-                message_thread_id=23,
             ),
         )
         groups = _Groups(messages)

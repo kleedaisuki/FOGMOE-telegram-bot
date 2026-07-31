@@ -16,7 +16,7 @@ from fogmoe_bot.application.assistant.current_turn_upload import (
     workspace_attachment_file_path,
 )
 from fogmoe_bot.application.conversation.inbox_worker import PermanentIngressError
-from fogmoe_bot.application.conversation.telegram_identity import (
+from fogmoe_bot.domain.conversation.telegram_identity import (
     GROUP_CHAT_TYPES,
     TelegramConversationAddress,
 )

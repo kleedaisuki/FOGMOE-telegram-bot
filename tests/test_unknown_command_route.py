@@ -10,7 +10,7 @@ import pytest
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
-from fogmoe_bot.application.conversation.telegram_identity import (
+from fogmoe_bot.domain.conversation.telegram_identity import (
     TelegramConversationAddress,
 )
 from fogmoe_bot.domain.conversation.identity import UpdateId

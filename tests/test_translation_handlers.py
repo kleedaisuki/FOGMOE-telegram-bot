@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
-from fogmoe_bot.application.conversation.telegram_identity import (
+from fogmoe_bot.domain.conversation.telegram_identity import (
     TelegramConversationAddress,
 )
 from fogmoe_bot.application.conversation.translation_ingress import (

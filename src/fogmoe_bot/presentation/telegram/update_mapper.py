@@ -16,7 +16,7 @@ from typing import cast
 
 from telegram import Update
 
-from fogmoe_bot.application.conversation.telegram_identity import (
+from fogmoe_bot.domain.conversation.telegram_identity import (
     TelegramConversationAddress,
 )
 from fogmoe_bot.domain.conversation.identity import (

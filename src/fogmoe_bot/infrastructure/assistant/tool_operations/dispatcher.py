@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from fogmoe_bot.application.assistant.temporal_memory import TemporalMemoryReader
 from fogmoe_bot.application.assistant.tool_runtime import ToolEffectRequest
+from fogmoe_bot.application.chat.ports import GroupContextReader
 from fogmoe_bot.application.memory.ports import WorkingMemoryReader
 from fogmoe_bot.application.scheduling.service import SchedulingService
 from fogmoe_bot.application.timekeeping.service import TimeService
@@ -28,7 +29,7 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
 
 from .diary import execute_diary
 from .external import ExternalReadTools, GeneratedMediaTools, StickerCatalogReader
-from .group import GroupContextReader, fetch_group_context
+from .group import fetch_group_context
 from .memory import search_memory
 from .outbound import finalize_downstream_effect
 from .parsing import optional_text, required_connection, required_text

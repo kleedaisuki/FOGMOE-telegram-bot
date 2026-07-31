@@ -8,9 +8,11 @@ from typing import cast
 
 from sqlalchemy.engine.row import RowMapping
 
-from fogmoe_bot.application.chat.group_messages import (
-    MAX_GROUP_CONTEXT_MESSAGES,
+from fogmoe_bot.domain.chat.group_messages import (
+    GroupContextQuery,
+    GroupConversationScope,
     GroupMessage,
+    GroupMessageIdentity,
     GroupMessageKind,
     GroupMessageObservation,
 )
@@ -60,52 +62,27 @@ class PostgresGroupMessageProjection:
             ),
         )
 
-    async def fetch_before(
-        self,
-        group_id: int,
-        *,
-        message_thread_id: int | None,
-        before_message_id: int | None,
-        limit: int,
-    ) -> tuple[GroupMessage, ...]:
+    async def fetch_before(self, query: GroupContextQuery) -> tuple[GroupMessage, ...]:
         """@brief 读取消息之前的规范上下文并按时间正序返回 / Read canonical context before a message and return chronological order.
 
-        @param group_id 群 chat ID / Group chat identifier.
-        @param message_thread_id 可选 Topic ID / Optional topic identifier.
-        @param before_message_id 可选排他上界 / Optional exclusive message-ID bound.
-        @param limit 最大消息数 / Maximum messages.
+        @param query 已验证 Topic 与窗口边界 / Validated topic and window boundary.
         @return 最旧到最新的消息 / Messages ordered oldest to newest.
         """
 
-        if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id == 0:
-            raise ValueError("group_id must be a non-zero integer")
-        if before_message_id is not None and (
-            isinstance(before_message_id, bool)
-            or not isinstance(before_message_id, int)
-            or before_message_id <= 0
-        ):
-            raise ValueError("before_message_id must be positive when present")
-        if message_thread_id is not None and (
-            isinstance(message_thread_id, bool)
-            or not isinstance(message_thread_id, int)
-            or message_thread_id <= 0
-        ):
-            raise ValueError("message_thread_id must be positive when present")
-        if (
-            isinstance(limit, bool)
-            or not isinstance(limit, int)
-            or not 1 <= limit <= MAX_GROUP_CONTEXT_MESSAGES
-        ):
-            raise ValueError(
-                f"limit must be between 1 and {MAX_GROUP_CONTEXT_MESSAGES}"
-            )
+        if not isinstance(query, GroupContextQuery):
+            raise TypeError("query must be a GroupContextQuery")
         boundary_sql = (
-            "" if before_message_id is None else "AND projection.message_id < %s "
+            "" if query.before_message_id is None else "AND projection.message_id < %s "
         )
         parameters: tuple[object, ...] = (
-            (group_id, message_thread_id, limit)
-            if before_message_id is None
-            else (group_id, message_thread_id, before_message_id, limit)
+            (query.scope.group_id, query.scope.message_thread_id, query.limit)
+            if query.before_message_id is None
+            else (
+                query.scope.group_id,
+                query.scope.message_thread_id,
+                query.before_message_id,
+                query.limit,
+            )
         )
         rows = await db.fetch_all(
             "SELECT projection.group_id, projection.message_id, projection.user_id, "
@@ -141,8 +118,17 @@ def _message(row: RowMapping) -> GroupMessage:
     sender_username = row["sender_username"]
     message_thread_id = row["message_thread_id"]
     return GroupMessage(
-        group_id=_integer(row, "group_id"),
-        message_id=_integer(row, "message_id"),
+        identity=GroupMessageIdentity(
+            scope=GroupConversationScope(
+                group_id=_integer(row, "group_id"),
+                message_thread_id=(
+                    None
+                    if message_thread_id is None
+                    else int(cast(int, message_thread_id))
+                ),
+            ),
+            message_id=_integer(row, "message_id"),
+        ),
         sender_user_id=None if user_id is None else int(cast(int, user_id)),
         sender_name=None if sender_name is None else str(sender_name),
         kind=GroupMessageKind(str(row["message_type"])),
@@ -150,9 +136,6 @@ def _message(row: RowMapping) -> GroupMessage:
         created_at=created_at,
         edited=_boolean(row, "is_edited"),
         sender_username=(None if sender_username is None else str(sender_username)),
-        message_thread_id=(
-            None if message_thread_id is None else int(cast(int, message_thread_id))
-        ),
     )
 
 

@@ -25,7 +25,7 @@ from pydantic import (
     model_validator,
 )
 
-from fogmoe_bot.application.chat.group_messages import (
+from fogmoe_bot.domain.chat.group_messages import (
     DEFAULT_GROUP_CONTEXT_MESSAGES,
     MAX_GROUP_CONTEXT_MESSAGES,
 )

@@ -9,21 +9,17 @@ inference activities, the acceptance UoW, and the outbox own the provider, charg
 from __future__ import annotations
 
 from fogmoe_bot.application.conversation.translation_ingress import (
+    TRANSLATION_CHAT_TYPES,
     TranslationFeedbackReason,
     TranslationIngressCoordinator,
     TranslationReplyTarget,
     TranslationTurnRequest,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
+from fogmoe_bot.domain.conversation.telegram_identity import GROUP_CHAT_TYPES
 
 from .command_cooldown_guard import ParsedTelegramCommand
 from .delivery import delivery_stream_for_chat
-
-_SUPPORTED_CHAT_TYPES = frozenset({"private", "group", "supergroup"})
-"""@brief `/tl` 支持的 Telegram chat 类型 / Telegram chat types supported by `/tl`."""
-
-_GROUP_CHAT_TYPES = frozenset({"group", "supergroup"})
-"""@brief 群聊类型 / Group-chat types."""
 
 
 class TranslationTelegramCommandHandler:
@@ -60,7 +56,7 @@ class TranslationTelegramCommandHandler:
 
         if command.command != "tl":
             raise ValueError("Translation handler received an unowned command")
-        if command.chat_type not in _SUPPORTED_CHAT_TYPES:
+        if command.chat_type not in TRANSLATION_CHAT_TYPES:
             raise ValueError(
                 f"Translation does not support chat type: {command.chat_type}"
             )
@@ -91,7 +87,7 @@ class TranslationTelegramCommandHandler:
                 user_id=command.user_id,
                 username=command.username,
                 display_name=command.display_name,
-                is_group=command.chat_type in _GROUP_CHAT_TYPES,
+                is_group=command.chat_type in GROUP_CHAT_TYPES,
                 text=text,
             )
         )

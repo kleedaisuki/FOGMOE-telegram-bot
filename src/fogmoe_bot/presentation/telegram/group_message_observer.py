@@ -5,11 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from fogmoe_bot.application.chat.group_messages import (
-    GroupMessageKind,
-    GroupMessageObservation,
-    GroupMessageProjection,
-)
+from fogmoe_bot.application.chat.ports import GroupMessageWriter
 from fogmoe_bot.application.conversation.router import Observer, RoutedOperation
 from fogmoe_bot.application.runtime import AggregateKey, WorkPriority
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
@@ -17,19 +13,14 @@ from fogmoe_bot.domain.conversation.payloads import (
     JsonObject,
     JsonValue,
 )
-
-
-_GROUP_ATTACHMENT_MARKER = "<group_attachment />"
-"""@brief 未导入群附件的非可执行模型标记 / Non-actionable model marker for an unimported group attachment.
-
-@note 群消息观察器没有当前 Assistant Turn 的 ``RuntimeProcess.add_file`` 成功 receipt，
-    因而绝不能把任何群媒体伪装成 ``<workspace_file>``。/ The group-message
-    observer has no successful current-Assistant-Turn ``RuntimeProcess.add_file`` receipt, so it
-    must never present any group media as a ``<workspace_file>``.
-"""
-
-_GROUP_SERVICE_MESSAGE_MARKER = "[service message]"
-"""@brief 非媒体 service 更新的固定可读标记 / Stable readable marker for a non-media service update."""
+from fogmoe_bot.domain.chat.group_messages import (
+    GROUP_ATTACHMENT_MARKER,
+    GROUP_SERVICE_MESSAGE_MARKER,
+    GroupConversationScope,
+    GroupMessageIdentity,
+    GroupMessageKind,
+    GroupMessageObservation,
+)
 
 
 class GroupMessageIngressObserver:
@@ -40,7 +31,7 @@ class GroupMessageIngressObserver:
     The observer's lazy operation performs database I/O only and never calls Telegram.
     """
 
-    def __init__(self, projection: GroupMessageProjection) -> None:
+    def __init__(self, projection: GroupMessageWriter) -> None:
         self._projection = projection
 
     @property
@@ -180,9 +171,13 @@ def extract_group_message_observation(
     kind, content = _content(message)
     return GroupMessageObservation(
         source_update_id=update.update_id.value,
-        group_id=group_id,
-        message_id=message_id,
-        message_thread_id=message_thread_id,
+        identity=GroupMessageIdentity(
+            scope=GroupConversationScope(
+                group_id=group_id,
+                message_thread_id=message_thread_id,
+            ),
+            message_id=message_id,
+        ),
         sender_user_id=sender_user_id,
         sender_name=sender_name,
         sender_username=sender_username,
@@ -210,23 +205,23 @@ def _content(message: JsonObject) -> tuple[GroupMessageKind, str]:
     if isinstance(text, str):
         return GroupMessageKind.TEXT, text
     if isinstance(message.get("photo"), list):
-        return GroupMessageKind.PHOTO, _GROUP_ATTACHMENT_MARKER
+        return GroupMessageKind.PHOTO, GROUP_ATTACHMENT_MARKER
     if _object(message.get("sticker")) is not None:
-        return GroupMessageKind.STICKER, _GROUP_ATTACHMENT_MARKER
+        return GroupMessageKind.STICKER, GROUP_ATTACHMENT_MARKER
     if (
         _object(message.get("voice")) is not None
         or _object(message.get("audio")) is not None
     ):
-        return GroupMessageKind.VOICE, _GROUP_ATTACHMENT_MARKER
+        return GroupMessageKind.VOICE, GROUP_ATTACHMENT_MARKER
     if (
         _object(message.get("video")) is not None
         or _object(message.get("animation")) is not None
         or _object(message.get("video_note")) is not None
     ):
-        return GroupMessageKind.VIDEO, _GROUP_ATTACHMENT_MARKER
+        return GroupMessageKind.VIDEO, GROUP_ATTACHMENT_MARKER
     if _object(message.get("document")) is not None:
-        return GroupMessageKind.DOCUMENT, _GROUP_ATTACHMENT_MARKER
-    return GroupMessageKind.OTHER, _GROUP_SERVICE_MESSAGE_MARKER
+        return GroupMessageKind.DOCUMENT, GROUP_ATTACHMENT_MARKER
+    return GroupMessageKind.OTHER, GROUP_SERVICE_MESSAGE_MARKER
 
 
 def _object(value: JsonValue | None) -> JsonObject | None:

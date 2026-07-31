@@ -9,7 +9,11 @@ from uuid import uuid4
 
 import pytest
 
-from fogmoe_bot.application.chat.group_messages import (
+from fogmoe_bot.domain.chat.group_messages import (
+    GROUP_ATTACHMENT_MARKER,
+    GroupContextQuery,
+    GroupConversationScope,
+    GroupMessageIdentity,
     GroupMessageKind,
     GroupMessageObservation,
 )
@@ -23,6 +27,26 @@ def _user_id() -> int:
     """@brief 生成测试 BIGINT 用户 ID / Generate a test BIGINT user identifier."""
 
     return 8_500_000_000_000_000_000 + int(uuid4().hex[:10], 16)
+
+
+def _identity(
+    group_id: int,
+    message_id: int,
+    *,
+    message_thread_id: int | None = None,
+) -> GroupMessageIdentity:
+    """@brief 构造群消息完整身份 / Build a complete group-message identity.
+
+    @param group_id 群 ID / Group identifier.
+    @param message_id 消息 ID / Message identifier.
+    @param message_thread_id 可选 Topic ID / Optional topic identifier.
+    @return 完整身份 / Complete identity.
+    """
+
+    return GroupMessageIdentity(
+        GroupConversationScope(group_id, message_thread_id),
+        message_id,
+    )
 
 
 def test_projection_replay_edit_order_and_context_window_are_canonical() -> None:
@@ -45,8 +69,7 @@ def test_projection_replay_edit_order_and_context_window_are_canonical() -> None
             )
             original = GroupMessageObservation(
                 100,
-                group_id,
-                1,
+                _identity(group_id, 1),
                 user_id,
                 GroupMessageKind.TEXT,
                 "original",
@@ -59,8 +82,7 @@ def test_projection_replay_edit_order_and_context_window_are_canonical() -> None
             await projection.project(
                 GroupMessageObservation(
                     101,
-                    group_id,
-                    1,
+                    _identity(group_id, 1),
                     user_id,
                     GroupMessageKind.TEXT,
                     "edited",
@@ -72,15 +94,13 @@ def test_projection_replay_edit_order_and_context_window_are_canonical() -> None
             await projection.project(
                 GroupMessageObservation(
                     103,
-                    group_id,
-                    3,
+                    _identity(group_id, 3, message_thread_id=23),
                     None,
                     GroupMessageKind.TEXT,
                     "topic message",
                     now + timedelta(seconds=3),
                     now + timedelta(seconds=3),
                     False,
-                    message_thread_id=23,
                     sender_name="Unregistered Speaker",
                     sender_username="visitor",
                 )
@@ -88,8 +108,7 @@ def test_projection_replay_edit_order_and_context_window_are_canonical() -> None
             await projection.project(
                 GroupMessageObservation(
                     99,
-                    group_id,
-                    1,
+                    _identity(group_id, 1),
                     user_id,
                     GroupMessageKind.TEXT,
                     "stale",
@@ -101,11 +120,10 @@ def test_projection_replay_edit_order_and_context_window_are_canonical() -> None
             await projection.project(
                 GroupMessageObservation(
                     102,
-                    group_id,
-                    2,
+                    _identity(group_id, 2),
                     None,
                     GroupMessageKind.PHOTO,
-                    "[photo]",
+                    GROUP_ATTACHMENT_MARKER,
                     now + timedelta(seconds=2),
                     now + timedelta(seconds=2),
                     False,
@@ -122,24 +140,26 @@ def test_projection_replay_edit_order_and_context_window_are_canonical() -> None
                 (int(row[0]), int(row[1]), str(row[2]), bool(row[3])) for row in rows
             ] == [
                 (1, 101, "edited", True),
-                (2, 102, "[photo]", False),
+                (2, 102, GROUP_ATTACHMENT_MARKER, False),
                 (3, 103, "topic message", False),
             ]
             context = await projection.fetch_before(
-                group_id,
-                message_thread_id=None,
-                before_message_id=4,
-                limit=10,
+                GroupContextQuery(
+                    GroupConversationScope(group_id),
+                    before_message_id=4,
+                    limit=10,
+                )
             )
             assert [message.message_id for message in context] == [1, 2]
             assert context[0].content == "edited"
             assert context[0].sender_name is not None
             assert context[1].sender_user_id is None
             topic_context = await projection.fetch_before(
-                group_id,
-                message_thread_id=23,
-                before_message_id=4,
-                limit=10,
+                GroupContextQuery(
+                    GroupConversationScope(group_id, 23),
+                    before_message_id=4,
+                    limit=10,
+                )
             )
             assert [message.message_id for message in topic_context] == [3]
             assert topic_context[0].sender_name == "Unregistered Speaker"

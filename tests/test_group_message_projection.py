@@ -8,7 +8,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fogmoe_bot.application.chat.group_messages import (
+from fogmoe_bot.domain.chat.group_messages import (
+    GroupContextQuery,
+    GroupConversationScope,
     GroupMessageKind,
     GroupMessageObservation,
 )
@@ -74,20 +76,13 @@ class _Projection:
 
         key = (observation.group_id, observation.message_id)
         current = self.rows.get(key)
-        if current is None or observation.source_update_id > current.source_update_id:
+        if current is None or observation.supersedes(current):
             self.rows[key] = observation
 
-    async def fetch_before(
-        self,
-        group_id: int,
-        *,
-        message_thread_id: int | None,
-        before_message_id: int | None,
-        limit: int,
-    ) -> tuple[()]:
+    async def fetch_before(self, query: GroupContextQuery) -> tuple[()]:
         """@brief 本测试不读取 / This test performs no reads."""
 
-        del group_id, message_thread_id, before_message_id, limit
+        del query
         return ()
 
 
@@ -241,10 +236,11 @@ def test_postgres_reader_filters_canonical_rows_and_decodes_legacy_base64(
 
         monkeypatch.setattr(postgres_module.db, "fetch_all", fake_fetch_all)
         messages = await PostgresGroupMessageProjection().fetch_before(
-            -1001,
-            message_thread_id=None,
-            before_message_id=10,
-            limit=5,
+            GroupContextQuery(
+                scope=GroupConversationScope(-1001),
+                before_message_id=10,
+                limit=5,
+            )
         )
         assert len(messages) == 1 and messages[0].content == "🔥"
         assert "projection.is_canonical" in captured[0]

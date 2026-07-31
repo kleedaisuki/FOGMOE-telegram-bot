@@ -1,13 +1,15 @@
 """@brief Assistant 群上下文 operation / Assistant group-context operation."""
 
 import json
-from collections.abc import Sequence
-from typing import Protocol, cast
+from typing import cast
 
 from fogmoe_bot.application.assistant.tool_runtime import ToolEffectRequest
-from fogmoe_bot.application.chat.group_messages import (
+from fogmoe_bot.application.chat.ports import GroupContextReader
+from fogmoe_bot.domain.chat.group_messages import (
     DEFAULT_GROUP_CONTEXT_MESSAGES,
     MAX_GROUP_CONTEXT_MESSAGES,
+    GroupContextQuery,
+    GroupConversationScope,
     GroupMessage,
 )
 from fogmoe_bot.domain.context.token_estimator import estimate_tokens
@@ -17,22 +19,6 @@ from .parsing import bounded_int
 
 _GROUP_CONTEXT_MAX_TOKENS = 16_384
 """@brief 单次群上下文换入预算 / Token budget for one group-context page-in."""
-
-
-class GroupContextReader(Protocol):
-    """读取当前消息之前 canonical group projection 的窄端口。"""
-
-    async def fetch_before(
-        self,
-        group_id: int,
-        *,
-        message_thread_id: int | None,
-        before_message_id: int | None,
-        limit: int,
-    ) -> Sequence[GroupMessage]:
-        """@brief 读取同一 Topic 的有界群消息窗口 / Read a bounded same-topic group-message window."""
-
-        ...
 
 
 async def fetch_group_context(
@@ -58,10 +44,14 @@ async def fetch_group_context(
         default=DEFAULT_GROUP_CONTEXT_MESSAGES,
     )
     messages = await groups.fetch_before(
-        group_id,
-        message_thread_id=request.context.message_thread_id,
-        before_message_id=request.context.message_id,
-        limit=window_size,
+        GroupContextQuery(
+            scope=GroupConversationScope(
+                group_id=group_id,
+                message_thread_id=request.context.message_thread_id,
+            ),
+            before_message_id=request.context.message_id,
+            limit=window_size,
+        )
     )
     entries = [_entry(message) for message in messages]
     selected: list[JsonObject] = []

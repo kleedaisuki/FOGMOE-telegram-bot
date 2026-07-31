@@ -23,7 +23,7 @@ from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCapability,
     StandaloneOutboundCommand,
 )
-from fogmoe_bot.application.conversation.telegram_identity import (
+from fogmoe_bot.domain.conversation.telegram_identity import (
     GROUP_CHAT_TYPES,
     TelegramConversationAddress,
 )

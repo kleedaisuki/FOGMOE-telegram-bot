@@ -28,7 +28,7 @@ from fogmoe_bot.application.assistant.current_turn_upload import (
     CURRENT_TURN_UPLOAD_MAX_BYTES,
     CurrentTurnUploadReference,
 )
-from fogmoe_bot.application.conversation.telegram_identity import (
+from fogmoe_bot.domain.conversation.telegram_identity import (
     TelegramConversationAddress,
 )
 from fogmoe_bot.domain.accounts.plan import AccountPlan
