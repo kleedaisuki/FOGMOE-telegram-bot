@@ -471,9 +471,7 @@ def test_migration_environment_does_not_mutate_import_paths() -> None:
     """
 
     environment_source = (
-        Path(migration_execution.__file__).parent.parent
-        / "migrations"
-        / "env.py"
+        Path(migration_execution.__file__).parent.parent / "migrations" / "env.py"
     ).read_text(encoding="utf-8")
 
     assert "sys.path" not in environment_source
