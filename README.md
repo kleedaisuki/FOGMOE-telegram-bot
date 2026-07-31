@@ -258,6 +258,8 @@ Python 异步 API、全部视图参数和生产安全边界见 [Dashboard 文档
 
 该命令显式构建并发布 workspace OCI image、安装并启用 `wspctld.service`。日常
 `runBot.sh` 只检查已安装 broker 的 service/socket readiness，绝不执行 sudo、构建或安装。
+部署入口以及 `runBot.sh init/update` 只安装普通 wheel；editable install 仅供开发者手工使用，
+不会进入部署环境。
 完整安装输出会同时实时显示并写入 owner-only 的
 `logs/wspctl_install_<timestamp>_<pid>.log`；`./statusWspctl.sh` 会指出最近一次日志。
 需要代理时，安装器直接读取当前环境已有的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 与

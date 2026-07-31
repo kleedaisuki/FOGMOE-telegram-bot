@@ -1236,10 +1236,16 @@ def _resolve_workspace_socket_path(
     runtime = payload.get("runtime")
     if not isinstance(runtime, Mapping):
         return
-    workspace = runtime.get("workspace")
-    if not isinstance(workspace, Mapping):
+    workspace_value = runtime.get("workspace")
+    if workspace_value is None:
+        workspace: Mapping[str, object] = {}
+    elif isinstance(workspace_value, Mapping):
+        workspace = workspace_value
+    else:
         return
     raw_socket_path = workspace.get("broker_socket_path")
+    if raw_socket_path is None:
+        raw_socket_path = ".wspctl/run/bot/wspctld.sock"
     if not isinstance(raw_socket_path, str) or raw_socket_path.startswith("/"):
         return
     if "\x00" in raw_socket_path:

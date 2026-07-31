@@ -3,7 +3,6 @@
 # 获取脚本所在目录的绝对路径
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BOT_DIR="$SCRIPT_DIR"
-SRC_DIR="$BOT_DIR/src"
 LOG_DIR="$BOT_DIR/logs"
 STATE_DIR="$BOT_DIR/.runtime"
 PID_FILE="$STATE_DIR/fogmoe-bot.pid"
@@ -130,7 +129,7 @@ read_runtime_shutdown_grace() {
         echo -e "${RED}错误: 无法读取运行时 shutdown grace 配置${NC}" >&2
         return 1
     fi
-    PYTHONPATH="$SRC_DIR" "$VENV_DIR/bin/python" - "$CONFIG_FILE" <<'PY'
+    "$VENV_DIR/bin/python" - "$CONFIG_FILE" <<'PY'
 from pathlib import Path
 import sys
 
@@ -146,7 +145,7 @@ read_workspace_broker_socket() {
         echo -e "${RED}错误: 无法读取 workspace broker socket 配置${NC}" >&2
         return 1
     fi
-    PYTHONPATH="$SRC_DIR" "$VENV_DIR/bin/python" - "$CONFIG_FILE" <<'PY'
+    "$VENV_DIR/bin/python" - "$CONFIG_FILE" <<'PY'
 from pathlib import Path
 import sys
 
@@ -251,11 +250,13 @@ install_dependencies() {
 
     # 安装项目和依赖
     if [ -f "$PYPROJECT_FILE" ]; then
-        echo "按 pyproject.toml 安装项目依赖..."
-        pip install -e "$BOT_DIR"
-
-        if [ $? -eq 0 ]; then
-            echo -e "${GREEN}✓ 依赖安装成功${NC}"
+        echo "按 pyproject.toml 构建并安装非 editable wheel..."
+        if python -m pip install "$BOT_DIR"; then
+            if ! deployment_install_is_regular; then
+                echo -e "${RED}✗ 部署拒绝 editable 安装${NC}"
+                exit 1
+            fi
+            echo -e "${GREEN}✓ 依赖与普通 wheel 安装成功${NC}"
         else
             echo -e "${RED}✗ 依赖安装失败${NC}"
             exit 1
@@ -264,6 +265,22 @@ install_dependencies() {
         echo -e "${RED}错误: pyproject.toml 文件不存在${NC}"
         exit 1
     fi
+}
+
+# @brief 验证 Bot 部署不是 editable install / Verify that the Bot deployment is not an editable install.
+# @return 普通安装返回零，editable 或元数据损坏返回非零 / Zero for a regular install; nonzero for editable or invalid metadata.
+deployment_install_is_regular() {
+    "$VENV_DIR/bin/python" - <<'PY'
+import importlib.metadata
+import json
+
+distribution = importlib.metadata.distribution("fogmoe-telegram-bot")
+direct_url_text = distribution.read_text("direct_url.json")
+if direct_url_text is None:
+    raise SystemExit(0)
+direct_url = json.loads(direct_url_text)
+raise SystemExit(direct_url.get("dir_info", {}).get("editable") is True)
+PY
 }
 
 # 初始化环境（首次设置）
@@ -330,18 +347,6 @@ start_bot() {
         exit 1
     fi
 
-    # 确保 src 目录存在
-    if [ ! -d "$SRC_DIR" ]; then
-        echo -e "${RED}错误: src 目录不存在: $SRC_DIR${NC}"
-        exit 1
-    fi
-
-    # 确保 bot 包存在
-    if [ ! -f "$SRC_DIR/fogmoe_bot/main.py" ]; then
-        echo -e "${RED}错误: bot 入口不存在: $SRC_DIR/fogmoe_bot/main.py${NC}"
-        exit 1
-    fi
-
     # 检查虚拟环境
     if [ ! -d "$VENV_DIR" ]; then
         echo -e "${YELLOW}虚拟环境不存在${NC}"
@@ -355,6 +360,11 @@ start_bot() {
             echo "请运行: $0 init"
             exit 1
         fi
+    fi
+    if [ ! -x "$VENV_DIR/bin/fogmoe-bot" ]; then
+        echo -e "${RED}错误: 已安装的 bot 入口不存在: $VENV_DIR/bin/fogmoe-bot${NC}"
+        echo "请运行: $0 init"
+        exit 1
     fi
 
     # 激活虚拟环境
@@ -377,15 +387,14 @@ start_bot() {
     mkdir -p "$LOG_DIR"
     start_timestamp="$(date '+%Y%m%dT%H%M%S')"
 
-    # 切换到项目根目录，使用 src layout 启动入口
+    # 切换到项目根目录；运行时只加载 virtual environment 中已安装的普通 wheel。
     cd "$BOT_DIR"
 
     # 启动bot并记录日志
     echo "正在启动bot..."
     STDOUT_LOG_FILE="$LOG_DIR/stdout_${start_timestamp}.log"
     echo "标准输出日志: $STDOUT_LOG_FILE"
-    PYTHONPATH="$SRC_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-        nohup "$VENV_DIR/bin/fogmoe-bot" \
+    nohup "$VENV_DIR/bin/fogmoe-bot" --config "$CONFIG_FILE" \
         > "$STDOUT_LOG_FILE" 2>&1 9>&- &
 
     # 获取新进程PID

@@ -83,7 +83,10 @@ def main() -> None:
     arguments = _parse_arguments()
     config_path = arguments.config.resolve()
     settings = read_bot_settings(config_path)
-    resources = load_resources(log_directory=_log_directory(config_path, settings))
+    resources = load_resources(
+        log_directory=_log_directory(config_path, settings),
+        project_root=config_path.parent,
+    )
     db.configure_database(settings.database)
     observability = build_observability(
         settings=settings.observability,

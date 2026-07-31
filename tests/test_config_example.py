@@ -41,6 +41,29 @@ def test_example_config_is_accepted_by_each_configuration_boundary() -> None:
     assert bot.database.application.username == dbctl.application.username
 
 
+def test_missing_workspace_section_resolves_socket_beside_config(
+    tmp_path: Path,
+) -> None:
+    """@brief 旧配置缺少 workspace 时仍以配置目录解析 socket / A legacy config without workspace still resolves the socket beside the config.
+
+    @param tmp_path pytest 隔离配置目录 / Isolated pytest configuration directory.
+    @return None / None.
+    """
+
+    payload: dict[str, object] = {"runtime": {}}
+    config_path = tmp_path / "config.json"
+
+    bot_config._resolve_workspace_socket_path(payload, config_path)
+
+    runtime = payload["runtime"]
+    assert isinstance(runtime, dict)
+    workspace = runtime["workspace"]
+    assert isinstance(workspace, dict)
+    assert workspace["broker_socket_path"] == str(
+        tmp_path / ".wspctl" / "run" / "bot" / "wspctld.sock"
+    )
+
+
 def test_example_config_explicitly_declares_every_non_ai_default() -> None:
     """@brief 模板逐字段固定非 AI 默认值，并显式展示 AI 连接 / Template pins every non-AI default and explicitly demonstrates AI connections.
 

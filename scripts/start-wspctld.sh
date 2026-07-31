@@ -74,8 +74,6 @@ WORKSPACE_HARD_BYTES="${WSPCTL_RUNTIME_WORKSPACE_HARD_BYTES:-4294967296}"
 LOCK_FILE="$REPOSITORY_ROOT/.runtime/wspctld-control.lock"
 # @brief 最近一次已应用 broker 配置的 fingerprint / Fingerprint of the most recently applied broker configuration.
 FINGERPRINT_FILE="$REPOSITORY_ROOT/.runtime/wspctld-fingerprint"
-# @brief 最近一次成功同步 editable native client 的输入 fingerprint / Input fingerprint of the most recently synchronized editable native client.
-EDITABLE_FINGERPRINT_FILE="$REPOSITORY_ROOT/.runtime/wspctl-editable-fingerprint"
 # @brief 由本 checkout 安装的 host artifacts 清单 / Manifest of host artifacts installed by this checkout.
 INSTALL_MANIFEST_FILE="$WORK_ROOT/install-manifest"
 # @brief Bot 专属 daemon socket 路径 / Bot-exclusive daemon socket path.
@@ -176,27 +174,31 @@ require_commands() {
     done
 }
 
-# @brief 计算会影响 editable native module 的输入 fingerprint / Compute the inputs fingerprint for the editable native module.
-# @return SHA-256 fingerprint / SHA-256 fingerprint.
-editable_input_fingerprint() {
-    {
-        printf 'editable-native-v1\n'
-        sha256sum "$REPOSITORY_ROOT/pyproject.toml" "$REPOSITORY_ROOT/CMakeLists.txt" "$REPOSITORY_ROOT/src/wspctl/CMakeLists.txt"
-        find "$REPOSITORY_ROOT/src/wspctl" -type f -print0 | sort -z | xargs -0 sha256sum
-    } | sha256sum | awk '{print $1}'
+# @brief 验证部署环境安装的是普通 wheel 且 native client 可导入 / Verify that deployment uses a regular wheel and the native client is importable.
+# @return 0 表示普通安装且 native client 可用 / Zero when regularly installed and the native client is usable.
+deployed_client_is_regular_install() {
+    "$PYTHON_EXECUTABLE" - <<'PY'
+import importlib.metadata
+import json
+
+import wspctl._native
+
+distribution = importlib.metadata.distribution("fogmoe-telegram-bot")
+direct_url_text = distribution.read_text("direct_url.json")
+if direct_url_text is None:
+    raise SystemExit(0)
+direct_url = json.loads(direct_url_text)
+if direct_url.get("dir_info", {}).get("editable") is True:
+    raise SystemExit("deployment rejected an editable fogmoe-telegram-bot install")
+PY
 }
 
-# @brief 判定当前 virtual environment 能否导入 native client / Determine whether the current virtual environment can import the native client.
-# @return 0 表示可导入 / Zero when importable.
-native_client_is_importable() {
-    "$PYTHON_EXECUTABLE" -c 'import wspctl._native' >/dev/null 2>&1
-}
-
-# @brief 建立或修复项目 virtual environment，并按输入增量同步 editable mapping / Create or repair the project virtual environment and synchronize the editable mapping only when inputs change.
-ensure_editable_client() {
-    local desired_fingerprint
-    local previous_fingerprint=""
-
+# @brief 建立项目 virtual environment 并从普通 wheel 部署 native client / Create the project virtual environment and deploy the native client from a regular wheel.
+# @return 成功时返回零 / Zero on success.
+# @note 显式 host 部署始终重建当前 checkout，禁止 editable mapping 与陈旧 C++ 扩展混装。/
+#     Explicit host deployment always rebuilds the current checkout and forbids mixing editable
+#     mappings with stale C++ extensions.
+ensure_deployed_client() {
     if [[ ! -x "$PYTHON_EXECUTABLE" ]]; then
         command -v python >/dev/null 2>&1 || die "找不到 python，无法创建 $VENV_DIR"
         note "创建项目 virtual environment: $VENV_DIR"
@@ -204,21 +206,10 @@ ensure_editable_client() {
     fi
     "$PYTHON_EXECUTABLE" -c 'import sys; raise SystemExit(sys.version_info < (3, 14))' \
         || die "项目 virtual environment 必须使用 Python 3.14 或更新版本"
-    desired_fingerprint="$(editable_input_fingerprint)"
-    if [[ -r "$EDITABLE_FINGERPRINT_FILE" ]]; then
-        previous_fingerprint="$(<"$EDITABLE_FINGERPRINT_FILE")"
-    fi
-    if native_client_is_importable && [[ "$desired_fingerprint" == "$previous_fingerprint" ]]; then
-        note "editable Python client 已就绪；跳过 pip"
-        return 0
-    fi
-    note "同步发生变化或缺失的 editable Python client（含 wspctl._native）"
-    "$PYTHON_EXECUTABLE" -m pip install --editable "$REPOSITORY_ROOT"
-    native_client_is_importable \
-        || die "editable 安装没有产生可导入的 wspctl._native"
-    local temporary_fingerprint_file="$EDITABLE_FINGERPRINT_FILE.$$.tmp"
-    printf '%s\n' "$desired_fingerprint" > "$temporary_fingerprint_file"
-    mv -f -- "$temporary_fingerprint_file" "$EDITABLE_FINGERPRINT_FILE"
+    note "从当前 checkout 构建并安装非 editable wheel（含 wspctl._native）"
+    "$PYTHON_EXECUTABLE" -m pip install --no-deps "$REPOSITORY_ROOT"
+    deployed_client_is_regular_install \
+        || die "部署后的 Python client 不可用或仍为 editable 安装"
 }
 
 # @brief 配置、编译并安装 host broker 工件 / Configure, build, and install host-broker artifacts.
@@ -772,7 +763,7 @@ start() {
     prepare_control_plane_directories
     ensure_loopback_state_mount
     require_state_mount
-    ensure_editable_client
+    ensure_deployed_client
     ensure_host_artifacts
     select_published_image
     install_service_configuration

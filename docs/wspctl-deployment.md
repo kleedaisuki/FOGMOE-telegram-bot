@@ -41,7 +41,9 @@ systemd environment 和 store path 都不接受 tag、短 hash、任意 generati
 ```
 
 该安装器依次执行 OCI build、root-owned publication、host artifact/systemd unit 安装，并
-enable/start `wspctld.service`。这是显式、可能要求 sudo 的部署操作。
+enable/start `wspctld.service`。这是显式、可能要求 sudo 的部署操作。部署过程始终从当前
+checkout 构建普通 wheel，并拒绝 `direct_url.json` 标记为 editable 的 Python 安装；
+Python 源码与 `wspctl._native` 因而不会处于一份实时映射、一份陈旧二进制的混合状态。
 
 `./runBot.sh start` 属于纯运行阶段：它只读取 Bot 配置中的 socket 路径，检查已经安装的
 `wspctld.service` 与 Unix socket，然后启动无特权 Bot。它绝不构建 image、安装 host binary、

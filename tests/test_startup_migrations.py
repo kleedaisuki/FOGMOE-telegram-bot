@@ -27,13 +27,18 @@ def test_main_starts_bot_without_database_migrations(
     settings = BotSettings()
     observability = make_observability()
     resources = SimpleNamespace(log_directory=tmp_path / "logs")
+    resource_arguments: dict[str, object] = {}
     monkeypatch.setattr(
         bot_main,
         "_parse_arguments",
         lambda: argparse.Namespace(config=tmp_path / "config.json"),
     )
     monkeypatch.setattr(bot_main, "read_bot_settings", lambda _: settings)
-    monkeypatch.setattr(bot_main, "load_resources", lambda **_: resources)
+    monkeypatch.setattr(
+        bot_main,
+        "load_resources",
+        lambda **arguments: resource_arguments.update(arguments) or resources,
+    )
     monkeypatch.setattr(
         bot_main.db,
         "configure_database",
@@ -63,3 +68,4 @@ def test_main_starts_bot_without_database_migrations(
     bot_main.main()
 
     assert calls == ["database", "logging", "network", "bot"]
+    assert resource_arguments["project_root"] == tmp_path

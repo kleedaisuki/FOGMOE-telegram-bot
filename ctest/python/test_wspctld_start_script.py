@@ -40,9 +40,11 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
     if checked.returncode != 0:
         raise AssertionError(f"invalid bash:\n{checked.stderr}")
     script = START_SCRIPT.read_text(encoding="utf-8")
-    assert "pip install --editable" in script
-    assert "editable_input_fingerprint" in script
-    assert "editable Python client 已就绪；跳过 pip" in script
+    assert 'pip install --no-deps "$REPOSITORY_ROOT"' in script
+    assert "pip install --editable" not in script
+    assert "editable_input_fingerprint" not in script
+    assert "deployed_client_is_regular_install" in script
+    assert 'get("editable") is True' in script
     assert "import wspctl._native" in script
     assert "-DWSPCTL_INSTALL_HOST_TOOLS=ON" in script
     assert "-DWSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT=ON" in script
