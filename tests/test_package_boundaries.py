@@ -54,9 +54,7 @@ def test_inbox_lifecycle_is_owned_by_a_domain_aggregate() -> None:
     inbox_path = SRC_ROOT / "domain" / "conversation" / "inbox.py"
     worker_path = SRC_ROOT / "application" / "conversation" / "inbox_worker.py"
     tree = ast.parse(inbox_path.read_text(encoding="utf-8"), filename=str(inbox_path))
-    classes = {
-        node.name: node for node in tree.body if isinstance(node, ast.ClassDef)
-    }
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
     inbound = classes["InboundUpdate"]
     inbound_fields = {
         node.target.id
@@ -64,26 +62,39 @@ def test_inbox_lifecycle_is_owned_by_a_domain_aggregate() -> None:
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
     }
     assert inbound_fields == {
-        "_update_id",
-        "_conversation_id",
         "_payload",
-        "_received_at",
-        "_trace_context",
+        "conversation_id",
+        "received_at",
+        "trace_context",
+        "update_id",
     }
     inbound_methods = {
-        node.name
-        for node in inbound.body
-        if isinstance(node, ast.FunctionDef)
+        node.name for node in inbound.body if isinstance(node, ast.FunctionDef)
     }
     assert {
         "pending",
         "with_trace_context",
+        "payload",
+    } <= inbound_methods
+    assert {
         "update_id",
         "conversation_id",
-        "payload",
         "received_at",
         "trace_context",
-    } <= inbound_methods
+    }.isdisjoint(inbound_methods)
+
+    aggregate_fields = {
+        node.target.id
+        for node in classes["InboxItem"].body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    }
+    assert aggregate_fields == {
+        "attempt_count",
+        "state",
+        "update",
+        "updated_at",
+        "version",
+    }
 
     aggregate_methods = {
         node.name

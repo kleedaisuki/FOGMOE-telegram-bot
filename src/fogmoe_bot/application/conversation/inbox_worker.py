@@ -315,7 +315,7 @@ class InboxWorker:
         ``CancelledError`` is not caught; cancellation leaves a processing claim for lease recovery.
         """
 
-        update = claim.update
+        update = claim.item.update
         with self._telemetry.span(
             "inbox.process",
             kind=SpanKind.CONSUMER,
@@ -446,7 +446,7 @@ class InboxWorker:
                 except Exception:
                     logger.exception(
                         "Inbox claim could not be finalized: update_id=%s",
-                        work.claim.update.update_id.value,
+                        work.claim.item.update.update_id.value,
                     )
                 finally:
                     capacity.put_nowait(None)
@@ -478,7 +478,7 @@ class InboxWorker:
             await self._repository.schedule_inbound_retry(retry)
             logger.warning(
                 "Inbox update retry scheduled: update_id=%s attempt=%s retry_at=%s",
-                claim.update.update_id.value,
+                claim.item.update.update_id.value,
                 claim.item.attempt_count,
                 decision.at.isoformat(),
                 exc_info=error,
@@ -500,7 +500,7 @@ class InboxWorker:
         )
         logger.error(
             "Inbox update moved to final-failure quarantine: update_id=%s attempt=%s",
-            claim.update.update_id.value,
+            claim.item.update.update_id.value,
             claim.item.attempt_count,
             extra={"event_name": EventName.INBOX_PROCESS_FAILED},
             exc_info=error,

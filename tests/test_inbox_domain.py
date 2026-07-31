@@ -56,6 +56,17 @@ def _claim() -> InboxClaim:
     )
 
 
+def test_inbox_fact_aggregate_and_capability_require_domain_factories() -> None:
+    """@brief 禁止创建缺字段的 inbox 空壳对象 / Prevent fieldless inbox shells from bypassing domain factories."""
+
+    with pytest.raises(TypeError, match="InboundUpdate.pending"):
+        InboundUpdate()
+    with pytest.raises(TypeError, match="InboxItem.receive"):
+        InboxItem()
+    with pytest.raises(TypeError, match="InboxClaim.from_processing"):
+        InboxClaim()
+
+
 def test_inbound_update_is_a_fact_not_a_job_snapshot() -> None:
     """@brief 路由事实不暴露持久化 job 状态 / The routed fact exposes no persistence-job state."""
 
@@ -231,7 +242,9 @@ def test_transition_time_failure_and_lease_invariants_are_owned_by_domain() -> N
         InboxFailure(42)  # type: ignore[arg-type]
 
 
-def test_restore_rejects_nullable_field_combinations_that_schema_cannot_represent() -> None:
+def test_restore_rejects_nullable_field_combinations_that_schema_cannot_represent() -> (
+    None
+):
     """@brief restore 拒绝 enum 加可空字段形成的非法组合 / Restore rejects illegal enum-plus-nullable-field combinations."""
 
     with pytest.raises(ValueError, match="Processing inbox state"):
@@ -275,7 +288,7 @@ def test_lease_recovery_row_matches_retry_state_and_preserves_attempt_count() ->
     claim = _claim()
     recovered_at = claim.lease_expires_at
     recovered = InboxItem.restore(
-        update=claim.update,
+        update=claim.item.update,
         status=InboxStatus.RETRY_WAIT,
         version=claim.expected_version + 1,
         attempt_count=claim.item.attempt_count,

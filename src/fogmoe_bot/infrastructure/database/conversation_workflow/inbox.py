@@ -200,7 +200,7 @@ class PostgresInboxRepository:
                     "Inbox claim SQL diverged from the domain claim transition"
                 )
             claims.append(claim)
-        return tuple(sorted(claims, key=lambda claim: int(claim.update.update_id)))
+        return tuple(sorted(claims, key=lambda claim: int(claim.item.update.update_id)))
 
     async def complete_inbound(
         self,
@@ -227,12 +227,16 @@ class PostgresInboxRepository:
                 target.version,
                 target.processed_at,
                 target.updated_at,
-                int(claim.update.update_id),
+                int(claim.item.update.update_id),
                 claim.expected_version,
                 str(claim.token),
             ),
         )
-        _require_claim_update(rowcount, "inbound", str(int(claim.update.update_id)))
+        _require_claim_update(
+            rowcount,
+            "inbound",
+            str(int(claim.item.update.update_id)),
+        )
 
     async def schedule_inbound_retry(
         self,
@@ -260,12 +264,16 @@ class PostgresInboxRepository:
                 target.next_attempt_at,
                 target.updated_at,
                 target.last_error,
-                int(claim.update.update_id),
+                int(claim.item.update.update_id),
                 claim.expected_version,
                 str(claim.token),
             ),
         )
-        _require_claim_update(rowcount, "inbound", str(int(claim.update.update_id)))
+        _require_claim_update(
+            rowcount,
+            "inbound",
+            str(int(claim.item.update.update_id)),
+        )
 
     async def dead_letter_inbound(
         self,
@@ -291,12 +299,16 @@ class PostgresInboxRepository:
                 target.version,
                 target.updated_at,
                 target.last_error,
-                int(claim.update.update_id),
+                int(claim.item.update.update_id),
                 claim.expected_version,
                 str(claim.token),
             ),
         )
-        _require_claim_update(rowcount, "inbound", str(int(claim.update.update_id)))
+        _require_claim_update(
+            rowcount,
+            "inbound",
+            str(int(claim.item.update.update_id)),
+        )
 
     async def recover_expired_inbound_leases(self, *, now: datetime) -> int:
         """@brief 回收崩溃 worker 遗留的 inbox 租约 / Recover inbox leases stranded by crashed workers.

@@ -1,4 +1,4 @@
-"""Durable inbox 领域模型 / Durable-inbox domain model."""
+"""@brief Durable inbox 领域模型 / Durable-inbox domain model."""
 
 from __future__ import annotations
 
@@ -156,11 +156,23 @@ class InboundUpdate:
         to the ``InboxItem`` aggregate.
     """
 
-    _update_id: UpdateId
-    _conversation_id: ConversationId
+    update_id: UpdateId
+    conversation_id: ConversationId
     _payload: JsonObject
-    _received_at: datetime
-    _trace_context: TraceContext
+    received_at: datetime
+    trace_context: TraceContext
+
+    def __new__(cls, *args: object, **kwargs: object) -> Self:
+        """@brief 拒绝绕过 pending 工厂的空壳事实 / Reject shell facts that bypass the pending factory.
+
+        @param args 未使用位置参数 / Unused positional arguments.
+        @param kwargs 未使用关键字参数 / Unused keyword arguments.
+        @return 永不返回 / Never returns.
+        @raise TypeError 必须使用 pending / ``pending`` must be used.
+        """
+
+        del args, kwargs
+        raise TypeError("Use InboundUpdate.pending()")
 
     @classmethod
     def _create(
@@ -189,11 +201,11 @@ class InboundUpdate:
         if not isinstance(trace_context, TraceContext):
             raise TypeError("Inbound Update requires a TraceContext")
         update = object.__new__(cls)
-        object.__setattr__(update, "_update_id", update_id)
-        object.__setattr__(update, "_conversation_id", conversation_id)
+        object.__setattr__(update, "update_id", update_id)
+        object.__setattr__(update, "conversation_id", conversation_id)
         object.__setattr__(update, "_payload", deepcopy(payload))
-        object.__setattr__(update, "_received_at", ensure_utc(received_at))
-        object.__setattr__(update, "_trace_context", trace_context)
+        object.__setattr__(update, "received_at", ensure_utc(received_at))
+        object.__setattr__(update, "trace_context", trace_context)
         return update
 
     @classmethod
@@ -234,30 +246,12 @@ class InboundUpdate:
         if not isinstance(trace_context, TraceContext):
             raise TypeError("Inbound Update requires a TraceContext")
         return type(self)._create(
-            update_id=self._update_id,
-            conversation_id=self._conversation_id,
+            update_id=self.update_id,
+            conversation_id=self.conversation_id,
             payload=self._payload,
-            received_at=self._received_at,
+            received_at=self.received_at,
             trace_context=trace_context,
         )
-
-    @property
-    def update_id(self) -> UpdateId:
-        """@brief 返回 Telegram Update identity / Return the Telegram Update identity.
-
-        @return Update ID / Update ID.
-        """
-
-        return self._update_id
-
-    @property
-    def conversation_id(self) -> ConversationId:
-        """@brief 返回规范会话键 / Return the canonical conversation key.
-
-        @return 会话键 / Conversation key.
-        """
-
-        return self._conversation_id
 
     @property
     def payload(self) -> JsonObject:
@@ -270,24 +264,6 @@ class InboundUpdate:
 
         return deepcopy(self._payload)
 
-    @property
-    def received_at(self) -> datetime:
-        """@brief 返回规范 UTC 接收时刻 / Return the normalized UTC receipt time.
-
-        @return UTC 时刻 / UTC instant.
-        """
-
-        return self._received_at
-
-    @property
-    def trace_context(self) -> TraceContext:
-        """@brief 返回 trace carrier / Return the trace carrier.
-
-        @return trace context / Trace context.
-        """
-
-        return self._trace_context
-
     def is_replay_of(self, other: InboundUpdate) -> bool:
         """@brief 判断两个事实是否是同一入口语义的重放 / Check whether two facts replay the same ingress semantics.
 
@@ -298,8 +274,8 @@ class InboundUpdate:
         """
 
         return (
-            self._update_id == other._update_id
-            and self._conversation_id == other._conversation_id
+            self.update_id == other.update_id
+            and self.conversation_id == other.conversation_id
             and self._payload == other._payload
         )
 
@@ -312,22 +288,34 @@ class InvalidInboxTransition(RuntimeError):
 class InboxItem:
     """@brief 拥有 durable ingress 生命周期的聚合根 / Aggregate root owning the durable-ingress lifecycle.
 
-    @param _update 不可变入口事实 / Immutable inbound fact.
-    @param _state 穷尽生命周期状态 / Exhaustive lifecycle state.
-    @param _version 乐观并发版本 / Optimistic-concurrency version.
-    @param _attempt_count 已成功领取次数 / Number of successful claims.
-    @param _updated_at 最近转换时刻 / Most recent transition time.
+    @param update 不可变入口事实 / Immutable inbound fact.
+    @param state 穷尽生命周期状态 / Exhaustive lifecycle state.
+    @param version 乐观并发版本 / Optimistic-concurrency version.
+    @param attempt_count 已成功领取次数 / Number of successful claims.
+    @param updated_at 最近转换时刻 / Most recent transition time.
     @note ``init=False`` 防止调用方任意拼装 status 与 nullable 字段；数据库恢复必须经过
         ``restore``，新事实必须经过 ``receive``。/ ``init=False`` prevents arbitrary
         combinations of status and nullable fields; database hydration goes through ``restore``
         and new facts go through ``receive``.
     """
 
-    _update: InboundUpdate
-    _state: InboxState
-    _version: int
-    _attempt_count: int
-    _updated_at: datetime
+    update: InboundUpdate
+    state: InboxState
+    version: int
+    attempt_count: int
+    updated_at: datetime
+
+    def __new__(cls, *args: object, **kwargs: object) -> Self:
+        """@brief 拒绝绕过 receive/restore 的空壳聚合 / Reject shell aggregates that bypass receive or restore.
+
+        @param args 未使用位置参数 / Unused positional arguments.
+        @param kwargs 未使用关键字参数 / Unused keyword arguments.
+        @return 永不返回 / Never returns.
+        @raise TypeError 必须使用领域工厂 / A domain factory must be used.
+        """
+
+        del args, kwargs
+        raise TypeError("Use InboxItem.receive() or restore()")
 
     @classmethod
     def _create(
@@ -351,11 +339,7 @@ class InboxItem:
 
         if not isinstance(update, InboundUpdate):
             raise TypeError("Inbox item requires an InboundUpdate")
-        if (
-            isinstance(version, bool)
-            or not isinstance(version, int)
-            or version < 0
-        ):
+        if isinstance(version, bool) or not isinstance(version, int) or version < 0:
             raise ValueError("Inbox version must be a non-negative integer")
         if (
             isinstance(attempt_count, bool)
@@ -370,7 +354,9 @@ class InboxItem:
             raise ValueError("Inbox updated_at cannot precede received_at")
         if isinstance(state, AwaitingInboxClaim):
             if version != 0 or attempt_count != 0:
-                raise ValueError("A pending inbox item must be its unclaimed initial version")
+                raise ValueError(
+                    "A pending inbox item must be its unclaimed initial version"
+                )
             if state.claimable_at < timestamp:
                 raise ValueError("Pending inbox claim time cannot precede updated_at")
         else:
@@ -382,11 +368,11 @@ class InboxItem:
             raise ValueError("Inbox retry time cannot precede updated_at")
 
         item = object.__new__(cls)
-        object.__setattr__(item, "_update", update)
-        object.__setattr__(item, "_state", state)
-        object.__setattr__(item, "_version", version)
-        object.__setattr__(item, "_attempt_count", attempt_count)
-        object.__setattr__(item, "_updated_at", timestamp)
+        object.__setattr__(item, "update", update)
+        object.__setattr__(item, "state", state)
+        object.__setattr__(item, "version", version)
+        object.__setattr__(item, "attempt_count", attempt_count)
+        object.__setattr__(item, "updated_at", timestamp)
         return item
 
     @classmethod
@@ -440,23 +426,37 @@ class InboxItem:
 
         if status is InboxStatus.PENDING:
             if next_time is None or completion_time is not None or failure is not None:
-                raise ValueError("Pending inbox state has inconsistent persistence fields")
+                raise ValueError(
+                    "Pending inbox state has inconsistent persistence fields"
+                )
             state: InboxState = AwaitingInboxClaim(next_time)
         elif status is InboxStatus.PROCESSING:
-            if next_time is not None or completion_time is not None or failure is not None:
-                raise ValueError("Processing inbox state has inconsistent persistence fields")
+            if (
+                next_time is not None
+                or completion_time is not None
+                or failure is not None
+            ):
+                raise ValueError(
+                    "Processing inbox state has inconsistent persistence fields"
+                )
             state = ProcessingInboxItem()
         elif status is InboxStatus.RETRY_WAIT:
             if next_time is None or completion_time is not None or failure is None:
-                raise ValueError("Retrying inbox state has inconsistent persistence fields")
+                raise ValueError(
+                    "Retrying inbox state has inconsistent persistence fields"
+                )
             state = WaitingInboxRetry(next_time, failure)
         elif status is InboxStatus.PROCESSED:
             if next_time is not None or completion_time is None or failure is not None:
-                raise ValueError("Processed inbox state has inconsistent persistence fields")
+                raise ValueError(
+                    "Processed inbox state has inconsistent persistence fields"
+                )
             state = ProcessedInboxItem(completion_time)
         else:
             if next_time is not None or completion_time is not None or failure is None:
-                raise ValueError("Dead-letter inbox state has inconsistent persistence fields")
+                raise ValueError(
+                    "Dead-letter inbox state has inconsistent persistence fields"
+                )
             state = DeadLetteredInboxItem(failure)
 
         return cls._create(
@@ -468,66 +468,21 @@ class InboxItem:
         )
 
     @property
-    def update(self) -> InboundUpdate:
-        """@brief 返回不可变入口事实 / Return the immutable inbound fact.
-
-        @return 入口事实 / Inbound fact.
-        """
-
-        return self._update
-
-    @property
-    def state(self) -> InboxState:
-        """@brief 返回穷尽生命周期状态 / Return the exhaustive lifecycle state.
-
-        @return 生命周期状态 / Lifecycle state.
-        """
-
-        return self._state
-
-    @property
     def status(self) -> InboxStatus:
         """@brief 返回持久化状态名称 / Return the persisted status name.
 
         @return 稳定状态枚举 / Stable status enum.
         """
 
-        if isinstance(self._state, AwaitingInboxClaim):
+        if isinstance(self.state, AwaitingInboxClaim):
             return InboxStatus.PENDING
-        if isinstance(self._state, ProcessingInboxItem):
+        if isinstance(self.state, ProcessingInboxItem):
             return InboxStatus.PROCESSING
-        if isinstance(self._state, WaitingInboxRetry):
+        if isinstance(self.state, WaitingInboxRetry):
             return InboxStatus.RETRY_WAIT
-        if isinstance(self._state, ProcessedInboxItem):
+        if isinstance(self.state, ProcessedInboxItem):
             return InboxStatus.PROCESSED
         return InboxStatus.FAILED_FINAL
-
-    @property
-    def version(self) -> int:
-        """@brief 返回乐观版本 / Return the optimistic version.
-
-        @return 非负版本 / Non-negative version.
-        """
-
-        return self._version
-
-    @property
-    def attempt_count(self) -> int:
-        """@brief 返回领取次数 / Return the claim-attempt count.
-
-        @return 非负领取次数 / Non-negative claim count.
-        """
-
-        return self._attempt_count
-
-    @property
-    def updated_at(self) -> datetime:
-        """@brief 返回最近转换时刻 / Return the most recent transition time.
-
-        @return UTC 时刻 / UTC instant.
-        """
-
-        return self._updated_at
 
     @property
     def next_attempt_at(self) -> datetime | None:
@@ -536,8 +491,8 @@ class InboxItem:
         @return 待领取/重试时刻，其他状态为 None / Claim time for pending/retry states, otherwise None.
         """
 
-        if isinstance(self._state, AwaitingInboxClaim | WaitingInboxRetry):
-            return self._state.claimable_at
+        if isinstance(self.state, AwaitingInboxClaim | WaitingInboxRetry):
+            return self.state.claimable_at
         return None
 
     @property
@@ -548,8 +503,8 @@ class InboxItem:
         """
 
         return (
-            self._state.processed_at
-            if isinstance(self._state, ProcessedInboxItem)
+            self.state.processed_at
+            if isinstance(self.state, ProcessedInboxItem)
             else None
         )
 
@@ -560,8 +515,8 @@ class InboxItem:
         @return 失败摘要或 None / Failure summary or None.
         """
 
-        if isinstance(self._state, WaitingInboxRetry | DeadLetteredInboxItem):
-            return self._state.failure.summary
+        if isinstance(self.state, WaitingInboxRetry | DeadLetteredInboxItem):
+            return self.state.failure.summary
         return None
 
     def claim(
@@ -580,23 +535,23 @@ class InboxItem:
         @raise InvalidInboxTransition 当前状态不可领取时抛出 / Raised when the current state is not claimable.
         """
 
-        if not isinstance(self._state, AwaitingInboxClaim | WaitingInboxRetry):
+        if not isinstance(self.state, AwaitingInboxClaim | WaitingInboxRetry):
             raise InvalidInboxTransition(
                 f"Inbox state {self.status.value} cannot be claimed"
             )
         timestamp = ensure_utc(claimed_at)
         lease_end = ensure_utc(lease_expires_at)
-        if timestamp < self._updated_at:
+        if timestamp < self.updated_at:
             raise ValueError("Inbox claim time cannot precede the current version")
-        if timestamp < self._state.claimable_at:
+        if timestamp < self.state.claimable_at:
             raise ValueError("Inbox item cannot be claimed before next_attempt_at")
         if lease_end <= timestamp:
             raise ValueError("Inbox lease must expire after claim time")
         processing = type(self)._create(
-            update=self._update,
+            update=self.update,
             state=ProcessingInboxItem(),
-            version=self._version + 1,
-            attempt_count=self._attempt_count + 1,
+            version=self.version + 1,
+            attempt_count=self.attempt_count + 1,
             updated_at=timestamp,
         )
         return InboxClaim.from_processing(
@@ -621,10 +576,10 @@ class InboxItem:
         self._require_claim(claim)
         timestamp = self._transition_time(processed_at)
         target = type(self)._create(
-            update=self._update,
+            update=self.update,
             state=ProcessedInboxItem(timestamp),
-            version=self._version + 1,
-            attempt_count=self._attempt_count,
+            version=self.version + 1,
+            attempt_count=self.attempt_count,
             updated_at=timestamp,
         )
         return InboxSucceeded(claim=claim, item=target)
@@ -654,10 +609,10 @@ class InboxItem:
         if not isinstance(failure, InboxFailure):
             raise TypeError("Inbox retry requires an InboxFailure")
         target = type(self)._create(
-            update=self._update,
+            update=self.update,
             state=WaitingInboxRetry(retry_time, failure),
-            version=self._version + 1,
-            attempt_count=self._attempt_count,
+            version=self.version + 1,
+            attempt_count=self.attempt_count,
             updated_at=failure_time,
         )
         return InboxRetryScheduled(claim=claim, item=target)
@@ -682,10 +637,10 @@ class InboxItem:
         if not isinstance(failure, InboxFailure):
             raise TypeError("Inbox dead-letter transition requires an InboxFailure")
         target = type(self)._create(
-            update=self._update,
+            update=self.update,
             state=DeadLetteredInboxItem(failure),
-            version=self._version + 1,
-            attempt_count=self._attempt_count,
+            version=self.version + 1,
+            attempt_count=self.attempt_count,
             updated_at=failure_time,
         )
         return InboxDeadLettered(claim=claim, item=target)
@@ -698,11 +653,11 @@ class InboxItem:
         @raise InvalidInboxTransition capability 与当前聚合不匹配时抛出 / Raised when the capability does not match this aggregate.
         """
 
-        if not isinstance(self._state, ProcessingInboxItem):
+        if not isinstance(self.state, ProcessingInboxItem):
             raise InvalidInboxTransition(
                 f"Inbox state {self.status.value} cannot be settled"
             )
-        if claim.item != self or claim.expected_version != self._version:
+        if claim.item != self or claim.expected_version != self.version:
             raise InvalidInboxTransition("Inbox claim does not own this item version")
 
     def _transition_time(self, occurred_at: datetime) -> datetime:
@@ -713,7 +668,7 @@ class InboxItem:
         """
 
         timestamp = ensure_utc(occurred_at)
-        if timestamp < self._updated_at:
+        if timestamp < self.updated_at:
             raise ValueError("Inbox transition time cannot precede the claim time")
         return timestamp
 
@@ -722,14 +677,26 @@ class InboxItem:
 class InboxClaim:
     """@brief 带 version/token/lease ownership 的处理 capability / Processing capability carrying version, token, and lease ownership.
 
-    @param _item 已进入 processing 的聚合 / Aggregate in processing state.
-    @param _token 本次 fencing token / Fencing token for this claim.
-    @param _lease_expires_at 可回收时刻 / Lease-recovery eligibility time.
+    @param item 已进入 processing 的聚合 / Aggregate in processing state.
+    @param token 本次 fencing token / Fencing token for this claim.
+    @param lease_expires_at 可回收时刻 / Lease-recovery eligibility time.
     """
 
-    _item: InboxItem
-    _token: LeaseToken
-    _lease_expires_at: datetime
+    item: InboxItem
+    token: LeaseToken
+    lease_expires_at: datetime
+
+    def __new__(cls, *args: object, **kwargs: object) -> Self:
+        """@brief 拒绝伪造 ownership capability / Reject forged ownership capabilities.
+
+        @param args 未使用位置参数 / Unused positional arguments.
+        @param kwargs 未使用关键字参数 / Unused keyword arguments.
+        @return 永不返回 / Never returns.
+        @raise TypeError 必须从 processing 聚合签发 / A processing aggregate must issue the capability.
+        """
+
+        del args, kwargs
+        raise TypeError("Use InboxClaim.from_processing()")
 
     @classmethod
     def from_processing(
@@ -755,37 +722,10 @@ class InboxClaim:
         if lease_end <= item.updated_at:
             raise ValueError("Inbox lease must expire after claim time")
         claim = object.__new__(cls)
-        object.__setattr__(claim, "_item", item)
-        object.__setattr__(claim, "_token", token)
-        object.__setattr__(claim, "_lease_expires_at", lease_end)
+        object.__setattr__(claim, "item", item)
+        object.__setattr__(claim, "token", token)
+        object.__setattr__(claim, "lease_expires_at", lease_end)
         return claim
-
-    @property
-    def item(self) -> InboxItem:
-        """@brief 返回 owned processing 聚合 / Return the owned processing aggregate.
-
-        @return processing 聚合 / Processing aggregate.
-        """
-
-        return self._item
-
-    @property
-    def update(self) -> InboundUpdate:
-        """@brief 返回待路由入口事实 / Return the inbound fact to route.
-
-        @return 不可变入口事实 / Immutable inbound fact.
-        """
-
-        return self._item.update
-
-    @property
-    def token(self) -> LeaseToken:
-        """@brief 返回 fencing token / Return the fencing token.
-
-        @return token / Token.
-        """
-
-        return self._token
 
     @property
     def expected_version(self) -> int:
@@ -794,16 +734,7 @@ class InboxClaim:
         @return 乐观版本 / Optimistic version.
         """
 
-        return self._item.version
-
-    @property
-    def lease_expires_at(self) -> datetime:
-        """@brief 返回租约可回收时刻 / Return the lease-recovery eligibility time.
-
-        @return UTC 时刻 / UTC instant.
-        """
-
-        return self._lease_expires_at
+        return self.item.version
 
 
 @dataclass(frozen=True, slots=True)
@@ -889,7 +820,7 @@ def _validate_settlement(
         raise ValueError(
             f"Inbox settlement requires {expected_status.value}, found {item.status.value}"
         )
-    if item.update != claim.update:
+    if item.update != claim.item.update:
         raise ValueError("Inbox settlement cannot replace its inbound fact")
     if item.version != claim.expected_version + 1:
         raise ValueError("Inbox settlement must advance exactly one version")
