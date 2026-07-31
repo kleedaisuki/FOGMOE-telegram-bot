@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 from logging.config import fileConfig
-from pathlib import Path
 
 from alembic import context
 from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_engine_from_config
 
-SRC_ROOT = Path(__file__).resolve().parents[2]
+from fogmoe_dbctl.postgres import quote_identifier
 
 config = context.config
 
@@ -18,22 +16,6 @@ config = context.config
 target_metadata = None
 VERSION_TABLE = "alembic_version"
 VERSION_NUM_LENGTH = 255
-
-
-def configure_import_path() -> None:
-    """@brief 配置 src 导入路径 / Configure src import path.
-
-    @return None / None.
-    """
-
-    src_root = str(SRC_ROOT)
-    if src_root not in sys.path:
-        sys.path.insert(0, src_root)
-
-
-configure_import_path()
-
-from fogmoe_dbctl.postgres import quote_identifier  # noqa: E402
 
 
 def configure_logging() -> None:

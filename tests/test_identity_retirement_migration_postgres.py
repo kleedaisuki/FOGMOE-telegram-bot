@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 from alembic import command
-from alembic.config import Config
 from sqlalchemy.exc import DBAPIError
 
 from fogmoe_bot.domain.assistant.messages import CanonicalMessage, ToolCallPart
@@ -354,16 +353,8 @@ def _run_alembic_downgrade(
     @return None / None.
     """
 
-    alembic_config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
-    alembic_config.attributes["database_url"] = (
-        migration_execution.maintenance_database_url(settings)
-    )
-    alembic_config.attributes["migration_schema"] = (
-        settings.maintenance.migration_schema
-    )
-    alembic_config.attributes["admin_user_id"] = settings.administrator.user_id
-    alembic_config.attributes["application_role"] = settings.application.username
-    command.downgrade(alembic_config, revision)
+    with migration_execution.configured_alembic(settings) as alembic_config:
+        command.downgrade(alembic_config, revision)
 
 
 def _seed_users_and_wallets(

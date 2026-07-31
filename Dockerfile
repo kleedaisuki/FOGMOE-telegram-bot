@@ -70,7 +70,6 @@ COPY src/fogmoe_config ./src/fogmoe_config
 COPY src/fogmoe_dashboard ./src/fogmoe_dashboard
 COPY src/fogmoe_dbctl ./src/fogmoe_dbctl
 COPY resources ./resources
-COPY alembic.ini ./alembic.ini
 
 RUN install --directory --owner=65532 --group=65532 --mode=0750 /app/logs
 

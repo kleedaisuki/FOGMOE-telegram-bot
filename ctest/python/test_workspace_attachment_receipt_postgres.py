@@ -30,7 +30,6 @@ from typing import Never
 from uuid import NAMESPACE_URL, uuid5
 
 from alembic import command as alembic_command
-from alembic.config import Config
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 """@brief 仓库根目录 / Repository root directory."""
@@ -66,9 +65,6 @@ from fogmoe_dbctl.commands import (  # noqa: E402
 )
 from fogmoe_dbctl.commands.access_policy import (  # noqa: E402
     DEFAULT_ACCESS_POLICY,
-)
-from fogmoe_dbctl.commands.migration_execution import (  # noqa: E402
-    maintenance_database_url,
 )
 from fogmoe_dbctl.config import DbctlSettings  # noqa: E402
 from fogmoe_dbctl.postgres import direct_psql_environment, quote_literal  # noqa: E402
@@ -747,15 +743,11 @@ def _run_irreversible_downgrade(settings: DbctlSettings) -> None:
         database version.
     """
 
-    configuration = Config(str(_PROJECT_ROOT / "alembic.ini"))
-    configuration.attributes["database_url"] = maintenance_database_url(settings)
-    configuration.attributes["migration_schema"] = settings.maintenance.migration_schema
-    configuration.attributes["admin_user_id"] = settings.administrator.user_id
-    configuration.attributes["application_role"] = settings.application.username
-    alembic_command.downgrade(
-        configuration,
-        "0070_workspace_attachment_model_boundary",
-    )
+    with migration_execution.configured_alembic(settings) as configuration:
+        alembic_command.downgrade(
+            configuration,
+            "0070_workspace_attachment_model_boundary",
+        )
 
 
 def _exception_text(error: BaseException) -> str:

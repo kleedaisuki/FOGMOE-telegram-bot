@@ -14,7 +14,7 @@ commands/migration_execution.py Alembic 与 psql 副作用边界
 commands/export_csv.py    通过受配置约束的连接原子导出表为 CSV
 postgres.py               PostgreSQL DSN、标识符与连接原语
 config.py                 dbctl 窄配置投影、路径与模型校验
-migrations/               Alembic 适配层与版本化 SQL
+migrations/               wheel 内的 Alembic 适配层与版本化 SQL
 ```
 
 依赖方向保持单向：`cli -> migrate -> (access_policy, access_sql, migration_execution) -> postgres/config`。
@@ -23,9 +23,14 @@ migrations/               Alembic 适配层与版本化 SQL
 原语；配置投影只可依赖中立的 `fogmoe_config.jsonc` 语法解码边界。任何控制面模块都不得
 依赖 `fogmoe_bot`。
 
+Alembic 的 `script_location` 由 `fogmoe_dbctl.migrations` 已安装包资源显式提供；运行
+`fogmoe-dbctl migrate` 不读取仓库根目录的 `alembic.ini`，因此普通 wheel 安装、容器运行和
+从任意启动目录调用共享同一迁移脚本集。
+
 ## 配置边界
 
-`fogmoe-dbctl` 只从仓库根目录的 `config.json`（JSONC）读取它所需的字段：
+`fogmoe-dbctl` 默认从启动目录的 `config.json`（JSONC）读取它所需的字段；从其他目录
+运行时必须通过 `--config` 指定部署配置：
 `database.endpoint`、`database.application`、`database.maintenance`、
 `database.reporting`、`database.bootstrap` 与 `identity.administrator`。它拥有自己的窄配置
 投影、Pydantic 模型与公开错误，不调用 bot 或 Dashboard 的配置服务；三个程序只共享
@@ -37,7 +42,7 @@ migrations/               Alembic 适配层与版本化 SQL
 防止 bootstrap 把 PostgreSQL 管理员误收敛为低权限角色。默认报表角色名为
 `fogmoe-dashboard`。
 
-配置只来自根目录的 JSONC 文档。完整字段、默认值和说明见仓库根目录的
+配置只来自该部署 JSONC 文档。完整字段、默认值和说明见仓库中的
 [`example.config.json`](../example.config.json)。
 
 ## 添加子命令
