@@ -318,10 +318,8 @@ class WorkspaceAttachmentModelBoundaryMigrationTests(unittest.TestCase):
         """
 
         snapshot = _SCHEMA_PATH.read_text(encoding="utf-8")
-        self.assertIn("through 0073_streaming_turn_steering", snapshot)
-        self.assertIn(
-            "Alembic head: 0073_streaming_turn_steering", snapshot
-        )
+        self.assertIn("through 0074_retrieval_vector_job_state", snapshot)
+        self.assertIn("Alembic head: 0074_retrieval_vector_job_state", snapshot)
         self.assertIn("CREATE TABLE workspace.runtimes", snapshot)
 
 

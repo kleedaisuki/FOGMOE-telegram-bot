@@ -13,12 +13,49 @@ from postgres_test_support import configure_bot_database
 
 from fogmoe_bot.application.retrieval import EpisodicPassageRenderer
 from fogmoe_bot.application.retrieval.ports import StaleVectorClaimError
-from fogmoe_bot.domain.retrieval import EmbeddingSpace, EmbeddingVector, RetrievalScope
+from fogmoe_bot.domain.retrieval import (
+    EmbeddingSpace,
+    EmbeddingVector,
+    PassageVectorJob,
+    PassageVectorJobKey,
+    PassageVectorStatus,
+    RetrievalScope,
+)
 from fogmoe_bot.infrastructure.database import db
+from fogmoe_bot.infrastructure.database import retrieval as retrieval_module
 from fogmoe_bot.infrastructure.database.retrieval import (
     PostgresEpisodicSource,
     PostgresRetrievalStore,
 )
+
+
+def test_pgvector_completion_comparison_uses_float32_storage_semantics() -> None:
+    """@brief Provider float64 与 pgvector float32 的正常量化不算 SQL 漂移 / Normal provider-float64 to pgvector-float32 quantization is not SQL drift."""
+
+    key = PassageVectorJobKey(uuid4(), "retrieval.float32-test")
+    completed_at = datetime(2035, 1, 1, tzinfo=UTC)
+    common = {
+        "key": key,
+        "status": PassageVectorStatus.COMPLETED,
+        "version": 2,
+        "attempt_count": 1,
+        "next_attempt_at": None,
+        "claim_token": None,
+        "lease_expires_at": None,
+        "last_error": None,
+        "created_at": completed_at - timedelta(seconds=1),
+        "updated_at": completed_at,
+        "completed_at": completed_at,
+    }
+    expected = PassageVectorJob.restore(
+        **common,
+        vector=EmbeddingVector((0.123456789, *([0.0] * 1023))),
+    )
+    persisted = PassageVectorJob.restore(
+        **common,
+        vector=EmbeddingVector((0.12345679, *([0.0] * 1023))),
+    )
+    assert retrieval_module._jobs_equal_at_pgvector_precision(expected, persisted)
 
 
 def _postgres_url() -> str:
@@ -317,7 +354,7 @@ def test_real_pgvector_projection_fencing_and_privacy_scoped_exact_search(
             assert len(claims) == 4
             for claim in claims:
                 vector = (
-                    EmbeddingVector((1.0, *([0.0] * 1023)))
+                    EmbeddingVector((0.123456789, *([0.0] * 1023)))
                     if claim.passage.scope == RetrievalScope("personal", owner_a)
                     else EmbeddingVector((0.0, 1.0, *([0.0] * 1022)))
                 )

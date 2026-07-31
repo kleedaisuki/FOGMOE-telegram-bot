@@ -409,7 +409,7 @@ class RetrievalWorker:
             try:
                 if (
                     isinstance(error, EmbeddingContractError)
-                    or claim.attempt_count >= self._max_attempts
+                    or claim.job.attempt_count >= self._max_attempts
                 ):
                     await self._store.fail_vector(
                         claim,
@@ -461,7 +461,7 @@ class RetrievalWorker:
         )
         if retry_after is not None:
             return failed_at + retry_after
-        cap = min(300.0, 2.0 * (2 ** max(0, claim.attempt_count - 1)))
+        cap = min(300.0, 2.0 * (2 ** max(0, claim.job.attempt_count - 1)))
         sampled = self._jitter(0.0, cap)
         if not math.isfinite(sampled) or not 0.0 <= sampled <= cap:
             raise ValueError("Retrieval jitter returned an invalid sample")

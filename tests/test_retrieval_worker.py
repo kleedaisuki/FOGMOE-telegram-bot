@@ -22,6 +22,8 @@ from fogmoe_bot.domain.observability.signals import MetricSignal, SpanSignal
 from fogmoe_bot.domain.retrieval import (
     EmbeddingSpace,
     EmbeddingVector,
+    PassageVectorJob,
+    PassageVectorJobKey,
     RetrievalEvidence,
     RetrievalPassage,
     RetrievalScope,
@@ -155,13 +157,18 @@ class _Store:
         if self.passage is None or self.claimed:
             return ()
         self.claimed = True
+        pending = PassageVectorJob.create_pending(
+            PassageVectorJobKey(self.passage.passage_id, space.space_id),
+            created_at=now,
+        )
         return (
-            PassageVectorClaim(
+            pending.claim(
                 passage=self.passage,
                 space=space,
                 claim_token=UUID("00000000-0000-0000-0000-000000000099"),
-                attempt_count=1,
-            ),
+                claimed_at=now,
+                lease_for=lease_for,
+            ).claim,
         )
 
     async def complete_vector(

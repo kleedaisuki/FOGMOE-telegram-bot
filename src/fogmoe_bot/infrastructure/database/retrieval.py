@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import struct
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import cast
@@ -16,17 +17,28 @@ from fogmoe_bot.application.retrieval import (
     CONVERSATION_TURN_SOURCE_KIND,
     EPISODIC_CORPUS_ID,
     EpisodicTurn,
-    PassageVectorClaim,
     RetrievalIOError,
     StaleVectorClaimError,
 )
 from fogmoe_bot.domain.retrieval import (
+    AwaitingPassageVector,
+    CompletedPassageVector,
     EmbeddingSpace,
     EmbeddingVector,
+    FailedPassageVector,
+    PassageVectorClaim,
+    PassageVectorClaimed,
+    PassageVectorFailure,
+    PassageVectorJob,
+    PassageVectorJobKey,
+    PassageVectorLeaseRecovered,
+    PassageVectorStatus,
+    ProcessingPassageVector,
     RetrievalEvidence,
     RetrievalPassage,
     RetrievalScope,
     RetrievalScopeKind,
+    WaitingPassageVectorRetry,
 )
 from fogmoe_bot.domain.temporal import ensure_utc
 from fogmoe_bot.infrastructure.database import db
@@ -37,6 +49,26 @@ _PASSAGE_COLUMNS = (
     "format_version, content_text, content_digest, occurred_at"
 )
 """@brief RetrievalPassage 映射列 / Columns used to map a RetrievalPassage."""
+
+_VECTOR_COLUMN_NAMES = (
+    "passage_id",
+    "space_id",
+    "status",
+    "version",
+    "attempt_count",
+    "next_attempt_at",
+    "claim_token",
+    "lease_expires_at",
+    "embedding",
+    "last_error",
+    "created_at",
+    "updated_at",
+    "completed_at",
+)
+"""@brief PassageVectorJob 映射列 / Columns used to map a PassageVectorJob."""
+
+_VECTOR_TRANSITION_BATCH_SIZE = 128
+"""@brief 单次向量状态批量 CAS 上限 / Maximum vector-state CAS batch size."""
 
 
 class PostgresEpisodicSource:
@@ -378,63 +410,70 @@ class PostgresRetrievalStore:
         limit: int,
         lease_for: timedelta,
     ) -> tuple[PassageVectorClaim, ...]:
-        """@brief 使用 SKIP LOCKED 领取待嵌入 passages / Claim passages with SKIP LOCKED.
+        """@brief 以领域决策和批量 CAS 领取待 embedding Passage / Claim passages through domain decisions and batched CAS.
 
-        @return 当前 fenced claims / Current fenced claims.
+        @param space 当前 embedding space / Active embedding space.
+        @param now 领取判定时刻 / Claim decision instant.
+        @param limit 最大领取数 / Maximum number of claims.
+        @param lease_for crash recovery 租期 / Crash-recovery lease duration.
+        @return 按 ready 顺序排列的 sealed claims / Sealed claims in ready order.
         """
 
         timestamp = ensure_utc(now)
-        if not 1 <= limit <= 128 or lease_for <= timedelta():
-            raise ValueError("Vector claim bounds are invalid")
-        lease_expires_at = timestamp + lease_for
-        claims: list[PassageVectorClaim] = []
+        if not 1 <= limit <= _VECTOR_TRANSITION_BATCH_SIZE:
+            raise ValueError("Vector claim limit must be between 1 and 128")
+        if not isinstance(lease_for, timedelta) or lease_for <= timedelta():
+            raise ValueError("Vector claim lease_for must be positive")
+
         async with db.transaction() as connection:
-            candidates = await db.fetch_all(
-                "SELECT vector.passage_id FROM retrieval.passage_vectors AS vector "
-                "WHERE vector.space_id = %s AND vector.status IN ('pending', 'retry_wait') "
-                "AND vector.next_attempt_at <= %s ORDER BY vector.next_attempt_at, "
-                "vector.passage_id FOR UPDATE SKIP LOCKED LIMIT %s",
+            rows = await db.fetch_all(
+                "SELECT "
+                + _vector_columns("vector")
+                + ", "
+                + ", ".join(
+                    f"passage.{column.strip()}"
+                    for column in _PASSAGE_COLUMNS.split(",")
+                )
+                + " FROM retrieval.passage_vectors AS vector "
+                "JOIN retrieval.passages AS passage "
+                "ON passage.passage_id = vector.passage_id "
+                "WHERE vector.space_id = %s "
+                "AND vector.status IN ('pending', 'retry_wait') "
+                "AND vector.next_attempt_at <= %s "
+                "ORDER BY vector.next_attempt_at, vector.passage_id "
+                "LIMIT %s FOR UPDATE OF vector SKIP LOCKED",
                 (space.space_id, timestamp, limit),
                 connection=connection,
             )
-            for candidate in candidates:
-                passage_id = _uuid(_row_values(candidate, 1)[0])
-                token = uuid4()
-                row = await db.fetch_one(
-                    "UPDATE retrieval.passage_vectors SET status = 'processing', "
-                    "version = version + 1, attempt_count = attempt_count + 1, "
-                    "next_attempt_at = NULL, claim_token = CAST(%s AS UUID), "
-                    "lease_expires_at = %s, last_error = NULL, updated_at = %s "
-                    "WHERE passage_id = CAST(%s AS UUID) AND space_id = %s "
-                    "AND status IN ('pending', 'retry_wait') RETURNING attempt_count",
-                    (
-                        str(token),
-                        lease_expires_at,
-                        timestamp,
-                        str(passage_id),
-                        space.space_id,
-                    ),
-                    connection=connection,
-                )
-                if row is None:
-                    raise RuntimeError("Locked vector candidate was not claimable")
-                passage_row = await db.fetch_one(
-                    "SELECT " + _PASSAGE_COLUMNS + " FROM retrieval.passages "
-                    "WHERE passage_id = CAST(%s AS UUID)",
-                    (str(passage_id),),
-                    connection=connection,
-                )
-                if passage_row is None:
-                    raise RuntimeError("Claimed vector has no passage")
-                claims.append(
-                    PassageVectorClaim(
-                        passage=_map_passage(passage_row),
+            decisions: list[PassageVectorClaimed] = []
+            for row in rows:
+                values = _row_values(row, len(_VECTOR_COLUMN_NAMES) + 11)
+                previous = _map_vector_job(values[: len(_VECTOR_COLUMN_NAMES)])
+                passage = _map_passage(values[len(_VECTOR_COLUMN_NAMES) :])
+                decisions.append(
+                    previous.claim(
+                        passage=passage,
                         space=space,
-                        claim_token=token,
-                        attempt_count=_integer(_row_values(row, 1)[0]),
+                        claim_token=uuid4(),
+                        claimed_at=timestamp,
+                        lease_for=lease_for,
                     )
                 )
-        return tuple(claims)
+            if not decisions:
+                return ()
+
+            persisted = await _persist_claim_decisions(
+                decisions,
+                space=space,
+                connection=connection,
+            )
+            for decision in decisions:
+                actual = persisted.get(decision.job.key)
+                if actual is None or actual != decision.job:
+                    raise RuntimeError(
+                        "Passage-vector claim SQL diverged from the domain decision"
+                    )
+            return tuple(decision.claim for decision in decisions)
 
     async def complete_vector(
         self,
@@ -450,28 +489,43 @@ class PostgresRetrievalStore:
             Claim token no longer identifies the current owner after recovery or reclaim.
         """
 
-        vector.require_space(claim.space)
-        timestamp = ensure_utc(completed_at)
-        rowcount = await db.execute(
-            "UPDATE retrieval.passage_vectors SET status = 'completed', "
-            "version = version + 1, embedding = CAST(%s AS vector), "
-            "claim_token = NULL, lease_expires_at = NULL, completed_at = %s, "
-            "updated_at = %s, last_error = NULL WHERE passage_id = CAST(%s AS UUID) "
-            "AND space_id = %s AND status = 'processing' "
-            "AND claim_token = CAST(%s AS UUID)",
-            (
-                _encode_vector(vector),
-                timestamp,
-                timestamp,
-                str(claim.passage.passage_id),
-                claim.space.space_id,
-                str(claim.claim_token),
-            ),
-        )
-        if rowcount != 1:
-            raise StaleVectorClaimError(
-                f"Stale vector claim {claim.passage.passage_id}"
+        decision = claim.job.complete(claim, vector, completed_at=completed_at)
+        target = decision.job
+        completed = _completed_vector_state(target)
+        processing = _processing_vector_state(claim.job)
+        async with db.transaction() as connection:
+            row = await db.fetch_one(
+                "UPDATE retrieval.passage_vectors AS vector "
+                "SET status = 'completed', version = %s, next_attempt_at = NULL, "
+                "claim_token = NULL, lease_expires_at = NULL, "
+                "embedding = CAST(%s AS vector), last_error = NULL, "
+                "updated_at = %s, completed_at = %s "
+                "WHERE vector.passage_id = CAST(%s AS UUID) "
+                "AND vector.space_id = %s AND vector.status = 'processing' "
+                "AND vector.version = %s "
+                "AND vector.claim_token = CAST(%s AS UUID) RETURNING "
+                + _vector_columns("vector"),
+                (
+                    target.version,
+                    _encode_vector(completed.vector),
+                    target.updated_at,
+                    completed.completed_at,
+                    str(target.key.passage_id),
+                    target.key.space_id,
+                    claim.job.version,
+                    str(processing.claim_token),
+                ),
+                connection=connection,
             )
+            if row is None:
+                raise StaleVectorClaimError(
+                    f"Stale vector claim {claim.passage.passage_id}"
+                )
+            persisted = _map_vector_job(row)
+            if not _jobs_equal_at_pgvector_precision(target, persisted):
+                raise RuntimeError(
+                    "Passage-vector completion SQL diverged from the domain decision"
+                )
 
     async def retry_vector(
         self,
@@ -483,17 +537,39 @@ class PostgresRetrievalStore:
     ) -> None:
         """@brief fenced 安排 retry / Schedule a retry with fencing."""
 
-        failure_time = ensure_utc(failed_at)
-        retry_time = ensure_utc(retry_at)
-        if retry_time <= failure_time:
-            raise ValueError("Vector retry_at must follow failed_at")
-        await self._finish_failure(
+        decision = claim.job.schedule_retry(
             claim,
-            status="retry_wait",
-            failed_at=failure_time,
-            next_attempt_at=retry_time,
-            error=error,
+            retry_at=retry_at,
+            failure=PassageVectorFailure(error),
+            failed_at=failed_at,
         )
+        target = decision.job
+        retrying = _retrying_vector_state(target)
+        processing = _processing_vector_state(claim.job)
+        async with db.transaction() as connection:
+            row = await db.fetch_one(
+                "UPDATE retrieval.passage_vectors AS vector "
+                "SET status = 'retry_wait', version = %s, next_attempt_at = %s, "
+                "claim_token = NULL, lease_expires_at = NULL, embedding = NULL, "
+                "last_error = %s, updated_at = %s, completed_at = NULL "
+                "WHERE vector.passage_id = CAST(%s AS UUID) "
+                "AND vector.space_id = %s AND vector.status = 'processing' "
+                "AND vector.version = %s "
+                "AND vector.claim_token = CAST(%s AS UUID) RETURNING "
+                + _vector_columns("vector"),
+                (
+                    target.version,
+                    retrying.next_attempt_at,
+                    retrying.failure.summary,
+                    target.updated_at,
+                    str(target.key.passage_id),
+                    target.key.space_id,
+                    claim.job.version,
+                    str(processing.claim_token),
+                ),
+                connection=connection,
+            )
+            _require_persisted_settlement(row, target, claim)
 
     async def fail_vector(
         self,
@@ -504,48 +580,37 @@ class PostgresRetrievalStore:
     ) -> None:
         """@brief fenced 终结 vector job / Finally fail a vector job with fencing."""
 
-        await self._finish_failure(
+        decision = claim.job.fail(
             claim,
-            status="failed_final",
-            failed_at=ensure_utc(failed_at),
-            next_attempt_at=None,
-            error=error,
+            failure=PassageVectorFailure(error),
+            failed_at=failed_at,
         )
-
-    async def _finish_failure(
-        self,
-        claim: PassageVectorClaim,
-        *,
-        status: str,
-        failed_at: datetime,
-        next_attempt_at: datetime | None,
-        error: str,
-    ) -> None:
-        """@brief 写入一种 fenced failure transition / Persist one fenced failure transition."""
-
-        message = error.strip()[:1_000]
-        if not message:
-            raise ValueError("Vector failure error cannot be blank")
-        rowcount = await db.execute(
-            "UPDATE retrieval.passage_vectors SET status = %s, version = version + 1, "
-            "next_attempt_at = %s, claim_token = NULL, lease_expires_at = NULL, "
-            "last_error = %s, updated_at = %s WHERE passage_id = CAST(%s AS UUID) "
-            "AND space_id = %s AND status = 'processing' "
-            "AND claim_token = CAST(%s AS UUID)",
-            (
-                status,
-                next_attempt_at,
-                message,
-                failed_at,
-                str(claim.passage.passage_id),
-                claim.space.space_id,
-                str(claim.claim_token),
-            ),
-        )
-        if rowcount != 1:
-            raise StaleVectorClaimError(
-                f"Stale vector claim {claim.passage.passage_id}"
+        target = decision.job
+        failed = _failed_vector_state(target)
+        processing = _processing_vector_state(claim.job)
+        async with db.transaction() as connection:
+            row = await db.fetch_one(
+                "UPDATE retrieval.passage_vectors AS vector "
+                "SET status = 'failed_final', version = %s, next_attempt_at = NULL, "
+                "claim_token = NULL, lease_expires_at = NULL, embedding = NULL, "
+                "last_error = %s, updated_at = %s, completed_at = NULL "
+                "WHERE vector.passage_id = CAST(%s AS UUID) "
+                "AND vector.space_id = %s AND vector.status = 'processing' "
+                "AND vector.version = %s "
+                "AND vector.claim_token = CAST(%s AS UUID) RETURNING "
+                + _vector_columns("vector"),
+                (
+                    target.version,
+                    failed.failure.summary,
+                    target.updated_at,
+                    str(target.key.passage_id),
+                    target.key.space_id,
+                    claim.job.version,
+                    str(processing.claim_token),
+                ),
+                connection=connection,
             )
+            _require_persisted_settlement(row, target, claim)
 
     async def recover_expired_vector_leases(
         self,
@@ -559,14 +624,39 @@ class PostgresRetrievalStore:
         """
 
         timestamp = ensure_utc(now)
-        return await db.execute(
-            "UPDATE retrieval.passage_vectors SET status = 'retry_wait', "
-            "version = version + 1, next_attempt_at = %s, claim_token = NULL, "
-            "lease_expires_at = NULL, updated_at = %s, "
-            "last_error = 'recovered expired embedding lease' "
-            "WHERE space_id = %s AND status = 'processing' AND lease_expires_at <= %s",
-            (timestamp, timestamp, space.space_id, timestamp),
-        )
+        recovered = 0
+        async with db.transaction() as connection:
+            while True:
+                rows = await db.fetch_all(
+                    "SELECT "
+                    + _vector_columns("vector")
+                    + " FROM retrieval.passage_vectors AS vector "
+                    "WHERE vector.space_id = %s AND vector.status = 'processing' "
+                    "AND vector.lease_expires_at <= %s "
+                    "ORDER BY vector.lease_expires_at, vector.passage_id "
+                    "LIMIT %s FOR UPDATE OF vector",
+                    (space.space_id, timestamp, _VECTOR_TRANSITION_BATCH_SIZE),
+                    connection=connection,
+                )
+                decisions = tuple(
+                    _map_vector_job(row).recover_expired(recovered_at=timestamp)
+                    for row in rows
+                )
+                if decisions:
+                    persisted = await _persist_recovery_decisions(
+                        decisions,
+                        space=space,
+                        connection=connection,
+                    )
+                    for decision in decisions:
+                        actual = persisted.get(decision.job.key)
+                        if actual is None or actual != decision.job:
+                            raise RuntimeError(
+                                "Passage-vector recovery SQL diverged from the domain decision"
+                            )
+                recovered += len(decisions)
+                if len(decisions) < _VECTOR_TRANSITION_BATCH_SIZE:
+                    return recovered
 
     async def search(
         self,
@@ -621,6 +711,336 @@ class PostgresRetrievalStore:
             )
             for row in rows
         )
+
+
+def _vector_columns(alias: str) -> str:
+    """@brief 构造完整 PassageVectorJob SQL 投影 / Build the complete PassageVectorJob SQL projection.
+
+    @param alias 已知安全的 SQL table alias / Known-safe SQL table alias.
+    @return 逗号分隔投影 / Comma-separated projection.
+    """
+
+    return ", ".join(
+        f"{alias}.embedding::text" if column == "embedding" else f"{alias}.{column}"
+        for column in _VECTOR_COLUMN_NAMES
+    )
+
+
+def _map_vector_job(row: object) -> PassageVectorJob:
+    """@brief 从完整数据库 row 恢复向量聚合 / Restore a vector aggregate from a complete database row.
+
+    @param row 十三个持久化字段 / Thirteen persisted fields.
+    @return 已验证领域聚合 / Validated domain aggregate.
+    """
+
+    values = _row_values(row, len(_VECTOR_COLUMN_NAMES))
+    return PassageVectorJob.restore(
+        key=PassageVectorJobKey(
+            passage_id=_uuid(values[0]),
+            space_id=_text(values[1]),
+        ),
+        status=PassageVectorStatus(_text(values[2])),
+        version=_integer(values[3]),
+        attempt_count=_integer(values[4]),
+        next_attempt_at=_optional_datetime(values[5]),
+        claim_token=_optional_uuid(values[6]),
+        lease_expires_at=_optional_datetime(values[7]),
+        vector=_optional_vector(values[8]),
+        last_error=_optional_text(values[9]),
+        created_at=_datetime(values[10]),
+        updated_at=_datetime(values[11]),
+        completed_at=_optional_datetime(values[12]),
+    )
+
+
+async def _persist_claim_decisions(
+    decisions: Sequence[PassageVectorClaimed],
+    *,
+    space: EmbeddingSpace,
+    connection: AsyncConnection,
+) -> dict[PassageVectorJobKey, PassageVectorJob]:
+    """@brief 批量 CAS 持久化已经计算的 claim 决策 / Persist already-computed claim decisions through batched CAS.
+
+    @param decisions 非空、有序领域决策 / Non-empty ordered domain decisions.
+    @param space 当前 embedding space / Active embedding space.
+    @param connection 持有 candidate locks 的事务连接 / Transaction holding candidate locks.
+    @return 按聚合 key 索引的 RETURNING 状态 / RETURNING states indexed by aggregate key.
+    """
+
+    if not decisions:
+        raise ValueError("Passage-vector claim persistence requires decisions")
+    value_sql = ", ".join(
+        "(CAST(%s AS UUID), CAST(%s AS TEXT), CAST(%s AS BIGINT), "
+        "CAST(%s AS BIGINT), CAST(%s AS INTEGER), CAST(%s AS UUID))"
+        for _ in decisions
+    )
+    params: list[object] = []
+    first = decisions[0]
+    first_processing = _processing_vector_state(first.job)
+    for decision in decisions:
+        processing = _processing_vector_state(decision.job)
+        if (
+            decision.job.key.space_id != space.space_id
+            or decision.job.updated_at != first.job.updated_at
+            or processing.lease_expires_at != first_processing.lease_expires_at
+        ):
+            raise RuntimeError("Passage-vector claim batch is not homogeneous")
+        params.extend(
+            (
+                str(decision.previous.key.passage_id),
+                _vector_status(decision.previous).value,
+                decision.previous.version,
+                decision.job.version,
+                decision.job.attempt_count,
+                str(processing.claim_token),
+            )
+        )
+    params.extend(
+        (
+            first_processing.lease_expires_at,
+            first.job.updated_at,
+            space.space_id,
+        )
+    )
+    rows = await db.fetch_all(
+        "WITH decisions (passage_id, expected_status, expected_version, "
+        "new_version, new_attempt_count, new_claim_token) AS (VALUES "
+        + value_sql
+        + ") UPDATE retrieval.passage_vectors AS vector "
+        "SET status = 'processing', version = decision.new_version, "
+        "attempt_count = decision.new_attempt_count, next_attempt_at = NULL, "
+        "claim_token = decision.new_claim_token, lease_expires_at = %s, "
+        "embedding = NULL, last_error = NULL, updated_at = %s, completed_at = NULL "
+        "FROM decisions AS decision "
+        "WHERE vector.passage_id = decision.passage_id AND vector.space_id = %s "
+        "AND vector.status = decision.expected_status "
+        "AND vector.version = decision.expected_version RETURNING "
+        + _vector_columns("vector"),
+        params,
+        connection=connection,
+    )
+    if len(rows) != len(decisions):
+        raise RuntimeError("Passage-vector claim CAS did not update every candidate")
+    return _index_vector_jobs(rows)
+
+
+async def _persist_recovery_decisions(
+    decisions: Sequence[PassageVectorLeaseRecovered],
+    *,
+    space: EmbeddingSpace,
+    connection: AsyncConnection,
+) -> dict[PassageVectorJobKey, PassageVectorJob]:
+    """@brief 批量 CAS 持久化过期 lease 恢复决策 / Persist expired-lease recovery decisions through batched CAS.
+
+    @param decisions 非空恢复决策 / Non-empty recovery decisions.
+    @param space 当前 embedding space / Active embedding space.
+    @param connection 持有过期行锁的事务连接 / Transaction holding expired-row locks.
+    @return 按聚合 key 索引的 RETURNING 状态 / RETURNING states indexed by aggregate key.
+    """
+
+    if not decisions:
+        raise ValueError("Passage-vector recovery persistence requires decisions")
+    value_sql = ", ".join(
+        "(CAST(%s AS UUID), CAST(%s AS BIGINT), CAST(%s AS UUID), CAST(%s AS BIGINT))"
+        for _ in decisions
+    )
+    params: list[object] = []
+    first = decisions[0]
+    first_retry = _retrying_vector_state(first.job)
+    for decision in decisions:
+        previous = _processing_vector_state(decision.previous)
+        retrying = _retrying_vector_state(decision.job)
+        if (
+            decision.job.key.space_id != space.space_id
+            or decision.job.updated_at != first.job.updated_at
+            or retrying != first_retry
+        ):
+            raise RuntimeError("Passage-vector recovery batch is not homogeneous")
+        params.extend(
+            (
+                str(decision.previous.key.passage_id),
+                decision.previous.version,
+                str(previous.claim_token),
+                decision.job.version,
+            )
+        )
+    params.extend(
+        (
+            first_retry.next_attempt_at,
+            first_retry.failure.summary,
+            first.job.updated_at,
+            space.space_id,
+        )
+    )
+    rows = await db.fetch_all(
+        "WITH decisions (passage_id, expected_version, expected_claim_token, "
+        "new_version) AS (VALUES "
+        + value_sql
+        + ") UPDATE retrieval.passage_vectors AS vector "
+        "SET status = 'retry_wait', version = decision.new_version, "
+        "next_attempt_at = %s, claim_token = NULL, lease_expires_at = NULL, "
+        "embedding = NULL, last_error = %s, updated_at = %s, completed_at = NULL "
+        "FROM decisions AS decision "
+        "WHERE vector.passage_id = decision.passage_id AND vector.space_id = %s "
+        "AND vector.status = 'processing' "
+        "AND vector.version = decision.expected_version "
+        "AND vector.claim_token = decision.expected_claim_token RETURNING "
+        + _vector_columns("vector"),
+        params,
+        connection=connection,
+    )
+    if len(rows) != len(decisions):
+        raise RuntimeError("Passage-vector recovery CAS did not update every candidate")
+    return _index_vector_jobs(rows)
+
+
+def _index_vector_jobs(
+    rows: Sequence[object],
+) -> dict[PassageVectorJobKey, PassageVectorJob]:
+    """@brief 按复合 key 索引 RETURNING 聚合 / Index RETURNING aggregates by composite key.
+
+    @param rows 完整向量状态 rows / Complete vector-state rows.
+    @return 唯一 key 到聚合的映射 / Mapping from unique keys to aggregates.
+    """
+
+    indexed: dict[PassageVectorJobKey, PassageVectorJob] = {}
+    for row in rows:
+        job = _map_vector_job(row)
+        if job.key in indexed:
+            raise RuntimeError("Passage-vector RETURNING contained a duplicate key")
+        indexed[job.key] = job
+    return indexed
+
+
+def _require_persisted_settlement(
+    row: object | None,
+    target: PassageVectorJob,
+    claim: PassageVectorClaim,
+) -> None:
+    """@brief 验证 fenced settlement 的 RETURNING 状态 / Validate a fenced settlement's RETURNING state.
+
+    @param row 可选 RETURNING row / Optional RETURNING row.
+    @param target 领域目标聚合 / Domain target aggregate.
+    @param claim 当前 sealed claim / Current sealed claim.
+    @return None / None.
+    @raise StaleVectorClaimError CAS 未命中 / CAS did not match.
+    @raise RuntimeError SQL post-state 与领域决策不同 / SQL post-state differs from the domain decision.
+    """
+
+    if row is None:
+        raise StaleVectorClaimError(f"Stale vector claim {claim.passage.passage_id}")
+    if _map_vector_job(row) != target:
+        raise RuntimeError(
+            "Passage-vector settlement SQL diverged from the domain decision"
+        )
+
+
+def _vector_status(job: PassageVectorJob) -> PassageVectorStatus:
+    """@brief 把穷尽领域状态映射为持久化枚举 / Map an exhaustive domain state to its persisted enum.
+
+    @param job 向量聚合 / Vector aggregate.
+    @return 持久化状态 / Persisted status.
+    """
+
+    if isinstance(job.state, AwaitingPassageVector):
+        return PassageVectorStatus.PENDING
+    if isinstance(job.state, WaitingPassageVectorRetry):
+        return PassageVectorStatus.RETRY_WAIT
+    if isinstance(job.state, ProcessingPassageVector):
+        return PassageVectorStatus.PROCESSING
+    if isinstance(job.state, CompletedPassageVector):
+        return PassageVectorStatus.COMPLETED
+    return PassageVectorStatus.FAILED_FINAL
+
+
+def _processing_vector_state(job: PassageVectorJob) -> ProcessingPassageVector:
+    """@brief 提取 processing 状态或暴露内部错误 / Extract processing state or expose an internal error.
+
+    @param job 预期 processing 聚合 / Expected processing aggregate.
+    @return Processing 状态 / Processing state.
+    """
+
+    if not isinstance(job.state, ProcessingPassageVector):
+        raise RuntimeError("Passage-vector job is not processing")
+    return job.state
+
+
+def _completed_vector_state(job: PassageVectorJob) -> CompletedPassageVector:
+    """@brief 提取 completed 状态 / Extract completed state.
+
+    @param job 预期 completed 聚合 / Expected completed aggregate.
+    @return Completed 状态 / Completed state.
+    """
+
+    if not isinstance(job.state, CompletedPassageVector):
+        raise RuntimeError("Passage-vector job is not completed")
+    return job.state
+
+
+def _retrying_vector_state(job: PassageVectorJob) -> WaitingPassageVectorRetry:
+    """@brief 提取 retry-wait 状态 / Extract retry-wait state.
+
+    @param job 预期 retry-wait 聚合 / Expected retry-wait aggregate.
+    @return Retry-wait 状态 / Retry-wait state.
+    """
+
+    if not isinstance(job.state, WaitingPassageVectorRetry):
+        raise RuntimeError("Passage-vector job is not waiting for retry")
+    return job.state
+
+
+def _failed_vector_state(job: PassageVectorJob) -> FailedPassageVector:
+    """@brief 提取 failed-final 状态 / Extract failed-final state.
+
+    @param job 预期 failed-final 聚合 / Expected failed-final aggregate.
+    @return Failed-final 状态 / Failed-final state.
+    """
+
+    if not isinstance(job.state, FailedPassageVector):
+        raise RuntimeError("Passage-vector job is not finally failed")
+    return job.state
+
+
+def _jobs_equal_at_pgvector_precision(
+    expected: PassageVectorJob,
+    persisted: PassageVectorJob,
+) -> bool:
+    """@brief 按 pgvector float32 语义比较完成态 / Compare completed states using pgvector float32 semantics.
+
+    @param expected Provider 精度的领域目标 / Domain target at provider precision.
+    @param persisted PostgreSQL RETURNING 状态 / PostgreSQL RETURNING state.
+    @return 除向量量化外是否完全相等 / Whether states are equal aside from vector quantization.
+    @note pgvector ``vector`` 坐标是 IEEE-754 单精度；该适配器比较不得污染通用领域向量。/
+        pgvector ``vector`` coordinates are IEEE-754 single precision; this adapter-specific
+        comparison must not leak that storage choice into the generic domain vector.
+    """
+
+    if expected == persisted:
+        return True
+    if not isinstance(expected.state, CompletedPassageVector) or not isinstance(
+        persisted.state, CompletedPassageVector
+    ):
+        return False
+    return (
+        expected.key == persisted.key
+        and expected.version == persisted.version
+        and expected.attempt_count == persisted.attempt_count
+        and expected.created_at == persisted.created_at
+        and expected.updated_at == persisted.updated_at
+        and expected.state.completed_at == persisted.state.completed_at
+        and tuple(_float32(value) for value in expected.state.vector.values)
+        == tuple(_float32(value) for value in persisted.state.vector.values)
+    )
+
+
+def _float32(value: float) -> float:
+    """@brief 按 PostgreSQL pgvector 的单精度往返一个坐标 / Round-trip one coordinate at PostgreSQL pgvector precision.
+
+    @param value Python 双精度坐标 / Python double-precision coordinate.
+    @return IEEE-754 单精度值 / IEEE-754 single-precision value.
+    """
+
+    return float(struct.unpack("!f", struct.pack("!f", value))[0])
 
 
 def _validate_projection(
@@ -765,6 +1185,16 @@ def _uuid(value: object) -> UUID:
     return value if isinstance(value, UUID) else UUID(str(value))
 
 
+def _optional_uuid(value: object) -> UUID | None:
+    """@brief 转换 nullable UUID / Convert a nullable UUID.
+
+    @param value 数据库标量 / Database scalar.
+    @return UUID 或 None / UUID or None.
+    """
+
+    return None if value is None else _uuid(value)
+
+
 def _integer(value: object) -> int:
     """@brief 转换整数 / Convert an integer."""
 
@@ -785,12 +1215,52 @@ def _text(value: object) -> str:
     return value
 
 
+def _optional_text(value: object) -> str | None:
+    """@brief 转换 nullable 文本 / Convert nullable text.
+
+    @param value 数据库标量 / Database scalar.
+    @return 文本或 None / Text or None.
+    """
+
+    return None if value is None else _text(value)
+
+
 def _datetime(value: object) -> datetime:
     """@brief 转换 datetime / Convert a datetime."""
 
     if not isinstance(value, datetime):
         raise TypeError("Expected retrieval datetime")
     return value
+
+
+def _optional_datetime(value: object) -> datetime | None:
+    """@brief 转换 nullable datetime / Convert a nullable datetime.
+
+    @param value 数据库标量 / Database scalar.
+    @return UTC datetime 或 None / UTC datetime or None.
+    """
+
+    return None if value is None else _datetime(value)
+
+
+def _optional_vector(value: object) -> EmbeddingVector | None:
+    """@brief 严格解析 nullable pgvector 文本 / Strictly parse nullable pgvector text.
+
+    @param value ``embedding::text`` 数据库标量 / ``embedding::text`` database scalar.
+    @return 已验证领域向量或 None / Validated domain vector or None.
+    @raise TypeError pgvector 文本不是数值数组 / pgvector text is not a numeric array.
+    """
+
+    if value is None:
+        return None
+    payload = json.loads(_text(value))
+    if not isinstance(payload, list) or not payload:
+        raise TypeError("Expected pgvector text to contain a non-empty array")
+    if any(
+        isinstance(item, bool) or not isinstance(item, int | float) for item in payload
+    ):
+        raise TypeError("Expected pgvector text to contain only numeric coordinates")
+    return EmbeddingVector(tuple(float(item) for item in payload))
 
 
 __all__ = ["PostgresEpisodicSource", "PostgresRetrievalStore"]

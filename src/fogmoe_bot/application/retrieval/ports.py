@@ -11,6 +11,7 @@ from uuid import UUID
 from fogmoe_bot.domain.retrieval import (
     EmbeddingSpace,
     EmbeddingVector,
+    PassageVectorClaim,
     RetrievalEvidence,
     RetrievalPassage,
     RetrievalScope,
@@ -57,32 +58,6 @@ class EpisodicTurn:
         object.__setattr__(self, "user_text", user_text)
         object.__setattr__(self, "assistant_text", assistant_text)
         object.__setattr__(self, "occurred_at", ensure_utc(self.occurred_at))
-
-
-@dataclass(frozen=True, slots=True)
-class PassageVectorClaim:
-    """@brief 带 fencing token 的 passage embedding claim / Passage-embedding claim with fencing.
-
-    @param passage 待嵌入文本 / Passage to embed.
-    @param space 嵌入空间 / Embedding space.
-    @param claim_token 当前 claim UUID / Current claim UUID.
-    @param attempt_count 已开始尝试次数 / Number of started attempts.
-    """
-
-    passage: RetrievalPassage
-    space: EmbeddingSpace
-    claim_token: UUID
-    attempt_count: int
-
-    def __post_init__(self) -> None:
-        """@brief 校验 claim / Validate the claim.
-
-        @return None / None.
-        @raise ValueError attempt_count 非正 / Non-positive attempt count.
-        """
-
-        if isinstance(self.attempt_count, bool) or self.attempt_count < 1:
-            raise ValueError("Vector claim attempt_count must be positive")
 
 
 class RetryableEmbeddingError(RuntimeError):

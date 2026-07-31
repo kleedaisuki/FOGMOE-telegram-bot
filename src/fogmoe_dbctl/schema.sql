@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0073_streaming_turn_steering
--- Alembic head: 0073_streaming_turn_steering
+-- Source migrations: 0001_initial through 0074_retrieval_vector_job_state
+-- Alembic head: 0074_retrieval_vector_job_state
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and retired user-plan backfill) and the
@@ -1055,13 +1055,38 @@ CREATE TABLE retrieval.passage_vectors (
     (status IN ('pending','retry_wait')) = (next_attempt_at IS NOT NULL)
   ),
   CONSTRAINT retrieval_passage_vectors_lease_ck CHECK (
-    (status = 'processing') = (
-      claim_token IS NOT NULL AND lease_expires_at IS NOT NULL
+    (
+      status = 'processing'
+      AND claim_token IS NOT NULL
+      AND lease_expires_at IS NOT NULL
+    )
+    OR (
+      status <> 'processing'
+      AND claim_token IS NULL
+      AND lease_expires_at IS NULL
     )
   ),
   CONSTRAINT retrieval_passage_vectors_result_ck CHECK (
-    (status = 'completed') = (
-      embedding IS NOT NULL AND completed_at IS NOT NULL
+    (
+      status = 'completed'
+      AND embedding IS NOT NULL
+      AND completed_at IS NOT NULL
+    )
+    OR (
+      status <> 'completed'
+      AND embedding IS NULL
+      AND completed_at IS NULL
+    )
+  ),
+  CONSTRAINT retrieval_passage_vectors_error_ck CHECK (
+    (
+      status IN ('retry_wait', 'failed_final')
+      AND last_error IS NOT NULL
+      AND char_length(btrim(last_error)) > 0
+    )
+    OR (
+      status IN ('pending', 'processing', 'completed')
+      AND last_error IS NULL
     )
   )
 );

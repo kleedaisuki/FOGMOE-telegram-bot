@@ -783,7 +783,7 @@ def test_0062_business_data_matrix_and_fresh_head_are_transactional() -> None:
         )
         assert (
             _scalar(cluster, success, "SELECT version_num FROM infra.alembic_version;")
-            == "0073_streaming_turn_steering"
+            == "0074_retrieval_vector_job_state"
         )
         assert (
             _scalar(
@@ -863,7 +863,7 @@ def test_0062_business_data_matrix_and_fresh_head_are_transactional() -> None:
         )
         assert (
             _scalar(cluster, fresh, "SELECT version_num FROM infra.alembic_version;")
-            == "0073_streaming_turn_steering"
+            == "0074_retrieval_vector_job_state"
         )
         assert (
             _scalar(
@@ -1141,4 +1141,191 @@ def test_0068_converts_legacy_projectable_rows_and_rejects_non_object_tools() ->
                 """,
             )
             == "array"
+        )
+
+
+def _seed_0074_vector_job(
+    cluster: _EphemeralPostgres,
+    settings: DbctlSettings,
+    *,
+    inactive_claim_residue: bool,
+    partial_result: bool,
+) -> None:
+    """@brief 在 0073 约束下写入向量任务历史形状 / Seed a historical vector-job shape under 0073 constraints.
+
+    @param cluster 临时 PostgreSQL 集群 / Ephemeral PostgreSQL cluster.
+    @param settings 目标数据库设置 / Target database settings.
+    @param inactive_claim_residue 是否保留单边无效 claim token / Whether to retain a one-sided inactive claim token.
+    @param partial_result 是否保留未完成状态的单边 embedding / Whether to retain a one-sided embedding on an incomplete state.
+    @return None / None.
+    """
+
+    claim_token = (
+        "'74000000-0000-4000-8000-000000000003'::UUID"
+        if inactive_claim_residue
+        else "NULL"
+    )
+    embedding = (
+        "array_fill(0.5::REAL, ARRAY[1024])::vector" if partial_result else "NULL"
+    )
+    _maintenance_sql(
+        cluster,
+        settings,
+        f"""
+        INSERT INTO retrieval.embedding_spaces (
+          space_id, model, dimensions, distance_metric, query_instruction,
+          passage_format_version, created_at
+        ) VALUES (
+          'retrieval.migration-test', 'fixture-model', 1024, 'cosine',
+          'Represent the query', 1, '2035-01-02 03:04:05+00'
+        );
+        INSERT INTO retrieval.passages (
+          passage_id, corpus_id, scope_kind, scope_id, personal_user_id,
+          source_kind, source_id, ordinal, format_version, content_text,
+          content_digest, occurred_at, created_at
+        ) VALUES (
+          '74000000-0000-4000-8000-000000000001', 'conversation.episodic',
+          'group', -74, NULL, 'conversation.turn',
+          '74000000-0000-4000-8000-000000000002', 0, 1,
+          'migration safety fixture', repeat('a', 64),
+          '2035-01-02 03:04:04+00', '2035-01-02 03:04:05+00'
+        );
+        INSERT INTO retrieval.passage_vectors (
+          passage_id, space_id, status, version, attempt_count,
+          next_attempt_at, claim_token, lease_expires_at, embedding,
+          last_error, created_at, updated_at, completed_at
+        ) VALUES (
+          '74000000-0000-4000-8000-000000000001',
+          'retrieval.migration-test', 'pending', 0, 0,
+          '2035-01-02 03:04:05+00', {claim_token}, NULL, {embedding},
+          NULL, '2035-01-02 03:04:05+00', '2035-01-02 03:04:05+00', NULL
+        );
+        """,
+    )
+
+
+def _vector_business_digest(
+    cluster: _EphemeralPostgres,
+    settings: DbctlSettings,
+) -> str:
+    """@brief 计算不含短期 lease capability 的向量任务摘要 / Hash a vector job excluding transient lease capability.
+
+    @param cluster 临时 PostgreSQL 集群 / Ephemeral PostgreSQL cluster.
+    @param settings 目标数据库设置 / Target database settings.
+    @return 业务列的稳定 MD5 摘要 / Stable MD5 digest of business columns.
+    """
+
+    return _scalar(
+        cluster,
+        settings,
+        """
+        SELECT md5(concat_ws(E'\\x1f',
+          passage_id::TEXT, space_id, status, version::TEXT,
+          attempt_count::TEXT, COALESCE(next_attempt_at::TEXT, '<null>'),
+          COALESCE(embedding::TEXT, '<null>'), COALESCE(last_error, '<null>'),
+          created_at::TEXT, updated_at::TEXT,
+          COALESCE(completed_at::TEXT, '<null>')
+        ))
+        FROM retrieval.passage_vectors
+        WHERE passage_id = '74000000-0000-4000-8000-000000000001';
+        """,
+    )
+
+
+def test_0074_preserves_business_data_and_atomically_rejects_ambiguity() -> None:
+    """@brief 0074 只清理无效 lease，对含糊 result 原子失败 / 0074 only clears invalid leases and atomically rejects ambiguous results.
+
+    @return None / None.
+    @note 此测试从真实 0073 schema 升级，同时比对所有持久业务列。/
+        This test upgrades a real 0073 schema and compares every persisted business column.
+    """
+
+    with _postgres_cluster() as cluster:
+        template_database = "fogmoe_test_0073_vector_template"
+        template = _bootstrap_database(cluster, template_database)
+        migration_execution.run_alembic(
+            settings=template,
+            revision="0073_streaming_turn_steering",
+            dry_run=False,
+        )
+
+        safe = _clone_database(
+            cluster,
+            template=template_database,
+            database="fogmoe_test_0074_vector_safe",
+        )
+        _seed_0074_vector_job(
+            cluster,
+            safe,
+            inactive_claim_residue=True,
+            partial_result=False,
+        )
+        safe_before = _vector_business_digest(cluster, safe)
+        assert (
+            _scalar(
+                cluster,
+                safe,
+                "SELECT (claim_token IS NOT NULL AND lease_expires_at IS NULL)::TEXT "
+                "FROM retrieval.passage_vectors;",
+            )
+            == "true"
+        )
+
+        migration_execution.run_alembic(
+            settings=safe,
+            revision="0074_retrieval_vector_job_state",
+            dry_run=False,
+        )
+
+        assert _vector_business_digest(cluster, safe) == safe_before
+        assert (
+            _scalar(
+                cluster,
+                safe,
+                "SELECT (claim_token IS NULL AND lease_expires_at IS NULL)::TEXT "
+                "FROM retrieval.passage_vectors;",
+            )
+            == "true"
+        )
+        assert (
+            _scalar(cluster, safe, "SELECT version_num FROM infra.alembic_version;")
+            == "0074_retrieval_vector_job_state"
+        )
+
+        ambiguous = _clone_database(
+            cluster,
+            template=template_database,
+            database="fogmoe_test_0074_vector_ambiguous",
+        )
+        _seed_0074_vector_job(
+            cluster,
+            ambiguous,
+            inactive_claim_residue=False,
+            partial_result=True,
+        )
+        ambiguous_before = _vector_business_digest(cluster, ambiguous)
+        with pytest.raises(DBAPIError, match="non-completed row"):
+            migration_execution.run_alembic(
+                settings=ambiguous,
+                revision="0074_retrieval_vector_job_state",
+                dry_run=False,
+            )
+
+        assert _vector_business_digest(cluster, ambiguous) == ambiguous_before
+        assert (
+            _scalar(
+                cluster,
+                ambiguous,
+                "SELECT (embedding IS NOT NULL AND completed_at IS NULL)::TEXT "
+                "FROM retrieval.passage_vectors;",
+            )
+            == "true"
+        )
+        assert (
+            _scalar(
+                cluster,
+                ambiguous,
+                "SELECT version_num FROM infra.alembic_version;",
+            )
+            == "0073_streaming_turn_steering"
         )
