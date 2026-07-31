@@ -10,11 +10,20 @@ Telegram-handler call path.
 from __future__ import annotations
 
 import random
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from fogmoe_bot.domain.media.identifiers import UserId
-from fogmoe_bot.domain.media.picture import PictureCandidate, PictureRating
+from fogmoe_bot.domain.media.picture import (
+    PictureCandidate,
+    PictureChoice,
+    PictureGalleryBatch,
+    PicturePermissionRequired,
+    PicturePreviewGranted,
+    PicturePreviewPolicy,
+    PictureRating,
+    PictureRegistrationRequired,
+    RecentPictureHistory,
+)
 
 from .account import MediaAccountProfiles
 from .picture_runtime import PictureRuntime
@@ -22,31 +31,6 @@ from .picture_source import PictureSource
 
 PICTURE_SERVICE_DATA_KEY = "media.picture.service"
 """@brief 图片服务 capability 键 / Picture-service capability key."""
-
-
-@dataclass(frozen=True, slots=True)
-class PicturePolicy:
-    """@brief 免费预览的显式资源边界 / Explicit bounds for free previews.
-
-    @param nsfw_permission 查看 NSFW 所需权限等级 / Permission level required for NSFW.
-    @param gallery_batch_size 单次图库读取上限 / Maximum candidates per gallery read.
-    @param recent_limit 每位用户的近期去重窗口 / Per-user recent-item exclusion window.
-    """
-
-    nsfw_permission: int = 2
-    gallery_batch_size: int = 200
-    recent_limit: int = 32
-
-    def __post_init__(self) -> None:
-        """@brief 校验免费预览容量边界 / Validate free-preview capacity bounds.
-
-        @return None / None.
-        """
-
-        if self.nsfw_permission < 0:
-            raise ValueError("nsfw_permission must not be negative")
-        if min(self.gallery_batch_size, self.recent_limit) <= 0:
-            raise ValueError("picture policy bounds must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,9 +71,6 @@ type PictureFreeRequestResult = (
 )
 """@brief 免费图片请求的穷尽结果 / Exhaustive result of a free-picture request."""
 
-type PictureChoice = Callable[[Sequence[PictureCandidate]], PictureCandidate]
-"""@brief 图片候选选择函数 / Picture-candidate selection function."""
-
 
 class PictureService:
     """@brief 协调免费图片准入、去重与有界上游读取 / Coordinate free admission, deduplication, and bounded upstream reads."""
@@ -100,7 +81,7 @@ class PictureService:
         accounts: MediaAccountProfiles,
         source: PictureSource,
         runtime: PictureRuntime,
-        policy: PicturePolicy = PicturePolicy(),
+        policy: PicturePreviewPolicy = PicturePreviewPolicy(),
         choose: PictureChoice = random.choice,
     ) -> None:
         """@brief 注入免费预览所需的最小依赖 / Inject the minimum dependencies for free previews.
@@ -120,7 +101,7 @@ class PictureService:
         self._choose = choose
 
     @property
-    def policy(self) -> PicturePolicy:
+    def policy(self) -> PicturePreviewPolicy:
         """@brief 返回不可变免费预览策略 / Return the immutable free-preview policy.
 
         @return 当前策略 / Current policy.
@@ -144,19 +125,30 @@ class PictureService:
         """
 
         profile = await self._accounts.profile(user_id)
-        if not profile.registered:
+        registered = profile.registered
+        permission = (
+            profile.permission if registered and rating is PictureRating.NSFW else None
+        )
+        access = self._policy.decide_access(
+            registered=registered,
+            permission=permission,
+            rating=rating,
+        )
+        if isinstance(access, PictureRegistrationRequired):
             return PictureNotRegistered()
-        if (
-            rating is PictureRating.NSFW
-            and profile.permission < self._policy.nsfw_permission
-        ):
-            return PicturePermissionDenied(self._policy.nsfw_permission)
+        if isinstance(access, PicturePermissionRequired):
+            return PicturePermissionDenied(access.required)
+        if not isinstance(access, PicturePreviewGranted):
+            raise AssertionError("unhandled picture-preview access decision")
         candidate = await self._select_picture(user_id, rating)
         if candidate is None:
             return PictureUnavailable()
-        recent = await self._runtime.recent_pictures.get(user_id) or ()
-        updated = (*recent, candidate.source_id)[-self._policy.recent_limit :]
-        await self._runtime.recent_pictures.put(user_id, updated)
+        latest_history = RecentPictureHistory.restore(
+            await self._runtime.recent_pictures.get(user_id),
+            record_limit=self._policy.recent_limit,
+        )
+        updated = latest_history.record(candidate)
+        await self._runtime.recent_pictures.put(user_id, updated.source_ids)
         return PictureFreeReady(candidate)
 
     async def refresh_cache(self) -> None:
@@ -174,10 +166,15 @@ class PictureService:
                         limit=self._policy.gallery_batch_size,
                     )
                 )
+                batch = (
+                    PictureGalleryBatch.restore(rating=rating, pictures=pictures)
+                    if pictures
+                    else None
+                )
             except Exception:
                 continue
-            if pictures:
-                await self._runtime.picture_batches.put(rating, pictures)
+            if batch is not None:
+                await self._runtime.picture_batches.put(rating, batch.pictures)
 
     async def _select_picture(
         self,
@@ -192,6 +189,15 @@ class PictureService:
         """
 
         pictures = await self._runtime.picture_batches.get(rating)
+        batch: PictureGalleryBatch | None = None
+        if pictures:
+            try:
+                batch = PictureGalleryBatch.restore(
+                    rating=rating,
+                    pictures=pictures,
+                )
+            except Exception:
+                return None
         if not pictures:
             try:
                 pictures = await self._runtime.gallery_bulkhead.run(
@@ -200,12 +206,21 @@ class PictureService:
                         limit=self._policy.gallery_batch_size,
                     )
                 )
+                batch = (
+                    PictureGalleryBatch.restore(rating=rating, pictures=pictures)
+                    if pictures
+                    else None
+                )
             except Exception:
                 return None
-            if pictures:
+            if batch is not None:
                 await self._runtime.picture_batches.put(rating, pictures)
         if not pictures:
             return None
-        recent = set(await self._runtime.recent_pictures.get(user_id) or ())
-        candidates = tuple(item for item in pictures if item.source_id not in recent)
-        return self._choose(candidates or pictures)
+        if batch is None:
+            raise AssertionError("non-empty picture batch was not restored")
+        history = RecentPictureHistory.restore(
+            await self._runtime.recent_pictures.get(user_id),
+            record_limit=self._policy.recent_limit,
+        )
+        return batch.select(recent=history, choose=self._choose).picture
