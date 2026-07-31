@@ -22,10 +22,14 @@ from fogmoe_bot.domain.conversation.identity import (
 from fogmoe_bot.domain.conversation.outbox import (
     SEND_TELEGRAM_ASSISTANT_PROGRESS,
     OutboundClaim,
+    OutboundDeadLettered,
+    OutboundDeliverySucceeded,
     OutboundDraft,
     OutboundEnqueueResult,
+    OutboundFailure,
     OutboundKind,
     OutboundMessage,
+    OutboundRetryScheduled,
     OutboundStatus,
 )
 from fogmoe_bot.domain.conversation.turn import (
@@ -46,7 +50,6 @@ from .common import (
     _optional_datetime,
     _optional_text,
     _require_claim_update,
-    _required_error,
     _row_values,
     _text,
     _uuid,
@@ -55,6 +58,17 @@ from .turn_uow import (
     _load_turn_for_mutation,
     _persist_turn,
 )
+
+_DELIVERY_PLAN_CANCELLED_ERROR = (
+    "delivery plan cancelled after permanent sibling failure"
+)
+"""@brief 永久 sibling 失败后的稳定取消原因 / Stable cancellation reason after a permanent sibling failure."""
+
+_EXPIRED_LEASE_RECOVERY_ERROR = "recovered expired worker lease"
+"""@brief 过期 worker lease 的稳定恢复原因 / Stable recovery reason for an expired worker lease."""
+
+_BULK_TRANSITION_BATCH_SIZE = 512
+"""@brief bulk 状态转换单批内存与锁预算 / Per-batch memory and lock budget for bulk transitions."""
 
 
 def _map_outbound(row: object) -> OutboundMessage:
@@ -72,7 +86,7 @@ def _map_outbound(row: object) -> OutboundMessage:
         created_at=_datetime(values[12]),
         trace_context=TraceContext.parse(_text(values[17])),
     )
-    return OutboundMessage(
+    return OutboundMessage.restore(
         draft=draft,
         stream_sequence=MessageSequence(_integer(values[4])),
         status=OutboundStatus(_text(values[8])),
@@ -84,6 +98,41 @@ def _map_outbound(row: object) -> OutboundMessage:
         external_message_id=_optional_text(values[15]),
         last_error=_optional_text(values[16]),
     )
+
+
+def _restore_outbound_transition(
+    row: object,
+) -> tuple[OutboundMessage, OutboundMessage, LeaseToken | None, datetime | None]:
+    """@brief 恢复 bulk transition 的 post/pre snapshot 与原 lease / Restore post/pre snapshots and the prior lease for a bulk transition.
+
+    @param row UPDATE RETURNING 携带的完整前后标量 / Complete before-and-after scalars returned by UPDATE.
+    @return post 聚合、pre 聚合、pre token 与 pre lease / Post aggregate, pre aggregate, prior token, and prior lease.
+    @raise RuntimeError SQL 未清除 post token/lease 时抛出 / Raised when SQL failed to clear the post token or lease.
+    """
+
+    values = _row_values(row, 30)
+    post = _map_outbound(values[:18])
+    if values[18] is not None or values[19] is not None:
+        raise RuntimeError(
+            "Outbound bulk transition did not clear its claim token and lease"
+        )
+    previous = OutboundMessage.restore(
+        draft=post.draft,
+        stream_sequence=post.stream_sequence,
+        status=OutboundStatus(_text(values[20])),
+        version=_integer(values[21]),
+        attempt_count=_integer(values[22]),
+        next_attempt_at=_optional_datetime(values[23]),
+        updated_at=_datetime(values[24]),
+        delivered_at=_optional_datetime(values[25]),
+        external_message_id=_optional_text(values[26]),
+        last_error=_optional_text(values[27]),
+    )
+    previous_token = (
+        LeaseToken.parse(_uuid(values[28])) if values[28] is not None else None
+    )
+    previous_lease = _optional_datetime(values[29])
+    return post, previous, previous_token, previous_lease
 
 
 def _validate_outbound_idempotency(
@@ -357,20 +406,18 @@ class PostgresOutboxRepository:
             return ()
         token = LeaseToken.new()
         async with db.transaction() as connection:
+            await self._cancel_abandoned_delivery_plans(
+                cancelled_at=timestamp,
+                connection=connection,
+            )
             rows = await db.fetch_all(
-                "WITH abandoned AS ("
-                "UPDATE conversation.outbound_messages AS outbound "
-                "SET status = 'cancelled', version = outbound.version + 1, "
-                "next_attempt_at = NULL, updated_at = %s, claim_token = NULL, "
-                "lease_expires_at = NULL, "
-                "last_error = 'delivery plan cancelled after permanent sibling failure' "
-                "FROM conversation.conversation_turns AS turn "
-                "WHERE outbound.turn_id = turn.turn_id "
-                "AND turn.state = 'failed_final' "
-                "AND outbound.kind <> %s "
-                "AND outbound.status IN ('pending', 'retry_wait')"
-                "), candidates AS ("
-                "SELECT candidate.message_id, candidate.status AS previous_status "
+                "WITH candidates AS ("
+                "SELECT candidate.message_id, candidate.status AS previous_status, "
+                "candidate.version AS previous_version, "
+                "candidate.attempt_count AS previous_attempt_count, "
+                "candidate.next_attempt_at AS previous_next_attempt_at, "
+                "candidate.updated_at AS previous_updated_at, "
+                "candidate.last_error AS previous_last_error "
                 "FROM conversation.outbound_messages AS candidate "
                 "WHERE candidate.status IN ('pending', 'retry_wait') "
                 "AND candidate.next_attempt_at <= %s "
@@ -400,10 +447,11 @@ class PostgresOutboxRepository:
                 "outbound.payload, outbound.idempotency_key, outbound.status, outbound.version, "
                 "outbound.attempt_count, outbound.next_attempt_at, outbound.created_at, "
                 "outbound.updated_at, outbound.delivered_at, outbound.external_message_id, "
-                "outbound.last_error, outbound.traceparent, candidates.previous_status",
+                "outbound.last_error, outbound.traceparent, candidates.previous_status, "
+                "candidates.previous_version, candidates.previous_attempt_count, "
+                "candidates.previous_next_attempt_at, candidates.previous_updated_at, "
+                "candidates.previous_last_error",
                 (
-                    timestamp,
-                    SEND_TELEGRAM_ASSISTANT_PROGRESS.value,
                     timestamp,
                     SEND_TELEGRAM_ASSISTANT_PROGRESS.value,
                     limit,
@@ -415,15 +463,36 @@ class PostgresOutboxRepository:
             )
             claims: list[OutboundClaim] = []
             for row in rows:
-                values = _row_values(row, 19)
-                message = _map_outbound(values[:18])
+                values = _row_values(row, 24)
+                persisted_processing = _map_outbound(values[:18])
                 previous_status = OutboundStatus(_text(values[18]))
+                previous = OutboundMessage.restore(
+                    draft=persisted_processing.draft,
+                    stream_sequence=persisted_processing.stream_sequence,
+                    status=previous_status,
+                    version=_integer(values[19]),
+                    attempt_count=_integer(values[20]),
+                    next_attempt_at=_optional_datetime(values[21]),
+                    updated_at=_datetime(values[22]),
+                    delivered_at=None,
+                    external_message_id=None,
+                    last_error=_optional_text(values[23]),
+                )
+                claim = previous.claim(
+                    token=token,
+                    claimed_at=timestamp,
+                    lease_expires_at=lease_expires_at,
+                )
+                if claim.message != persisted_processing:
+                    raise RuntimeError(
+                        "Outbound claim SQL diverged from the domain claim transition"
+                    )
                 if (
-                    message.turn_id is not None
-                    and message.kind != SEND_TELEGRAM_ASSISTANT_PROGRESS
+                    claim.message.turn_id is not None
+                    and claim.message.kind != SEND_TELEGRAM_ASSISTANT_PROGRESS
                 ):
                     turn = await _load_turn_for_mutation(
-                        message.turn_id,
+                        claim.message.turn_id,
                         connection=connection,
                     )
                     if previous_status not in {
@@ -436,16 +505,10 @@ class PostgresOutboxRepository:
                         )
                     if turn.state is not TurnState.WAITING_DELIVERY:
                         raise ConcurrentTurnUpdateError(
-                            f"Claimable outbound {message.message_id} requires a "
+                            f"Claimable outbound {claim.message.message_id} requires a "
                             f"waiting_delivery turn, found {turn.state.value}"
                         )
-                claims.append(
-                    OutboundClaim(
-                        message=message,
-                        token=token,
-                        lease_expires_at=lease_expires_at,
-                    )
-                )
+                claims.append(claim)
 
         return tuple(
             sorted(
@@ -457,38 +520,116 @@ class PostgresOutboxRepository:
             )
         )
 
-    async def mark_outbound_delivered(
+    async def _cancel_abandoned_delivery_plans(
         self,
-        claim: OutboundClaim,
         *,
-        delivered_at: datetime,
-        external_message_id: str | None,
-    ) -> None:
-        """@brief 用 fencing token 标记 outbox 投递成功 / Mark outbox delivery successful with its fencing token.
+        cancelled_at: datetime,
+        connection: AsyncConnection,
+    ) -> int:
+        """@brief 取消所属 Turn 已永久失败的未领取消息并验证领域转换 / Cancel unclaimed messages of failed Turns and verify the domain transition.
 
-        @param claim 领取凭证 / Claim receipt.
-        @param delivered_at 成功时间 / Success time.
-        @param external_message_id 外部消息 ID / External message identifier.
+        @param cancelled_at 取消时刻 / Cancellation time.
+        @param connection 当前 claim 事务连接 / Current claim-transaction connection.
+        @return 已取消消息数 / Number of cancelled messages.
+        @note progress 消息保持独立，不随最终投递计划取消 / Progress messages remain independent of final-plan cancellation.
+        """
+
+        reason = OutboundFailure(_DELIVERY_PLAN_CANCELLED_ERROR)
+        cancelled = 0
+        while True:
+            rows = await db.fetch_all(
+                "WITH candidates AS ("
+                "SELECT candidate.message_id, candidate.status AS previous_status, "
+                "candidate.version AS previous_version, "
+                "candidate.attempt_count AS previous_attempt_count, "
+                "candidate.next_attempt_at AS previous_next_attempt_at, "
+                "candidate.updated_at AS previous_updated_at, "
+                "candidate.delivered_at AS previous_delivered_at, "
+                "candidate.external_message_id AS previous_external_message_id, "
+                "candidate.last_error AS previous_last_error, "
+                "candidate.claim_token AS previous_claim_token, "
+                "candidate.lease_expires_at AS previous_lease_expires_at "
+                "FROM conversation.outbound_messages AS candidate "
+                "JOIN conversation.conversation_turns AS turn "
+                "ON candidate.turn_id = turn.turn_id "
+                "WHERE turn.state = 'failed_final' "
+                "AND candidate.kind <> %s "
+                "AND candidate.status IN ('pending', 'retry_wait') "
+                "ORDER BY candidate.updated_at ASC, candidate.message_id ASC LIMIT %s "
+                "FOR UPDATE OF candidate"
+                ") UPDATE conversation.outbound_messages AS outbound "
+                "SET status = 'cancelled', version = outbound.version + 1, "
+                "next_attempt_at = NULL, updated_at = %s, claim_token = NULL, "
+                "lease_expires_at = NULL, "
+                "last_error = 'delivery plan cancelled after permanent sibling failure' "
+                "FROM candidates WHERE outbound.message_id = candidates.message_id "
+                "RETURNING outbound.message_id, outbound.conversation_id, outbound.turn_id, "
+                "outbound.delivery_stream_id, outbound.stream_sequence, outbound.kind, "
+                "outbound.payload, outbound.idempotency_key, outbound.status, outbound.version, "
+                "outbound.attempt_count, outbound.next_attempt_at, outbound.created_at, "
+                "outbound.updated_at, outbound.delivered_at, outbound.external_message_id, "
+                "outbound.last_error, outbound.traceparent, outbound.claim_token, "
+                "outbound.lease_expires_at, candidates.previous_status, "
+                "candidates.previous_version, candidates.previous_attempt_count, "
+                "candidates.previous_next_attempt_at, candidates.previous_updated_at, "
+                "candidates.previous_delivered_at, candidates.previous_external_message_id, "
+                "candidates.previous_last_error, candidates.previous_claim_token, "
+                "candidates.previous_lease_expires_at",
+                (
+                    SEND_TELEGRAM_ASSISTANT_PROGRESS.value,
+                    _BULK_TRANSITION_BATCH_SIZE,
+                    cancelled_at,
+                ),
+                connection=connection,
+            )
+            for row in rows:
+                persisted_cancelled, previous, previous_token, previous_lease = (
+                    _restore_outbound_transition(row)
+                )
+                if previous_token is not None or previous_lease is not None:
+                    raise RuntimeError(
+                        "Claimable abandoned outbound unexpectedly retained lease ownership"
+                    )
+                decision = previous.cancel(cancelled_at=cancelled_at, reason=reason)
+                if decision.message != persisted_cancelled:
+                    raise RuntimeError(
+                        "Abandoned-outbound SQL diverged from the domain cancellation"
+                    )
+            cancelled += len(rows)
+            if len(rows) < _BULK_TRANSITION_BATCH_SIZE:
+                return cancelled
+
+    async def complete_outbound(
+        self,
+        decision: OutboundDeliverySucceeded,
+    ) -> None:
+        """@brief 原子持久化成功领域决定 / Atomically persist a successful domain decision.
+
+        @param decision 已验证成功 settlement / Validated successful settlement.
         @return None / None.
         @raise StaleClaimError token 已失效时抛出 / Raised when the token is stale.
         """
 
-        timestamp = ensure_utc(delivered_at)
-        if timestamp < claim.message.updated_at:
-            raise ValueError("delivered_at cannot precede claim time")
+        claim = decision.claim
+        target = decision.message
+        delivered_at = target.delivered_at
+        if delivered_at is None:
+            raise RuntimeError("Successful outbound settlement lost its delivery time")
         async with db.transaction() as connection:
             rowcount = await db.execute(
                 "UPDATE conversation.outbound_messages "
-                "SET status = 'delivered', version = version + 1, delivered_at = %s, "
+                "SET status = 'delivered', version = %s, delivered_at = %s, "
                 "external_message_id = %s, updated_at = %s, next_attempt_at = NULL, "
                 "claim_token = NULL, lease_expires_at = NULL, last_error = NULL "
                 "WHERE message_id = CAST(%s AS UUID) AND status = 'processing' "
-                "AND claim_token = CAST(%s AS UUID)",
+                "AND version = %s AND claim_token = CAST(%s AS UUID)",
                 (
-                    timestamp,
-                    external_message_id,
-                    timestamp,
+                    target.version,
+                    delivered_at,
+                    target.external_message_id,
+                    target.updated_at,
                     str(claim.message.message_id),
+                    claim.expected_version,
                     str(claim.token),
                 ),
                 connection=connection,
@@ -500,47 +641,40 @@ class PostgresOutboxRepository:
             )
             await self._complete_delivery_turn_if_settled(
                 claim,
-                occurred_at=timestamp,
+                occurred_at=target.updated_at,
                 connection=connection,
             )
 
-    async def retry_outbound(
+    async def schedule_outbound_retry(
         self,
-        claim: OutboundClaim,
-        *,
-        failed_at: datetime,
-        retry_at: datetime,
-        error: str,
+        decision: OutboundRetryScheduled,
     ) -> None:
-        """@brief 安排 outbox 重试 / Schedule an outbox retry.
+        """@brief 原子持久化重试领域决定 / Atomically persist a domain retry decision.
 
-        @param claim 领取凭证 / Claim receipt.
-        @param failed_at 本次失败时间 / Failure time for this attempt.
-        @param retry_at 下次尝试时间 / Next attempt time.
-        @param error 失败原因 / Failure reason.
+        @param decision 已验证重试 settlement / Validated retry settlement.
         @return None / None.
         @raise StaleClaimError token 已失效时抛出 / Raised when the token is stale.
         """
 
-        failure_time = ensure_utc(failed_at)
-        retry_time = ensure_utc(retry_at)
-        if failure_time < claim.message.updated_at:
-            raise ValueError("failed_at cannot precede claim time")
-        if retry_time <= failure_time:
-            raise ValueError("retry_at must be later than failed_at")
-        normalized_error = _required_error(error)
+        claim = decision.claim
+        target = decision.message
+        if target.next_attempt_at is None or target.last_error is None:
+            raise RuntimeError("Retry settlement lost its schedule or failure")
         async with db.transaction() as connection:
             rowcount = await db.execute(
                 "UPDATE conversation.outbound_messages "
-                "SET status = 'retry_wait', version = version + 1, next_attempt_at = %s, "
+                "SET status = 'retry_wait', version = %s, next_attempt_at = %s, "
                 "updated_at = %s, claim_token = NULL, lease_expires_at = NULL, "
                 "last_error = %s WHERE message_id = CAST(%s AS UUID) "
-                "AND status = 'processing' AND claim_token = CAST(%s AS UUID)",
+                "AND status = 'processing' AND version = %s "
+                "AND claim_token = CAST(%s AS UUID)",
                 (
-                    retry_time,
-                    failure_time,
-                    normalized_error,
+                    target.version,
+                    target.next_attempt_at,
+                    target.updated_at,
+                    target.last_error,
                     str(claim.message.message_id),
+                    claim.expected_version,
                     str(claim.token),
                 ),
                 connection=connection,
@@ -551,37 +685,35 @@ class PostgresOutboxRepository:
                 str(claim.message.message_id),
             )
 
-    async def fail_outbound(
+    async def dead_letter_outbound(
         self,
-        claim: OutboundClaim,
-        *,
-        failed_at: datetime,
-        error: str,
+        decision: OutboundDeadLettered,
     ) -> None:
-        """@brief 将 outbox 消息标记最终失败 / Mark an outbox message finally failed.
+        """@brief 原子持久化最终失败领域决定 / Atomically persist a final-failure domain decision.
 
-        @param claim 领取凭证 / Claim receipt.
-        @param failed_at 最终失败时间 / Final failure time.
-        @param error 最终失败原因 / Final failure reason.
+        @param decision 已验证 dead-letter settlement / Validated dead-letter settlement.
         @return None / None.
         @raise StaleClaimError token 已失效时抛出 / Raised when the token is stale.
         """
 
-        failure_time = ensure_utc(failed_at)
-        if failure_time < claim.message.updated_at:
-            raise ValueError("failed_at cannot precede claim time")
-        normalized_error = _required_error(error)
+        claim = decision.claim
+        target = decision.message
+        if target.last_error is None:
+            raise RuntimeError("Dead-letter settlement lost its failure")
         async with db.transaction() as connection:
             rowcount = await db.execute(
                 "UPDATE conversation.outbound_messages "
-                "SET status = 'failed_final', version = version + 1, next_attempt_at = NULL, "
+                "SET status = 'failed_final', version = %s, next_attempt_at = NULL, "
                 "updated_at = %s, claim_token = NULL, lease_expires_at = NULL, "
                 "last_error = %s WHERE message_id = CAST(%s AS UUID) "
-                "AND status = 'processing' AND claim_token = CAST(%s AS UUID)",
+                "AND status = 'processing' AND version = %s "
+                "AND claim_token = CAST(%s AS UUID)",
                 (
-                    failure_time,
-                    normalized_error,
+                    target.version,
+                    target.updated_at,
+                    target.last_error,
                     str(claim.message.message_id),
+                    claim.expected_version,
                     str(claim.token),
                 ),
                 connection=connection,
@@ -593,13 +725,13 @@ class PostgresOutboxRepository:
             )
             await self._fail_delivery_turn(
                 claim,
-                occurred_at=failure_time,
-                error=normalized_error,
+                occurred_at=target.updated_at,
+                error=target.last_error,
                 connection=connection,
             )
             await self._cancel_unclaimed_delivery_plan(
                 claim,
-                occurred_at=failure_time,
+                occurred_at=target.updated_at,
                 connection=connection,
             )
 
@@ -719,24 +851,69 @@ class PostgresOutboxRepository:
         turn_id = claim.message.turn_id
         if turn_id is None or claim.message.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS:
             return
-        await db.execute(
-            "UPDATE conversation.outbound_messages "
-            "SET status = 'cancelled', version = version + 1, "
-            "next_attempt_at = NULL, updated_at = %s, claim_token = NULL, "
-            "lease_expires_at = NULL, "
-            "last_error = 'delivery plan cancelled after permanent sibling failure' "
-            "WHERE turn_id = CAST(%s AS UUID) "
-            "AND message_id <> CAST(%s AS UUID) "
-            "AND kind <> %s "
-            "AND status IN ('pending', 'retry_wait')",
-            (
-                occurred_at,
-                str(turn_id),
-                str(claim.message.message_id),
-                SEND_TELEGRAM_ASSISTANT_PROGRESS.value,
-            ),
-            connection=connection,
-        )
+        reason = OutboundFailure(_DELIVERY_PLAN_CANCELLED_ERROR)
+        while True:
+            rows = await db.fetch_all(
+                "WITH candidates AS ("
+                "SELECT candidate.message_id, candidate.status AS previous_status, "
+                "candidate.version AS previous_version, "
+                "candidate.attempt_count AS previous_attempt_count, "
+                "candidate.next_attempt_at AS previous_next_attempt_at, "
+                "candidate.updated_at AS previous_updated_at, "
+                "candidate.delivered_at AS previous_delivered_at, "
+                "candidate.external_message_id AS previous_external_message_id, "
+                "candidate.last_error AS previous_last_error, "
+                "candidate.claim_token AS previous_claim_token, "
+                "candidate.lease_expires_at AS previous_lease_expires_at "
+                "FROM conversation.outbound_messages AS candidate "
+                "WHERE candidate.turn_id = CAST(%s AS UUID) "
+                "AND candidate.message_id <> CAST(%s AS UUID) "
+                "AND candidate.kind <> %s "
+                "AND candidate.status IN ('pending', 'retry_wait') "
+                "ORDER BY candidate.stream_sequence ASC, candidate.message_id ASC LIMIT %s "
+                "FOR UPDATE OF candidate"
+                ") UPDATE conversation.outbound_messages AS outbound "
+                "SET status = 'cancelled', version = outbound.version + 1, "
+                "next_attempt_at = NULL, updated_at = %s, claim_token = NULL, "
+                "lease_expires_at = NULL, "
+                "last_error = 'delivery plan cancelled after permanent sibling failure' "
+                "FROM candidates WHERE outbound.message_id = candidates.message_id "
+                "RETURNING outbound.message_id, outbound.conversation_id, outbound.turn_id, "
+                "outbound.delivery_stream_id, outbound.stream_sequence, outbound.kind, "
+                "outbound.payload, outbound.idempotency_key, outbound.status, outbound.version, "
+                "outbound.attempt_count, outbound.next_attempt_at, outbound.created_at, "
+                "outbound.updated_at, outbound.delivered_at, outbound.external_message_id, "
+                "outbound.last_error, outbound.traceparent, outbound.claim_token, "
+                "outbound.lease_expires_at, candidates.previous_status, "
+                "candidates.previous_version, candidates.previous_attempt_count, "
+                "candidates.previous_next_attempt_at, candidates.previous_updated_at, "
+                "candidates.previous_delivered_at, candidates.previous_external_message_id, "
+                "candidates.previous_last_error, candidates.previous_claim_token, "
+                "candidates.previous_lease_expires_at",
+                (
+                    str(turn_id),
+                    str(claim.message.message_id),
+                    SEND_TELEGRAM_ASSISTANT_PROGRESS.value,
+                    _BULK_TRANSITION_BATCH_SIZE,
+                    occurred_at,
+                ),
+                connection=connection,
+            )
+            for row in rows:
+                persisted_cancelled, previous, previous_token, previous_lease = (
+                    _restore_outbound_transition(row)
+                )
+                if previous_token is not None or previous_lease is not None:
+                    raise RuntimeError(
+                        "Claimable sibling outbound unexpectedly retained lease ownership"
+                    )
+                decision = previous.cancel(cancelled_at=occurred_at, reason=reason)
+                if decision.message != persisted_cancelled:
+                    raise RuntimeError(
+                        "Sibling-cancellation SQL diverged from the domain transition"
+                    )
+            if len(rows) < _BULK_TRANSITION_BATCH_SIZE:
+                return
 
     async def recover_expired_outbound_leases(self, *, now: datetime) -> int:
         """@brief 回收崩溃 worker 遗留的 outbox 租约 / Recover outbox leases stranded by crashed workers.
@@ -747,33 +924,79 @@ class PostgresOutboxRepository:
 
         timestamp = ensure_utc(now)
         retry_time = timestamp + timedelta(microseconds=1)
-        recovery_error = "recovered expired worker lease"
         async with db.transaction() as connection:
-            rows = await db.fetch_all(
-                "WITH expired AS ("
-                "SELECT message_id FROM conversation.outbound_messages "
-                "WHERE status = 'processing' AND lease_expires_at <= %s "
-                "FOR UPDATE SKIP LOCKED"
-                ") UPDATE conversation.outbound_messages AS outbound "
-                "SET status = 'retry_wait', version = outbound.version + 1, "
-                "next_attempt_at = %s, updated_at = %s, claim_token = NULL, "
-                "lease_expires_at = NULL, last_error = %s FROM expired "
-                "WHERE outbound.message_id = expired.message_id "
-                "RETURNING outbound.message_id, outbound.conversation_id, outbound.turn_id, "
-                "outbound.delivery_stream_id, outbound.stream_sequence, outbound.kind, "
-                "outbound.payload, outbound.idempotency_key, outbound.status, outbound.version, "
-                "outbound.attempt_count, outbound.next_attempt_at, outbound.created_at, "
-                "outbound.updated_at, outbound.delivered_at, outbound.external_message_id, "
-                "outbound.last_error",
-                (
-                    timestamp,
-                    retry_time,
-                    timestamp,
-                    recovery_error,
-                ),
-                connection=connection,
-            )
-            return len(rows)
+            failure = OutboundFailure(_EXPIRED_LEASE_RECOVERY_ERROR)
+            recovered = 0
+            while True:
+                rows = await db.fetch_all(
+                    "WITH expired AS ("
+                    "SELECT candidate.message_id, candidate.status AS previous_status, "
+                    "candidate.version AS previous_version, "
+                    "candidate.attempt_count AS previous_attempt_count, "
+                    "candidate.next_attempt_at AS previous_next_attempt_at, "
+                    "candidate.updated_at AS previous_updated_at, "
+                    "candidate.delivered_at AS previous_delivered_at, "
+                    "candidate.external_message_id AS previous_external_message_id, "
+                    "candidate.last_error AS previous_last_error, "
+                    "candidate.claim_token AS previous_claim_token, "
+                    "candidate.lease_expires_at AS previous_lease_expires_at "
+                    "FROM conversation.outbound_messages AS candidate "
+                    "WHERE candidate.status = 'processing' "
+                    "AND candidate.lease_expires_at <= %s "
+                    "ORDER BY candidate.lease_expires_at ASC, candidate.message_id ASC "
+                    "LIMIT %s FOR UPDATE OF candidate SKIP LOCKED"
+                    ") UPDATE conversation.outbound_messages AS outbound "
+                    "SET status = 'retry_wait', version = outbound.version + 1, "
+                    "next_attempt_at = %s, updated_at = %s, claim_token = NULL, "
+                    "lease_expires_at = NULL, last_error = %s FROM expired "
+                    "WHERE outbound.message_id = expired.message_id "
+                    "RETURNING outbound.message_id, outbound.conversation_id, outbound.turn_id, "
+                    "outbound.delivery_stream_id, outbound.stream_sequence, outbound.kind, "
+                    "outbound.payload, outbound.idempotency_key, outbound.status, outbound.version, "
+                    "outbound.attempt_count, outbound.next_attempt_at, outbound.created_at, "
+                    "outbound.updated_at, outbound.delivered_at, outbound.external_message_id, "
+                    "outbound.last_error, outbound.traceparent, outbound.claim_token, "
+                    "outbound.lease_expires_at, expired.previous_status, "
+                    "expired.previous_version, expired.previous_attempt_count, "
+                    "expired.previous_next_attempt_at, expired.previous_updated_at, "
+                    "expired.previous_delivered_at, expired.previous_external_message_id, "
+                    "expired.previous_last_error, expired.previous_claim_token, "
+                    "expired.previous_lease_expires_at",
+                    (
+                        timestamp,
+                        _BULK_TRANSITION_BATCH_SIZE,
+                        retry_time,
+                        timestamp,
+                        _EXPIRED_LEASE_RECOVERY_ERROR,
+                    ),
+                    connection=connection,
+                )
+                for row in rows:
+                    persisted_retry, previous, previous_token, previous_lease = (
+                        _restore_outbound_transition(row)
+                    )
+                    if previous_token is None or previous_lease is None:
+                        raise RuntimeError(
+                            "Expired processing outbound lost its lease ownership"
+                        )
+                    claim = OutboundClaim.from_processing(
+                        previous,
+                        token=previous_token,
+                        lease_expires_at=previous_lease,
+                    )
+                    decision = previous.recover_expired_lease(
+                        claim,
+                        recovered_at=timestamp,
+                        retry_at=retry_time,
+                        failure=failure,
+                    )
+                    if decision.message != persisted_retry:
+                        raise RuntimeError(
+                            "Outbound lease-recovery SQL diverged from the domain transition"
+                        )
+                recovered += len(rows)
+                if len(rows) < _BULK_TRANSITION_BATCH_SIZE:
+                    return recovered
 
 
 __all__ = ["PostgresOutboxRepository", "StandaloneOutboxWriter"]

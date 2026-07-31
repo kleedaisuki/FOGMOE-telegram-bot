@@ -68,7 +68,7 @@ def _message(
     @return 测试消息 / Test message.
     """
 
-    return OutboundMessage(
+    return OutboundMessage.restore(
         draft=OutboundDraft(
             message_id=OutboundMessageId.new(),
             conversation_id=ConversationId("assistant-user:7"),
@@ -85,6 +85,9 @@ def _message(
         attempt_count=1,
         next_attempt_at=None,
         updated_at=NOW + timedelta(seconds=1),
+        delivered_at=None,
+        external_message_id=None,
+        last_error=None,
     )
 
 

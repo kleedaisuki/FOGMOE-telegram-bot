@@ -50,6 +50,9 @@ MESSAGE_UUID = UUID("33333333-3333-4333-8333-333333333333")
 TRACEPARENT = "00-11111111111141118111111111111111-2222222222224222-01"
 """@brief 测试用 durable trace carrier / Durable trace carrier used in tests."""
 
+LEASE_UUID = UUID("44444444-4444-4444-8444-444444444444")
+"""@brief 测试 fencing token / Test fencing token."""
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 """@brief 项目根目录 / Project root."""
 
@@ -106,6 +109,22 @@ def _outbound_row(
 
     next_attempt_at = NOW if status in {"pending", "retry_wait"} else None
     delivered_at = NOW if status == "delivered" else None
+    version = {
+        "pending": 0,
+        "processing": 1,
+        "retry_wait": 2,
+        "delivered": 2,
+        "failed_final": 2,
+        "cancelled": 1,
+    }[status]
+    attempt_count = 0 if status in {"pending", "cancelled"} else 1
+    last_error = (
+        "temporary delivery failure"
+        if status == "retry_wait"
+        else "permanent delivery failure"
+        if status == "failed_final"
+        else None
+    )
     return (
         OUTBOUND_UUID,
         "telegram:chat:-100:user:42:thread:9",
@@ -116,14 +135,14 @@ def _outbound_row(
         {"chat_id": -100, "text": "hello"},
         "turn:answer",
         status,
-        1 if status == "processing" else 0,
-        1 if status == "processing" else 0,
+        version,
+        attempt_count,
         next_attempt_at,
         NOW - timedelta(seconds=1),
         NOW,
         delivered_at,
         None,
-        None,
+        last_error,
         TRACEPARENT,
     )
 
@@ -140,9 +159,109 @@ def _outbound_claim_row(
     @return claim UPDATE RETURNING 行 / Claim UPDATE RETURNING row.
     """
 
+    processing = list(_outbound_row(status="processing", turn_id=turn_id))
+    if previous_status == "pending":
+        previous_version = 0
+        previous_attempt_count = 0
+        previous_error = None
+    elif previous_status == "retry_wait":
+        previous_version = 2
+        previous_attempt_count = 1
+        previous_error = "temporary delivery failure"
+        processing[9] = 3
+        processing[10] = 2
+    else:
+        raise ValueError(f"Unsupported pre-claim status: {previous_status}")
     return (
-        *_outbound_row(status="processing", turn_id=turn_id),
+        *processing,
         previous_status,
+        previous_version,
+        previous_attempt_count,
+        NOW,
+        NOW,
+        previous_error,
+    )
+
+
+def _outbound_cancellation_row(
+    *,
+    cancelled_at: datetime,
+    previous_status: str = "pending",
+    turn_id: UUID | None = TURN_UUID,
+) -> tuple[object, ...]:
+    """@brief 构造取消操作的完整 pre/post 行 / Build a complete cancellation pre/post row.
+
+    @param cancelled_at 取消时刻 / Cancellation time.
+    @param previous_status 取消前 pending 或 retry_wait / Pending or retry-wait status before cancellation.
+    @param turn_id 可选来源 Turn / Optional source Turn.
+    @return bulk UPDATE RETURNING 行 / Bulk UPDATE RETURNING row.
+    """
+
+    if previous_status == "pending":
+        previous_version = 0
+        previous_attempt_count = 0
+        previous_error = None
+    elif previous_status == "retry_wait":
+        previous_version = 2
+        previous_attempt_count = 1
+        previous_error = "temporary delivery failure"
+    else:
+        raise ValueError(f"Unsupported pre-cancellation status: {previous_status}")
+    cancelled = list(_outbound_row(status="cancelled", turn_id=turn_id))
+    cancelled[9] = previous_version + 1
+    cancelled[10] = previous_attempt_count
+    cancelled[13] = cancelled_at
+    cancelled[16] = (
+        "delivery plan cancelled after permanent sibling failure"
+    )
+    return (
+        *cancelled,
+        None,
+        None,
+        previous_status,
+        previous_version,
+        previous_attempt_count,
+        NOW if previous_status == "pending" else cancelled_at,
+        NOW,
+        None,
+        None,
+        previous_error,
+        None,
+        None,
+    )
+
+
+def _outbound_recovery_row(
+    *,
+    recovered_at: datetime,
+    turn_id: UUID | None = TURN_UUID,
+) -> tuple[object, ...]:
+    """@brief 构造过期 lease recovery 的完整 pre/post 行 / Build a complete expired-lease recovery pre/post row.
+
+    @param recovered_at 回收时刻 / Recovery time.
+    @param turn_id 可选来源 Turn / Optional source Turn.
+    @return bulk UPDATE RETURNING 行 / Bulk UPDATE RETURNING row.
+    """
+
+    previous_updated_at = recovered_at - timedelta(seconds=1)
+    recovered = list(_outbound_row(status="retry_wait", turn_id=turn_id))
+    recovered[11] = recovered_at + timedelta(microseconds=1)
+    recovered[13] = recovered_at
+    recovered[16] = "recovered expired worker lease"
+    return (
+        *recovered,
+        None,
+        None,
+        "processing",
+        1,
+        1,
+        None,
+        previous_updated_at,
+        None,
+        None,
+        None,
+        LEASE_UUID,
+        recovered_at,
     )
 
 

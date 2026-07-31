@@ -32,7 +32,11 @@ from fogmoe_bot.application.runtime import (
 )
 from fogmoe_bot.domain.conversation.outbox import (
     OutboundClaim,
+    OutboundDeadLettered,
+    OutboundDeliverySucceeded,
+    OutboundFailure,
     OutboundMessage,
+    OutboundRetryScheduled,
 )
 from fogmoe_bot.domain.observability.conventions import EventName, MetricName, Outcome
 from fogmoe_bot.domain.observability.signals import SpanKind, SpanStatus
@@ -61,54 +65,37 @@ class OutboxPersistence(Protocol):
 
         ...
 
-    async def mark_outbound_delivered(
+    async def complete_outbound(
         self,
-        claim: OutboundClaim,
-        *,
-        delivered_at: datetime,
-        external_message_id: str | None,
+        decision: OutboundDeliverySucceeded,
     ) -> None:
-        """@brief 以 fencing token 确认投递 / Acknowledge delivery with the fencing token.
+        """@brief 原子持久化领域成功决定 / Atomically persist a successful domain decision.
 
-        @param claim 当前 claim / Current claim.
-        @param delivered_at 成功时间 / Delivery time.
-        @param external_message_id 外部消息标识 / External message identifier.
+        @param decision 已验证成功 settlement / Validated successful settlement.
         @return None / None.
         """
 
         ...
 
-    async def retry_outbound(
+    async def schedule_outbound_retry(
         self,
-        claim: OutboundClaim,
-        *,
-        failed_at: datetime,
-        retry_at: datetime,
-        error: str,
+        decision: OutboundRetryScheduled,
     ) -> None:
-        """@brief 以 fencing token 安排重试 / Schedule a retry with the fencing token.
+        """@brief 原子持久化领域重试决定 / Atomically persist a domain retry decision.
 
-        @param claim 当前 claim / Current claim.
-        @param failed_at 本次失败时间 / Failure time.
-        @param retry_at 下次可领取时间 / Next claimable time.
-        @param error 有界错误摘要 / Bounded error summary.
+        @param decision 已验证重试 settlement / Validated retry settlement.
         @return None / None.
         """
 
         ...
 
-    async def fail_outbound(
+    async def dead_letter_outbound(
         self,
-        claim: OutboundClaim,
-        *,
-        failed_at: datetime,
-        error: str,
+        decision: OutboundDeadLettered,
     ) -> None:
-        """@brief 以 fencing token 标记永久失败 / Mark final failure with the fencing token.
+        """@brief 原子持久化领域最终失败决定 / Atomically persist a domain final-failure decision.
 
-        @param claim 当前 claim / Current claim.
-        @param failed_at 最终失败时间 / Final-failure time.
-        @param error 有界错误摘要 / Bounded error summary.
+        @param decision 已验证 dead-letter settlement / Validated dead-letter settlement.
         @return None / None.
         """
 
@@ -524,11 +511,12 @@ class OutboxWorker:
                 await self._finalize_failure(claim, error)
                 return
 
-            await self._repository.mark_outbound_delivered(
+            decision = message.succeed(
                 claim,
                 delivered_at=self._clock.now(),
                 external_message_id=receipt.external_message_id,
             )
+            await self._repository.complete_outbound(decision)
             self._telemetry.counter(
                 MetricName.OUTBOX_OUTCOMES,
                 attributes={
@@ -660,13 +648,15 @@ class OutboxWorker:
             error=error,
         )
         error_text = self._error_text(error)
+        failure = OutboundFailure(error_text)
         if isinstance(decision, RetryDeliveryAt):
-            await self._repository.retry_outbound(
+            retry = claim.message.retry(
                 claim,
                 failed_at=failed_at,
                 retry_at=decision.at,
-                error=error_text,
+                failure=failure,
             )
+            await self._repository.schedule_outbound_retry(retry)
             self._telemetry.counter(
                 MetricName.OUTBOX_OUTCOMES,
                 attributes={
@@ -675,11 +665,12 @@ class OutboxWorker:
                 },
             )
             return
-        await self._repository.fail_outbound(
+        dead_letter = claim.message.dead_letter(
             claim,
             failed_at=failed_at,
-            error=error_text,
+            failure=failure,
         )
+        await self._repository.dead_letter_outbound(dead_letter)
         self._telemetry.counter(
             MetricName.OUTBOX_OUTCOMES,
             attributes={

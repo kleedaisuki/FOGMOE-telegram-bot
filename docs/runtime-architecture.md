@@ -544,7 +544,7 @@ flowchart TD
 3. Router 根据 command 的 domain identity 计算 `AggregateKey`，提交给有界 keyed mailbox；它不调用 feature handler 链。
 4. Workflow 在 mailbox turn 中加载 snapshot，执行 pure transition，短 transaction 内保存状态并写 outbox/activity request。
 5. LLM、媒体和其他慢 activity 不持有 mailbox。完成后以 `InferenceSucceeded/Failed(turn_id, expected_version, ...)` 重新进入同 key；过期 version 被 domain transition 拒绝。若将来允许同一 version 内并行 speculative attempt，再增加显式 generation。
-6. Outbox sender 独立 claim 已提交消息，调用 Telegram，随后用 fencing token 记录成功或下一次重试。
+6. Outbox sender 独立 claim 已提交消息，调用 Telegram，随后让聚合产生成功、重试或 dead-letter settlement；adapter 同时比较 processing version 与 fencing token 后持久化。
 
 ### 6.2 `KeyedMailboxRuntime` 契约
 
@@ -661,7 +661,7 @@ Microsoft 的生产模式说明同样要求 Half-Open 只放行有限请求，�
 
 - [identity.py](../src/fogmoe_bot/domain/conversation/identity.py)：`ConversationId`、`TurnId`、`UpdateId`、`OutboundMessageId`、`DeliveryStreamId` 等 identity value objects
 - [turn.py](../src/fogmoe_bot/domain/conversation/turn.py)：`TurnState`、`TurnEvent` 与 `ConversationTurn` 状态机
-- [inbox.py](../src/fogmoe_bot/domain/conversation/inbox.py)：`InboundUpdate` 只表达路由可读的不可变入口事实；`InboxItem` 以穷尽状态和拥有 receive/claim/succeed/retry/dead-letter 转换，`InboxClaim` 携带 version/token/lease ownership；[inference.py](../src/fogmoe_bot/domain/conversation/inference.py)、[message.py](../src/fogmoe_bot/domain/conversation/message.py)、[outbox.py](../src/fogmoe_bot/domain/conversation/outbox.py) 分别拥有其 aggregate/snapshot 与 fencing claim
+- [inbox.py](../src/fogmoe_bot/domain/conversation/inbox.py)：`InboundUpdate` 只表达路由可读的不可变入口事实；`InboxItem` 以穷尽状态拥有 receive/claim/succeed/retry/dead-letter 转换，`InboxClaim` 携带 version/token/lease ownership；[outbox.py](../src/fogmoe_bot/domain/conversation/outbox.py) 同样由 `OutboundMessage` 聚合拥有 enqueue/claim/succeed/retry/dead-letter/cancel，application 只选择退避策略，PostgreSQL adapter 只校验 claim pre/post snapshot 并以 expected-version + token CAS 持久化 settlement；[inference.py](../src/fogmoe_bot/domain/conversation/inference.py)、[message.py](../src/fogmoe_bot/domain/conversation/message.py) 分别拥有其 activity/snapshot
 - [workflow_results.py](../src/fogmoe_bot/domain/conversation/workflow_results.py)：跨 aggregate 短事务的类型化结果
 - application feature module 持有所需最小 persistence protocol，PostgreSQL adapter 由 `infrastructure/database/conversation_workflow/` 按 inbox/turn/inference/outbox 直接实现
 

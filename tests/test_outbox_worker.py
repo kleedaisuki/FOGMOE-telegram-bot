@@ -26,8 +26,11 @@ from fogmoe_bot.domain.conversation.identity import (
 from fogmoe_bot.domain.conversation.outbox import (
     SEND_TELEGRAM_MESSAGE,
     OutboundClaim,
+    OutboundDeadLettered,
+    OutboundDeliverySucceeded,
     OutboundDraft,
     OutboundMessage,
+    OutboundRetryScheduled,
     OutboundStatus,
 )
 
@@ -57,17 +60,20 @@ def _claim(
         idempotency_key=f"answer:{sequence}",
         created_at=NOW,
     )
-    message = OutboundMessage(
+    message = OutboundMessage.restore(
         draft=draft,
         stream_sequence=MessageSequence(sequence),
         status=OutboundStatus.PROCESSING,
-        version=1,
+        version=attempt_count * 2 - 1,
         attempt_count=attempt_count,
         next_attempt_at=None,
         updated_at=NOW + timedelta(seconds=1),
+        delivered_at=None,
+        external_message_id=None,
+        last_error=None,
     )
-    return OutboundClaim(
-        message=message,
+    return OutboundClaim.from_processing(
+        message,
         token=LeaseToken.new(),
         lease_expires_at=NOW + timedelta(minutes=1),
     )
@@ -101,9 +107,9 @@ class _Repository:
 
         self.claims = list(claims)
         self.claim_limits: list[int] = []
-        self.delivered: list[tuple[OutboundClaim, datetime, str | None]] = []
-        self.retried: list[tuple[OutboundClaim, datetime, datetime, str]] = []
-        self.failed: list[tuple[OutboundClaim, datetime, str]] = []
+        self.delivered: list[OutboundDeliverySucceeded] = []
+        self.retried: list[OutboundRetryScheduled] = []
+        self.failed: list[OutboundDeadLettered] = []
         self.recover_calls = 0
         self.recovery_failures = recovery_failures
 
@@ -128,58 +134,41 @@ class _Repository:
         del self.claims[:limit]
         return claimed
 
-    async def mark_outbound_delivered(
+    async def complete_outbound(
         self,
-        claim: OutboundClaim,
-        *,
-        delivered_at: datetime,
-        external_message_id: str | None,
+        decision: OutboundDeliverySucceeded,
     ) -> None:
         """@brief 记录成功确认 / Record successful acknowledgement.
 
-        @param claim 当前 claim / Current claim.
-        @param delivered_at 成功时间 / Delivery time.
-        @param external_message_id 外部 ID / External ID.
+        @param decision 成功 settlement / Successful settlement.
         @return None / None.
         """
 
-        self.delivered.append((claim, delivered_at, external_message_id))
+        self.delivered.append(decision)
 
-    async def retry_outbound(
+    async def schedule_outbound_retry(
         self,
-        claim: OutboundClaim,
-        *,
-        failed_at: datetime,
-        retry_at: datetime,
-        error: str,
+        decision: OutboundRetryScheduled,
     ) -> None:
         """@brief 记录重试 / Record retry.
 
-        @param claim 当前 claim / Current claim.
-        @param failed_at 失败时间 / Failure time.
-        @param retry_at 重试时间 / Retry time.
-        @param error 错误摘要 / Error summary.
+        @param decision 重试 settlement / Retry settlement.
         @return None / None.
         """
 
-        self.retried.append((claim, failed_at, retry_at, error))
+        self.retried.append(decision)
 
-    async def fail_outbound(
+    async def dead_letter_outbound(
         self,
-        claim: OutboundClaim,
-        *,
-        failed_at: datetime,
-        error: str,
+        decision: OutboundDeadLettered,
     ) -> None:
         """@brief 记录永久失败 / Record final failure.
 
-        @param claim 当前 claim / Current claim.
-        @param failed_at 失败时间 / Failure time.
-        @param error 错误摘要 / Error summary.
+        @param decision dead-letter settlement / Dead-letter settlement.
         @return None / None.
         """
 
-        self.failed.append((claim, failed_at, error))
+        self.failed.append(decision)
 
     async def recover_expired_outbound_leases(self, *, now: datetime) -> int:
         """@brief 记录租约回收 / Record lease recovery.
@@ -275,9 +264,12 @@ def test_success_marks_claim_delivered_with_external_id() -> None:
 
         await worker.process_claim(claim)
 
-        assert repository.delivered == [
-            (claim, NOW + timedelta(seconds=2), "telegram:42")
-        ]
+        assert len(repository.delivered) == 1
+        assert repository.delivered[0].claim == claim
+        assert repository.delivered[0].message.delivered_at == NOW + timedelta(
+            seconds=2
+        )
+        assert repository.delivered[0].message.external_message_id == "telegram:42"
         assert repository.retried == []
         assert repository.failed == []
 
@@ -300,10 +292,12 @@ def test_retry_after_is_honoured_before_jitter() -> None:
 
         await worker.process_claim(_claim())
 
-        _, failed_at, retry_at, persisted_error = repository.retried[0]
+        retry = repository.retried[0]
+        failed_at = retry.message.updated_at
         assert failed_at == NOW + timedelta(seconds=2)
-        assert retry_at == failed_at + timedelta(seconds=17)
-        assert "retry_after_seconds=17" in persisted_error
+        assert retry.message.next_attempt_at == failed_at + timedelta(seconds=17)
+        assert retry.message.last_error is not None
+        assert "retry_after_seconds=17" in retry.message.last_error
 
     asyncio.run(scenario())
 
@@ -325,11 +319,10 @@ def test_permanent_failure_is_not_retried() -> None:
         await worker.process_claim(claim)
 
         assert repository.retried == []
-        assert repository.failed[0][:2] == (
-            claim,
-            NOW + timedelta(seconds=2),
-        )
-        assert "category=permission" in repository.failed[0][2]
+        assert repository.failed[0].claim == claim
+        assert repository.failed[0].message.updated_at == NOW + timedelta(seconds=2)
+        assert repository.failed[0].message.last_error is not None
+        assert "category=permission" in repository.failed[0].message.last_error
 
     asyncio.run(scenario())
 
@@ -451,8 +444,11 @@ def test_attempt_timeout_is_persisted_as_ambiguous_retry() -> None:
 
         await worker.process_claim(_claim())
 
-        assert "category=ambiguous_timeout" in repository.retried[0][3]
-        assert "outcome_ambiguous=true" in repository.retried[0][3]
-        assert repository.retried[0][2] > repository.retried[0][1]
+        retry = repository.retried[0].message
+        assert retry.last_error is not None
+        assert "category=ambiguous_timeout" in retry.last_error
+        assert "outcome_ambiguous=true" in retry.last_error
+        assert retry.next_attempt_at is not None
+        assert retry.next_attempt_at > retry.updated_at
 
     asyncio.run(scenario())

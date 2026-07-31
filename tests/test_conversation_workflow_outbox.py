@@ -9,8 +9,10 @@ import pytest
 from conversation_workflow_testkit import (
     NOW,
     TURN_UUID,
+    _outbound_cancellation_row,
     _outbound_claim_row,
     _outbound_draft,
+    _outbound_recovery_row,
     _outbound_row,
     _standalone_outbound_draft,
     _TransactionContext,
@@ -30,6 +32,7 @@ from fogmoe_bot.domain.conversation.outbox import (
     SEND_TELEGRAM_ASSISTANT_PROGRESS,
     OutboundClaim,
     OutboundDraft,
+    OutboundFailure,
     OutboundStatus,
 )
 from fogmoe_bot.infrastructure.database import db
@@ -40,6 +43,21 @@ from fogmoe_bot.infrastructure.database.conversation_workflow import turn_uow
 from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
     PostgresOutboxRepository,
 )
+
+
+def _claim_for(row: tuple[object, ...]) -> OutboundClaim:
+    """@brief 从 processing 数据库行签发测试 claim / Issue a test claim from a processing database row.
+
+    @param row processing outbox 行 / Processing outbox row.
+    @return 带 fencing ownership 的 claim / Claim carrying fencing ownership.
+    """
+
+    message = outbox_repository._map_outbound(row)
+    return OutboundClaim.from_processing(
+        message,
+        token=LeaseToken.new(),
+        lease_expires_at=NOW + timedelta(seconds=30),
+    )
 
 
 def test_claim_outbound_uses_skip_locked_fencing_and_delivery_stream_head(
@@ -60,6 +78,8 @@ def test_claim_outbound_uses_skip_locked_fencing_and_delivery_stream_head(
         """@brief 捕获领取 SQL / Capture claim SQL."""
 
         calls.append((sql, params, connection))
+        if "turn.state = 'failed_final'" in sql:
+            return []
         return [_outbound_claim_row(previous_status="pending")]
 
     async def fake_load_turn(
@@ -98,17 +118,116 @@ def test_claim_outbound_uses_skip_locked_fencing_and_delivery_stream_head(
     assert claims[0].message.status is OutboundStatus.PROCESSING
     assert int(claims[0].message.stream_sequence) == 7
     assert claims[0].lease_expires_at == NOW + timedelta(seconds=30)
-    sql, params, used_connection = calls[0]
-    assert "delivery plan cancelled after permanent sibling failure" in sql
-    assert "turn.state = 'failed_final'" in sql
+    abandoned_sql, _, abandoned_connection = calls[0]
+    sql, params, used_connection = calls[1]
+    assert "delivery plan cancelled after permanent sibling failure" in abandoned_sql
+    assert "turn.state = 'failed_final'" in abandoned_sql
+    assert "LIMIT %s" in abandoned_sql
     assert "turn.state = 'waiting_delivery'" in sql
     assert "FOR UPDATE OF candidate SKIP LOCKED" in sql
+    assert "candidate.version AS previous_version" in sql
     assert "earlier.delivery_stream_id = candidate.delivery_stream_id" in sql
     assert "earlier.stream_sequence < candidate.stream_sequence" in sql
     assert used_connection is connection
+    assert abandoned_connection is connection
     assert params[1] == SEND_TELEGRAM_ASSISTANT_PROGRESS.value
-    assert params[3] == SEND_TELEGRAM_ASSISTANT_PROGRESS.value
-    assert UUID(str(params[5])) == claims[0].token.value
+    assert UUID(str(params[3])) == claims[0].token.value
+    assert claims[0].expected_version == 1
+
+
+def test_claim_outbound_rejects_sql_domain_transition_divergence(
+    monkeypatch: Any,
+) -> None:
+    """@brief claim SQL 与领域转换不一致时事务快速失败 / A claim transaction fails fast when SQL diverges from the domain transition.
+
+    @param monkeypatch pytest 替换工具 / pytest replacement utility.
+    @return None / None.
+    """
+
+    connection = object()
+    repository = PostgresOutboxRepository()
+    divergent = list(_outbound_claim_row(previous_status="pending"))
+    divergent[9] = 2
+
+    async def fake_fetch_all(
+        sql: str,
+        params: tuple[object, ...],
+        *,
+        connection: object,
+    ) -> list[tuple[object, ...]]:
+        """@brief 返回错误递增两个版本的 post snapshot / Return a post-snapshot advanced by two versions.
+
+        @param sql claim SQL / Claim SQL.
+        @param params SQL 参数 / SQL parameters.
+        @param connection 当前连接 / Current connection.
+        @return 错误 post snapshot / Divergent post-snapshot.
+        """
+
+        del params, connection
+        if "turn.state = 'failed_final'" in sql:
+            return []
+        return [tuple(divergent)]
+
+    monkeypatch.setattr(db, "transaction", lambda: _TransactionContext(connection))
+    monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
+
+    with pytest.raises(RuntimeError, match="diverged from the domain"):
+        asyncio.run(
+            repository.claim_outbound(
+                now=NOW,
+                limit=1,
+                lease_for=timedelta(seconds=30),
+            )
+        )
+
+
+def test_claim_outbound_validates_abandoned_plan_cancellation(
+    monkeypatch: Any,
+) -> None:
+    """@brief claim 事务用领域 cancel 对照 abandoned bulk SQL / The claim transaction checks abandoned bulk SQL against the domain cancellation.
+
+    @param monkeypatch pytest 替换工具 / pytest replacement utility.
+    @return None / None.
+    """
+
+    connection = object()
+    repository = PostgresOutboxRepository()
+    calls = 0
+
+    async def fake_fetch_all(
+        sql: str,
+        params: tuple[object, ...],
+        *,
+        connection: object,
+    ) -> list[tuple[object, ...]]:
+        """@brief 先返回 abandoned cancellation，再返回空 claim batch / Return an abandoned cancellation followed by an empty claim batch.
+
+        @param sql 当前 SQL / Current SQL.
+        @param params SQL 参数 / SQL parameters.
+        @param connection 当前连接 / Current connection.
+        @return 当前阶段的数据库行 / Rows for the current stage.
+        """
+
+        nonlocal calls
+        del params, connection
+        calls += 1
+        if "turn.state = 'failed_final'" in sql:
+            return [_outbound_cancellation_row(cancelled_at=NOW)]
+        return []
+
+    monkeypatch.setattr(db, "transaction", lambda: _TransactionContext(connection))
+    monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
+
+    claims = asyncio.run(
+        repository.claim_outbound(
+            now=NOW,
+            limit=1,
+            lease_for=timedelta(seconds=30),
+        )
+    )
+
+    assert claims == ()
+    assert calls == 2
 
 
 def test_progress_outbound_is_claimable_while_its_turn_is_processing(
@@ -134,8 +253,10 @@ def test_progress_outbound_is_claimable_while_its_turn_is_processing(
     ) -> list[tuple[object, ...]]:
         """@brief 返回 progress claim 并验证推理期例外 / Return a progress claim and verify the inference-time exception."""
 
+        if "turn.state = 'failed_final'" in sql:
+            return []
         assert "candidate.kind = %s" in sql
-        assert params[3] == SEND_TELEGRAM_ASSISTANT_PROGRESS.value
+        assert params[1] == SEND_TELEGRAM_ASSISTANT_PROGRESS.value
         return [tuple(progress_row)]
 
     async def unexpected_turn_load(*args: object, **kwargs: object) -> object:
@@ -225,21 +346,23 @@ def test_progress_delivery_and_final_failure_do_not_mutate_the_turn(
 
             row = list(_outbound_row(status="processing"))
             row[5] = SEND_TELEGRAM_ASSISTANT_PROGRESS.value
-            return OutboundClaim(
-                message=outbox_repository._map_outbound(tuple(row)),
-                token=LeaseToken.new(),
-                lease_expires_at=NOW + timedelta(seconds=30),
-            )
+            return _claim_for(tuple(row))
 
-        await repository.mark_outbound_delivered(
-            progress_claim(),
-            delivered_at=NOW + timedelta(seconds=1),
-            external_message_id="101",
+        successful_claim = progress_claim()
+        await repository.complete_outbound(
+            successful_claim.message.succeed(
+                successful_claim,
+                delivered_at=NOW + timedelta(seconds=1),
+                external_message_id="101",
+            )
         )
-        await repository.fail_outbound(
-            progress_claim(),
-            failed_at=NOW + timedelta(seconds=1),
-            error="permanent Telegram rejection",
+        failed_claim = progress_claim()
+        await repository.dead_letter_outbound(
+            failed_claim.message.dead_letter(
+                failed_claim,
+                failed_at=NOW + timedelta(seconds=1),
+                failure=OutboundFailure("permanent Telegram rejection"),
+            )
         )
 
         assert len(execute_calls) == 2
@@ -265,7 +388,9 @@ def test_claim_standalone_outbound_does_not_load_or_transition_a_turn(
     ) -> list[tuple[object, ...]]:
         """@brief 返回无 Turn 的已领取行 / Return a claimed row without a Turn."""
 
-        del sql, params, connection
+        del params, connection
+        if "turn.state = 'failed_final'" in sql:
+            return []
         return [
             _outbound_claim_row(
                 previous_status="pending",
@@ -318,6 +443,9 @@ def test_claim_retry_outbound_keeps_delivery_plan_waiting(
     ) -> list[tuple[object, ...]]:
         """@brief 返回 retry_wait 领取结果 / Return a claimed retry_wait row."""
 
+        del params, connection
+        if "turn.state = 'failed_final'" in sql:
+            return []
         return [_outbound_claim_row(previous_status="retry_wait")]
 
     async def fake_load_turn(
@@ -603,6 +731,8 @@ def test_stale_outbound_claim_cannot_ack_newer_lease(monkeypatch: Any) -> None:
     ) -> int:
         """@brief 模拟 fencing 条件未命中 / Simulate a fencing predicate miss."""
 
+        assert "AND version = %s AND claim_token" in sql
+        assert params[-2] == 1
         return 0
 
     connection = object()
@@ -615,19 +745,71 @@ def test_stale_outbound_claim_cannot_ack_newer_lease(monkeypatch: Any) -> None:
     repository = PostgresOutboxRepository()
 
     message = outbox_repository._map_outbound(_outbound_row())
-    stale_claim = OutboundClaim(
-        message=message,
+    stale_claim = OutboundClaim.from_processing(
+        message,
         token=LeaseToken.new(),
         lease_expires_at=NOW + timedelta(seconds=30),
     )
     with pytest.raises(StaleClaimError):
-        asyncio.run(
-            repository.mark_outbound_delivered(
-                stale_claim,
-                delivered_at=NOW + timedelta(seconds=1),
-                external_message_id="42",
-            )
+        decision = stale_claim.message.succeed(
+            stale_claim,
+            delivered_at=NOW + timedelta(seconds=1),
+            external_message_id="42",
         )
+        asyncio.run(
+            repository.complete_outbound(decision)
+        )
+
+
+def test_retry_outbound_settlement_uses_version_and_token_cas(
+    monkeypatch: Any,
+) -> None:
+    """@brief retry persistence 同时比较 processing version 与 fencing token / Retry persistence compares both processing version and fencing token.
+
+    @param monkeypatch pytest 替换工具 / pytest replacement utility.
+    @return None / None.
+    """
+
+    connection = object()
+    captured: dict[str, object] = {}
+
+    async def fake_execute(
+        sql: str,
+        params: tuple[object, ...],
+        *,
+        connection: object,
+    ) -> int:
+        """@brief 捕获 retry CAS / Capture the retry CAS.
+
+        @param sql retry SQL / Retry SQL.
+        @param params SQL 参数 / SQL parameters.
+        @param connection 当前连接 / Current connection.
+        @return 单行命中 / One affected row.
+        """
+
+        captured["sql"] = sql
+        captured["params"] = params
+        assert connection is not None
+        return 1
+
+    monkeypatch.setattr(db, "transaction", lambda: _TransactionContext(connection))
+    monkeypatch.setattr(db, "execute", fake_execute)
+    repository = PostgresOutboxRepository()
+    claim = _claim_for(_outbound_row())
+    decision = claim.message.retry(
+        claim,
+        failed_at=NOW + timedelta(seconds=1),
+        retry_at=NOW + timedelta(seconds=2),
+        failure=OutboundFailure("temporary Telegram error"),
+    )
+
+    asyncio.run(repository.schedule_outbound_retry(decision))
+
+    assert "AND version = %s" in str(captured["sql"])
+    params = captured["params"]
+    assert isinstance(params, tuple)
+    assert params[-2] == claim.expected_version
+    assert UUID(str(params[-1])) == claim.token.value
 
 
 def test_delivered_outbound_atomically_completes_turn(monkeypatch: Any) -> None:
@@ -699,17 +881,15 @@ def test_delivered_outbound_atomically_completes_turn(monkeypatch: Any) -> None:
     monkeypatch.setattr(db, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(outbox_repository, "_load_turn_for_mutation", fake_load_turn)
     monkeypatch.setattr(outbox_repository, "_persist_turn", fake_persist)
-    claim = OutboundClaim(
-        message=outbox_repository._map_outbound(_outbound_row()),
-        token=LeaseToken.new(),
-        lease_expires_at=NOW + timedelta(seconds=30),
-    )
+    claim = _claim_for(_outbound_row())
 
     asyncio.run(
-        repository.mark_outbound_delivered(
-            claim,
-            delivered_at=NOW + timedelta(seconds=1),
-            external_message_id="42",
+        repository.complete_outbound(
+            claim.message.succeed(
+                claim,
+                delivered_at=NOW + timedelta(seconds=1),
+                external_message_id="42",
+            )
         )
     )
 
@@ -768,17 +948,15 @@ def test_delivered_effect_keeps_turn_waiting_until_delivery_plan_is_empty(
     monkeypatch.setattr(
         outbox_repository, "_load_turn_for_mutation", unexpected_turn_load
     )
-    claim = OutboundClaim(
-        message=outbox_repository._map_outbound(_outbound_row()),
-        token=LeaseToken.new(),
-        lease_expires_at=NOW + timedelta(seconds=30),
-    )
+    claim = _claim_for(_outbound_row())
 
     asyncio.run(
-        repository.mark_outbound_delivered(
-            claim,
-            delivered_at=NOW + timedelta(seconds=1),
-            external_message_id="42",
+        repository.complete_outbound(
+            claim.message.succeed(
+                claim,
+                delivered_at=NOW + timedelta(seconds=1),
+                external_message_id="42",
+            )
         )
     )
 
@@ -799,7 +977,7 @@ def test_permanent_delivery_failure_cancels_unclaimed_sibling_effects(
         *,
         connection: object,
     ) -> int:
-        """@brief 记录 fenced 失败与 sibling 取消 SQL / Record fenced failure and sibling-cancellation SQL.
+        """@brief 记录 fenced 最终失败 SQL / Record fenced final-failure SQL.
 
         @param sql 执行的 SQL / Executed SQL.
         @param params SQL 参数 / SQL parameters.
@@ -810,6 +988,28 @@ def test_permanent_delivery_failure_cancels_unclaimed_sibling_effects(
         assert connection is not None
         statements.append((sql, params))
         return 1
+
+    async def fake_fetch_all(
+        sql: str,
+        params: tuple[object, ...],
+        *,
+        connection: object,
+    ) -> list[tuple[object, ...]]:
+        """@brief 返回并记录已验证 sibling 取消快照 / Return and record a verified sibling-cancellation snapshot.
+
+        @param sql sibling cancellation SQL / Sibling-cancellation SQL.
+        @param params SQL 参数 / SQL parameters.
+        @param connection 当前连接 / Current connection.
+        @return 取消操作的 pre/post 行 / Cancellation pre/post row.
+        """
+
+        assert connection is not None
+        statements.append((sql, params))
+        return [
+            _outbound_cancellation_row(
+                cancelled_at=NOW + timedelta(seconds=1),
+            )
+        ]
 
     async def fake_load_turn(
         turn_id: TurnId,
@@ -858,19 +1058,18 @@ def test_permanent_delivery_failure_cancels_unclaimed_sibling_effects(
         lambda: _TransactionContext(connection),
     )
     monkeypatch.setattr(db, "execute", fake_execute)
+    monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
     monkeypatch.setattr(outbox_repository, "_load_turn_for_mutation", fake_load_turn)
     monkeypatch.setattr(outbox_repository, "_persist_turn", fake_persist)
-    claim = OutboundClaim(
-        message=outbox_repository._map_outbound(_outbound_row()),
-        token=LeaseToken.new(),
-        lease_expires_at=NOW + timedelta(seconds=30),
-    )
+    claim = _claim_for(_outbound_row())
 
     asyncio.run(
-        repository.fail_outbound(
-            claim,
-            failed_at=NOW + timedelta(seconds=1),
-            error="permanent Telegram error",
+        repository.dead_letter_outbound(
+            claim.message.dead_letter(
+                claim,
+                failed_at=NOW + timedelta(seconds=1),
+                failure=OutboundFailure("permanent Telegram error"),
+            )
         )
     )
 
@@ -916,17 +1115,15 @@ def test_delivered_standalone_outbound_never_transitions_a_turn(
     monkeypatch.setattr(
         outbox_repository, "_load_turn_for_mutation", unexpected_turn_load
     )
-    claim = OutboundClaim(
-        message=outbox_repository._map_outbound(_outbound_row(turn_id=None)),
-        token=LeaseToken.new(),
-        lease_expires_at=NOW + timedelta(seconds=30),
-    )
+    claim = _claim_for(_outbound_row(turn_id=None))
 
     asyncio.run(
-        repository.mark_outbound_delivered(
-            claim,
-            delivered_at=NOW + timedelta(seconds=1),
-            external_message_id="42",
+        repository.complete_outbound(
+            claim.message.succeed(
+                claim,
+                delivered_at=NOW + timedelta(seconds=1),
+                external_message_id="42",
+            )
         )
     )
 
@@ -949,7 +1146,8 @@ def test_expired_outbound_recovery_leaves_delivery_plan_state_unchanged(
         """@brief 返回已恢复成 retry_wait 的 outbox 行 / Return an outbox row recovered into retry_wait."""
 
         captured["sql"] = sql
-        return [_outbound_row(status="retry_wait")]
+        captured["params"] = params
+        return [_outbound_recovery_row(recovered_at=NOW)]
 
     async def unexpected_turn_load(*args: object, **kwargs: object) -> object:
         """@brief 租约恢复不应加载 Turn / Lease recovery must not load a Turn."""
@@ -970,7 +1168,21 @@ def test_expired_outbound_recovery_leaves_delivery_plan_state_unchanged(
     recovered = asyncio.run(repository.recover_expired_outbound_leases(now=NOW))
 
     assert recovered == 1
-    assert "FOR UPDATE SKIP LOCKED" in str(captured["sql"])
+    sql = str(captured["sql"])
+    assert "FOR UPDATE OF candidate SKIP LOCKED" in sql
+    assert "candidate.claim_token AS previous_claim_token" in sql
+    assert "outbound.traceparent" in sql
+    assert "lease_expires_at <= %s" in sql
+    assert "LIMIT %s FOR UPDATE OF candidate SKIP LOCKED" in sql
+    assert "status = 'retry_wait'" in sql
+    assert "next_attempt_at = %s" in sql
+    params = captured["params"]
+    assert isinstance(params, tuple)
+    assert params[0] == NOW
+    assert params[1] == 512
+    assert params[2] == NOW + timedelta(microseconds=1)
+    assert params[3] == NOW
+    assert params[4] == "recovered expired worker lease"
 
 
 def test_expired_standalone_outbound_recovery_does_not_touch_a_turn(
@@ -990,7 +1202,7 @@ def test_expired_standalone_outbound_recovery_does_not_touch_a_turn(
         """@brief 返回已恢复 standalone 行 / Return a recovered standalone row."""
 
         del sql, params, connection
-        return [_outbound_row(status="retry_wait", turn_id=None)]
+        return [_outbound_recovery_row(recovered_at=NOW, turn_id=None)]
 
     async def unexpected_turn_load(*args: object, **kwargs: object) -> object:
         """@brief 拒绝 standalone 查询 Turn / Reject a Turn lookup for a standalone row."""
