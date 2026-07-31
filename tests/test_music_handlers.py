@@ -5,11 +5,12 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from fogmoe_bot.application.media.music_service import MusicPage
 from fogmoe_bot.domain.media.identifiers import UserId
 from fogmoe_bot.domain.media.music import (
+    MusicPage,
     MusicPlatform,
     MusicSearchId,
+    MusicSearchPolicy,
     MusicSearchSession,
     MusicTrack,
 )
@@ -17,7 +18,8 @@ from fogmoe_bot.presentation.telegram.media_handlers import music as music_handl
 
 
 def _page() -> MusicPage:
-    session = MusicSearchSession(
+    policy = MusicSearchPolicy()
+    session = MusicSearchSession.restore(
         search_id=MusicSearchId("a" * 32),
         requester_id=UserId(42),
         query="song <name>",
@@ -25,7 +27,7 @@ def _page() -> MusicPage:
         tracks=(MusicTrack("1", "song", "artist", "album", MusicPlatform.NETEASE),),
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
     )
-    return MusicPage(session=session, page=1, total_pages=1, tracks=session.tracks)
+    return session.page(1, policy=policy)
 
 
 class _MusicServiceFake:

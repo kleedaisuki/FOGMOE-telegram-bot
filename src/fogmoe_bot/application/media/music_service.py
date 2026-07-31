@@ -5,12 +5,14 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from fogmoe_bot.domain.media.identifiers import UserId
 from fogmoe_bot.domain.media.music import (
+    MusicPage,
     MusicPlatform,
     MusicSearchId,
+    MusicSearchPolicy,
     MusicSearchSession,
     MusicTrack,
 )
@@ -20,24 +22,6 @@ from .music_ports import MusicSessionRepository, MusicSource
 from .music_runtime import MusicRuntime
 
 MUSIC_SERVICE_DATA_KEY = "media.music.service"
-
-
-@dataclass(frozen=True, slots=True)
-class MusicPolicy:
-    """音乐搜索、分页与会话的显式边界 / Explicit bounds for music search, pagination, and sessions."""
-
-    result_limit: int = 20
-    session_ttl: timedelta = timedelta(minutes=30)
-    page_size: int = 5
-    query_chars: int = 200
-
-    def __post_init__(self) -> None:
-        """校验音乐容量与时限 / Validate music capacities and duration."""
-
-        if min(self.result_limit, self.page_size, self.query_chars) <= 0:
-            raise ValueError("music policy bounds must be positive")
-        if self.session_ttl <= timedelta(0):
-            raise ValueError("music session TTL must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,16 +49,6 @@ class MusicSessionExpired:
 @dataclass(frozen=True, slots=True)
 class MusicUnavailable:
     """音乐上游无结果或暂不可用 / Music upstream returned no result or is unavailable."""
-
-
-@dataclass(frozen=True, slots=True)
-class MusicPage:
-    """可渲染音乐结果页 / Renderable music-result page."""
-
-    session: MusicSearchSession
-    page: int
-    total_pages: int
-    tracks: tuple[MusicTrack, ...]
 
 
 type MusicResult = (
@@ -105,7 +79,7 @@ class MusicService:
         sessions: MusicSessionRepository,
         source: MusicSource,
         runtime: MusicRuntime,
-        policy: MusicPolicy = MusicPolicy(),
+        policy: MusicSearchPolicy = MusicSearchPolicy(),
         id_factory: IdFactory = lambda: uuid.uuid4().hex,
         now: UtcNow = _utc_now,
     ) -> None:
@@ -125,8 +99,8 @@ class MusicService:
     ) -> MusicResult:
         """创建持久化音乐搜索会话 / Create a durable music-search session."""
 
-        normalized = " ".join(query.split())[: self._policy.query_chars]
-        if not normalized or normalized.casefold() == "help":
+        search_query = self._policy.query_from(query)
+        if search_query.requests_help:
             return MusicHelp()
         profile = await self._accounts.profile(user_id)
         if not profile.registered:
@@ -134,26 +108,24 @@ class MusicService:
         limited = await self._rate_limit(user_id)
         if limited is not None:
             return limited
-        platform = MusicPlatform.NETEASE
-        tracks = await self._search_tracks(normalized, platform)
-        if not tracks and len(normalized.split()) > 1:
-            words = normalized.split()
-            tracks = await self._search_tracks(
-                " ".join(words[: max(1, len(words) // 2)]),
-                platform,
-            )
+        platform = self._policy.default_platform
+        tracks: tuple[MusicTrack, ...] = ()
+        for search_term in search_query.search_terms:
+            tracks = await self._search_tracks(search_term, platform)
+            if tracks:
+                break
         if not tracks:
             return MusicUnavailable()
-        session = MusicSearchSession(
+        session = MusicSearchSession.start(
             search_id=MusicSearchId(self._id_factory()),
             requester_id=user_id,
-            query=normalized,
-            platform=platform,
+            query=search_query,
             tracks=tracks,
-            expires_at=self._now() + self._policy.session_ttl,
+            now=self._now(),
+            policy=self._policy,
         )
         await self._sessions.save(session)
-        return self._page(session, 1)
+        return session.page(1, policy=self._policy)
 
     async def page(
         self,
@@ -170,7 +142,7 @@ class MusicService:
         session = await self._sessions.load(search_id, now=self._now())
         if session is None:
             return MusicSessionExpired()
-        return self._page(session, page)
+        return session.page(page, policy=self._policy)
 
     async def switch_platform(
         self,
@@ -191,16 +163,14 @@ class MusicService:
         tracks = await self._search_tracks(current.query, platform)
         if not tracks:
             return MusicUnavailable()
-        updated = MusicSearchSession(
-            search_id=current.search_id,
-            requester_id=current.requester_id,
-            query=current.query,
+        updated = current.replace_platform_results(
             platform=platform,
             tracks=tracks,
-            expires_at=self._now() + self._policy.session_ttl,
+            now=self._now(),
+            policy=self._policy,
         )
         await self._sessions.save(updated)
-        return self._page(updated, page)
+        return updated.page(page, policy=self._policy)
 
     async def _search_tracks(
         self,
@@ -233,20 +203,3 @@ class MusicService:
         if allowed:
             return None
         return MusicRateLimited(retry_after or 1)
-
-    def _page(self, session: MusicSearchSession, requested_page: int) -> MusicPage:
-        """从会话切出一个规范页 / Slice one canonical page from a session."""
-
-        total_pages = max(
-            1,
-            (len(session.tracks) + self._policy.page_size - 1)
-            // self._policy.page_size,
-        )
-        page = min(max(requested_page, 1), total_pages)
-        start = (page - 1) * self._policy.page_size
-        return MusicPage(
-            session=session,
-            page=page,
-            total_pages=total_pages,
-            tracks=session.tracks[start : start + self._policy.page_size],
-        )

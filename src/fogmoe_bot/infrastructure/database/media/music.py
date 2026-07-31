@@ -100,7 +100,7 @@ class PostgresMusicSessionRepository:
                     )
                 except KeyError, ValueError:
                     continue
-        return MusicSearchSession(
+        return MusicSearchSession.restore(
             search_id=MusicSearchId(UUID(str(row[0])).hex),
             requester_id=UserId(int(row[1])),
             query=str(row[2]),

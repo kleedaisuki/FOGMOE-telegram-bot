@@ -30,7 +30,7 @@ def test_music_session_survives_adapter_restart_and_upsert() -> None:
         requester = UserId(8_300_000_000 + uuid4().int % 100_000_000)
         search_id = MusicSearchId(uuid4().hex)
         now = datetime.now(UTC)
-        session = MusicSearchSession(
+        session = MusicSearchSession.restore(
             search_id=search_id,
             requester_id=requester,
             query="durable query",

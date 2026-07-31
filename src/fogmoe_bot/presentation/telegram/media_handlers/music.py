@@ -12,14 +12,13 @@ from fogmoe_bot.application.media.music_service import (
     MUSIC_SERVICE_DATA_KEY,
     MusicHelp,
     MusicNotRegistered,
-    MusicPage,
     MusicRateLimited,
     MusicService,
     MusicSessionExpired,
     MusicUnavailable,
 )
 from fogmoe_bot.domain.media.identifiers import UserId
-from fogmoe_bot.domain.media.music import MusicPlatform, MusicSearchId
+from fogmoe_bot.domain.media.music import MusicPage, MusicPlatform, MusicSearchId
 
 _MUSIC_PAGE_CALLBACK = re.compile(r"^music_p_([0-9a-f]{32})_([0-9]{1,3})$")
 _MUSIC_SWITCH_CALLBACK = re.compile(
@@ -152,7 +151,7 @@ async def _send_music_page(
         f"{prefix}搜索结果 - “{html.escape(session.query)}” ({session.platform.display_name})：",
         "",
     ]
-    start = (page.page - 1) * 5 + 1
+    start = (page.page - 1) * page.page_size + 1
     for index, track in enumerate(page.tracks, start=start):
         lines.extend(
             (
