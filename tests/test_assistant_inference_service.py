@@ -566,6 +566,48 @@ def test_contract_failure_short_circuits_models_routes_and_image_fallback() -> N
     assert calls == [("primary", "bad-slug")]
 
 
+def test_local_invariant_failure_is_not_wrapped_as_provider_unavailability() -> None:
+    """@brief 本地不变量失败不会伪装为 provider 耗尽 / A local invariant failure is not disguised as provider exhaustion."""
+
+    calls: list[tuple[str, str]] = []
+
+    def runner(
+        provider: str,
+        model: str,
+        messages: object,
+        **_: object,
+    ) -> AgentResponse:
+        """@brief 记录唯一候选并触发本地错误 / Record the sole candidate and raise a local error.
+
+        @param provider route provider ID / Route provider ID.
+        @param model route model name / Route model name.
+        @param messages 未使用模型消息 / Unused model messages.
+        @return 永不返回 / Never returns.
+        @raise ValueError 模拟已 checkpoint 工具执行的不变量错误 /
+            Raised to simulate an invariant error in checkpointed tool execution.
+        """
+
+        del messages
+        calls.append((provider, model))
+        raise ValueError("page must be an integer")
+
+    service = _service(
+        routes=(
+            _route(
+                "primary",
+                models=(RouteModel("model-a"), RouteModel("model-b")),
+            ),
+            _route("fallback"),
+        ),
+        runner=runner,
+    )
+
+    with pytest.raises(ValueError, match="page must be an integer"):
+        asyncio.run(service.infer(_context([])))
+
+    assert calls == [("primary", "model-a")]
+
+
 def test_transient_provider_failure_still_falls_back_to_the_next_model() -> None:
     """@brief 暂态 provider 失败仍允许切换同 route 下一模型 /
     A transient provider failure still permits the next model in the same route.

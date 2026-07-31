@@ -101,6 +101,7 @@ from .errors import (
     ProviderFailure,
     ProviderFailureKind,
     SafetyBlockError,
+    is_local_invariant_failure,
 )
 from .inference_command import (
     DurableAssistantInferenceCommand,
@@ -430,12 +431,12 @@ class DurableAssistantInferenceAdapter:
                 str(error) or "Assistant inference stopped after partial effects",
                 category=InferenceErrorCategory.PARTIAL_EFFECT,
             ) from error
-        except (ValueError, TypeError, KeyError) as error:
-            raise PermanentInferenceError(
-                f"Assistant inference invariant failed: {error}",
-                category=InferenceErrorCategory.INTERNAL,
-            ) from error
         except Exception as error:
+            if is_local_invariant_failure(error):
+                raise PermanentInferenceError(
+                    f"Assistant inference invariant failed: {error}",
+                    category=InferenceErrorCategory.INTERNAL,
+                ) from error
             raise RetryableInferenceError(
                 str(error) or error.__class__.__name__,
                 category=InferenceErrorCategory.PROVIDER_UNAVAILABLE,
@@ -1031,6 +1032,7 @@ def _sanitize_runtime_event(event: Mapping[str, object]) -> JsonObject:
             "invocation_id",
             "effect_kind",
             "replayed",
+            "is_error",
         ),
     }.get(event_type, ("type",))
     return {key: _json_value(event[key]) for key in allowed_keys if key in event}
@@ -1090,11 +1092,30 @@ def _events_to_history(
                                 FrozenJsonValue,
                                 _json_value(event.get("result")),
                             ),
+                            is_error=_runtime_tool_result_is_error(event),
                         ),
                     ),
                 )
             )
     return result
+
+
+def _runtime_tool_result_is_error(event: Mapping[str, object]) -> bool:
+    """@brief 读取 Runtime 工具结果的错误语义 / Read error semantics from a Runtime tool result.
+
+    @param event 一个 ``tool_result`` Runtime event / One ``tool_result`` Runtime event.
+    @return 显式错误位；旧持久化事件缺位时根据顶层 ``error`` 推导 /
+        Explicit error bit, or a top-level ``error`` fallback for older persisted events.
+    @note 回退只服务于既有持久化数据；新事件必须写入显式 ``is_error``，供所有 provider
+        codec 保留同一语义。/ The fallback serves existing persisted data only; new events must
+        write explicit ``is_error`` so every provider codec retains the same semantics.
+    """
+
+    is_error = event.get("is_error")
+    if type(is_error) is bool:
+        return is_error
+    result = event.get("result")
+    return isinstance(result, Mapping) and "error" in result
 
 
 def _visible_event_texts(events: Sequence[Mapping[str, object]]) -> list[str]:
@@ -1422,6 +1443,12 @@ def _classify_unavailable(
     """
 
     cause = error.last_error
+    if is_local_invariant_failure(cause):
+        detail = str(cause or error).strip() or error.__class__.__name__
+        return PermanentInferenceError(
+            detail,
+            category=InferenceErrorCategory.INTERNAL,
+        )
     if isinstance(cause, ProviderFailure):
         return _classify_provider_failure(cause)
     cause_name = cause.__class__.__name__.lower() if cause is not None else ""

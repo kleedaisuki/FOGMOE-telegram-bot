@@ -71,7 +71,10 @@ from .completion import (
     PromptCacheDirective,
     PromptCacheKey,
 )
-from .errors import ProviderFailure, ResumableAgentInterruptedError
+from .errors import (
+    ResumableAgentInterruptedError,
+    is_deterministic_agent_failure,
+)
 from .progress import (
     AssistantProgressPersistence,
     commentary_progress_item,
@@ -370,6 +373,7 @@ class AgentExecutionState:
         if result.validation_error is not None:
             call_event["validation_error"] = result.validation_error
         ephemeral = result.result_residency is ToolResultResidency.AGENT_TURN
+        is_error = not _tool_result_succeeded(result)
         if ephemeral:
             call_event["ephemeral"] = True
         self._events.append(call_event)
@@ -381,7 +385,7 @@ class AgentExecutionState:
                         result.provider_call_id,
                         result.name,
                         cast(FrozenJsonValue, result.public_result),
-                        is_error=result.validation_error is not None,
+                        is_error=is_error,
                     ),
                 ),
             )
@@ -395,6 +399,7 @@ class AgentExecutionState:
             "invocation_id": result.invocation_id,
             "effect_kind": result.effect_kind,
             "replayed": result.replayed,
+            "is_error": is_error,
         }
         if ephemeral:
             result_event["ephemeral"] = True
@@ -445,7 +450,7 @@ class AgentExecutionState:
                             result.provider_call_id,
                             result.name,
                             cast(FrozenJsonValue, result.public_result),
-                            is_error=result.validation_error is not None,
+                            is_error=not _tool_result_succeeded(result),
                         ),
                     ),
                 )
@@ -735,7 +740,7 @@ class AgentLoop:
         except StaleClaimError:
             raise
         except Exception as error:
-            if _is_deterministic_agent_failure(error):
+            if is_deterministic_agent_failure(error):
                 raise
             if state.step > 0 or state.events:
                 raise ResumableAgentInterruptedError(
@@ -911,7 +916,7 @@ class AgentLoop:
         except StaleClaimError:
             raise
         except Exception as error:
-            if _is_deterministic_agent_failure(error):
+            if is_deterministic_agent_failure(error):
                 raise
             if emitted_visible_delta:
                 raise ResumableAgentInterruptedError(
@@ -1288,20 +1293,6 @@ def _tool_result_succeeded(result: ToolRuntimeResult) -> bool:
     return result.validation_error is None and not (
         isinstance(result.public_result, dict) and "error" in result.public_result
     )
-
-
-def _is_deterministic_agent_failure(error: Exception) -> bool:
-    """@brief 判断重放同一 checkpoint 不会自愈的确定性失败 /
-    Decide whether replaying the same checkpoint cannot heal a deterministic failure.
-
-    @param error 当前 Agent 或 completion-port 异常 / Current Agent or completion-port failure.
-    @return contract/rejected provider failure 或本地校验错误为 True /
-        True for contract/rejected provider failures or local validation errors.
-    """
-
-    if isinstance(error, ProviderFailure):
-        return not error.retryable
-    return isinstance(error, (ValueError, TypeError, KeyError, AssertionError))
 
 
 def _prompt_cache_directive(

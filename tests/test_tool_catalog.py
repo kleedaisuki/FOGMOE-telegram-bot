@@ -162,6 +162,7 @@ def test_default_catalog_excludes_stateful_sandbox_and_classifies_action_tools()
     assert isinstance(media, ValidatedToolInvocation)
     assert media.mutating is True
     assert media.effect_kind == "media.generate_image"
+    assert media.arguments.timeout_seconds is None
 
 
 def test_send_sticker_is_a_bounded_mutation_without_file_id_escape_hatch() -> None:

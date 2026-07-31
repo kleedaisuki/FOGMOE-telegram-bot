@@ -30,6 +30,7 @@ async def execute_diary(
         "page",
         minimum=1,
         maximum=_MAX_DIARY_PAGES,
+        default=1,
     )
     if connection is not None:
         await db.fetch_one(

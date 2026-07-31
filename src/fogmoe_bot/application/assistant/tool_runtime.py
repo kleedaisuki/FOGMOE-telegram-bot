@@ -84,6 +84,7 @@ class ToolResultEvent(TypedDict):
     invocation_id: str
     effect_kind: str
     replayed: bool
+    is_error: bool
     ephemeral: NotRequired[bool]
 
 

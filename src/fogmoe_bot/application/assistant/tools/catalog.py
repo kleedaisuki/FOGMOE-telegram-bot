@@ -264,8 +264,11 @@ class GenerateImageArgs(ToolArguments):
     height: int = Field(default=1024, ge=64, le=4096, description="Image height")
     steps: int = Field(default=9, ge=1, le=150, description="Generation steps")
     seed: int | None = Field(default=None, description="Optional deterministic seed")
-    timeout_seconds: int = Field(
-        default=30, ge=15, le=60, description="Request timeout"
+    timeout_seconds: int | None = Field(
+        default=None,
+        ge=15,
+        le=60,
+        description="Optional request-timeout override; omit to use the deployment default",
     )
 
 

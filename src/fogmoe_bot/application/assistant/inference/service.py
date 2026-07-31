@@ -23,6 +23,7 @@ from ..errors import (
     ProviderFailure,
     ResumableAgentInterruptedError,
     SafetyBlockError,
+    is_local_invariant_failure,
 )
 from ..streaming import AssistantStreamSession
 from ..tool_runtime import ToolExecutionContext
@@ -140,6 +141,8 @@ class AssistantInferenceService:
         )
         if response is not None:
             return response
+        if last_error is not None and is_local_invariant_failure(last_error):
+            raise last_error
         if messages_have_images(context_state.messages) and _allows_candidate_fallback(
             last_error
         ):
@@ -355,7 +358,7 @@ def _allows_candidate_fallback(error: Exception | None) -> bool:
         return True
     if isinstance(error, ProviderFailure):
         return error.retryable
-    return not isinstance(error, (ValueError, TypeError, KeyError, AssertionError))
+    return not is_local_invariant_failure(error)
 
 
 __all__ = ["AgentRunner", "AssistantInferenceService"]

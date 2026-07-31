@@ -17,6 +17,7 @@ from fogmoe_bot.application.assistant.errors import (
     ProviderFailure,
     ProviderFailureKind,
 )
+from fogmoe_bot.application.assistant.inference.service import AssistantInferenceService
 from fogmoe_bot.application.assistant.inference_command import (
     DurableAssistantInferenceCommand,
     DurableAssistantScope,
@@ -45,6 +46,7 @@ from fogmoe_bot.application.conversation.inference_worker import (
     PermanentInferenceError,
     RetryableInferenceError,
 )
+from fogmoe_bot.application.runtime import FailureCircuit, FailureCircuitPolicy
 from fogmoe_bot.domain.accounts.plan import AccountPlan
 from fogmoe_bot.domain.assistant.messages import (
     CanonicalMessage,
@@ -57,6 +59,11 @@ from fogmoe_bot.domain.assistant.streaming import (
     AssistantStreamKind,
 )
 from fogmoe_bot.domain.assistant.request_metadata import RequestMeta
+from fogmoe_bot.domain.assistant.routing.models import (
+    ProviderAuth,
+    ProviderRoute,
+    RouteModel,
+)
 from fogmoe_bot.domain.context import ContextState
 from fogmoe_bot.domain.context_window.budget import TokenCount
 from fogmoe_bot.domain.context_window.compaction import CompactionId
@@ -923,6 +930,110 @@ def test_missing_current_user_message_and_oversized_output_fail_permanently() ->
         )
 
 
+def test_local_agent_invariant_becomes_immediate_durable_final_failure() -> None:
+    """@brief 本地 Agent 不变量错误直接归类为可回复终态 / A local Agent invariant error is directly classified as a reply-producing durable final state."""
+
+    class _InvariantAgent:
+        """@brief 模拟在已 checkpoint 工具执行后失败的 Agent / Simulate an Agent failing after checkpointed tool execution."""
+
+        def __init__(self) -> None:
+            """@brief 初始化调用计数 / Initialize the invocation counter.
+
+            @return None / None.
+            """
+
+            self.calls = 0
+
+        async def run(
+            self,
+            context: ContextState,
+            config: object,
+            *,
+            tool_context: ToolExecutionContext | None = None,
+            stream: AssistantStreamSession | None = None,
+        ) -> AgentResponse:
+            """@brief 记录候选后暴露本地不变量错误 / Record the candidate and expose a local invariant error.
+
+            @param context route-local canonical 上下文 / Route-local canonical context.
+            @param config 选定 route 的执行配置 / Execution configuration for the selected route.
+            @param tool_context durable 工具身份 / Durable tool identity.
+            @param stream 可选易失流 / Optional ephemeral stream.
+            @return 永不返回 / Never returns.
+            @raise ValueError 模拟 diary 默认值边界被破坏 /
+                Raised to simulate a broken diary-default boundary.
+            """
+
+            del context, config, tool_context, stream
+            self.calls += 1
+            raise ValueError("page must be an integer")
+
+    async def scenario() -> None:
+        """@brief 穿过真实 service 与 durable adapter 运行错误路径 / Run the error path through the real service and durable adapter.
+
+        @return None / None.
+        """
+
+        turn_id = TurnId.new()
+        current = _message(
+            sequence=1,
+            turn_id=turn_id,
+            role=MessageRole.USER,
+            content={"text": "read my diary"},
+        )
+        agent = _InvariantAgent()
+        service = AssistantInferenceService(
+            routes=(
+                ProviderRoute(
+                    route_id="primary",
+                    provider_id="primary",
+                    provider_label="Primary",
+                    style="openai",
+                    endpoint="https://primary.example.test/v1/chat/completions",
+                    auth=ProviderAuth(),
+                    models=(RouteModel("model-a"), RouteModel("model-b")),
+                ),
+                ProviderRoute(
+                    route_id="fallback",
+                    provider_id="fallback",
+                    provider_label="Fallback",
+                    style="openai",
+                    endpoint="https://fallback.example.test/v1/chat/completions",
+                    auth=ProviderAuth(),
+                    models=(RouteModel("model-c"),),
+                ),
+            ),
+            circuit=FailureCircuit[str](
+                FailureCircuitPolicy(
+                    failure_threshold=3,
+                    failure_window_seconds=300,
+                    cooldown_seconds=1800,
+                )
+            ),
+            working_memory_limit=4,
+            working_memory_max_tokens=8192,
+            working_memory_enabled=True,
+            agent_loop=agent,
+        )
+        adapter = DurableAssistantInferenceAdapter(
+            history=_History((current,)),
+            system_prompt="You are a careful assistant.",
+            runtime_limits=InferenceRuntimeLimits(
+                provider_timeout=timedelta(seconds=20),
+                attempt_timeout=timedelta(seconds=30),
+                lease_for=timedelta(seconds=45),
+            ),
+            inference=service,
+        )
+
+        with pytest.raises(PermanentInferenceError) as captured:
+            await adapter.infer(_request(turn_id))
+
+        assert captured.value.category is InferenceErrorCategory.INTERNAL
+        assert agent.calls == 1
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     ("cause", "expected_type", "category"),
     (
@@ -937,6 +1048,11 @@ def test_missing_current_user_message_and_oversized_output_fail_permanently() ->
             type("AuthenticationError", (RuntimeError,), {})("bad key"),
             PermanentInferenceError,
             InferenceErrorCategory.AUTHENTICATION,
+        ),
+        (
+            ValueError("page must be an integer"),
+            PermanentInferenceError,
+            InferenceErrorCategory.INTERNAL,
         ),
     ),
 )

@@ -3,7 +3,8 @@
 from datetime import timedelta
 from enum import StrEnum
 
-from .tool_runtime import RuntimeEvent
+from .completion import AgentCheckpointConflictError
+from .tool_runtime import RuntimeEvent, ToolEffectConflictError
 
 
 class ProviderFailureKind(StrEnum):
@@ -168,8 +169,49 @@ class ResumableAgentInterruptedError(RuntimeError):
     """
 
 
+def is_local_invariant_failure(error: Exception | None) -> bool:
+    """@brief 判断本地不变量失败是否必须终结当前 generation / Decide whether a local invariant failure must terminate the current generation.
+
+    @param error 候选执行异常或 None / Candidate execution exception or None.
+    @return 本地 contract、checkpoint 或 receipt 身份失败时为 True /
+        True for local contract, checkpoint, or receipt-identity failures.
+    @note 这不是业务工具拒绝的替代表示；可安全恢复的业务拒绝必须已经是
+        ``ToolRuntimeResult`` 的公开 ``error`` 结果。/ This is not an alternate
+        representation for business tool rejection; safely recoverable business rejections must
+        already be public ``error`` results in ``ToolRuntimeResult``.
+    """
+
+    return isinstance(
+        error,
+        (
+            AgentCheckpointConflictError,
+            ToolEffectConflictError,
+            ValueError,
+            TypeError,
+            KeyError,
+            AssertionError,
+        ),
+    )
+
+
+def is_deterministic_agent_failure(error: Exception) -> bool:
+    """@brief 判断重放同一 Agent checkpoint 是否无法自愈 / Decide whether replaying the same Agent checkpoint cannot heal a failure.
+
+    @param error 当前 Agent 或 completion-port 异常 / Current Agent or completion-port failure.
+    @return 不可重试 provider 拒绝或本地不变量失败时为 True /
+        True for non-retryable provider rejection or local invariant failure.
+    """
+
+    return (
+        (isinstance(error, ProviderFailure) and not error.retryable)
+        or is_local_invariant_failure(error)
+    )
+
+
 __all__ = [
     "AssistantInferenceUnavailableError",
+    "is_deterministic_agent_failure",
+    "is_local_invariant_failure",
     "PartialAgentResponseError",
     "ProviderContractError",
     "ProviderFailure",

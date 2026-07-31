@@ -470,6 +470,31 @@ class _Receipts:
         return PersistedToolResult(result, False)
 
 
+class _RejectedToolReceipts:
+    """@brief 返回可模型恢复业务拒绝的 receipt port / Receipt port returning a model-recoverable business rejection."""
+
+    def __init__(self) -> None:
+        """@brief 初始化请求记录 / Initialize request records.
+
+        @return None / None.
+        """
+
+        self.requests: list[ToolEffectRequest] = []
+
+    async def execute(self, request: ToolEffectRequest) -> PersistedToolResult:
+        """@brief 返回已确定且无副作用的 diary 拒绝 / Return a determinate, side-effect-free diary rejection.
+
+        @param request 规范 receipt 请求 / Canonical receipt request.
+        @return 回填模型的拒绝结果 / Rejection result fed back to the model.
+        """
+
+        self.requests.append(request)
+        return PersistedToolResult(
+            {"error": "Diary page must be created sequentially"},
+            replayed=False,
+        )
+
+
 class _FreshMemoryTool:
     """@brief 验证 Memory tool 使用非缓存执行契约 / Verify the Memory tool uses the non-cacheable execution contract."""
 
@@ -870,6 +895,65 @@ def test_checkpoint_precedes_effect_and_restart_replays_without_provider_or_muta
         assert receipts.mutation_count == 1
         results = [event for event in replay.events if event["type"] == "tool_result"]
         assert results[0]["replayed"] is True
+
+    asyncio.run(scenario())
+
+
+def test_business_tool_rejection_is_marked_error_and_allows_final_reply() -> None:
+    """@brief 业务工具拒绝回填模型并继续产生最终回复 / A business tool rejection feeds back to the model and still produces a final reply."""
+
+    async def scenario() -> None:
+        """@brief 执行拒绝后的一次正常 completion / Execute one normal completion after a rejection.
+
+        @return None / None.
+        """
+
+        order: list[str] = []
+        receipts = _RejectedToolReceipts()
+        completion = _Completion(
+            [
+                _assistant_tool_call(
+                    "",
+                    call_id="diary-rejected",
+                    name="user_diary",
+                    arguments={"action": "append", "content": "note"},
+                ),
+                _assistant_text("这一页还不能创建，我先继续和你聊。"),
+            ],
+            order,
+        )
+        response = await AgentLoop(
+            runtime=AgentRuntime(catalog=DEFAULT_TOOL_CATALOG, persistence=receipts),
+            completion=completion,
+            checkpoints=_Checkpoints(order),
+            memory=_Memory(),
+            telemetry=make_telemetry(),
+        ).run(
+            _context(),
+            AgentExecutionConfig(route=_route(), model="model", allow_tools=True),
+            tool_context=_tool_context(TurnId.new()),
+        )
+
+        assert response.text == "这一页还不能创建，我先继续和你聊。"
+        assert len(completion.requests) == 2
+        post_tool_messages = cast(
+            tuple[CanonicalMessage, ...], completion.requests[1]["messages"]
+        )
+        tool_part = next(
+            part
+            for message in post_tool_messages
+            if message.role is MessageRole.TOOL
+            for part in message.parts
+            if isinstance(part, ToolResultPart)
+        )
+        assert tool_part.is_error is True
+        assert tool_part.to_json()["result"] == {
+            "error": "Diary page must be created sequentially"
+        }
+        tool_event = next(
+            event for event in response.events if event["type"] == "tool_result"
+        )
+        assert tool_event["is_error"] is True
 
     asyncio.run(scenario())
 
