@@ -47,6 +47,7 @@ from fogmoe_bot.domain.media.artifact import ArtifactKind
 from fogmoe_bot.infrastructure.media.file_artifact_store import FileArtifactStore
 from fogmoe_bot.infrastructure.telegram.outbox_delivery import (
     TelegramOutboxDeliveryAdapter,
+    parse_send_artifact_payload,
     parse_send_message_payload,
     parse_send_photo_payload,
     parse_send_sticker_payload,
@@ -460,6 +461,41 @@ def test_artifact_delivery_claims_and_completes_only_through_outbox(
     assert receipt.external_message_id == "88"
     assert bot.artifact_calls == [("image", 7)]
     assert artifacts.claim(record.artifact_id, expected_kind=ArtifactKind.IMAGE) is None
+
+
+def test_malformed_nonempty_artifact_id_is_normalized_before_delivery(
+    tmp_path: Path,
+) -> None:
+    """@brief 非空非法 artifact ID 保持 payload 错误分类与校验顺序 / A malformed non-empty artifact ID preserves payload classification and validation order.
+
+    @param tmp_path 临时 artifact root / Temporary artifact root.
+    """
+
+    payload: JsonObject = {
+        "chat_id": 7,
+        "artifact_id": "not-a-valid-artifact-id",
+        "kind": "image",
+        "filename": "result.png",
+        "mime_type": "image/png",
+        "size_bytes": 11,
+    }
+    bot = _Bot()
+
+    with pytest.raises(OutboundPayloadError, match="artifact_id") as captured:
+        asyncio.run(
+            TelegramOutboxDeliveryAdapter(
+                cast(Bot, bot),
+                artifacts=FileArtifactStore(tmp_path),
+            ).deliver(_message(payload, kind=SEND_TELEGRAM_ARTIFACT))
+        )
+
+    assert captured.value.category is DeliveryErrorCategory.INVALID_PAYLOAD
+    assert isinstance(captured.value.__cause__, ValueError)
+    assert bot.artifact_calls == []
+
+    payload["chat_id"] = True
+    with pytest.raises(OutboundPayloadError, match="chat_id"):
+        parse_send_artifact_payload(payload)
 
 
 def test_sticker_delivery_resolves_the_first_exact_emoji_from_the_pack() -> None:

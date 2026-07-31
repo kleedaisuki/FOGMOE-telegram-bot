@@ -531,6 +531,7 @@ def parse_send_artifact_payload(payload: JsonObject) -> SendArtifactPayload:
 
     @param payload 持久化 payload / Persisted payload.
     @return 类型化 payload / Typed payload.
+    @raise OutboundPayloadError 字段集或字段语义非法 / Invalid keys or field semantics.
     """
 
     _validate_keys(payload, allowed=_ARTIFACT_KEYS, required=_ARTIFACT_KEYS)
@@ -557,9 +558,16 @@ def parse_send_artifact_payload(payload: JsonObject) -> SendArtifactPayload:
         or size_bytes < 1
     ):
         raise _payload_error("size_bytes must be a positive integer")
+    chat_id = _chat_id(payload)
+    try:
+        parsed_artifact_id = ArtifactId(artifact_id)
+    except (TypeError, ValueError) as error:
+        raise _payload_error(
+            "artifact_id must be 32 lowercase hexadecimal characters"
+        ) from error
     return SendArtifactPayload(
-        chat_id=_chat_id(payload),
-        artifact_id=ArtifactId(artifact_id),
+        chat_id=chat_id,
+        artifact_id=parsed_artifact_id,
         kind=artifact_kind,
         filename=filename,
         mime_type=mime_type,

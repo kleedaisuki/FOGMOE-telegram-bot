@@ -10,11 +10,23 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from fogmoe_bot.domain.media.artifact import ArtifactKind, ArtifactRecord
+from fogmoe_bot.domain.media.artifact import (
+    ArtifactClaimExpiredDecision,
+    ArtifactClaimCapability,
+    ArtifactClaimed,
+    ArtifactClaimToken,
+    ArtifactKind,
+    ArtifactRecord,
+    ArtifactRecoveryBlockedDecision,
+    ArtifactRecoveryReadyDecision,
+)
 from fogmoe_bot.domain.media.identifiers import ArtifactId
 
 _SAFE_EXTENSION = re.compile(r"^\.[a-z0-9]{1,8}$")
 """@brief 允许的文件扩展名 grammar / Allowed filename-extension grammar."""
+
+_AVAILABLE_MANIFEST = re.compile(r"^(?P<artifact>[0-9a-f]{32})\.json$")
+"""@brief available manifest grammar / Available-manifest grammar."""
 
 _CLAIM_MANIFEST = re.compile(
     r"^(?P<artifact>[0-9a-f]{32})\.claim\."
@@ -31,20 +43,99 @@ _DEFAULT_CLAIM_LEASE = timedelta(minutes=5)
 """@brief 默认投递 claim 租约 / Default delivery-claim lease."""
 
 
-@dataclass(frozen=True, slots=True)
-class ClaimedArtifact:
-    """@brief 被一个投递者原子领取的制品 / Artifact atomically claimed by one delivery attempt.
+@dataclass(frozen=True, slots=True, init=False)
+class FileArtifactClaim:
+    """@brief 绑定领域 capability 与仓储路径的不可伪造 handle / Unforgeable handle binding domain capability to store paths.
 
-    @param record 持久化元数据 / Persisted metadata.
-    @param path 数据文件路径 / Data-file path.
-    @param claim_path 独占 claim manifest / Exclusive claim-manifest path.
-    @param lease_expires_at 可被故障恢复的时间 / Instant after which crash recovery may reclaim it.
+    构造器不公开；只有在 available→claim rename 获胜且 manifest/data 验证
+    通过后，store 才能创建 handle。/ Its constructor is not public; the store may
+    create a handle only after winning the available→claim rename and validating manifest/data.
     """
 
-    record: ArtifactRecord
-    path: Path
-    claim_path: Path
-    lease_expires_at: datetime
+    _state: ArtifactClaimed
+    """@brief 领域 claimed 状态 / Domain claimed state."""
+    _path: Path
+    """@brief 受验证 payload 路径 / Validated payload path."""
+    _claim_path: Path
+    """@brief 独占 claim manifest 路径 / Exclusive claim-manifest path."""
+    _store_root: Path
+    """@brief 签发 handle 的 store 根 / Store root that issued the handle."""
+
+    def __init__(self) -> None:
+        """@brief 禁止公开伪造文件 capability / Prevent public forgery of a file capability.
+
+        @raise TypeError 始终抛出 / Always raised.
+        """
+
+        raise TypeError("FileArtifactClaim can only be issued by FileArtifactStore")
+
+    @classmethod
+    def _create(
+        cls,
+        *,
+        state: ArtifactClaimed,
+        path: Path,
+        claim_path: Path,
+        store_root: Path,
+    ) -> FileArtifactClaim:
+        """@brief 经路径与 capability 一致性门创建 handle / Create a handle through path/capability consistency checks.
+
+        @param state 领域 claimed 状态 / Domain claimed state.
+        @param path payload 路径 / Payload path.
+        @param claim_path claim manifest 路径 / Claim-manifest path.
+        @param store_root 签发 store 根 / Issuing store root.
+        @return 已验证文件 capability / Validated file capability.
+        """
+
+        if not isinstance(state, ArtifactClaimed):
+            raise TypeError("file artifact claim requires ArtifactClaimed")
+        if not all(isinstance(value, Path) for value in (path, claim_path, store_root)):
+            raise TypeError("file artifact claim paths must be Path values")
+        expected_directory = store_root / state.record.kind.value
+        if path.parent != expected_directory or claim_path.parent != expected_directory:
+            raise ValueError("file artifact claim paths are outside their store")
+        capability = _claim_capability_from_path(claim_path)
+        if capability != state.capability:
+            raise ValueError("file artifact claim path does not match its capability")
+        expected_prefix = f"{state.record.artifact_id}."
+        if not path.name.startswith(expected_prefix):
+            raise ValueError("file artifact payload path does not match its record")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_state", state)
+        object.__setattr__(instance, "_path", path)
+        object.__setattr__(instance, "_claim_path", claim_path)
+        object.__setattr__(instance, "_store_root", store_root)
+        return instance
+
+    @property
+    def record(self) -> ArtifactRecord:
+        """@brief 返回受领取制品元数据 / Return claimed artifact metadata."""
+
+        return self._state.record
+
+    @property
+    def path(self) -> Path:
+        """@brief 返回只读 payload 路径 / Return the read-only payload path."""
+
+        return self._path
+
+    @property
+    def claim_path(self) -> Path:
+        """@brief 返回独占 claim manifest 路径 / Return the exclusive claim-manifest path."""
+
+        return self._claim_path
+
+    @property
+    def token(self) -> ArtifactClaimToken:
+        """@brief 返回 fencing token / Return the fencing token."""
+
+        return self._state.capability.token
+
+    @property
+    def lease_expires_at(self) -> datetime:
+        """@brief 返回 UTC 租约截止 / Return the UTC lease deadline."""
+
+        return self._state.capability.lease_expires_at
 
 
 class FileArtifactStore:
@@ -108,14 +199,14 @@ class FileArtifactStore:
         manifest_path = directory / f"{artifact_id}.json"
         data_tmp = directory / f".{artifact_id}.{uuid.uuid4().hex}.data.tmp"
         manifest_tmp = directory / f".{artifact_id}.{uuid.uuid4().hex}.manifest.tmp"
-        record = ArtifactRecord(
+        record = ArtifactRecord.create(
             artifact_id=artifact_id,
             kind=kind,
             filename=_safe_filename(filename, fallback=f"artifact{extension}"),
             mime_type=mime_type,
             size_bytes=len(content),
             created_at=created_at,
-            expires_at=created_at + ttl,
+            ttl=ttl,
         )
         try:
             _write_durable(data_tmp, content)
@@ -152,7 +243,7 @@ class FileArtifactStore:
         *,
         expected_kind: ArtifactKind,
         now: datetime | None = None,
-    ) -> ClaimedArtifact | None:
+    ) -> FileArtifactClaim | None:
         """@brief 以原子 rename 领取一次投递 / Claim one delivery with an atomic rename.
 
         @param artifact_id 制品标识 / Artifact identifier.
@@ -161,8 +252,6 @@ class FileArtifactStore:
         @return 独占 claim；缺失、过期或已领取时为 None / Exclusive claim, or None when missing, expired, or claimed.
         """
 
-        if re.fullmatch(r"[0-9a-f]{32}", str(artifact_id)) is None:
-            return None
         current = _utc(now or datetime.now(UTC))
         directory = self._root / expected_kind.value
         self._finalize_completions(directory, artifact_id)
@@ -190,7 +279,7 @@ class FileArtifactStore:
         *,
         expected_kind: ArtifactKind,
         current: datetime,
-    ) -> ClaimedArtifact | None:
+    ) -> FileArtifactClaim | None:
         """@brief 原子领取当前 available manifest / Atomically claim the current available manifest.
 
         @param directory 类型目录 / Kind directory.
@@ -201,10 +290,15 @@ class FileArtifactStore:
         """
 
         manifest_path = directory / f"{artifact_id}.json"
-        lease_expires_at = current + self._claim_lease
-        lease_micros = int(lease_expires_at.timestamp() * 1_000_000)
+        capability = ArtifactClaimCapability.issue(
+            artifact_id=artifact_id,
+            token=ArtifactClaimToken(uuid.uuid4().hex),
+            claimed_at=current,
+            lease_duration=self._claim_lease,
+        )
+        lease_micros = int(capability.lease_expires_at.timestamp() * 1_000_000)
         claim_path = directory / (
-            f"{artifact_id}.claim.{lease_micros}.{uuid.uuid4().hex}.json"
+            f"{artifact_id}.claim.{lease_micros}.{capability.token}.json"
         )
         try:
             os.rename(manifest_path, claim_path)
@@ -213,11 +307,16 @@ class FileArtifactStore:
         _fsync_directory(directory)
         try:
             record, data_path = _read_manifest(claim_path, directory)
-            if (
-                record.artifact_id != artifact_id
-                or record.kind is not expected_kind
-                or record.expires_at <= current
-            ):
+            if record.artifact_id != artifact_id or record.kind is not expected_kind:
+                data_path.unlink(missing_ok=True)
+                claim_path.unlink(missing_ok=True)
+                _fsync_directory(directory)
+                return None
+            state = record.available().claim(
+                capability=capability,
+                claimed_at=current,
+            )
+            if isinstance(state, ArtifactClaimExpiredDecision):
                 data_path.unlink(missing_ok=True)
                 claim_path.unlink(missing_ok=True)
                 _fsync_directory(directory)
@@ -227,11 +326,11 @@ class FileArtifactStore:
                 claim_path.unlink(missing_ok=True)
                 _fsync_directory(directory)
                 return None
-            return ClaimedArtifact(
-                record=record,
+            return FileArtifactClaim._create(
+                state=state,
                 path=data_path,
                 claim_path=claim_path,
-                lease_expires_at=lease_expires_at,
+                store_root=self._root,
             )
         except OSError, ValueError, KeyError, json.JSONDecodeError:
             claim_path.unlink(missing_ok=True)
@@ -253,41 +352,41 @@ class FileArtifactStore:
         @return 是否成功恢复一个 manifest / Whether one manifest was recovered.
         """
 
-        claims = sorted(directory.glob(f"{artifact_id}.claim.*.json"))
-        if not claims:
-            return False
-        expiries: list[tuple[datetime, Path]] = []
-        for claim_path in claims:
-            expires_at = self._claim_expiry(claim_path)
-            if expires_at > current:
+        recoverable: list[tuple[datetime, Path, ArtifactRecoveryReadyDecision]] = []
+        for claim_path in sorted(directory.glob(f"{artifact_id}.claim.*.json")):
+            capability = _claim_capability_from_path(claim_path)
+            if capability is None or capability.artifact_id != artifact_id:
+                continue
+            try:
+                record, _ = _read_manifest(claim_path, directory)
+                claimed = ArtifactClaimed(record, capability)
+            except FileNotFoundError:
+                continue
+            except OSError, ValueError, KeyError, json.JSONDecodeError:
+                claim_path.unlink(missing_ok=True)
+                _fsync_directory(directory)
                 return False
-            expiries.append((expires_at, claim_path))
+            decision = claimed.recover(current)
+            if isinstance(decision, ArtifactRecoveryBlockedDecision):
+                return False
+            recoverable.append((capability.lease_expires_at, claim_path, decision))
+        if not recoverable:
+            return False
         available = directory / f"{artifact_id}.json"
         if available.exists():
             return True
-        for _, claim_path in sorted(expiries, key=lambda item: item[0]):
+        for _, claim_path, recovered in sorted(
+            recoverable,
+            key=lambda item: item[0],
+        ):
+            recovered_path = directory / f"{recovered.claim.record.artifact_id}.json"
             try:
-                os.rename(claim_path, available)
+                os.rename(claim_path, recovered_path)
             except FileNotFoundError:
                 continue
             _fsync_directory(directory)
             return True
         return False
-
-    def _claim_expiry(self, claim_path: Path) -> datetime:
-        """@brief 读取 claim 文件名中的显式租约 / Read the explicit lease from a claim filename.
-
-        @param claim_path claim manifest 路径 / Claim-manifest path.
-        @return aware UTC 租约截止 / Aware UTC lease deadline.
-        """
-
-        matched = _CLAIM_MANIFEST.fullmatch(claim_path.name)
-        if matched is None:
-            return datetime.max.replace(tzinfo=UTC)
-        return datetime.fromtimestamp(
-            int(matched.group("expires")) / 1_000_000,
-            tz=UTC,
-        )
 
     def _finalize_completions(self, directory: Path, artifact_id: ArtifactId) -> int:
         """@brief 完成 kill-9 遗留的 delivery tombstone / Finalize delivery tombstones left by kill-9.
@@ -313,14 +412,18 @@ class FileArtifactStore:
             _fsync_directory(directory)
         return finalized
 
-    def release(self, claim: ClaimedArtifact) -> None:
+    def release(self, claim: FileArtifactClaim) -> None:
         """@brief 可重试失败后释放 claim / Release a claim after a retryable failure.
 
         @param claim 独占 claim / Exclusive claim.
         @return None / None.
         """
 
-        available = claim.claim_path.parent / f"{claim.record.artifact_id}.json"
+        state = self._claim_state(claim)
+        available_state = state.release()
+        available = (
+            claim.claim_path.parent / f"{available_state.record.artifact_id}.json"
+        )
         if not claim.path.is_file():
             claim.claim_path.unlink(missing_ok=True)
             _fsync_directory(claim.claim_path.parent)
@@ -333,16 +436,18 @@ class FileArtifactStore:
             claim.claim_path.unlink(missing_ok=True)
         _fsync_directory(claim.claim_path.parent)
 
-    def complete(self, claim: ClaimedArtifact) -> None:
+    def complete(self, claim: FileArtifactClaim) -> None:
         """@brief 投递成功后删除数据与 claim / Delete data and claim after successful delivery.
 
         @param claim 独占 claim / Exclusive claim.
         @return None / None.
         """
 
+        state = self._claim_state(claim)
+        completed = state.complete(ArtifactClaimToken(uuid.uuid4().hex))
         directory = claim.claim_path.parent
         completion = directory / (
-            f"{claim.record.artifact_id}.complete.{uuid.uuid4().hex}.json"
+            f"{completed.record.artifact_id}.complete.{completed.token}.json"
         )
         try:
             os.rename(claim.claim_path, completion)
@@ -352,6 +457,23 @@ class FileArtifactStore:
         claim.path.unlink(missing_ok=True)
         completion.unlink(missing_ok=True)
         _fsync_directory(directory)
+
+    def _claim_state(self, claim: FileArtifactClaim) -> ArtifactClaimed:
+        """@brief 验证 handle 由同一 store 根签发 / Verify that a handle was issued for the same store root.
+
+        @param claim 待验证文件 capability / File capability to validate.
+        @return 领域 claimed 状态 / Domain claimed state.
+        @raise TypeError 值不是 ``FileArtifactClaim`` 时抛出 /
+            Raised when the value is not a ``FileArtifactClaim``.
+        @raise ValueError handle 属于其他 store 根时抛出 /
+            Raised when the handle belongs to another store root.
+        """
+
+        if not isinstance(claim, FileArtifactClaim):
+            raise TypeError("artifact transition requires a FileArtifactClaim")
+        if claim._store_root != self._root:
+            raise ValueError("artifact claim belongs to a different store")
+        return claim._state
 
     def cleanup_expired(
         self,
@@ -388,12 +510,11 @@ class FileArtifactStore:
                 claim_match = _CLAIM_MANIFEST.fullmatch(manifest.name)
                 if claim_match is not None:
                     artifact_id = ArtifactId(claim_match.group("artifact"))
-                    if self._claim_expiry(manifest) <= current:
-                        self._recover_expired_claim(
-                            directory,
-                            artifact_id,
-                            current=current,
-                        )
+                    self._recover_expired_claim(
+                        directory,
+                        artifact_id,
+                        current=current,
+                    )
                     continue
                 try:
                     record, _ = _read_manifest(manifest, directory)
@@ -447,22 +568,108 @@ def _read_manifest(path: Path, directory: Path) -> tuple[ArtifactRecord, Path]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("artifact manifest must be an object")
-    data_file = str(payload["data_file"])
+    expected_keys = {
+        "artifact_id",
+        "kind",
+        "filename",
+        "mime_type",
+        "size_bytes",
+        "created_at",
+        "expires_at",
+        "data_file",
+    }
+    if set(payload) != expected_keys:
+        raise ValueError("artifact manifest fields do not match the schema")
+    artifact_id = ArtifactId(_manifest_string(payload, "artifact_id"))
+    kind = ArtifactKind(_manifest_string(payload, "kind"))
+    filename = _manifest_string(payload, "filename")
+    mime_type = _manifest_string(payload, "mime_type")
+    size_bytes = payload["size_bytes"]
+    if isinstance(size_bytes, bool) or not isinstance(size_bytes, int):
+        raise ValueError("artifact manifest size_bytes must be an integer")
+    data_file = _manifest_string(payload, "data_file")
     data_path = directory / data_file
     if data_path.parent != directory or Path(data_file).name != data_file:
         raise ValueError("artifact data path escapes its directory")
-    record = ArtifactRecord(
-        artifact_id=ArtifactId(str(payload["artifact_id"])),
-        kind=ArtifactKind(str(payload["kind"])),
-        filename=str(payload["filename"]),
-        mime_type=str(payload["mime_type"]),
-        size_bytes=int(str(payload["size_bytes"])),
+    record = ArtifactRecord.restore(
+        artifact_id=artifact_id,
+        kind=kind,
+        filename=filename,
+        mime_type=mime_type,
+        size_bytes=size_bytes,
         created_at=_parse_datetime(payload["created_at"]),
         expires_at=_parse_datetime(payload["expires_at"]),
     )
-    if not data_file.startswith(f"{record.artifact_id}."):
+    manifest_artifact_id = _manifest_artifact_id(path)
+    if manifest_artifact_id != record.artifact_id:
+        raise ValueError("artifact manifest filename does not match its record")
+    try:
+        directory_kind = ArtifactKind(directory.name)
+    except ValueError as error:
+        raise ValueError("artifact manifest directory has an invalid kind") from error
+    if directory_kind is not record.kind:
+        raise ValueError("artifact manifest directory does not match its kind")
+    extension = data_file.removeprefix(str(record.artifact_id))
+    if (
+        not data_file.startswith(str(record.artifact_id))
+        or _SAFE_EXTENSION.fullmatch(extension) is None
+    ):
         raise ValueError("artifact data filename does not match its manifest")
     return record, data_path
+
+
+def _manifest_string(payload: dict[object, object], key: str) -> str:
+    """@brief 严格读取 manifest 字符串 / Strictly read a manifest string.
+
+    @param payload 已解析 JSON object / Parsed JSON object.
+    @param key 字段名 / Field name.
+    @return 未强制转换的字符串 / String without coercion.
+    @raise ValueError 字段不是字符串时抛出 / Raised when the field is not a string.
+    """
+
+    value = payload[key]
+    if not isinstance(value, str):
+        raise ValueError(f"artifact manifest {key} must be a string")
+    return value
+
+
+def _manifest_artifact_id(path: Path) -> ArtifactId:
+    """@brief 从三种合法 manifest 文件名解析身份 / Parse identity from any legal manifest filename.
+
+    @param path available、claim 或 completion manifest 路径 / Available, claim, or completion manifest path.
+    @return 文件名制品标识 / Filename artifact identifier.
+    @raise ValueError 文件名不是合法状态时抛出 /
+        Raised when the filename is not a legal state representation.
+    """
+
+    for pattern in (_AVAILABLE_MANIFEST, _CLAIM_MANIFEST, _COMPLETION_MANIFEST):
+        matched = pattern.fullmatch(path.name)
+        if matched is not None:
+            return ArtifactId(matched.group("artifact"))
+    raise ValueError("artifact manifest filename has an invalid state")
+
+
+def _claim_capability_from_path(path: Path) -> ArtifactClaimCapability | None:
+    """@brief 从合法 claim 文件名恢复 capability / Restore a capability from a legal claim filename.
+
+    @param path 候选 claim manifest 路径 / Candidate claim-manifest path.
+    @return 已验证 capability；非法文件名则为 None / Validated capability, or None for an invalid filename.
+    """
+
+    matched = _CLAIM_MANIFEST.fullmatch(path.name)
+    if matched is None:
+        return None
+    try:
+        return ArtifactClaimCapability.restore(
+            artifact_id=ArtifactId(matched.group("artifact")),
+            token=ArtifactClaimToken(matched.group("token")),
+            lease_expires_at=datetime.fromtimestamp(
+                int(matched.group("expires")) / 1_000_000,
+                tz=UTC,
+            ),
+        )
+    except OSError, OverflowError, ValueError:
+        return None
 
 
 def _parse_datetime(value: object) -> datetime:
@@ -472,7 +679,9 @@ def _parse_datetime(value: object) -> datetime:
     @return aware UTC 时间 / Aware UTC instant.
     """
 
-    return _utc(datetime.fromisoformat(str(value)))
+    if not isinstance(value, str):
+        raise ValueError("artifact manifest timestamp must be a string")
+    return _utc(datetime.fromisoformat(value))
 
 
 def _safe_filename(value: str, *, fallback: str) -> str:
