@@ -513,9 +513,11 @@ struct ActivationStagingParent final {
  * @param purpose 诊断语义 / Diagnostic purpose.
  * @param allow_creation 是否允许创建缺失目录 / Whether a missing directory may be created.
  * @return 成功或 fail-closed I/O/ownership 错误 / Success or a fail-closed I/O/ownership error.
- * @note 只有既有 root-owned 且 group/other 不可写的目录可收紧；所有 chown/chmod/readback
- *       均作用于打开后的 inode。/ Only an existing root-owned directory that is not writable by
- *       group/other may be tightened; chown, chmod, and readback all operate on the opened inode.
+ * @note 只有既有 root-owned 且 group/other 不可写的目录可收紧；已满足契约的既有目录不会产生
+ *       metadata 写入，所有必要的 chown/chmod/readback 均作用于打开后的 inode。/
+ *       Only an existing root-owned directory that is not writable by group/other may be
+ *       tightened; an existing directory already satisfying the contract incurs no metadata
+ *       writes, and every necessary chown/chmod/readback operates on the opened inode.
  */
 [[nodiscard]] Result<void> converge_private_directory_fd(const std::filesystem::path& path,
                                                          const std::string_view purpose,
@@ -561,6 +563,9 @@ struct ActivationStagingParent final {
             ErrorCode::io_failure,
             std::string(purpose) +
                 " is not a trusted root-owned directory; refusing ownership or mode repair"));
+    }
+    if (!created && is_private_root_owned_directory(metadata)) {
+        return {};
     }
     if (fchown(descriptor.get(), 0, 0) != 0 || fchmod(descriptor.get(), 0700) != 0 ||
         fsync(descriptor.get()) != 0) {
@@ -3199,13 +3204,13 @@ Result<void> preflight_xfs_project_quota(const XfsProjectQuotaConfig& config,
             make_error(ErrorCode::sandbox_preflight_failed,
                        "XFS admission budget plus system reserve exceeds filesystem capacity"));
     }
-    if (const auto state_directory =
-            validate_private_directory(*canonical_state_root, "XFS quota state_root");
-        !state_directory) {
-        return std::unexpected(state_directory.error());
-    }
     if (const auto quota = require_project_quota_enforcement(*mount_path); !quota) {
         return std::unexpected(quota.error());
+    }
+    if (const auto state_directory =
+            tighten_existing_private_directory(*canonical_state_root, "XFS quota state_root");
+        !state_directory) {
+        return std::unexpected(state_directory.error());
     }
     return reject_legacy_state(*canonical_state_root);
 }

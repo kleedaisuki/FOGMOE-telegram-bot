@@ -167,8 +167,11 @@ private:
  * @param state_root broker 的持久状态根 / Broker persistent state root.
  * @return 成功或不可接受的 quota/mount 原因 / Success or an unacceptable quota/mount reason.
  * @note 此函数要求真实 XFS、可写 mount、project accounting 和 enforcement；没有 fallback。
+ *       已存在且可信的 root-owned state root 会通过稳定 FD 收紧为精确 root:root 0700；
+ *       非 root-owned 或 group/other 可写目录仍会 fail closed。/
  *       This requires real XFS, a writable mount, project accounting, and enforcement; there is no
- * fallback.
+ *       fallback. An existing trusted root-owned state root is tightened through stable FDs to
+ *       exact root:root 0700; non-root-owned or group/other-writable directories still fail closed.
  */
 [[nodiscard]] Result<void> preflight_xfs_project_quota(const XfsProjectQuotaConfig& config,
                                                        const std::filesystem::path& state_root);

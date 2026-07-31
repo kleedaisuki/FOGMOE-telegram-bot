@@ -716,9 +716,62 @@ run_concurrent_reconciliation(const wspctl::XfsProjectQuota& quota,
             .workspace_uid = kAgentUid,
             .workspace_gid = kAgentGid,
         };
+        if (chmod(state_root->c_str(), 0755) != 0) {
+            std::cerr << "FAIL: simulate trusted 0755 XFS state-root drift\n";
+            break;
+        }
         if (const auto preflight = wspctl::preflight_xfs_project_quota(config, *state_root);
             !preflight) {
-            std::cerr << "FAIL: XFS quota preflight: " << preflight.error().message << '\n';
+            std::cerr << "FAIL: XFS quota preflight did not migrate trusted 0755 state root: "
+                      << preflight.error().message << '\n';
+            break;
+        }
+        /** @brief 迁移后的 state-root metadata / State-root metadata after migration. */
+        struct stat migrated_state_root {};
+        if (lstat(state_root->c_str(), &migrated_state_root) != 0 ||
+            migrated_state_root.st_uid != 0U || migrated_state_root.st_gid != 0U ||
+            (migrated_state_root.st_mode & 07777U) != 0700U) {
+            std::cerr << "FAIL: trusted 0755 XFS state root was not tightened to root:root 0700\n";
+            break;
+        }
+        /** @brief 对已迁移 state root 的重复 preflight / Repeated preflight for the migrated
+         * state root. */
+        const auto repeated_preflight = wspctl::preflight_xfs_project_quota(config, *state_root);
+        if (!repeated_preflight) {
+            std::cerr << "FAIL: repeated XFS quota preflight: "
+                      << repeated_preflight.error().message << '\n';
+            break;
+        }
+        /** @brief 幂等 preflight 后的 state-root metadata / State-root metadata after idempotent
+         * preflight. */
+        struct stat idempotent_state_root {};
+        if (lstat(state_root->c_str(), &idempotent_state_root) != 0 ||
+            idempotent_state_root.st_dev != migrated_state_root.st_dev ||
+            idempotent_state_root.st_ino != migrated_state_root.st_ino ||
+            idempotent_state_root.st_ctim.tv_sec != migrated_state_root.st_ctim.tv_sec ||
+            idempotent_state_root.st_ctim.tv_nsec != migrated_state_root.st_ctim.tv_nsec) {
+            std::cerr << "FAIL: repeated preflight rewrote an already-private XFS state root\n";
+            break;
+        }
+        if (chmod(state_root->c_str(), 0770) != 0) {
+            std::cerr << "FAIL: simulate unsafe group-writable XFS state-root drift\n";
+            break;
+        }
+        /** @brief unsafe state-root preflight 结果 / Unsafe state-root preflight result. */
+        const auto rejected_unsafe_state_root =
+            wspctl::preflight_xfs_project_quota(config, *state_root);
+        /** @brief 被拒绝后的 state-root metadata / State-root metadata after rejection. */
+        struct stat rejected_state_root {};
+        if (rejected_unsafe_state_root ||
+            rejected_unsafe_state_root.error().message.find("refusing ownership or mode repair") ==
+                std::string::npos ||
+            lstat(state_root->c_str(), &rejected_state_root) != 0 ||
+            (rejected_state_root.st_mode & 07777U) != 0770U) {
+            std::cerr << "FAIL: group-writable XFS state root was repaired instead of rejected\n";
+            break;
+        }
+        if (chmod(state_root->c_str(), 0700) != 0) {
+            std::cerr << "FAIL: restore private XFS state-root mode after rejection test\n";
             break;
         }
         const wspctl::XfsProjectQuota quota(*state_root, config);
