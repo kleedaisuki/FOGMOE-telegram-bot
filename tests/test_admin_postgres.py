@@ -6,12 +6,19 @@ import asyncio
 import json
 import os
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import uuid4
 
 import pytest
 from observability_testkit import make_telemetry
 
 from fogmoe_bot.application.admin.models import RequestAnnouncement
+from fogmoe_bot.domain.admin.announcement import (
+    Announcement,
+    AnnouncementId,
+    AnnouncementStatus,
+    ExpandingAnnouncement,
+)
 from fogmoe_bot.domain.conversation.identity import OutboundMessageId
 from fogmoe_bot.infrastructure.admin.announcements import (
     AnnouncementIdempotencyConflict,
@@ -109,6 +116,33 @@ def test_admin_announcement_snapshot_is_concurrent_replayable_and_fenced() -> No
             assert {first.inserted, second.inserted} == {True, False}
             assert first.recipient_count == second.recipient_count
             assert first.recipient_count >= 2
+            main_row = await db.fetch_one(
+                "SELECT announcement_id, idempotency_key, requested_by, "
+                "source_update_id, body, recipient_count, state, created_at, "
+                "updated_at, completed_at FROM admin.announcements "
+                "WHERE announcement_id = CAST(%s AS UUID)",
+                (str(first.announcement_id),),
+            )
+            assert main_row is not None
+            main_aggregate = Announcement.restore(
+                announcement_id=AnnouncementId.parse(str(main_row[0])),
+                idempotency_key=str(main_row[1]),
+                requested_by=int(main_row[2]),
+                source_update_id=int(main_row[3]),
+                body=str(main_row[4]),
+                completion_chat_id=command.reply_chat_id,
+                completion_message_thread_id=command.reply_message_thread_id,
+                completion_reply_to_message_id=command.reply_message_id,
+                recipient_count=int(main_row[5]),
+                status=str(main_row[6]),
+                created_at=cast(datetime, main_row[7]),
+                updated_at=cast(datetime, main_row[8]),
+                completed_at=cast(datetime | None, main_row[9]),
+            )
+            assert main_aggregate.status is AnnouncementStatus.EXPANDING
+            assert isinstance(main_aggregate.state, ExpandingAnnouncement)
+            assert main_aggregate.recipient_count == first.recipient_count
+            main_aggregate.require_same_intent(main_aggregate.intent)
             announcement_conversation = f"admin-announcement:{first.announcement_id}"
             known_snapshot = await db.fetch_one(
                 "SELECT COUNT(*) FROM admin.announcement_recipients "

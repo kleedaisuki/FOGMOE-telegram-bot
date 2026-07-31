@@ -1,9 +1,9 @@
-"""PostgreSQL adapter for durable Admin announcement delivery."""
+"""@brief Durable Admin 公告投递 PostgreSQL adapter / PostgreSQL adapter for durable Admin announcement delivery."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import cast
 from uuid import UUID
 
@@ -14,13 +14,20 @@ from fogmoe_bot.application.admin.models import (
     RequestAnnouncement,
 )
 from fogmoe_bot.domain.admin.announcement import (
+    Announcement,
+    AnnouncementAudienceProgress,
+    AnnouncementAudienceSnapshot,
+    AnnouncementAudienceSnapshotted,
+    AnnouncementDeliveryCompleted,
     AnnouncementDeliveryCounts,
-    AnnouncementDispatchContent,
     AnnouncementId,
+    AnnouncementIntent,
+    AnnouncementIntentMismatch,
+    CompletedAnnouncement,
+    ExpandingAnnouncement,
 )
 from fogmoe_bot.domain.admin.recipient import (
     AnnouncementClaimToken,
-    AnnouncementCompletionReleased,
     AnnouncementRecipient,
     AnnouncementRecipientClaim,
     AnnouncementRecipientDeadLettered,
@@ -30,17 +37,27 @@ from fogmoe_bot.domain.admin.recipient import (
     AnnouncementRecipientRetryScheduled,
     ExpandedAnnouncementRecipient,
     FailedAnnouncementRecipient,
+    PendingAnnouncementRecipient,
     RetryWaitingAnnouncementRecipient,
 )
 from fogmoe_bot.infrastructure.database import db
-
-_RECIPIENT_COLUMNS = (
-    "announcement_id, recipient_kind, chat_id, message_thread_id, "
-    "reply_to_message_id, status, attempt_count, next_attempt_at, claim_token, "
-    "lease_expires_at, outbound_message_id, last_error, created_at, updated_at, "
-    "expanded_at, terminal_at"
+from fogmoe_bot.infrastructure.admin.announcement_persistence import (
+    _ANNOUNCEMENT_COLUMNS,
+    _RECIPIENT_COLUMNS,
+    _announcement_intent,
+    _completion_address,
+    _dispatch_content,
+    _integer,
+    _qualified_announcement_columns,
+    _qualified_recipient_columns,
+    _require_expected_announcement_post_state,
+    _require_expected_post_state,
+    _require_positive_limit,
+    _restore_announcement,
+    _restore_joined_announcement,
+    _restore_recipient,
+    _utc,
 )
-"""@brief recipient 聚合的规范数据库列序 / Canonical database column order for recipient aggregates."""
 
 type _SettlementDecision = (
     AnnouncementRecipientExpanded
@@ -65,36 +82,43 @@ class PostgresAdminAnnouncementOperations:
         @raise AnnouncementIdempotencyConflict 同键语义不同 / The same key denotes different semantics.
         """
 
-        announcement_id = AnnouncementId.for_idempotency_key(command.idempotency_key)
+        intent = _announcement_intent(command)
+        initial = Announcement.start(intent)
         async with db.transaction() as connection:
             inserted_row = await db.fetch_one(
                 "INSERT INTO admin.announcements "
                 "(announcement_id, idempotency_key, requested_by, source_update_id, "
                 "body, recipient_count, state, created_at, updated_at) "
                 "VALUES (CAST(%s AS UUID), %s, %s, %s, %s, 0, 'expanding', %s, %s) "
-                "ON CONFLICT (idempotency_key) DO NOTHING RETURNING announcement_id",
+                "ON CONFLICT (idempotency_key) DO NOTHING "
+                f"RETURNING {_ANNOUNCEMENT_COLUMNS}",
                 (
-                    str(announcement_id),
-                    command.idempotency_key,
-                    command.actor_id,
-                    command.source_update_id,
-                    command.body,
-                    command.requested_at,
-                    command.requested_at,
+                    str(initial.announcement_id),
+                    intent.idempotency_key,
+                    intent.requested_by,
+                    intent.source_update_id,
+                    intent.body,
+                    intent.requested_at,
+                    intent.requested_at,
                 ),
                 connection=connection,
             )
             inserted = inserted_row is not None
-            if inserted:
+            if inserted_row is not None:
+                persisted_initial = _restore_announcement(
+                    inserted_row,
+                    completion_address=intent.completion_address,
+                )
+                if persisted_initial != initial:
+                    raise RuntimeError(
+                        "Inserted announcement disagrees with domain initial state"
+                    )
                 await self._snapshot_audience(
                     connection,
-                    announcement_id=announcement_id,
-                    command=command,
+                    announcement=persisted_initial,
                 )
             row = await db.fetch_one(
-                "SELECT announcement.announcement_id, announcement.idempotency_key, "
-                "announcement.requested_by, announcement.source_update_id, "
-                "announcement.body, announcement.recipient_count, announcement.created_at, "
+                f"SELECT {_qualified_announcement_columns('announcement')}, "
                 "completion.chat_id, completion.message_thread_id, "
                 "completion.reply_to_message_id "
                 "FROM admin.announcements AS announcement "
@@ -110,10 +134,11 @@ class PostgresAdminAnnouncementOperations:
                 raise RuntimeError(
                     "Announcement acceptance returned no canonical intent"
                 )
-            self._validate_replay(row, command, expected_id=announcement_id)
+            announcement = _restore_joined_announcement(row)
+            self._validate_replay(announcement, intent)
             return AnnouncementAcceptance(
-                announcement_id=AnnouncementId.parse(cast(UUID | str, row[0])),
-                recipient_count=_integer(row[5]),
+                announcement_id=announcement.announcement_id,
+                recipient_count=announcement.recipient_count,
                 inserted=inserted,
             )
 
@@ -121,21 +146,21 @@ class PostgresAdminAnnouncementOperations:
         self,
         connection: AsyncConnection,
         *,
-        announcement_id: AnnouncementId,
-        command: RequestAnnouncement,
-    ) -> None:
+        announcement: Announcement,
+    ) -> AnnouncementAudienceSnapshotted:
         """@brief 在意图事务内固化用户和群组受众 / Materialize user and group audiences inside the intent transaction.
 
         @param connection 意图事务连接 / Intent-transaction connection.
-        @param announcement_id 公告 ID / Announcement ID.
-        @param command 公告命令 / Announcement command.
-        @return None / None.
+        @param announcement INSERT RETURNING 恢复的初态 / Initial state restored from INSERT RETURNING.
+        @return sealed 受众快照决策 / Sealed audience-snapshot decision.
         """
 
+        intent = announcement.intent
+        address = intent.completion_address
         parameters = (
-            str(announcement_id),
-            command.requested_at,
-            command.requested_at,
+            str(announcement.announcement_id),
+            intent.requested_at,
+            intent.requested_at,
         )
         await db.execute(
             """
@@ -150,7 +175,7 @@ class PostgresAdminAnnouncementOperations:
             ) AS audience
             ON CONFLICT (announcement_id, recipient_kind, chat_id) DO NOTHING
             """,
-            (*parameters, command.requested_at),
+            (*parameters, intent.requested_at),
             connection=connection,
         )
         await db.execute(
@@ -174,7 +199,7 @@ class PostgresAdminAnnouncementOperations:
             WHERE audience.group_id <> 0
             ON CONFLICT (announcement_id, recipient_kind, chat_id) DO NOTHING
             """,
-            (*parameters, command.requested_at),
+            (*parameters, intent.requested_at),
             connection=connection,
         )
         await db.execute(
@@ -184,60 +209,73 @@ class PostgresAdminAnnouncementOperations:
             "VALUES (CAST(%s AS UUID), 'completion', %s, %s, %s, "
             "'blocked', NULL, %s, %s)",
             (
-                str(announcement_id),
-                command.reply_chat_id,
-                command.reply_message_thread_id,
-                command.reply_message_id,
-                command.requested_at,
-                command.requested_at,
+                str(announcement.announcement_id),
+                address.chat_id,
+                address.message_thread_id,
+                address.reply_to_message_id,
+                intent.requested_at,
+                intent.requested_at,
             ),
             connection=connection,
         )
-        await db.execute(
-            "UPDATE admin.announcements SET "
-            "recipient_count = (SELECT COUNT(*) FROM admin.announcement_recipients "
+        count_row = await db.fetch_one(
+            "SELECT COUNT(*) FROM admin.announcement_recipients "
             "WHERE announcement_id = CAST(%s AS UUID) "
-            "AND recipient_kind IN ('user', 'group')), "
-            "state = CASE WHEN EXISTS (SELECT 1 FROM admin.announcement_recipients "
-            "WHERE announcement_id = CAST(%s AS UUID) "
-            "AND recipient_kind IN ('user', 'group')) "
-            "THEN 'expanding' ELSE 'delivering' END "
-            "WHERE announcement_id = CAST(%s AS UUID)",
-            (str(announcement_id), str(announcement_id), str(announcement_id)),
+            "AND recipient_kind IN ('user', 'group')",
+            (str(announcement.announcement_id),),
             connection=connection,
         )
+        if count_row is None:
+            raise RuntimeError("Announcement audience snapshot returned no count")
+        decision = announcement.record_audience_snapshot(
+            AnnouncementAudienceSnapshot(_integer(count_row[0])),
+            recorded_at=intent.requested_at,
+        )
+        expected = decision.announcement
+        post_row = await db.fetch_one(
+            "UPDATE admin.announcements SET recipient_count = %s, state = %s, "
+            "updated_at = %s WHERE announcement_id = CAST(%s AS UUID) "
+            "AND state = %s AND recipient_count = %s "
+            f"RETURNING {_ANNOUNCEMENT_COLUMNS}",
+            (
+                expected.recipient_count,
+                expected.status.value,
+                expected.updated_at,
+                str(expected.announcement_id),
+                announcement.status.value,
+                announcement.recipient_count,
+            ),
+            connection=connection,
+        )
+        if post_row is None:
+            raise RuntimeError("Inserted announcement audience could not be recorded")
+        _require_expected_announcement_post_state(
+            post_row,
+            expected,
+            completion_address=announcement.intent.completion_address,
+            operation="audience snapshot",
+        )
+        return decision
 
     def _validate_replay(
         self,
-        row: Sequence[object],
-        command: RequestAnnouncement,
-        *,
-        expected_id: AnnouncementId,
+        announcement: Announcement,
+        intent: AnnouncementIntent,
     ) -> None:
         """@brief 拒绝同键不同义的公告重放 / Reject an announcement replay with different semantics.
 
-        @param row 已持久化意图行 / Persisted intent row.
-        @param command 重放命令 / Replayed command.
-        @param expected_id 幂等键推导 ID / ID derived from the idempotency key.
+        @param announcement 已恢复的真实主聚合 / Restored real main aggregate.
+        @param intent 重放的领域意图 / Replayed domain intent.
         @return None / None.
         @raise AnnouncementIdempotencyConflict 语义不同 / Semantics differ.
         """
 
-        same = (
-            AnnouncementId.parse(cast(UUID | str, row[0])) == expected_id
-            and str(row[1]) == command.idempotency_key
-            and _integer(row[2]) == command.actor_id
-            and _integer(row[3]) == command.source_update_id
-            and str(row[4]) == command.body
-            and _utc(cast(datetime, row[6])) == command.requested_at
-            and _integer(row[7]) == command.reply_chat_id
-            and _optional_integer(row[8]) == command.reply_message_thread_id
-            and _integer(row[9]) == command.reply_message_id
-        )
-        if not same:
+        try:
+            announcement.require_same_intent(intent)
+        except AnnouncementIntentMismatch as error:
             raise AnnouncementIdempotencyConflict(
                 "Announcement idempotency key already denotes another intent"
-            )
+            ) from error
 
     async def promote_delivery_completions(
         self,
@@ -256,8 +294,33 @@ class PostgresAdminAnnouncementOperations:
         timestamp = _utc(now)
         async with db.transaction() as connection:
             candidates = await db.fetch_all(
-                """
-                SELECT announcement.announcement_id
+                f"""
+                SELECT {_qualified_announcement_columns("announcement")},
+                  COALESCE((
+                    SELECT COUNT(*)
+                    FROM admin.announcement_recipients AS audience
+                    JOIN conversation.outbound_messages AS outbound
+                      ON outbound.message_id = audience.outbound_message_id
+                    WHERE audience.announcement_id = announcement.announcement_id
+                      AND audience.recipient_kind IN ('user', 'group')
+                      AND audience.status = 'expanded'
+                      AND outbound.status = 'delivered'
+                  ), 0),
+                  COALESCE((
+                    SELECT COUNT(*)
+                    FROM admin.announcement_recipients AS audience
+                    LEFT JOIN conversation.outbound_messages AS outbound
+                      ON outbound.message_id = audience.outbound_message_id
+                    WHERE audience.announcement_id = announcement.announcement_id
+                      AND audience.recipient_kind IN ('user', 'group')
+                      AND (
+                        audience.status = 'failed_final'
+                        OR (
+                          audience.status = 'expanded'
+                          AND outbound.status IN ('failed_final', 'cancelled')
+                        )
+                      )
+                  ), 0)
                 FROM admin.announcements AS announcement
                 WHERE announcement.state = 'delivering'
                   AND NOT EXISTS (
@@ -277,8 +340,8 @@ class PostgresAdminAnnouncementOperations:
                 (limit,),
                 connection=connection,
             )
-            decisions: list[AnnouncementCompletionReleased] = []
-            """@brief 由锁定 blocked pre-state 产生的 release 决策 / Release decisions produced from locked blocked pre-states."""
+            decisions: list[AnnouncementDeliveryCompleted] = []
+            """@brief 由锁定公告与 blocked completion 产生的复合决策 / Compound decisions produced from locked announcements and blocked completions."""
             for candidate in candidates:
                 announcement_id = AnnouncementId.parse(cast(UUID | str, candidate[0]))
                 pre_row = await db.fetch_one(
@@ -295,37 +358,77 @@ class PostgresAdminAnnouncementOperations:
                         "Delivering announcement has no blocked completion recipient"
                     )
                 blocked = _restore_recipient(pre_row)
-                decision = blocked.release_completion(released_at=timestamp)
-                post_row = await db.fetch_one(
-                    "WITH promoted AS ("
+                announcement = _restore_announcement(
+                    candidate,
+                    completion_address=_completion_address(blocked),
+                )
+                counts = AnnouncementDeliveryCounts(
+                    recipients=announcement.recipient_count,
+                    delivered=_integer(candidate[10]),
+                    failed=_integer(candidate[11]),
+                )
+                decision = announcement.complete_delivery(
+                    counts,
+                    completion_recipient=blocked,
+                    completed_at=timestamp,
+                )
+                expected_announcement = decision.announcement
+                completed_state = cast(
+                    CompletedAnnouncement,
+                    expected_announcement.state,
+                )
+                announcement_row = await db.fetch_one(
                     "UPDATE admin.announcements AS announcement SET "
                     "state = 'completed', completed_at = %s, updated_at = %s "
                     "WHERE announcement.announcement_id = CAST(%s AS UUID) "
                     "AND announcement.state = 'delivering' "
-                    "RETURNING announcement.announcement_id) "
-                    "UPDATE admin.announcement_recipients AS completion SET "
-                    "status = 'pending', next_attempt_at = %s, updated_at = %s "
-                    "FROM promoted WHERE completion.announcement_id = "
-                    "promoted.announcement_id "
-                    "AND completion.recipient_kind = 'completion' "
-                    "AND completion.status = 'blocked' "
-                    f"RETURNING {_qualified_recipient_columns('completion')}",
+                    f"RETURNING {_ANNOUNCEMENT_COLUMNS}",
                     (
-                        timestamp,
-                        timestamp,
-                        str(announcement_id),
-                        timestamp,
-                        timestamp,
+                        completed_state.completed_at,
+                        expected_announcement.updated_at,
+                        str(expected_announcement.announcement_id),
                     ),
                     connection=connection,
                 )
-                if post_row is None:
+                if announcement_row is None:
+                    raise RuntimeError(
+                        "Locked delivering announcement could not be completed"
+                    )
+                _require_expected_announcement_post_state(
+                    announcement_row,
+                    expected_announcement,
+                    completion_address=announcement.intent.completion_address,
+                    operation="delivery completion",
+                )
+                release = decision.completion_release
+                expected_completion = release.recipient
+                pending_state = cast(
+                    PendingAnnouncementRecipient,
+                    expected_completion.state,
+                )
+                completion_row = await db.fetch_one(
+                    "UPDATE admin.announcement_recipients AS completion SET "
+                    "status = 'pending', next_attempt_at = %s, updated_at = %s "
+                    "WHERE completion.announcement_id = CAST(%s AS UUID) "
+                    "AND completion.recipient_kind = 'completion' "
+                    "AND completion.chat_id = %s "
+                    "AND completion.status = 'blocked' "
+                    f"RETURNING {_qualified_recipient_columns('completion')}",
+                    (
+                        pending_state.next_attempt_at,
+                        expected_completion.updated_at,
+                        str(expected_completion.announcement_id),
+                        expected_completion.chat_id,
+                    ),
+                    connection=connection,
+                )
+                if completion_row is None:
                     raise RuntimeError(
                         "Locked announcement completion could not be released"
                     )
                 _require_expected_post_state(
-                    post_row,
-                    decision.recipient,
+                    completion_row,
+                    expected_completion,
                     operation="completion release",
                 )
                 decisions.append(decision)
@@ -537,7 +640,9 @@ class PostgresAdminAnnouncementOperations:
                 connection=connection,
             )
             if post_row is None:
-                raise RuntimeError("Locked announcement recipient could not be expanded")
+                raise RuntimeError(
+                    "Locked announcement recipient could not be expanded"
+                )
             _require_expected_post_state(
                 post_row,
                 expected,
@@ -672,17 +777,67 @@ class PostgresAdminAnnouncementOperations:
         @return None / None.
         """
 
-        await db.execute(
+        row = await db.fetch_one(
+            f"SELECT {_qualified_announcement_columns('announcement')}, "
+            "completion.chat_id, completion.message_thread_id, "
+            "completion.reply_to_message_id "
+            "FROM admin.announcements AS announcement "
+            "JOIN admin.announcement_recipients AS completion "
+            "ON completion.announcement_id = announcement.announcement_id "
+            "AND completion.recipient_kind = 'completion' "
+            "WHERE announcement.announcement_id = CAST(%s AS UUID) "
+            "FOR UPDATE OF announcement",
+            (str(announcement_id),),
+            connection=connection,
+        )
+        if row is None:
+            raise RuntimeError("Announcement expansion returned no main aggregate")
+        announcement = _restore_joined_announcement(row)
+        if not isinstance(announcement.state, ExpandingAnnouncement):
+            return
+        progress_row = await db.fetch_one(
+            "SELECT COUNT(*), COUNT(*) FILTER ("
+            "WHERE status IN ('expanded', 'failed_final')) "
+            "FROM admin.announcement_recipients "
+            "WHERE announcement_id = CAST(%s AS UUID) "
+            "AND recipient_kind IN ('user', 'group')",
+            (str(announcement_id),),
+            connection=connection,
+        )
+        if progress_row is None:
+            raise RuntimeError("Announcement audience progress returned no counts")
+        progress = AnnouncementAudienceProgress(
+            recipient_count=_integer(progress_row[0]),
+            terminal_count=_integer(progress_row[1]),
+        )
+        if progress.terminal_count != progress.recipient_count:
+            return
+        decision = announcement.finish_audience_expansion(
+            progress,
+            finished_at=now,
+        )
+        expected = decision.announcement
+        post_row = await db.fetch_one(
             "UPDATE admin.announcements AS announcement SET "
             "state = 'delivering', updated_at = %s "
             "WHERE announcement.announcement_id = CAST(%s AS UUID) "
             "AND announcement.state = 'expanding' "
-            "AND NOT EXISTS (SELECT 1 FROM admin.announcement_recipients AS recipient "
-            "WHERE recipient.announcement_id = announcement.announcement_id "
-            "AND recipient.recipient_kind IN ('user', 'group') "
-            "AND recipient.status NOT IN ('expanded', 'failed_final'))",
-            (now, str(announcement_id)),
+            "AND announcement.recipient_count = %s "
+            f"RETURNING {_ANNOUNCEMENT_COLUMNS}",
+            (
+                expected.updated_at,
+                str(expected.announcement_id),
+                announcement.recipient_count,
+            ),
             connection=connection,
+        )
+        if post_row is None:
+            raise RuntimeError("Locked expanding announcement could not begin delivery")
+        _require_expected_announcement_post_state(
+            post_row,
+            expected,
+            completion_address=announcement.intent.completion_address,
+            operation="audience expansion",
         )
 
     async def recover_expired(self, *, now: datetime, limit: int) -> int:
@@ -748,19 +903,6 @@ class PostgresAdminAnnouncementOperations:
             return len(decisions)
 
 
-def _qualified_recipient_columns(alias: str) -> str:
-    """@brief 用内部 SQL alias 限定 recipient 列 / Qualify recipient columns with an internal SQL alias.
-
-    @param alias adapter 内部固定 alias / Adapter-internal fixed alias.
-    @return 规范限定列列表 / Canonical qualified column list.
-    @note alias 不接受用户输入 / The alias never receives user input.
-    """
-
-    return ", ".join(
-        f"{alias}.{column.strip()}" for column in _RECIPIENT_COLUMNS.split(",")
-    )
-
-
 def _apply_settlement_decision(
     decision: _SettlementDecision,
     pre_state: AnnouncementRecipient,
@@ -789,127 +931,6 @@ def _apply_settlement_decision(
             "Announcement settlement decision disagrees with database pre-state"
         )
     return expected
-
-
-def _require_expected_post_state(
-    row: Sequence[object],
-    expected: AnnouncementRecipient,
-    *,
-    operation: str,
-) -> None:
-    """@brief restore SQL 后态并与领域决策逐字段比较 / Restore the SQL post-state and compare it field-for-field with the domain decision.
-
-    @param row UPDATE RETURNING 的完整 recipient 行 / Complete recipient row from UPDATE RETURNING.
-    @param expected 领域计算后态 / Domain-calculated post-state.
-    @param operation 错误上下文 / Error context.
-    @return None / None.
-    @raise RuntimeError SQL 后态不一致时抛出 / Raised when the SQL post-state disagrees.
-    """
-
-    actual = _restore_recipient(row)
-    if actual != expected:
-        raise RuntimeError(
-            f"Announcement {operation} post-state disagrees with domain transition"
-        )
-
-
-def _restore_recipient(row: Sequence[object]) -> AnnouncementRecipient:
-    """@brief 从固定 SQL 列序恢复 durable recipient / Restore a durable recipient from the fixed SQL column order.
-
-    @param row 前十六列为完整 recipient 持久化形状 / Row whose first sixteen columns are the complete recipient shape.
-    @return 已验证领域聚合 / Validated domain aggregate.
-    @raise ValueError 行字段不足或状态矩阵非法时抛出 / Raised for a short row or invalid state matrix.
-    """
-
-    if len(row) < 16:
-        raise ValueError("Announcement recipient row has fewer than sixteen fields")
-    return AnnouncementRecipient.restore(
-        announcement_id=AnnouncementId.parse(cast(UUID | str, row[0])),
-        recipient_kind=AnnouncementRecipientKind(str(row[1])),
-        chat_id=_integer(row[2]),
-        message_thread_id=_optional_integer(row[3]),
-        reply_to_message_id=_optional_integer(row[4]),
-        status=str(row[5]),
-        attempt_count=_integer(row[6]),
-        next_attempt_at=cast(datetime | None, row[7]),
-        claim_token=cast(UUID | str | None, row[8]),
-        lease_expires_at=cast(datetime | None, row[9]),
-        outbound_message_id=cast(UUID | str | None, row[10]),
-        last_error=None if row[11] is None else str(row[11]),
-        created_at=cast(datetime, row[12]),
-        updated_at=cast(datetime, row[13]),
-        expanded_at=cast(datetime | None, row[14]),
-        terminal_at=cast(datetime | None, row[15]),
-    )
-
-
-def _dispatch_content(row: Sequence[object]) -> AnnouncementDispatchContent:
-    """@brief 从 claim JOIN 列恢复不可变出站内容 / Restore immutable dispatch content from claim JOIN columns.
-
-    @param row recipient 十六列后附公告正文、总数、时间和终态计数 / Recipient columns followed by body, total, time, and terminal counts.
-    @return 已验证出站内容 / Validated dispatch content.
-    @raise ValueError 行字段不足或计数非法时抛出 / Raised for a short row or invalid counts.
-    """
-
-    if len(row) < 21:
-        raise ValueError("Announcement claim row has fewer than twenty-one fields")
-    return AnnouncementDispatchContent(
-        body=str(row[16]),
-        counts=AnnouncementDeliveryCounts(
-            recipients=_integer(row[17]),
-            delivered=_integer(row[19]),
-            failed=_integer(row[20]),
-        ),
-        announcement_created_at=cast(datetime, row[18]),
-    )
-
-
-def _integer(value: object) -> int:
-    """@brief 严格转换数据库整数 / Strictly convert a database integer.
-
-    @param value 数据库值 / Database value.
-    @return Python 整数 / Python integer.
-    @raise ValueError 值不是整数 / The value is not an integer.
-    """
-
-    if isinstance(value, bool):
-        raise ValueError("Boolean is not an Admin integer")
-    return int(str(value))
-
-
-def _optional_integer(value: object) -> int | None:
-    """@brief 转换可空整数 / Convert an optional database integer.
-
-    @param value 数据库值 / Database value.
-    @return 整数或 None / Integer or None.
-    """
-
-    return None if value is None else _integer(value)
-
-
-def _utc(value: datetime) -> datetime:
-    """@brief 将 aware 时间规范为 UTC / Normalize an aware instant to UTC.
-
-    @param value 输入时间 / Input instant.
-    @return UTC aware 时间 / UTC-aware instant.
-    @raise ValueError 输入为 naive datetime / The input is naive.
-    """
-
-    if value.tzinfo is None:
-        raise ValueError("Admin persistence timestamps must be timezone-aware")
-    return value.astimezone(UTC)
-
-
-def _require_positive_limit(limit: int) -> None:
-    """@brief 校验有界批量 / Validate a bounded batch limit.
-
-    @param limit 批量上限 / Batch bound.
-    @return None / None.
-    @raise ValueError limit 非正 / The limit is not positive.
-    """
-
-    if isinstance(limit, bool) or limit < 1:
-        raise ValueError("Admin batch limit must be positive")
 
 
 __all__ = [
