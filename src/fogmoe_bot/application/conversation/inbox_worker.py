@@ -6,7 +6,7 @@ import asyncio
 import logging
 import random
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
@@ -19,7 +19,11 @@ from fogmoe_bot.application.runtime import (
     UtcClock,
 )
 from fogmoe_bot.domain.conversation.inbox import (
-    InboundClaim,
+    InboxClaim,
+    InboxDeadLettered,
+    InboxFailure,
+    InboxRetryScheduled,
+    InboxSucceeded,
     InboundUpdate,
 )
 from fogmoe_bot.domain.observability.conventions import EventName, MetricName, Outcome
@@ -43,7 +47,7 @@ class InboxPersistence(Protocol):
         now: datetime,
         limit: int,
         lease_for: timedelta,
-    ) -> Sequence[InboundClaim]:
+    ) -> Sequence[InboxClaim]:
         """@brief 原子领取到期 Update / Atomically claim due Updates.
 
         @param now 当前 UTC 时刻 / Current UTC time.
@@ -54,52 +58,37 @@ class InboxPersistence(Protocol):
 
         ...
 
-    async def mark_inbound_processed(
+    async def complete_inbound(
         self,
-        claim: InboundClaim,
-        *,
-        processed_at: datetime,
+        decision: InboxSucceeded,
     ) -> None:
-        """@brief 以 fencing token 完成 Update / Complete an Update with its fencing token.
+        """@brief 原子持久化领域成功决定 / Atomically persist a domain success decision.
 
-        @param claim 当前 claim / Current claim.
-        @param processed_at 完成时间 / Completion time.
+        @param decision 已验证成功决定 / Validated success decision.
         @return None / None.
         """
 
         ...
 
-    async def retry_inbound(
+    async def schedule_inbound_retry(
         self,
-        claim: InboundClaim,
-        *,
-        failed_at: datetime,
-        retry_at: datetime,
-        error: str,
+        decision: InboxRetryScheduled,
     ) -> None:
-        """@brief 以 fencing token 安排重试 / Schedule retry with the fencing token.
+        """@brief 原子持久化领域重试决定 / Atomically persist a domain retry decision.
 
-        @param claim 当前 claim / Current claim.
-        @param failed_at 本次失败时间 / Time of this failure.
-        @param retry_at 下次领取时间 / Next claim time.
-        @param error 规范错误摘要 / Normalized error summary.
+        @param decision 已验证重试决定 / Validated retry decision.
         @return None / None.
         """
 
         ...
 
-    async def fail_inbound(
+    async def dead_letter_inbound(
         self,
-        claim: InboundClaim,
-        *,
-        failed_at: datetime,
-        error: str,
+        decision: InboxDeadLettered,
     ) -> None:
-        """@brief 以 fencing token 隔离永久失败 Update / Quarantine a permanently failed Update with the fencing token.
+        """@brief 原子持久化领域 dead-letter 决定 / Atomically persist a domain dead-letter decision.
 
-        @param claim 当前 claim / Current claim.
-        @param failed_at 最终失败时间 / Final failure time.
-        @param error 规范错误摘要 / Normalized error summary.
+        @param decision 已验证最终失败决定 / Validated final-failure decision.
         @return None / None.
         """
 
@@ -233,7 +222,7 @@ class _ClaimWork:
     @param claim 待路由 claim / Claim to route.
     """
 
-    claim: InboundClaim
+    claim: InboxClaim
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,7 +306,7 @@ class InboxWorker:
                 for _ in range(self._worker_count):
                     await work_queue.put(_StopConsumer())
 
-    async def process_claim(self, claim: InboundClaim) -> None:
+    async def process_claim(self, claim: InboxClaim) -> None:
         """@brief 路由一个 claim 并以 fencing token 终结状态 / Route one claim and finalize it with the fencing token.
 
         @param claim 当前 claim / Current claim.
@@ -333,10 +322,10 @@ class InboxWorker:
             parent=update.trace_context,
             attributes={
                 "fogmoe.update.id": update.update_id.value,
-                "fogmoe.inbox.attempt": update.attempt_count,
+                "fogmoe.inbox.attempt": claim.item.attempt_count,
             },
         ) as span:
-            routed_update = replace(update, trace_context=span.context)
+            routed_update = update.with_trace_context(span.context)
             try:
                 outcome = await self._router.route(routed_update)
                 if isinstance(outcome, DispatchDeferred):
@@ -350,10 +339,11 @@ class InboxWorker:
                 )
                 await self._finalize_failure(claim, error)
                 return
-            await self._repository.mark_inbound_processed(
+            success = claim.item.succeed(
                 claim,
                 processed_at=self._clock.now(),
             )
+            await self._repository.complete_inbound(success)
             self._telemetry.counter(
                 MetricName.INBOX_OUTCOMES,
                 attributes={"outcome": Outcome.SUCCESS},
@@ -463,7 +453,7 @@ class InboxWorker:
             finally:
                 work_queue.task_done()
 
-    async def _finalize_failure(self, claim: InboundClaim, error: Exception) -> None:
+    async def _finalize_failure(self, claim: InboxClaim, error: Exception) -> None:
         """@brief 按策略安排重试或隔离 / Schedule retry or quarantine according to policy.
 
         @param claim 失败 claim / Failed claim.
@@ -473,22 +463,23 @@ class InboxWorker:
 
         failed_at = self._clock.now()
         decision = self._retry_policy.decide(
-            attempt_count=claim.update.attempt_count,
+            attempt_count=claim.item.attempt_count,
             failed_at=failed_at,
             error=error,
         )
-        error_text = self._error_text(error)
+        failure = InboxFailure(self._error_text(error))
         if isinstance(decision, RetryAt):
-            await self._repository.retry_inbound(
+            retry = claim.item.retry(
                 claim,
                 failed_at=failed_at,
                 retry_at=decision.at,
-                error=error_text,
+                failure=failure,
             )
+            await self._repository.schedule_inbound_retry(retry)
             logger.warning(
                 "Inbox update retry scheduled: update_id=%s attempt=%s retry_at=%s",
                 claim.update.update_id.value,
-                claim.update.attempt_count,
+                claim.item.attempt_count,
                 decision.at.isoformat(),
                 exc_info=error,
             )
@@ -497,11 +488,12 @@ class InboxWorker:
                 attributes={"outcome": Outcome.RETRY},
             )
             return
-        await self._repository.fail_inbound(
+        dead_letter = claim.item.dead_letter(
             claim,
             failed_at=failed_at,
-            error=error_text,
+            failure=failure,
         )
+        await self._repository.dead_letter_inbound(dead_letter)
         self._telemetry.counter(
             MetricName.INBOX_OUTCOMES,
             attributes={"outcome": Outcome.DROPPED},
@@ -509,7 +501,7 @@ class InboxWorker:
         logger.error(
             "Inbox update moved to final-failure quarantine: update_id=%s attempt=%s",
             claim.update.update_id.value,
-            claim.update.attempt_count,
+            claim.item.attempt_count,
             extra={"event_name": EventName.INBOX_PROCESS_FAILED},
             exc_info=error,
         )

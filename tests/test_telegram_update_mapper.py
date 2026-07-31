@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 
 from telegram import Update
 
-from fogmoe_bot.domain.conversation.inbox import InboundStatus
 from fogmoe_bot.presentation.telegram.update_mapper import TelegramUpdateMapper
 
 
@@ -61,8 +60,8 @@ def test_mapper_separates_private_users_and_shares_group_topics() -> None:
     )
 
 
-def test_mapper_creates_json_safe_pending_inbound() -> None:
-    """@brief mapper 产生可领取且时间规范化的 inbox 实体 / Mapper produces a claimable, time-normalized inbox entity."""
+def test_mapper_creates_json_safe_inbound_fact() -> None:
+    """@brief mapper 产生时间规范化的不可变入口事实 / Mapper produces a time-normalized immutable inbound fact."""
 
     mapper = TelegramUpdateMapper()
     received_at = datetime(2026, 7, 11, 12, 30, tzinfo=timezone.utc)
@@ -77,8 +76,7 @@ def test_mapper_creates_json_safe_pending_inbound() -> None:
 
     assert inbound.update_id.value == 501
     assert inbound.conversation_id.value == "assistant-user:77"
-    assert inbound.status is InboundStatus.PENDING
-    assert inbound.next_attempt_at == datetime(2026, 7, 11, 12, 30, tzinfo=timezone.utc)
+    assert inbound.received_at == received_at
     assert inbound.payload["message"]["text"] == "hello"  # type: ignore[index]
     assert isinstance(inbound.payload["message"]["date"], int)  # type: ignore[index]
 

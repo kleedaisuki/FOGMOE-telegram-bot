@@ -42,8 +42,17 @@ def _update(
     message_id: int = 10,
     edited: bool = False,
     content: dict[str, object] | None = None,
+    payload_update_id: int | None = None,
 ) -> InboundUpdate:
-    """@brief 构造 durable 群 Update / Build a durable group Update."""
+    """@brief 构造 durable 群 Update / Build a durable group Update.
+
+    @param update_id 领域 identity / Domain identity.
+    @param message_id Telegram message ID / Telegram message ID.
+    @param edited 是否为编辑 / Whether this is an edit.
+    @param content 可选消息内容 / Optional message content.
+    @param payload_update_id 可选 payload 内 identity / Optional identity inside the payload.
+    @return durable Update / Durable Update.
+    """
 
     message: dict[str, object] = {
         "message_id": message_id,
@@ -58,7 +67,7 @@ def _update(
         update_id=UpdateId(update_id),
         conversation_id=ConversationId("assistant-user:42"),
         payload={
-            "update_id": update_id,
+            "update_id": update_id if payload_update_id is None else payload_update_id,
             "edited_message" if edited else "message": message,
         },
         received_at=NOW,
@@ -117,8 +126,7 @@ def test_safe_mapper_extracts_text_edits_and_media_without_sdk_objects() -> None
     # model through fetch_group_context.
     assert sticker.content == "<group_attachment />"
 
-    malformed = _update(4)
-    malformed.payload["update_id"] = 999
+    malformed = _update(4, payload_update_id=999)
     assert extract_group_message_observation(malformed) is None
 
 

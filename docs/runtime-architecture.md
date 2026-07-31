@@ -661,7 +661,7 @@ Microsoft 的生产模式说明同样要求 Half-Open 只放行有限请求，�
 
 - [identity.py](../src/fogmoe_bot/domain/conversation/identity.py)：`ConversationId`、`TurnId`、`UpdateId`、`OutboundMessageId`、`DeliveryStreamId` 等 identity value objects
 - [turn.py](../src/fogmoe_bot/domain/conversation/turn.py)：`TurnState`、`TurnEvent` 与 `ConversationTurn` 状态机
-- [inbox.py](../src/fogmoe_bot/domain/conversation/inbox.py)、[inference.py](../src/fogmoe_bot/domain/conversation/inference.py)、[message.py](../src/fogmoe_bot/domain/conversation/message.py)、[outbox.py](../src/fogmoe_bot/domain/conversation/outbox.py)：各自 aggregate/snapshot 与 fencing claim
+- [inbox.py](../src/fogmoe_bot/domain/conversation/inbox.py)：`InboundUpdate` 只表达路由可读的不可变入口事实；`InboxItem` 以穷尽状态和拥有 receive/claim/succeed/retry/dead-letter 转换，`InboxClaim` 携带 version/token/lease ownership；[inference.py](../src/fogmoe_bot/domain/conversation/inference.py)、[message.py](../src/fogmoe_bot/domain/conversation/message.py)、[outbox.py](../src/fogmoe_bot/domain/conversation/outbox.py) 分别拥有其 aggregate/snapshot 与 fencing claim
 - [workflow_results.py](../src/fogmoe_bot/domain/conversation/workflow_results.py)：跨 aggregate 短事务的类型化结果
 - application feature module 持有所需最小 persistence protocol，PostgreSQL adapter 由 `infrastructure/database/conversation_workflow/` 按 inbox/turn/inference/outbox 直接实现
 

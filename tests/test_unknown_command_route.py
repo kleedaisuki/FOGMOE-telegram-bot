@@ -48,11 +48,17 @@ class _Outbound:
         self.commands.append(command)
 
 
-def _update(update_id: int, command: str) -> InboundUpdate:
+def _update(
+    update_id: int,
+    command: str,
+    *,
+    bot_username: str = "FogMoeBot",
+) -> InboundUpdate:
     """@brief 构造当前 Bot 的完整 command Update / Build a complete command update for the current Bot.
 
     @param update_id Telegram Update 标识 / Telegram Update identifier.
     @param command 无 slash 命令名 / Command name without slash.
+    @param bot_username 命令目标 Bot / Bot targeted by the command.
     @return durable 来源 Update / Durable source update.
     """
 
@@ -65,12 +71,12 @@ def _update(update_id: int, command: str) -> InboundUpdate:
             "date": 1_893_456_000,
             "chat": {"id": chat_id, "type": "supergroup"},
             "from": {"id": user_id, "is_bot": False, "first_name": "Klee"},
-            "text": f"/{command}@FogMoeBot extra",
+            "text": f"/{command}@{bot_username} extra",
             "entities": [
                 {
                     "type": "bot_command",
                     "offset": 0,
-                    "length": len(command) + len("/@FogMoeBot"),
+                    "length": len(command) + len(f"/@{bot_username}"),
                 }
             ],
         },
@@ -151,13 +157,8 @@ def test_known_and_other_bot_commands_are_not_owned_by_unknown_route() -> None:
     )
     assert not route.matches(_update(18, "bank"))
 
-    update = _update(19, "obsolete")
-    message = update.payload["message"]
-    assert isinstance(message, dict)
-    text = message["text"]
-    assert isinstance(text, str)
     # Keep the original command-entity width intact: Telegram offsets describe
     # the received payload, so changing it here would create an invalid update
     # rather than exercising another bot target.
-    message["text"] = text.replace("@FogMoeBot", "@OtherBotX")
+    update = _update(19, "obsolete", bot_username="OtherBotX")
     assert not route.matches(update)

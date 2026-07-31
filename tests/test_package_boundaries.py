@@ -45,6 +45,65 @@ def test_context_and_conversation_have_distinct_domain_ownership():
     )
 
 
+def test_inbox_lifecycle_is_owned_by_a_domain_aggregate() -> None:
+    """@brief 路由事实不携带 job 字段，worker 不再拥有 setter 式生命周期 / Routed facts carry no job fields and the worker owns no setter-style lifecycle.
+
+    @return None / None.
+    """
+
+    inbox_path = SRC_ROOT / "domain" / "conversation" / "inbox.py"
+    worker_path = SRC_ROOT / "application" / "conversation" / "inbox_worker.py"
+    tree = ast.parse(inbox_path.read_text(encoding="utf-8"), filename=str(inbox_path))
+    classes = {
+        node.name: node for node in tree.body if isinstance(node, ast.ClassDef)
+    }
+    inbound = classes["InboundUpdate"]
+    inbound_fields = {
+        node.target.id
+        for node in inbound.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    }
+    assert inbound_fields == {
+        "_update_id",
+        "_conversation_id",
+        "_payload",
+        "_received_at",
+        "_trace_context",
+    }
+    inbound_methods = {
+        node.name
+        for node in inbound.body
+        if isinstance(node, ast.FunctionDef)
+    }
+    assert {
+        "pending",
+        "with_trace_context",
+        "update_id",
+        "conversation_id",
+        "payload",
+        "received_at",
+        "trace_context",
+    } <= inbound_methods
+
+    aggregate_methods = {
+        node.name
+        for node in classes["InboxItem"].body
+        if isinstance(node, ast.FunctionDef)
+    }
+    assert {"receive", "restore", "claim", "succeed", "retry", "dead_letter"} <= (
+        aggregate_methods
+    )
+
+    worker_source = worker_path.read_text(encoding="utf-8")
+    for setter_style_operation in (
+        "mark_inbound_processed",
+        "retry_inbound",
+        "fail_inbound",
+        "replace(update",
+    ):
+        assert setter_style_operation not in worker_source
+
+
 def test_personal_scope_has_neutral_world_ownership_not_town_ownership() -> None:
     """@brief PersonalScope 属于共享 world 域，个人 RPG 不依赖 Town /
     PersonalScope belongs to the shared world domain and personal RPG does not depend on Town.

@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 from fogmoe_bot.domain.conversation.identity import (
@@ -334,17 +335,56 @@ def _inbound_row(*, status: str = "processing") -> tuple[object, ...]:
     """
 
     next_attempt_at = NOW if status in {"pending", "retry_wait"} else None
+    version = {
+        "pending": 0,
+        "processing": 1,
+        "retry_wait": 2,
+        "processed": 2,
+        "failed_final": 2,
+    }[status]
+    attempt_count = 0 if status == "pending" else 1
+    processed_at = NOW if status == "processed" else None
+    last_error = (
+        "transient failure"
+        if status == "retry_wait"
+        else "permanent failure"
+        if status == "failed_final"
+        else None
+    )
     return (
         99,
         "telegram:chat:-100:user:42:thread:9",
         {"update_id": 99},
         status,
-        1 if status == "processing" else 0,
-        1 if status == "processing" else 0,
+        version,
+        attempt_count,
         next_attempt_at,
         NOW - timedelta(seconds=1),
         NOW,
-        None,
-        None,
+        processed_at,
+        last_error,
         TRACEPARENT,
+    )
+
+
+def _inbound_claim_row(*, previous_status: str = "pending") -> tuple[object, ...]:
+    """@brief 构造同时携带领取前后状态的 inbox 行 / Build an inbox row carrying pre- and post-claim state.
+
+    @param previous_status 领取前状态 / State before the claim.
+    @return claim UPDATE RETURNING 行 / Claim UPDATE RETURNING row.
+    """
+
+    previous = _inbound_row(status=previous_status)
+    processing = list(_inbound_row(status="processing"))
+    processing[4] = cast(int, previous[4]) + 1
+    processing[5] = cast(int, previous[5]) + 1
+    return (
+        *processing,
+        previous[3],
+        previous[4],
+        previous[5],
+        previous[6],
+        previous[8],
+        previous[9],
+        previous[10],
     )

@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -30,8 +29,12 @@ from fogmoe_bot.domain.conversation.identity import (
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import (
-    InboundClaim,
-    InboundStatus,
+    InboxClaim,
+    InboxDeadLettered,
+    InboxItem,
+    InboxRetryScheduled,
+    InboxStatus,
+    InboxSucceeded,
     InboundUpdate,
 )
 
@@ -39,7 +42,7 @@ NOW = datetime(2026, 7, 11, 10, tzinfo=timezone.utc)
 """@brief 测试基准时间 / Test reference time."""
 
 
-def _claim(*, attempt_count: int = 1, update_id: int = 1) -> InboundClaim:
+def _claim(*, attempt_count: int = 1, update_id: int = 1) -> InboxClaim:
     """@brief 构造 processing claim / Build a processing claim.
 
     @param attempt_count 已记录领取次数 / Recorded claim count.
@@ -47,23 +50,28 @@ def _claim(*, attempt_count: int = 1, update_id: int = 1) -> InboundClaim:
     @return 测试 claim / Test claim.
     """
 
-    pending = InboundUpdate.pending(
+    update = InboundUpdate.pending(
         update_id=UpdateId(update_id),
         conversation_id=ConversationId("assistant-user:7"),
         payload={"kind": "message"},
         received_at=NOW,
     )
-    processing = replace(
-        pending,
-        status=InboundStatus.PROCESSING,
-        version=1,
-        attempt_count=attempt_count,
-        next_attempt_at=None,
-        updated_at=NOW + timedelta(seconds=1),
-    )
-    return InboundClaim(
-        update=processing,
+    if attempt_count == 1:
+        pending = InboxItem.receive(update)
+    else:
+        pending = InboxItem.restore(
+            update=update,
+            status=InboxStatus.RETRY_WAIT,
+            version=attempt_count,
+            attempt_count=attempt_count - 1,
+            next_attempt_at=NOW + timedelta(seconds=1),
+            updated_at=NOW,
+            processed_at=None,
+            last_error="transient failure",
+        )
+    return pending.claim(
         token=LeaseToken.new(),
+        claimed_at=NOW + timedelta(seconds=1),
         lease_expires_at=NOW + timedelta(minutes=1),
     )
 
@@ -85,7 +93,7 @@ class _Repository:
 
     def __init__(
         self,
-        claims: tuple[InboundClaim, ...] = (),
+        claims: tuple[InboxClaim, ...] = (),
         *,
         recovery_failures: int = 0,
     ) -> None:
@@ -97,9 +105,9 @@ class _Repository:
 
         self.claims = list(claims)
         self.claim_limits: list[int] = []
-        self.processed: list[tuple[InboundClaim, datetime]] = []
-        self.retried: list[tuple[InboundClaim, datetime, datetime, str]] = []
-        self.failed: list[tuple[InboundClaim, datetime, str]] = []
+        self.processed: list[tuple[InboxClaim, datetime]] = []
+        self.retried: list[tuple[InboxClaim, datetime, datetime, str]] = []
+        self.failed: list[tuple[InboxClaim, datetime, str]] = []
         self.recover_calls = 0
         self.recovery_failures = recovery_failures
 
@@ -109,7 +117,7 @@ class _Repository:
         now: datetime,
         limit: int,
         lease_for: timedelta,
-    ) -> tuple[InboundClaim, ...]:
+    ) -> tuple[InboxClaim, ...]:
         """@brief 按上限领取 claims / Claim values up to the limit.
 
         @param now 当前时间 / Current time.
@@ -124,56 +132,50 @@ class _Repository:
         del self.claims[:limit]
         return claimed
 
-    async def mark_inbound_processed(
+    async def complete_inbound(
         self,
-        claim: InboundClaim,
-        *,
-        processed_at: datetime,
+        decision: InboxSucceeded,
     ) -> None:
         """@brief 记录完成 / Record completion.
 
-        @param claim 当前 claim / Current claim.
-        @param processed_at 完成时间 / Completion time.
+        @param decision 成功领域决定 / Success domain decision.
         @return None / None.
         """
 
-        self.processed.append((claim, processed_at))
+        processed_at = decision.item.processed_at
+        assert processed_at is not None
+        self.processed.append((decision.claim, processed_at))
 
-    async def retry_inbound(
+    async def schedule_inbound_retry(
         self,
-        claim: InboundClaim,
-        *,
-        failed_at: datetime,
-        retry_at: datetime,
-        error: str,
+        decision: InboxRetryScheduled,
     ) -> None:
         """@brief 记录重试 / Record retry.
 
-        @param claim 当前 claim / Current claim.
-        @param failed_at 失败时间 / Failure time.
-        @param retry_at 重试时间 / Retry time.
-        @param error 错误文本 / Error text.
+        @param decision 重试领域决定 / Retry domain decision.
         @return None / None.
         """
 
-        self.retried.append((claim, failed_at, retry_at, error))
+        retry_at = decision.item.next_attempt_at
+        error = decision.item.last_error
+        assert retry_at is not None and error is not None
+        self.retried.append(
+            (decision.claim, decision.item.updated_at, retry_at, error)
+        )
 
-    async def fail_inbound(
+    async def dead_letter_inbound(
         self,
-        claim: InboundClaim,
-        *,
-        failed_at: datetime,
-        error: str,
+        decision: InboxDeadLettered,
     ) -> None:
         """@brief 记录最终失败 / Record final failure.
 
-        @param claim 当前 claim / Current claim.
-        @param failed_at 失败时间 / Failure time.
-        @param error 错误文本 / Error text.
+        @param decision dead-letter 领域决定 / Dead-letter domain decision.
         @return None / None.
         """
 
-        self.failed.append((claim, failed_at, error))
+        error = decision.item.last_error
+        assert error is not None
+        self.failed.append((decision.claim, decision.item.updated_at, error))
 
     async def recover_expired_inbound_leases(self, *, now: datetime) -> int:
         """@brief 记录 lease recovery / Record lease recovery.
@@ -205,7 +207,7 @@ class _OverclaimingRepository(_Repository):
         now: datetime,
         limit: int,
         lease_for: timedelta,
-    ) -> tuple[InboundClaim, ...]:
+    ) -> tuple[InboxClaim, ...]:
         """@brief 首次忽略 limit 返回全部 claims / Ignore the first limit and return every claim."""
 
         del now, lease_for
