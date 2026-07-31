@@ -37,6 +37,10 @@ from fogmoe_bot.infrastructure.database.account_plan import (
 from fogmoe_bot.infrastructure.database.conversation_workflow.turn import (
     PostgresTurnRepository,
 )
+from fogmoe_bot.infrastructure.database.conversation_workflow.common import (
+    _INFERENCE_ACTIVITY_COLUMNS,
+    _map_inference_activity,
+)
 from fogmoe_bot.infrastructure.database.conversation_workflow.turn_uow import (
     _append_message,
     _map_message,
@@ -44,6 +48,15 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.turn_uow import (
 from fogmoe_bot.infrastructure.database.user_profile.store import (
     PostgresUserProfileStore,
 )
+
+_QUALIFIED_INFERENCE_ACTIVITY_COLUMNS = (
+    "activity.activity_id, activity.turn_id, activity.conversation_id, "
+    "activity.request, activity.status, activity.version, activity.attempt_count, "
+    "activity.retry_budget_used, activity.next_attempt_at, activity.created_at, "
+    "activity.updated_at, activity.completed_at, activity.completion_token, "
+    "activity.last_error, activity.traceparent, activity.input_revision"
+)
+"""@brief steer acceptance 的无歧义 activity 投影 / Unambiguous activity projection for steer acceptance."""
 
 
 class TransactionalProfileReader(Protocol):
@@ -272,8 +285,7 @@ class PostgresAssistantTurnAcceptanceUoW:
         if request.task_kind != "assistant" or request.current_turn_upload is not None:
             return None
         row = await db.fetch_one(
-            "SELECT activity.activity_id, activity.turn_id, activity.input_revision, "
-            "activity.status "
+            "SELECT " + _QUALIFIED_INFERENCE_ACTIVITY_COLUMNS + " "
             "FROM conversation.inference_activities AS activity "
             "JOIN conversation.conversation_turns AS turn "
             "ON turn.turn_id = activity.turn_id "
@@ -292,17 +304,10 @@ class PostgresAssistantTurnAcceptanceUoW:
         )
         if row is None:
             return None
-        turn_id = TurnId.parse(row[1])
-        current_revision_value = row[2]
-        if (
-            isinstance(current_revision_value, bool)
-            or not isinstance(current_revision_value, int)
-        ):
-            raise IdempotencyConflictError(
-                f"Active Turn {turn_id} has an invalid input revision"
-            )
-        current_revision = TurnRevision(current_revision_value)
-        revision = current_revision.next()
+        activity = _map_inference_activity(row)
+        turn_id = activity.turn_id
+        steering = activity.steer(accepted_at=accepted_at)
+        revision = steering.activity.input_revision
         content = dict(request.user_content)
         content["input_kind"] = STEER_INPUT_KIND
         content["input_revision"] = int(revision)
@@ -324,27 +329,36 @@ class PostgresAssistantTurnAcceptanceUoW:
             raise IdempotencyConflictError(
                 f"Steer Update {request.update_id.value} replay was not detected before mutation"
             )
-        rowcount = await db.execute(
+        activity_row = await db.fetch_one(
             "UPDATE conversation.inference_activities "
             "SET status = 'steer_pending', input_revision = %s, "
-            "version = version + 1, next_attempt_at = %s, "
+            "version = %s, next_attempt_at = %s, "
             "claim_token = NULL, lease_expires_at = NULL, completion_token = NULL, "
-            "last_error = NULL, retry_budget_used = 0, updated_at = %s "
+            "completed_at = NULL, last_error = NULL, retry_budget_used = %s, "
+            "updated_at = %s "
             "WHERE activity_id = CAST(%s AS UUID) "
             "AND status IN ('processing', 'steer_pending') "
-            "AND input_revision = %s",
+            "AND version = %s AND input_revision = %s RETURNING "
+            + _INFERENCE_ACTIVITY_COLUMNS,
             (
                 int(revision),
-                accepted_at,
-                accepted_at,
-                str(row[0]),
-                int(current_revision),
+                steering.activity.version,
+                steering.activity.next_attempt_at,
+                steering.activity.retry_budget_used,
+                steering.activity.updated_at,
+                str(activity.activity_id),
+                activity.version,
+                int(activity.input_revision),
             ),
             connection=connection,
         )
-        if rowcount != 1:
+        if activity_row is None:
             raise IdempotencyConflictError(
                 f"Active Turn {turn_id} changed while accepting revision {revision.value}"
+            )
+        if _map_inference_activity(activity_row) != steering.activity:
+            raise RuntimeError(
+                "Inference steer SQL diverged from the domain transition"
             )
         return TurnSteer(
             turn_id=turn_id,

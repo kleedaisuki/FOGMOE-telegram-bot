@@ -211,9 +211,7 @@ def _outbound_cancellation_row(
     cancelled[9] = previous_version + 1
     cancelled[10] = previous_attempt_count
     cancelled[13] = cancelled_at
-    cancelled[16] = (
-        "delivery plan cancelled after permanent sibling failure"
-    )
+    cancelled[16] = "delivery plan cancelled after permanent sibling failure"
     return (
         *cancelled,
         None,
@@ -422,27 +420,81 @@ def _activity(
     @return 活动快照 / Activity snapshot.
     """
 
+    is_pending = status is InferenceActivityStatus.PENDING
+    revision = (
+        1
+        if status is InferenceActivityStatus.STEER_PENDING and input_revision == 0
+        else input_revision
+    )
     next_attempt_at = (
         NOW
         if status
         in {
             InferenceActivityStatus.PENDING,
             InferenceActivityStatus.STEER_PENDING,
-            InferenceActivityStatus.RETRY,
         }
+        else NOW + timedelta(seconds=1)
+        if status is InferenceActivityStatus.RETRY
         else None
     )
-    return InferenceActivity(
+    version = {
+        InferenceActivityStatus.PENDING: 0,
+        InferenceActivityStatus.PROCESSING: 1,
+        InferenceActivityStatus.STEER_PENDING: 2,
+        InferenceActivityStatus.RETRY: 2,
+        InferenceActivityStatus.COMPLETED: 2,
+        InferenceActivityStatus.FAILED: 2,
+        InferenceActivityStatus.CANCELLED: 1,
+    }[status]
+    return InferenceActivity.restore(
         draft=_activity_draft(),
         status=status,
-        version=1,
-        attempt_count=1,
+        version=version,
+        attempt_count=0 if is_pending else 1,
         next_attempt_at=next_attempt_at,
         updated_at=NOW,
         retry_budget_used=retry_budget_used,
         completed_at=NOW if status is InferenceActivityStatus.COMPLETED else None,
         completion_token=completion_token,
-        input_revision=TurnRevision(input_revision),
+        last_error=(
+            "typed retry"
+            if status is InferenceActivityStatus.RETRY
+            else "typed final failure"
+            if status is InferenceActivityStatus.FAILED
+            else None
+        ),
+        input_revision=TurnRevision(revision),
+    )
+
+
+def _activity_row(activity: InferenceActivity) -> tuple[object, ...]:
+    """@brief 将测试活动投影为 PostgreSQL adapter 行 / Project a test activity into a PostgreSQL adapter row.
+
+    @param activity 已验证推理聚合 / Validated inference aggregate.
+    @return 与共享 activity SELECT 一致的 16 列行 / Sixteen-column row matching the shared activity SELECT.
+    """
+
+    return (
+        activity.activity_id.value,
+        activity.turn_id.value,
+        str(activity.conversation_id),
+        activity.request,
+        activity.status.value,
+        activity.version,
+        activity.attempt_count,
+        activity.retry_budget_used,
+        activity.next_attempt_at,
+        activity.created_at,
+        activity.updated_at,
+        activity.completed_at,
+        (
+            activity.completion_token.value
+            if activity.completion_token is not None
+            else None
+        ),
+        activity.last_error,
+        activity.trace_context.to_traceparent(),
+        int(activity.input_revision),
     )
 
 

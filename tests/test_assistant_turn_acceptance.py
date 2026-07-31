@@ -29,6 +29,7 @@ from fogmoe_bot.domain.conversation.identity import (
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.message import MessageRole
+from fogmoe_bot.domain.observability.trace import TraceContext
 from fogmoe_bot.infrastructure.database import assistant_turn_acceptance
 from fogmoe_bot.infrastructure.database.assistant_turn_acceptance import (
     PostgresAssistantTurnAcceptanceUoW,
@@ -611,6 +612,7 @@ def test_active_generation_accepts_text_as_same_turn_steer(
         active_turn_id = TurnId.for_source(TurnSource.telegram(UpdateId(99)))
         activity_id = InferenceActivityId.for_turn(active_turn_id)
         request = _request(update_id=100)
+        traceparent = TraceContext.new_root().to_traceparent()
         executed: list[tuple[str, tuple[object, ...]]] = []
         active_queries: list[tuple[str, tuple[object, ...]]] = []
 
@@ -637,7 +639,24 @@ def test_active_generation_accepts_text_as_same_turn_steer(
                 return None
             if "FROM conversation.inference_activities AS activity" in sql:
                 active_queries.append((sql, params))
-                return (str(activity_id), str(active_turn_id), 0, "processing")
+                return (
+                    activity_id.value,
+                    active_turn_id.value,
+                    str(request.conversation_id),
+                    {"task_kind": "assistant"},
+                    "processing",
+                    1,
+                    1,
+                    0,
+                    None,
+                    NOW,
+                    NOW,
+                    None,
+                    None,
+                    None,
+                    traceparent,
+                    0,
+                )
             if "WHERE message_id = CAST" in sql:
                 return None
             if "COALESCE(MAX(sequence)" in sql:
@@ -656,6 +675,26 @@ def test_active_generation_accepts_text_as_same_turn_steer(
                     content,
                     params[7],
                     params[8],
+                )
+            if "UPDATE conversation.inference_activities" in sql:
+                executed.append((sql, params))
+                return (
+                    activity_id.value,
+                    active_turn_id.value,
+                    str(request.conversation_id),
+                    {"task_kind": "assistant"},
+                    "steer_pending",
+                    2,
+                    1,
+                    0,
+                    NOW,
+                    NOW,
+                    NOW,
+                    None,
+                    None,
+                    None,
+                    traceparent,
+                    1,
                 )
             return (None,)
 
@@ -717,7 +756,8 @@ def test_active_generation_accepts_text_as_same_turn_steer(
         update_sql, update_params = executed[0]
         assert "status = 'steer_pending'" in update_sql
         assert "input_revision = %s" in update_sql
-        assert "retry_budget_used = 0" in update_sql
+        assert "retry_budget_used = %s" in update_sql
+        assert "AND version = %s" in update_sql
         assert update_params[0] == 1
         assert update_params[-1] == 0
         assert transaction.exit_exception is None
@@ -809,9 +849,7 @@ def test_active_attachment_turn_does_not_absorb_plain_text_as_steer(
         assert isinstance(result, AssistantTurnAccepted)
         assert len(workflow.calls) == 1
         _, new_turn, _, new_activity = workflow.calls[0]
-        expected_turn_id = TurnId.for_source(
-            TurnSource.telegram(request.update_id)
-        )
+        expected_turn_id = TurnId.for_source(TurnSource.telegram(request.update_id))
         assert new_turn.turn_id == expected_turn_id  # type: ignore[attr-defined]
         assert new_activity.turn_id == expected_turn_id  # type: ignore[attr-defined]
 

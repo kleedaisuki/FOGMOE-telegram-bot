@@ -9,7 +9,9 @@ import pytest
 from conversation_workflow_testkit import (
     NOW,
     TURN_UUID,
+    _activity,
     _activity_draft,
+    _activity_row,
     _initial_turn,
     _message_draft,
     _message_result,
@@ -26,6 +28,7 @@ from fogmoe_bot.domain.conversation.inference import (
     InferenceActivity,
     InferenceActivityDraft,
     InferenceActivityEnqueueResult,
+    InferenceActivityStatus,
 )
 from fogmoe_bot.domain.conversation.message import (
     MessageAppendResult,
@@ -97,7 +100,7 @@ def test_accept_turn_commits_state_and_user_message_in_one_transaction(
 
         captured["activity_connection"] = connection
         return InferenceActivityEnqueueResult(
-            activity=InferenceActivity.pending(activity),
+            activity=InferenceActivity.enqueue(activity),
             inserted=True,
         )
 
@@ -245,7 +248,7 @@ def test_connection_bound_acceptance_uses_caller_transaction_without_nesting(
         """@brief 返回 activity 回执 / Return an activity receipt."""
 
         return InferenceActivityEnqueueResult(
-            InferenceActivity.pending(activity),
+            InferenceActivity.enqueue(activity),
             True,
         )
 
@@ -318,7 +321,7 @@ def test_inference_activity_insert_binds_traceparent_after_timestamps(
 
         del operation, connection
         return InferenceActivityEnqueueResult(
-            InferenceActivity.pending(requested),
+            InferenceActivity.enqueue(requested),
             inserted=False,
         )
 
@@ -336,11 +339,14 @@ def test_inference_activity_insert_binds_traceparent_after_timestamps(
         )
     )
 
-    assert captured["params"][-4:] == (
+    assert captured["params"][8:11] == (
         draft.created_at,
         draft.created_at,
         draft.created_at,
+    )
+    assert captured["params"][11:] == (
         draft.trace_context.to_traceparent(),
+        0,
     )
 
 
@@ -473,7 +479,7 @@ def test_accept_uow_late_replay_returns_descendant_turn(
         """@brief 返回 acceptance 已提交活动 / Return the activity committed by acceptance."""
 
         return InferenceActivityEnqueueResult(
-            activity=InferenceActivity.pending(draft),
+            activity=InferenceActivity.enqueue(draft),
             inserted=False,
         )
 
@@ -655,15 +661,23 @@ def test_cancel_turn_fences_a_steer_pending_generation(
     connection = object()
     repository = PostgresTurnRepository()
     writes: list[str] = []
+    write_params: list[tuple[object, ...]] = []
+    activity = _activity(
+        status=InferenceActivityStatus.STEER_PENDING,
+        input_revision=1,
+    )
+    cancelled_at = NOW + timedelta(seconds=1)
+    target = activity.cancel(cancelled_at=cancelled_at).activity
 
     async def fake_lock_inference(
         turn_id: TurnId,
         *,
         connection: object,
-    ) -> list[tuple[str]]:
+    ) -> tuple[InferenceActivity, ...]:
         """@brief 返回一个尚未重新领取的 steer generation / Return one steer generation awaiting reclaim."""
 
-        return [("steer_pending",)]
+        del turn_id, connection
+        return (activity,)
 
     async def fake_lock_outbound(
         turn_id: TurnId,
@@ -697,9 +711,29 @@ def test_cancel_turn_fences_a_steer_pending_generation(
     ) -> int:
         """@brief 捕获原子取消语句 / Capture atomic cancellation statements."""
 
-        del params, connection
+        del connection
         writes.append(sql)
+        write_params.append(params)
         return 1
+
+    async def fake_fetch_one(
+        sql: str,
+        params: tuple[object, ...],
+        *,
+        connection: object,
+    ) -> tuple[object, ...]:
+        """@brief 返回领域目标 activity 行 / Return the domain-target activity row.
+
+        @param sql SQL 文本 / SQL text.
+        @param params SQL 参数 / SQL parameters.
+        @param connection 调用方连接 / Caller connection.
+        @return 已取消活动行 / Cancelled activity row.
+        """
+
+        del connection
+        writes.append(sql)
+        write_params.append(params)
+        return _activity_row(target)
 
     async def fake_persist(
         turn: object,
@@ -727,6 +761,7 @@ def test_cancel_turn_fences_a_steer_pending_generation(
         fake_lock_outbound,
     )
     monkeypatch.setattr(turn_repository, "_load_turn_for_mutation", fake_load_turn)
+    monkeypatch.setattr(db, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(db, "execute", fake_execute)
     monkeypatch.setattr(turn_repository, "_persist_turn", fake_persist)
 
@@ -734,12 +769,16 @@ def test_cancel_turn_fences_a_steer_pending_generation(
         repository.cancel_turn(
             TurnId(TURN_UUID),
             expected_version=1,
-            cancelled_at=NOW + timedelta(seconds=1),
+            cancelled_at=cancelled_at,
         )
     )
 
-    inference_update = next(
-        sql for sql in writes if "inference_activities" in sql
+    inference_write_index = next(
+        index for index, sql in enumerate(writes) if "inference_activities" in sql
     )
-    assert "steer_pending" in inference_update
+    inference_update = writes[inference_write_index]
+    inference_params = write_params[inference_write_index]
+    assert "RETURNING activity_id" in inference_update
+    assert inference_params[0] == "cancelled"
+    assert inference_params[-2:] == (activity.version, "steer_pending")
     assert cancelled.state.value == "cancelled"

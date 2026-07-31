@@ -39,12 +39,17 @@ from fogmoe_bot.domain.conversation.identity import (
     LeaseToken,
     MessageSequence,
     TurnId,
+    TurnRevision,
 )
 from fogmoe_bot.domain.conversation.inference import (
     InferenceActivity,
     InferenceActivityClaim,
     InferenceActivityDraft,
+    InferenceFailedFinal,
+    InferenceGenerationCause,
     InferenceGenerationFence,
+    InferenceRetryScheduled,
+    InferenceSucceeded,
     InferenceActivityStatus,
 )
 from fogmoe_bot.domain.conversation.message import ConversationMessage, MessageDraft
@@ -88,19 +93,28 @@ def _claim(
         },
         created_at=NOW,
     )
-    activity = InferenceActivity(
+    activity = InferenceActivity.restore(
         draft=draft,
         status=InferenceActivityStatus.PROCESSING,
-        version=1,
+        version=attempt_count,
         attempt_count=attempt_count,
         retry_budget_used=retry_budget_used,
         next_attempt_at=None,
         updated_at=NOW + timedelta(seconds=1),
+        completed_at=None,
+        completion_token=None,
+        last_error=None,
+        input_revision=TurnRevision.initial(),
     )
-    return InferenceActivityClaim(
-        activity=activity,
+    return InferenceActivityClaim.from_processing(
+        activity,
         token=LeaseToken.new(),
         lease_expires_at=NOW + timedelta(minutes=1),
+        cause=(
+            InferenceGenerationCause.INITIAL
+            if attempt_count == 1
+            else InferenceGenerationCause.RETRY
+        ),
     )
 
 
@@ -169,46 +183,54 @@ class _Repository:
 
     async def complete_inference_activity(
         self,
-        claim: InferenceActivityClaim,
+        decision: InferenceSucceeded,
         *,
         assistant_message: MessageDraft,
         outbounds: tuple[OutboundDraft, ...],
-        completed_at: datetime,
     ) -> object:
         """@brief 记录成功提交 / Record successful completion."""
 
         del assistant_message
-        self.completed.append((claim, outbounds, completed_at))
+        completed_at = decision.activity.completed_at
+        assert completed_at is not None
+        self.completed.append((decision.claim, outbounds, completed_at))
         return object()
 
     async def retry_inference_activity(
         self,
-        claim: InferenceActivityClaim,
-        *,
-        failed_at: datetime,
-        retry_at: datetime,
-        error: str,
-        retry_budget_used: int,
+        decision: InferenceRetryScheduled,
     ) -> None:
         """@brief 记录重试 / Record retry."""
 
-        self.retried.append((claim, failed_at, retry_at, error))
-        self.retry_budgets.append(retry_budget_used)
+        retry_at = decision.activity.next_attempt_at
+        error = decision.activity.last_error
+        assert retry_at is not None and error is not None
+        self.retried.append(
+            (decision.claim, decision.activity.updated_at, retry_at, error)
+        )
+        self.retry_budgets.append(decision.activity.retry_budget_used)
 
     async def fail_inference_activity(
         self,
-        claim: InferenceActivityClaim,
+        decision: InferenceFailedFinal,
         *,
         assistant_message: MessageDraft,
         outbounds: tuple[OutboundDraft, ...],
-        failed_at: datetime,
-        error: str,
-        retry_budget_used: int,
     ) -> object:
         """@brief 记录最终失败与安全反馈 / Record final failure and safe feedback."""
 
-        self.failed.append((claim, assistant_message, outbounds, failed_at, error))
-        self.failure_budgets.append(retry_budget_used)
+        error = decision.activity.last_error
+        assert error is not None
+        self.failed.append(
+            (
+                decision.claim,
+                assistant_message,
+                outbounds,
+                decision.activity.updated_at,
+                error,
+            )
+        )
+        self.failure_budgets.append(decision.activity.retry_budget_used)
         return object()
 
     async def recover_expired_inference_leases(self, *, now: datetime) -> int:
@@ -353,11 +375,10 @@ class _OrderedRepository(_Repository):
 
     async def complete_inference_activity(
         self,
-        claim: InferenceActivityClaim,
+        decision: InferenceSucceeded,
         *,
         assistant_message: MessageDraft,
         outbounds: tuple[OutboundDraft, ...],
-        completed_at: datetime,
     ) -> object:
         """@brief 提交成功或模拟回滚 / Commit success or simulate rollback."""
 
@@ -365,52 +386,34 @@ class _OrderedRepository(_Repository):
         if self.reject_completion:
             raise OSError("database unavailable")
         return await super().complete_inference_activity(
-            claim,
+            decision,
             assistant_message=assistant_message,
             outbounds=outbounds,
-            completed_at=completed_at,
         )
 
     async def retry_inference_activity(
         self,
-        claim: InferenceActivityClaim,
-        *,
-        failed_at: datetime,
-        retry_at: datetime,
-        error: str,
-        retry_budget_used: int,
+        decision: InferenceRetryScheduled,
     ) -> None:
         """@brief 记录 durable retry 提交 / Record the durable retry commit."""
 
         self.order.append("durable:retry")
-        await super().retry_inference_activity(
-            claim,
-            failed_at=failed_at,
-            retry_at=retry_at,
-            error=error,
-            retry_budget_used=retry_budget_used,
-        )
+        await super().retry_inference_activity(decision)
 
     async def fail_inference_activity(
         self,
-        claim: InferenceActivityClaim,
+        decision: InferenceFailedFinal,
         *,
         assistant_message: MessageDraft,
         outbounds: tuple[OutboundDraft, ...],
-        failed_at: datetime,
-        error: str,
-        retry_budget_used: int,
     ) -> object:
         """@brief 记录 durable final-failure 提交 / Record the durable final-failure commit."""
 
         self.order.append("durable:fail")
         return await super().fail_inference_activity(
-            claim,
+            decision,
             assistant_message=assistant_message,
             outbounds=outbounds,
-            failed_at=failed_at,
-            error=error,
-            retry_budget_used=retry_budget_used,
         )
 
 
@@ -675,22 +678,20 @@ def test_superseded_claim_is_an_informational_fencing_outcome(
         repository = _Repository()
 
         async def stale_completion(
-            claim: InferenceActivityClaim,
+            decision: InferenceSucceeded,
             *,
             assistant_message: MessageDraft,
             outbounds: tuple[OutboundDraft, ...],
-            completed_at: datetime,
         ) -> object:
             """@brief 模拟 reset 失效的 completion claim / Simulate a reset-invalidated completion claim.
 
-            @param claim 已被 fencing 的 claim / Claim invalidated by fencing.
+            @param decision 已被 fencing 的 settlement / Settlement invalidated by fencing.
             @param assistant_message 待提交的助手消息 / Assistant message pending commit.
             @param outbounds 待提交的出站效果 / Outbound effects pending commit.
-            @param completed_at 推理完成时间 / Inference completion time.
             @return 永不返回 / Never returns.
             """
 
-            del claim, assistant_message, outbounds, completed_at
+            del decision, assistant_message, outbounds
             raise StaleClaimError("claim cancelled by conversation reset")
 
         monkeypatch.setattr(repository, "complete_inference_activity", stale_completion)

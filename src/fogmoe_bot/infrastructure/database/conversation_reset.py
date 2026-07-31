@@ -31,6 +31,10 @@ from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
     PostgresOutboxRepository,
     StandaloneOutboxWriter,
 )
+from fogmoe_bot.infrastructure.database.conversation_workflow.common import (
+    _INFERENCE_ACTIVITY_COLUMNS,
+    _map_inference_activity,
+)
 
 
 class PostgresConversationResetUoW:
@@ -164,26 +168,19 @@ class PostgresConversationResetUoW:
         """
 
         timestamp = ensure_utc(cancelled_at)
-        activity_rows = cast(
-            Sequence[object],
-            await db.fetch_all(
-                "SELECT activity.activity_id, activity.turn_id, activity.status "
-                "FROM conversation.inference_activities AS activity "
-                "WHERE activity.conversation_id = %s "
-                "AND activity.status IN "
-                "('pending', 'processing', 'steer_pending', 'retry') "
-                "ORDER BY activity.activity_id FOR UPDATE OF activity",
-                (str(conversation_id),),
-                connection=connection,
-            ),
+        activity_rows = await db.fetch_all(
+            "SELECT " + _INFERENCE_ACTIVITY_COLUMNS + " "
+            "FROM conversation.inference_activities AS activity "
+            "WHERE activity.conversation_id = %s "
+            "AND activity.status IN "
+            "('pending', 'processing', 'steer_pending', 'retry') "
+            "ORDER BY activity.activity_id FOR UPDATE OF activity",
+            (str(conversation_id),),
+            connection=connection,
         )
-        activity_by_turn = {
-            TurnId.parse(str(cast(Sequence[object], row)[1])): cast(
-                Sequence[object], row
-            )
-            for row in activity_rows
-        }
-        if len(activity_by_turn) != len(activity_rows):
+        activities = tuple(_map_inference_activity(row) for row in activity_rows)
+        activity_by_turn = {activity.turn_id: activity for activity in activities}
+        if len(activity_by_turn) != len(activities):
             raise ConcurrentTurnUpdateError(
                 "A reset found multiple active inference activities for one Turn"
             )
@@ -216,24 +213,44 @@ class PostgresConversationResetUoW:
             turn_rows[turn_id] = values
 
         for turn_id in turn_ids:
-            activity_values = activity_by_turn[turn_id]
-            activity_id = str(activity_values[0])
+            activity = activity_by_turn[turn_id]
             turn_updated_at = cast(datetime, turn_rows[turn_id][2])
-            transition_at = max(timestamp, ensure_utc(turn_updated_at))
-            activity_count = await db.execute(
+            transition_at = max(
+                timestamp,
+                ensure_utc(turn_updated_at),
+                activity.updated_at,
+            )
+            cancellation = activity.cancel(cancelled_at=transition_at)
+            target = cancellation.activity
+            activity_row = await db.fetch_one(
                 "UPDATE conversation.inference_activities "
-                "SET status = 'cancelled', version = version + 1, "
+                "SET status = %s, version = %s, "
                 "next_attempt_at = NULL, claim_token = NULL, lease_expires_at = NULL, "
-                "completion_token = NULL, updated_at = %s "
+                "completion_token = NULL, completed_at = NULL, updated_at = %s, "
+                "last_error = %s, retry_budget_used = %s, input_revision = %s "
                 "WHERE activity_id = CAST(%s AS UUID) "
-                "AND status IN "
-                "('pending', 'processing', 'steer_pending', 'retry')",
-                (transition_at, activity_id),
+                "AND version = %s AND status = %s RETURNING "
+                + _INFERENCE_ACTIVITY_COLUMNS,
+                (
+                    target.status.value,
+                    target.version,
+                    target.updated_at,
+                    target.last_error,
+                    target.retry_budget_used,
+                    int(target.input_revision),
+                    str(activity.activity_id),
+                    activity.version,
+                    activity.status.value,
+                ),
                 connection=connection,
             )
-            if activity_count != 1:
+            if activity_row is None:
                 raise ConcurrentTurnUpdateError(
-                    f"Inference activity {activity_id} changed while row-locked"
+                    f"Inference activity {activity.activity_id} changed while row-locked"
+                )
+            if _map_inference_activity(activity_row) != target:
+                raise RuntimeError(
+                    "Conversation-reset inference cancellation diverged from the domain transition"
                 )
             turn_count = await db.execute(
                 "UPDATE conversation.conversation_turns "

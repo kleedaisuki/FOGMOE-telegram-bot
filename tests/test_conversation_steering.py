@@ -94,13 +94,17 @@ def test_steer_pending_inference_is_claimable_at_its_new_revision() -> None:
         request={"schema_version": 2},
         created_at=NOW,
     )
-    activity = InferenceActivity(
+    activity = InferenceActivity.restore(
         draft=draft,
         status=InferenceActivityStatus.STEER_PENDING,
         version=2,
         attempt_count=1,
         next_attempt_at=NOW,
         updated_at=NOW,
+        retry_budget_used=0,
+        completed_at=None,
+        completion_token=None,
+        last_error=None,
         input_revision=TurnRevision(1),
     )
 

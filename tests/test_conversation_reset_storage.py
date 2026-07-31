@@ -6,8 +6,10 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
+from conversation_workflow_testkit import _activity, _activity_row
 
 from fogmoe_bot.domain.conversation.identity import ConversationId, TurnId
+from fogmoe_bot.domain.conversation.inference import InferenceActivityStatus
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.conversation_reset import (
     PostgresConversationResetUoW,
@@ -36,6 +38,12 @@ def test_reset_cancels_active_workflow_without_legacy_billing_reads(
 
         reads: list[str] = []
         writes: list[str] = []
+        write_params: list[tuple[object, ...]] = []
+        activity = _activity(
+            status=InferenceActivityStatus.STEER_PENDING,
+            input_revision=1,
+        )
+        target = activity.cancel(cancelled_at=NOW).activity
 
         async def fetch_all(
             sql: str,
@@ -53,7 +61,7 @@ def test_reset_cancels_active_workflow_without_legacy_billing_reads(
 
             del params, connection
             reads.append(sql)
-            return [("activity-1", str(TURN_ID), "steer_pending")]
+            return [_activity_row(activity)]
 
         async def fetch_one(
             sql: str,
@@ -69,7 +77,11 @@ def test_reset_cancels_active_workflow_without_legacy_billing_reads(
             @return Turn 行 / Turn row.
             """
 
-            del params, connection
+            del connection
+            if "UPDATE conversation.inference_activities" in sql:
+                writes.append(sql)
+                write_params.append(params)
+                return _activity_row(target)
             reads.append(sql)
             return (str(TURN_ID), "waiting_inference", NOW)
 
@@ -87,8 +99,9 @@ def test_reset_cancels_active_workflow_without_legacy_billing_reads(
             @return 受影响行数 / Affected row count.
             """
 
-            del params, connection
+            del connection
             writes.append(sql)
+            write_params.append(params)
             return 1
 
         monkeypatch.setattr(db, "fetch_all", fetch_all)
@@ -105,16 +118,17 @@ def test_reset_cancels_active_workflow_without_legacy_billing_reads(
         assert len(reads) == 2
         assert len(writes) == 2
         assert all("assistant.billing_reservations" not in sql for sql in reads)
-        inference_reads = [
-            sql for sql in reads if "inference_activities" in sql
-        ]
-        inference_writes = [
-            sql for sql in writes if "inference_activities" in sql
-        ]
+        inference_reads = [sql for sql in reads if "inference_activities" in sql]
+        inference_writes = [sql for sql in writes if "inference_activities" in sql]
         assert inference_reads and inference_writes
         assert all("steer_pending" in sql for sql in inference_reads)
-        assert all("steer_pending" in sql for sql in inference_writes)
-        assert any("status = 'cancelled'" in sql for sql in writes)
+        inference_write_index = writes.index(inference_writes[0])
+        assert "RETURNING activity_id" in inference_writes[0]
+        assert write_params[inference_write_index][0] == "cancelled"
+        assert write_params[inference_write_index][-2:] == (
+            activity.version,
+            "steer_pending",
+        )
         assert any("state = 'cancelled'" in sql for sql in writes)
 
     asyncio.run(scenario())

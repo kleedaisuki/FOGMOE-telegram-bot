@@ -38,7 +38,12 @@ from fogmoe_bot.domain.conversation.identity import (
 )
 from fogmoe_bot.domain.conversation.inference import (
     InferenceActivityClaim,
+    InferenceFailedFinal,
+    InferenceFailure,
     InferenceGenerationFence,
+    InferenceRetryBudgetCharge,
+    InferenceRetryScheduled,
+    InferenceSucceeded,
 )
 from fogmoe_bot.domain.conversation.message import (
     MessageDraft,
@@ -83,18 +88,16 @@ class InferencePersistence(Protocol):
 
     async def complete_inference_activity(
         self,
-        claim: InferenceActivityClaim,
+        decision: InferenceSucceeded,
         *,
         assistant_message: MessageDraft,
         outbounds: Sequence[OutboundDraft],
-        completed_at: datetime,
     ) -> InferenceCompletionResult:
         """@brief 原子完成活动、历史与 outbox / Atomically complete the activity, history, and outbox.
 
-        @param claim 当前 claim / Current claim.
+        @param decision 已验证成功 settlement / Validated successful settlement.
         @param assistant_message 确定性助手消息 / Deterministic assistant message.
         @param outbounds 有序、确定性的出站意图 / Ordered deterministic outbound intents.
-        @param completed_at 完成时间 / Completion time.
         @return 完成回执 / Completion receipt.
         """
 
@@ -102,21 +105,11 @@ class InferencePersistence(Protocol):
 
     async def retry_inference_activity(
         self,
-        claim: InferenceActivityClaim,
-        *,
-        failed_at: datetime,
-        retry_at: datetime,
-        error: str,
-        retry_budget_used: int,
+        decision: InferenceRetryScheduled,
     ) -> None:
         """@brief 原子安排活动与 Turn 重试 / Atomically schedule activity and Turn retry.
 
-        @param claim 当前 claim / Current claim.
-        @param failed_at 失败时间 / Failure time.
-        @param retry_at 下次领取时间 / Next claim time.
-        @param error 错误摘要 / Error summary.
-        @param retry_budget_used 本次决定后已使用的普通失败预算 /
-            Ordinary failure budget used after this decision.
+        @param decision 已验证重试 settlement / Validated retry settlement.
         @return None / None.
         """
 
@@ -124,24 +117,17 @@ class InferencePersistence(Protocol):
 
     async def fail_inference_activity(
         self,
-        claim: InferenceActivityClaim,
+        decision: InferenceFailedFinal,
         *,
         assistant_message: MessageDraft,
         outbounds: Sequence[OutboundDraft],
-        failed_at: datetime,
-        error: str,
-        retry_budget_used: int,
     ) -> InferenceFailureDeliveryResult:
         """@brief 原子终结活动并持久化安全失败上下文/outbox / Atomically fail activity and persist safe failure context/outbox.
 
-        @param claim 当前 claim / Current claim.
+        @param decision 已验证最终失败 settlement / Validated final-failure settlement.
         @param assistant_message 不含内部诊断的 canonical 失败消息 /
             Canonical failure message without internal diagnostics.
         @param outbounds 安全失败反馈出站 / Safe failure-feedback outbounds.
-        @param failed_at 最终失败时间 / Final-failure time.
-        @param error 错误摘要 / Error summary.
-        @param retry_budget_used 本次决定后已使用的普通失败预算 /
-            Ordinary failure budget used after this decision.
         @return 原子失败反馈回执 / Atomic failure-feedback receipt.
         @note 若该 durable request 含当前附件，持久化实现必须在同一事务内仅将其严格
             ``pending`` marker 终结为 ``unavailable``。已有 receipt 的 ``imported`` 行必须
@@ -418,7 +404,7 @@ def _build_failure_effects(
         payload=outbound_payload,
         idempotency_key=f"turn:{activity.turn_id}:failure:outbound:0",
         created_at=failed_at,
-        trace_context=activity.draft.trace_context,
+        trace_context=activity.trace_context,
     )
     return assistant_message, (outbound,)
 
@@ -873,7 +859,7 @@ class InferenceWorker:
         with self._telemetry.span(
             "inference.attempt",
             kind=SpanKind.CONSUMER,
-            parent=activity.draft.trace_context,
+            parent=activity.trace_context,
             attributes={
                 "fogmoe.turn.id": str(activity.turn_id),
                 "fogmoe.activity.id": str(activity.activity_id),
@@ -969,11 +955,14 @@ class InferenceWorker:
                 for ordinal, intent in enumerate(result.outbounds)
             )
             try:
-                await self._repository.complete_inference_activity(
+                completion = activity.succeed(
                     claim,
+                    completed_at=completed_at,
+                )
+                await self._repository.complete_inference_activity(
+                    completion,
                     assistant_message=assistant_message,
                     outbounds=outbounds,
-                    completed_at=completed_at,
                 )
             except BaseException:
                 await self._suspend_stream(stream)
@@ -1118,23 +1107,24 @@ class InferenceWorker:
 
         try:
             failed_at = self._clock.now()
-            retry_budget_used = claim.activity.retry_budget_used + (
-                0 if isinstance(error, InferenceDependencyPending) else 1
+            failure = claim.activity.record_failure(
+                claim,
+                failed_at=failed_at,
+                failure=InferenceFailure(self._error_text(error)),
+                budget_charge=(
+                    InferenceRetryBudgetCharge.PRESERVE
+                    if isinstance(error, InferenceDependencyPending)
+                    else InferenceRetryBudgetCharge.CONSUME
+                ),
             )
-            """@brief dependency gate 不消耗普通失败预算 / Dependency gates do not consume the ordinary failure budget."""
             decision = self._retry_policy.decide(
-                retry_budget_used=retry_budget_used,
+                retry_budget_used=failure.retry_budget_used,
                 failed_at=failed_at,
                 error=error,
             )
-            error_text = self._error_text(error)
             if isinstance(decision, RetryInferenceAt):
                 await self._repository.retry_inference_activity(
-                    claim,
-                    failed_at=failed_at,
-                    retry_at=decision.at,
-                    error=error_text,
-                    retry_budget_used=retry_budget_used,
+                    failure.schedule_retry(retry_at=decision.at),
                 )
                 self._telemetry.counter(
                     MetricName.INFERENCE_OUTCOMES,
@@ -1148,12 +1138,9 @@ class InferenceWorker:
                 error=error,
             )
             await self._repository.fail_inference_activity(
-                claim,
+                failure.fail_final(),
                 assistant_message=assistant_message,
                 outbounds=outbounds,
-                failed_at=failed_at,
-                error=error_text,
-                retry_budget_used=retry_budget_used,
             )
             self._telemetry.counter(
                 MetricName.INFERENCE_OUTCOMES,

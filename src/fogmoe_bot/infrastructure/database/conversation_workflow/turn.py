@@ -17,6 +17,7 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnId,
 )
 from fogmoe_bot.domain.conversation.inference import (
+    InferenceActivity,
     InferenceActivityDraft,
     InferenceActivityEnqueueResult,
     InferenceActivityStatus,
@@ -363,28 +364,42 @@ class PostgresTurnRepository:
         @return 规范活动与插入标志 / Canonical activity and insertion flag.
         """
 
+        pending = InferenceActivity.enqueue(draft)
         row = await db.fetch_one(
             "INSERT INTO conversation.inference_activities "
             "(activity_id, turn_id, conversation_id, request, status, version, "
-            "attempt_count, next_attempt_at, created_at, updated_at, traceparent) "
+            "attempt_count, retry_budget_used, next_attempt_at, created_at, updated_at, "
+            "completed_at, completion_token, last_error, traceparent, input_revision, "
+            "claim_token, lease_expires_at) "
             "VALUES (CAST(%s AS UUID), CAST(%s AS UUID), %s, CAST(%s AS JSONB), "
-            "'pending', 0, 0, %s, %s, %s, %s) ON CONFLICT (turn_id) DO NOTHING "
+            "%s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, %s, %s, NULL, NULL) "
+            "ON CONFLICT (turn_id) DO NOTHING "
             "RETURNING " + _INFERENCE_ACTIVITY_COLUMNS,
             (
                 str(draft.activity_id),
                 str(draft.turn_id),
                 str(draft.conversation_id),
-                _encode_json(draft.request),
-                draft.created_at,
-                draft.created_at,
-                draft.created_at,
-                draft.trace_context.to_traceparent(),
+                _encode_json(pending.request),
+                pending.status.value,
+                pending.version,
+                pending.attempt_count,
+                pending.retry_budget_used,
+                pending.next_attempt_at,
+                pending.created_at,
+                pending.updated_at,
+                pending.trace_context.to_traceparent(),
+                int(pending.input_revision),
             ),
             connection=connection,
         )
         if row is not None:
+            persisted = _map_inference_activity(row)
+            if persisted != pending:
+                raise RuntimeError(
+                    "Inference enqueue SQL diverged from the domain transition"
+                )
             return InferenceActivityEnqueueResult(
-                activity=_map_inference_activity(row),
+                activity=persisted,
                 inserted=True,
             )
         return await self._require_existing_inference_activity(
@@ -464,9 +479,8 @@ class PostgresTurnRepository:
                 connection=connection,
             )
             if any(
-                InferenceActivityStatus(_text(_row_values(row, 1)[0]))
-                is InferenceActivityStatus.PROCESSING
-                for row in active_inference_rows
+                activity.status is InferenceActivityStatus.PROCESSING
+                for activity in active_inference_rows
             ):
                 raise ConcurrentTurnUpdateError(
                     f"Turn {turn_id} cannot be cancelled while inference is processing"
@@ -488,16 +502,38 @@ class PostgresTurnRepository:
                     f"Turn {turn_id} expected version {expected_version}, "
                     f"found {current.version}"
                 )
-            await db.execute(
-                "UPDATE conversation.inference_activities "
-                "SET status = 'cancelled', version = version + 1, "
-                "next_attempt_at = NULL, updated_at = %s, claim_token = NULL, "
-                "lease_expires_at = NULL, completion_token = NULL "
-                "WHERE turn_id = CAST(%s AS UUID) "
-                "AND status IN ('pending', 'steer_pending', 'retry')",
-                (timestamp, str(turn_id)),
-                connection=connection,
-            )
+            for activity in active_inference_rows:
+                cancellation = activity.cancel(cancelled_at=timestamp)
+                target = cancellation.activity
+                row = await db.fetch_one(
+                    "UPDATE conversation.inference_activities "
+                    "SET status = %s, version = %s, next_attempt_at = NULL, "
+                    "updated_at = %s, claim_token = NULL, lease_expires_at = NULL, "
+                    "completion_token = NULL, completed_at = NULL, last_error = %s, "
+                    "retry_budget_used = %s, input_revision = %s "
+                    "WHERE activity_id = CAST(%s AS UUID) AND version = %s "
+                    "AND status = %s RETURNING " + _INFERENCE_ACTIVITY_COLUMNS,
+                    (
+                        target.status.value,
+                        target.version,
+                        target.updated_at,
+                        target.last_error,
+                        target.retry_budget_used,
+                        int(target.input_revision),
+                        str(activity.activity_id),
+                        activity.version,
+                        activity.status.value,
+                    ),
+                    connection=connection,
+                )
+                if row is None:
+                    raise ConcurrentTurnUpdateError(
+                        f"Inference activity {activity.activity_id} changed during cancellation"
+                    )
+                if _map_inference_activity(row) != target:
+                    raise RuntimeError(
+                        "Inference cancellation SQL diverged from the domain transition"
+                    )
             await db.execute(
                 "UPDATE conversation.outbound_messages "
                 "SET status = 'cancelled', version = version + 1, next_attempt_at = NULL, "
@@ -523,23 +559,23 @@ class PostgresTurnRepository:
         turn_id: TurnId,
         *,
         connection: AsyncConnection,
-    ) -> Sequence[object]:
+    ) -> tuple[InferenceActivity, ...]:
         """@brief 锁定回合的活动推理行 / Lock a turn's active inference row.
 
         @param turn_id 回合 ID / Turn identifier.
         @param connection 当前短事务连接 / Current short-transaction connection.
-        @return 活动状态行 / Active-status rows.
+        @return 行锁保护的活动聚合 / Active aggregates protected by row locks.
         """
 
-        rows: Sequence[object] = await db.fetch_all(
-            "SELECT status FROM conversation.inference_activities "
+        rows = await db.fetch_all(
+            _INFERENCE_ACTIVITY_SELECT + " "
             "WHERE turn_id = CAST(%s AS UUID) "
             "AND status IN "
             "('pending', 'processing', 'steer_pending', 'retry') FOR UPDATE",
             (str(turn_id),),
             connection=connection,
         )
-        return rows
+        return tuple(_map_inference_activity(row) for row in rows)
 
     async def _lock_active_outbound_for_turn(
         self,

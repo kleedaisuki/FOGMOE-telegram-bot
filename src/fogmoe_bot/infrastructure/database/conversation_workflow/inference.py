@@ -20,8 +20,12 @@ from fogmoe_bot.domain.conversation.identity import (
 from fogmoe_bot.domain.conversation.inference import (
     InferenceActivity,
     InferenceActivityClaim,
+    InferenceActivityLease,
     InferenceActivityStatus,
-    InferenceGenerationCause,
+    InferenceFailedFinal,
+    InferenceFailure,
+    InferenceRetryScheduled,
+    InferenceSucceeded,
 )
 from fogmoe_bot.domain.conversation.message import (
     MessageDraft,
@@ -48,11 +52,10 @@ from .common import (
     _INFERENCE_ACTIVITY_COLUMNS,
     _INFERENCE_ACTIVITY_SELECT,
     _claim_window,
+    _datetime,
     _map_inference_activity,
-    _require_claim_update,
-    _required_error,
+    _optional_datetime,
     _row_values,
-    _text,
     _uuid,
     _validate_inference_activity_idempotency,
 )
@@ -78,38 +81,11 @@ def _validate_claim_identity(
     @raise StaleClaimError steer 已提升 revision 时抛出 / Raised when a steer has advanced the revision.
     """
 
-    _validate_inference_activity_idempotency(current, claim.activity.draft)
+    _validate_inference_activity_idempotency(current, claim.activity)
     if current.input_revision != claim.activity.input_revision:
         raise StaleClaimError(f"Stale inference revision for {current.activity_id}")
     if current.retry_budget_used != claim.activity.retry_budget_used:
         raise StaleClaimError(f"Stale inference retry budget for {current.activity_id}")
-
-
-def _validate_retry_budget_target(
-    claim: InferenceActivityClaim,
-    retry_budget_used: int,
-) -> int:
-    """@brief 校验一次失败 outcome 的绝对 retry-budget 目标 / Validate the absolute retry-budget target for one failure outcome.
-
-    @param claim 当前 processing claim 与其预算快照 / Current processing claim and its budget snapshot.
-    @param retry_budget_used dependency 保持原值，普通失败增加一的目标值 /
-        Target value, unchanged for a dependency and incremented by one for an ordinary failure.
-    @return 已验证的绝对目标值 / Validated absolute target.
-    @raise ValueError 目标不是整数、倒退、跨越多次 outcome 或超过 claim 次数时抛出 /
-        Raised when the target is not an integer, regresses, skips more than one outcome, or
-        exceeds the claim count.
-    """
-
-    current = claim.activity.retry_budget_used
-    if isinstance(retry_budget_used, bool) or not isinstance(retry_budget_used, int):
-        raise ValueError("retry_budget_used must be an integer")
-    if retry_budget_used not in {current, current + 1}:
-        raise ValueError(
-            "retry_budget_used must preserve or increment the claim snapshot by one"
-        )
-    if retry_budget_used > claim.activity.attempt_count:
-        raise ValueError("retry_budget_used cannot exceed the claim-attempt count")
-    return retry_budget_used
 
 
 def _validate_outbound_for_turn(
@@ -203,8 +179,7 @@ class PostgresInferenceRepository:
         token = LeaseToken.new()
         async with db.transaction() as connection:
             rows = await db.fetch_all(
-                "WITH candidates AS ("
-                "SELECT candidate.activity_id, candidate.status AS previous_status "
+                "SELECT " + _INFERENCE_ACTIVITY_COLUMNS + " "
                 "FROM conversation.inference_activities AS candidate "
                 "WHERE candidate.status IN ('pending', 'steer_pending', 'retry') "
                 "AND candidate.next_attempt_at <= %s AND NOT EXISTS ("
@@ -214,46 +189,81 @@ class PostgresInferenceRepository:
                 "AND (earlier.created_at, earlier.activity_id) "
                 "< (candidate.created_at, candidate.activity_id)"
                 ") ORDER BY candidate.next_attempt_at ASC, candidate.activity_id ASC LIMIT %s "
-                "FOR UPDATE SKIP LOCKED"
-                ") UPDATE conversation.inference_activities AS activity "
-                "SET status = 'processing', version = activity.version + 1, "
-                "attempt_count = activity.attempt_count + 1, next_attempt_at = NULL, "
-                "claim_token = CAST(%s AS UUID), lease_expires_at = %s, "
-                "completion_token = NULL, updated_at = %s, last_error = NULL "
-                "FROM candidates WHERE activity.activity_id = candidates.activity_id "
-                "RETURNING activity.activity_id, activity.turn_id, "
-                "activity.conversation_id, activity.request, activity.status, "
-                "activity.version, activity.attempt_count, "
-                "activity.retry_budget_used, activity.next_attempt_at, "
-                "activity.created_at, activity.updated_at, activity.completed_at, "
-                "activity.completion_token, activity.last_error, activity.traceparent, "
-                "activity.input_revision, "
-                "candidates.previous_status",
-                (timestamp, limit, str(token), lease_expires_at, timestamp),
+                "FOR UPDATE OF candidate SKIP LOCKED",
+                (timestamp, limit),
                 connection=connection,
             )
             claims: list[InferenceActivityClaim] = []
             for row in rows:
-                values = _row_values(row, 17)
-                activity = _map_inference_activity(values[:16])
-                previous_status = InferenceActivityStatus(_text(values[16]))
-                turn = await _load_turn_for_mutation(
-                    activity.turn_id,
+                previous = _map_inference_activity(row)
+                claim = previous.claim(
+                    token=token,
+                    claimed_at=timestamp,
+                    lease_expires_at=lease_expires_at,
+                )
+                target = claim.activity
+                activity_row = await db.fetch_one(
+                    "UPDATE conversation.inference_activities "
+                    "SET status = %s, version = %s, attempt_count = %s, "
+                    "retry_budget_used = %s, next_attempt_at = %s, "
+                    "claim_token = CAST(%s AS UUID), lease_expires_at = %s, "
+                    "completion_token = NULL, completed_at = NULL, updated_at = %s, "
+                    "last_error = %s, input_revision = %s "
+                    "WHERE activity_id = CAST(%s AS UUID) AND status = %s "
+                    "AND version = %s AND attempt_count = %s "
+                    "AND retry_budget_used = %s AND input_revision = %s "
+                    "AND next_attempt_at IS NOT DISTINCT FROM %s "
+                    "AND updated_at = %s AND claim_token IS NULL "
+                    "AND lease_expires_at IS NULL RETURNING "
+                    + _INFERENCE_ACTIVITY_COLUMNS,
+                    (
+                        target.status.value,
+                        target.version,
+                        target.attempt_count,
+                        target.retry_budget_used,
+                        target.next_attempt_at,
+                        str(token),
+                        lease_expires_at,
+                        target.updated_at,
+                        target.last_error,
+                        int(target.input_revision),
+                        str(previous.activity_id),
+                        previous.status.value,
+                        previous.version,
+                        previous.attempt_count,
+                        previous.retry_budget_used,
+                        int(previous.input_revision),
+                        previous.next_attempt_at,
+                        previous.updated_at,
+                    ),
                     connection=connection,
                 )
-                if previous_status in {
+                if activity_row is None:
+                    raise ConcurrentTurnUpdateError(
+                        f"Inference activity {previous.activity_id} changed while row-locked"
+                    )
+                persisted_processing = _map_inference_activity(activity_row)
+                if persisted_processing != target:
+                    raise RuntimeError(
+                        "Inference claim SQL diverged from the domain transition"
+                    )
+                turn = await _load_turn_for_mutation(
+                    persisted_processing.turn_id,
+                    connection=connection,
+                )
+                if previous.status in {
                     InferenceActivityStatus.PENDING,
                     InferenceActivityStatus.STEER_PENDING,
                 }:
                     if turn.state is not TurnState.WAITING_INFERENCE:
                         raise ConcurrentTurnUpdateError(
-                            f"Pending or steered inference {activity.activity_id} requires a "
+                            f"Pending or steered inference {persisted_processing.activity_id} requires a "
                             f"waiting_inference turn, found {turn.state.value}"
                         )
-                elif previous_status is InferenceActivityStatus.RETRY:
+                elif previous.status is InferenceActivityStatus.RETRY:
                     if turn.state is not TurnState.INFERENCE_RETRY_WAIT:
                         raise ConcurrentTurnUpdateError(
-                            f"Retry inference {activity.activity_id} requires an "
+                            f"Retry inference {persisted_processing.activity_id} requires an "
                             f"inference_retry_wait turn, found {turn.state.value}"
                         )
                     resumed = turn.transition(
@@ -267,49 +277,34 @@ class PostgresInferenceRepository:
                     )
                 else:
                     raise RuntimeError(
-                        f"Unsupported inference pre-claim status {previous_status.value}"
+                        f"Unsupported inference pre-claim status {previous.status.value}"
                     )
-                claims.append(
-                    InferenceActivityClaim(
-                        activity=activity,
-                        token=token,
-                        lease_expires_at=lease_expires_at,
-                        cause=(
-                            InferenceGenerationCause.STEER
-                            if previous_status is InferenceActivityStatus.STEER_PENDING
-                            else (
-                                InferenceGenerationCause.RETRY
-                                if previous_status is InferenceActivityStatus.RETRY
-                                else InferenceGenerationCause.INITIAL
-                            )
-                        ),
-                    )
-                )
+                claims.append(claim)
         return tuple(sorted(claims, key=lambda claim: str(claim.activity.activity_id)))
 
     async def complete_inference_activity(
         self,
-        claim: InferenceActivityClaim,
+        decision: InferenceSucceeded,
         *,
         assistant_message: MessageDraft,
         outbounds: Sequence[OutboundDraft],
-        completed_at: datetime,
     ) -> InferenceCompletionResult:
         """@brief 以 fencing token 原子提交推理、历史与 outbox / Atomically commit inference, history, and outbox with a fencing token.
 
-        @param claim 当前活动 claim / Current activity claim.
+        @param decision 已验证成功 settlement / Validated successful settlement.
         @param assistant_message 确定性助手消息 / Deterministic assistant message.
         @param outbounds 有序、确定性的出站副作用 / Ordered deterministic outbound effects.
-        @param completed_at 完成时间 / Completion time.
         @return 原子完成回执 / Atomic completion receipt.
         @raise StaleClaimError claim 已被恢复或替代时抛出 / Raised when the claim was recovered or superseded.
         @note 相同成功 claim 的 post-commit 重放返回规范回执；更老 claim 永远不能覆盖新结果。/
         A post-commit replay of the same successful claim returns canonical receipts; an older claim can never overwrite a newer result.
         """
 
-        timestamp = ensure_utc(completed_at)
-        if timestamp < claim.activity.updated_at:
-            raise ValueError("completed_at cannot precede inference claim time")
+        claim = decision.claim
+        target = decision.activity
+        timestamp = target.completed_at
+        if timestamp is None:  # pragma: no cover - decision proves completion.
+            raise AssertionError("Inference success lost its completion time")
         if not outbounds:
             raise ValueError("Inference completion requires outbound effects")
         if assistant_message.created_at > timestamp or any(
@@ -325,6 +320,7 @@ class PostgresInferenceRepository:
             (
                 current,
                 current_claim_token,
+                current_lease_expires_at,
             ) = await self._load_inference_activity_for_update(
                 claim.activity.activity_id,
                 connection=connection,
@@ -343,7 +339,10 @@ class PostgresInferenceRepository:
                 _validate_outbound_for_turn(turn, outbound)
 
             if current.status is InferenceActivityStatus.COMPLETED:
-                if current.completion_token != claim.token:
+                if (
+                    current.completion_token != claim.token
+                    or current.version != claim.expected_version + 1
+                ):
                     raise StaleClaimError(
                         f"Stale inference claim for {current.activity_id}"
                     )
@@ -376,7 +375,9 @@ class PostgresInferenceRepository:
 
             if (
                 current.status is not InferenceActivityStatus.PROCESSING
+                or current != claim.activity
                 or current_claim_token != claim.token
+                or current_lease_expires_at != claim.lease_expires_at
             ):
                 raise StaleClaimError(
                     f"Stale inference claim for {current.activity_id}"
@@ -401,20 +402,24 @@ class PostgresInferenceRepository:
             )
             activity_row = await db.fetch_one(
                 "UPDATE conversation.inference_activities "
-                "SET status = 'completed', version = version + 1, "
+                "SET status = 'completed', version = %s, "
                 "next_attempt_at = NULL, claim_token = NULL, lease_expires_at = NULL, "
                 "completion_token = CAST(%s AS UUID), completed_at = %s, "
                 "updated_at = %s, last_error = NULL "
                 "WHERE activity_id = CAST(%s AS UUID) AND status = 'processing' "
-                "AND claim_token = CAST(%s AS UUID) AND input_revision = %s RETURNING "
+                "AND version = %s AND claim_token = CAST(%s AS UUID) "
+                "AND input_revision = %s AND retry_budget_used = %s RETURNING "
                 + _INFERENCE_ACTIVITY_COLUMNS,
                 (
+                    target.version,
                     str(claim.token),
                     timestamp,
                     timestamp,
                     str(current.activity_id),
+                    claim.expected_version,
                     str(claim.token),
                     int(claim.activity.input_revision),
+                    claim.activity.retry_budget_used,
                 ),
                 connection=connection,
             )
@@ -423,6 +428,10 @@ class PostgresInferenceRepository:
                     f"Stale inference claim for {current.activity_id}"
                 )
             completed_activity = _map_inference_activity(activity_row)
+            if completed_activity != target:
+                raise RuntimeError(
+                    "Inference completion SQL diverged from the domain transition"
+                )
             updated_turn = turn.transition(
                 TurnEvent.INFERENCE_SUCCEEDED,
                 occurred_at=timestamp,
@@ -444,41 +453,35 @@ class PostgresInferenceRepository:
 
     async def retry_inference_activity(
         self,
-        claim: InferenceActivityClaim,
-        *,
-        failed_at: datetime,
-        retry_at: datetime,
-        retry_budget_used: int,
-        error: str,
+        decision: InferenceRetryScheduled,
     ) -> None:
         """@brief 原子安排活动与 Turn 重试 / Atomically schedule the activity and Turn for retry.
 
-        @param claim 当前活动 claim / Current activity claim.
-        @param failed_at 失败时间 / Failure time.
-        @param retry_at 下次可领取时间 / Next claimable time.
-        @param retry_budget_used 本次 outcome 后的绝对普通重试预算用量 /
-            Absolute ordinary retry-budget usage after this outcome.
-        @param error 有界错误摘要 / Bounded error summary.
+        @param decision 已验证重试 settlement / Validated retry settlement.
         @return None / None.
         """
 
-        failure_time = ensure_utc(failed_at)
-        retry_time = ensure_utc(retry_at)
-        if failure_time < claim.activity.updated_at:
-            raise ValueError("failed_at cannot precede inference claim time")
-        if retry_time <= failure_time:
-            raise ValueError("retry_at must be later than failed_at")
-        budget_target = _validate_retry_budget_target(claim, retry_budget_used)
-        normalized_error = _required_error(error)
+        claim = decision.claim
+        target = decision.activity
+        retry_time = target.next_attempt_at
+        normalized_error = target.last_error
+        if retry_time is None or normalized_error is None:
+            raise AssertionError("Inference retry settlement lost schedule or failure")
         async with db.transaction() as connection:
-            current, current_token = await self._load_inference_activity_for_update(
+            (
+                current,
+                current_token,
+                current_lease,
+            ) = await self._load_inference_activity_for_update(
                 claim.activity.activity_id,
                 connection=connection,
             )
             _validate_claim_identity(current, claim)
             if (
                 current.status is not InferenceActivityStatus.PROCESSING
+                or current != claim.activity
                 or current_token != claim.token
+                or current_lease != claim.lease_expires_at
             ):
                 raise StaleClaimError(
                     f"Stale inference claim for {current.activity_id}"
@@ -491,30 +494,40 @@ class PostgresInferenceRepository:
                 raise ConcurrentTurnUpdateError(
                     f"Inference retry requires waiting_inference, found {turn.state.value}"
                 )
-            rowcount = await db.execute(
+            activity_row = await db.fetch_one(
                 "UPDATE conversation.inference_activities "
-                "SET status = 'retry', version = version + 1, next_attempt_at = %s, "
+                "SET status = 'retry', version = %s, next_attempt_at = %s, "
                 "claim_token = NULL, lease_expires_at = NULL, completion_token = NULL, "
                 "updated_at = %s, last_error = %s, retry_budget_used = %s "
                 "WHERE activity_id = CAST(%s AS UUID) AND status = 'processing' "
-                "AND claim_token = CAST(%s AS UUID) AND input_revision = %s "
-                "AND retry_budget_used = %s",
+                "AND version = %s AND claim_token = CAST(%s AS UUID) "
+                "AND input_revision = %s AND retry_budget_used = %s RETURNING "
+                + _INFERENCE_ACTIVITY_COLUMNS,
                 (
+                    target.version,
                     retry_time,
-                    failure_time,
+                    target.updated_at,
                     normalized_error,
-                    budget_target,
+                    target.retry_budget_used,
                     str(current.activity_id),
+                    claim.expected_version,
                     str(claim.token),
                     int(claim.activity.input_revision),
                     claim.activity.retry_budget_used,
                 ),
                 connection=connection,
             )
-            _require_claim_update(rowcount, "inference", str(current.activity_id))
+            if activity_row is None:
+                raise StaleClaimError(
+                    f"Stale inference claim for {current.activity_id}"
+                )
+            if _map_inference_activity(activity_row) != target:
+                raise RuntimeError(
+                    "Inference retry SQL diverged from the domain transition"
+                )
             retrying = turn.transition(
                 TurnEvent.SCHEDULE_INFERENCE_RETRY,
-                occurred_at=failure_time,
+                occurred_at=target.updated_at,
                 retry_at=retry_time,
                 error=normalized_error,
             )
@@ -526,23 +539,16 @@ class PostgresInferenceRepository:
 
     async def fail_inference_activity(
         self,
-        claim: InferenceActivityClaim,
+        decision: InferenceFailedFinal,
         *,
         assistant_message: MessageDraft,
         outbounds: Sequence[OutboundDraft],
-        failed_at: datetime,
-        retry_budget_used: int,
-        error: str,
     ) -> InferenceFailureDeliveryResult:
         """@brief 原子终结活动并持久化安全失败上下文/outbox / Atomically fail the activity and persist safe failure context/outbox.
 
-        @param claim 当前活动 claim / Current activity claim.
+        @param decision 已验证最终失败 settlement / Validated final-failure settlement.
         @param assistant_message 不含内部诊断的 canonical 用户反馈 / Canonical user feedback without internal diagnostics.
         @param outbounds 安全失败反馈出站 / Safe failure-feedback outbounds.
-        @param failed_at 最终失败时间 / Final-failure time.
-        @param retry_budget_used 本次 outcome 后的绝对普通重试预算用量 /
-            Absolute ordinary retry-budget usage after this outcome.
-        @param error 有界错误摘要 / Bounded error summary.
         @return 原子失败反馈回执 / Atomic failure-feedback receipt.
         @note activity fencing 成功后、Turn 终态转移前，当前附件的 strict pending marker
             会在同一事务中转为 unavailable。receipt 竞争若先完成 imported，条件更新返回
@@ -554,9 +560,12 @@ class PostgresInferenceRepository:
             conflicts on unavailable and rolls back.
         """
 
-        failure_time = ensure_utc(failed_at)
-        if failure_time < claim.activity.updated_at:
-            raise ValueError("failed_at cannot precede inference claim time")
+        claim = decision.claim
+        target = decision.activity
+        failure_time = target.updated_at
+        normalized_error = target.last_error
+        if normalized_error is None:  # pragma: no cover - decision proves failure.
+            raise AssertionError("Inference final failure lost its summary")
         if not outbounds:
             raise ValueError("Final inference failure requires outbound feedback")
         if assistant_message.created_at > failure_time or any(
@@ -565,22 +574,26 @@ class PostgresInferenceRepository:
             raise ValueError(
                 "Inference failure effects cannot be created after failed_at"
             )
-        budget_target = _validate_retry_budget_target(claim, retry_budget_used)
-        normalized_error = _required_error(error)
         async with db.transaction() as connection:
             await db.fetch_one(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                 (str(claim.activity.conversation_id),),
                 connection=connection,
             )
-            current, current_token = await self._load_inference_activity_for_update(
+            (
+                current,
+                current_token,
+                current_lease,
+            ) = await self._load_inference_activity_for_update(
                 claim.activity.activity_id,
                 connection=connection,
             )
             _validate_claim_identity(current, claim)
             if (
                 current.status is not InferenceActivityStatus.PROCESSING
+                or current != claim.activity
                 or current_token != claim.token
+                or current_lease != claim.lease_expires_at
             ):
                 raise StaleClaimError(
                     f"Stale inference claim for {current.activity_id}"
@@ -602,18 +615,20 @@ class PostgresInferenceRepository:
                 _validate_outbound_for_turn(turn, outbound)
             activity_row = await db.fetch_one(
                 "UPDATE conversation.inference_activities "
-                "SET status = 'failed', version = version + 1, next_attempt_at = NULL, "
+                "SET status = 'failed', version = %s, next_attempt_at = NULL, "
                 "claim_token = NULL, lease_expires_at = NULL, completion_token = NULL, "
                 "updated_at = %s, last_error = %s, retry_budget_used = %s "
                 "WHERE activity_id = CAST(%s AS UUID) AND status = 'processing' "
-                "AND claim_token = CAST(%s AS UUID) AND input_revision = %s "
+                "AND version = %s AND claim_token = CAST(%s AS UUID) AND input_revision = %s "
                 "AND retry_budget_used = %s "
                 "RETURNING " + _INFERENCE_ACTIVITY_COLUMNS,
                 (
+                    target.version,
                     failure_time,
                     normalized_error,
-                    budget_target,
+                    target.retry_budget_used,
                     str(current.activity_id),
+                    claim.expected_version,
                     str(claim.token),
                     int(claim.activity.input_revision),
                     claim.activity.retry_budget_used,
@@ -625,8 +640,12 @@ class PostgresInferenceRepository:
                     f"Stale inference claim for {current.activity_id}"
                 )
             failed_activity = _map_inference_activity(activity_row)
+            if failed_activity != target:
+                raise RuntimeError(
+                    "Inference final-failure SQL diverged from the domain transition"
+                )
             await self._terminalize_pending_current_attachment(
-                current,
+                failed_activity,
                 connection=connection,
             )
             message_result = await _append_message(
@@ -677,7 +696,7 @@ class PostgresInferenceRepository:
             verifies that the same Turn activity is failed and has no receipt.
         """
 
-        if not _has_matching_current_turn_upload(activity.draft.request):
+        if not _has_matching_current_turn_upload(activity.request):
             return
         await db.execute(
             "UPDATE conversation.conversation_messages SET content = jsonb_set("
@@ -704,33 +723,84 @@ class PostgresInferenceRepository:
         recovery_error = "inference worker lease expired before finalization"
         async with db.transaction() as connection:
             rows = await db.fetch_all(
-                "WITH expired AS (SELECT activity_id "
-                "FROM conversation.inference_activities "
-                "WHERE status = 'processing' AND lease_expires_at <= %s "
-                "FOR UPDATE SKIP LOCKED) "
-                "UPDATE conversation.inference_activities AS activity "
-                "SET status = 'retry', version = activity.version + 1, "
-                "next_attempt_at = %s, claim_token = NULL, lease_expires_at = NULL, "
-                "completion_token = NULL, updated_at = %s, last_error = %s "
-                "FROM expired WHERE activity.activity_id = expired.activity_id RETURNING "
-                "activity.activity_id, activity.turn_id, activity.conversation_id, "
-                "activity.request, activity.status, activity.version, "
-                "activity.attempt_count, activity.retry_budget_used, "
-                "activity.next_attempt_at, activity.created_at, activity.updated_at, "
-                "activity.completed_at, activity.completion_token, activity.last_error, "
-                "activity.traceparent, activity.input_revision",
-                (timestamp, retry_time, timestamp, recovery_error),
+                "SELECT "
+                + _INFERENCE_ACTIVITY_COLUMNS
+                + ", candidate.claim_token, candidate.lease_expires_at "
+                "FROM conversation.inference_activities AS candidate "
+                "WHERE candidate.status = 'processing' "
+                "AND candidate.lease_expires_at <= %s "
+                "FOR UPDATE OF candidate SKIP LOCKED",
+                (timestamp,),
                 connection=connection,
             )
             for row in rows:
-                activity = _map_inference_activity(row)
+                values = _row_values(row, 18)
+                previous = _map_inference_activity(values[:16])
+                if values[16] is None or values[17] is None:
+                    raise RuntimeError(
+                        "Expired processing inference lost its lease ownership"
+                    )
+                lease = InferenceActivityLease.restore(
+                    previous,
+                    token=LeaseToken.parse(_uuid(values[16])),
+                    lease_expires_at=_datetime(values[17]),
+                )
+                recovery = previous.recover_expired_lease(
+                    lease,
+                    recovered_at=timestamp,
+                    retry_at=retry_time,
+                    failure=InferenceFailure(recovery_error),
+                )
+                target = recovery.activity
+                activity_row = await db.fetch_one(
+                    "UPDATE conversation.inference_activities "
+                    "SET status = %s, version = %s, attempt_count = %s, "
+                    "retry_budget_used = %s, next_attempt_at = %s, "
+                    "claim_token = NULL, lease_expires_at = NULL, "
+                    "completion_token = NULL, completed_at = NULL, updated_at = %s, "
+                    "last_error = %s, input_revision = %s "
+                    "WHERE activity_id = CAST(%s AS UUID) AND status = 'processing' "
+                    "AND version = %s AND attempt_count = %s "
+                    "AND retry_budget_used = %s AND input_revision = %s "
+                    "AND updated_at = %s AND claim_token = CAST(%s AS UUID) "
+                    "AND lease_expires_at = %s RETURNING "
+                    + _INFERENCE_ACTIVITY_COLUMNS,
+                    (
+                        target.status.value,
+                        target.version,
+                        target.attempt_count,
+                        target.retry_budget_used,
+                        target.next_attempt_at,
+                        target.updated_at,
+                        target.last_error,
+                        int(target.input_revision),
+                        str(previous.activity_id),
+                        previous.version,
+                        previous.attempt_count,
+                        previous.retry_budget_used,
+                        int(previous.input_revision),
+                        previous.updated_at,
+                        str(lease.token),
+                        lease.lease_expires_at,
+                    ),
+                    connection=connection,
+                )
+                if activity_row is None:
+                    raise ConcurrentTurnUpdateError(
+                        f"Expired inference {previous.activity_id} changed while row-locked"
+                    )
+                persisted_retry = _map_inference_activity(activity_row)
+                if recovery.activity != persisted_retry:
+                    raise RuntimeError(
+                        "Inference lease-recovery SQL diverged from the domain transition"
+                    )
                 turn = await _load_turn_for_mutation(
-                    activity.turn_id,
+                    persisted_retry.turn_id,
                     connection=connection,
                 )
                 if turn.state is not TurnState.WAITING_INFERENCE:
                     raise ConcurrentTurnUpdateError(
-                        f"Expired inference {activity.activity_id} requires a "
+                        f"Expired inference {persisted_retry.activity_id} requires a "
                         f"waiting_inference turn, found {turn.state.value}"
                     )
                 retrying = turn.transition(
@@ -751,28 +821,32 @@ class PostgresInferenceRepository:
         activity_id: InferenceActivityId,
         *,
         connection: AsyncConnection,
-    ) -> tuple[InferenceActivity, LeaseToken | None]:
-        """@brief 锁定活动并读取当前 claim token / Lock an activity and load its current claim token.
+    ) -> tuple[InferenceActivity, LeaseToken | None, datetime | None]:
+        """@brief 锁定活动并读取当前 token/lease / Lock an activity and load its current token and lease.
 
         @param activity_id 活动 ID / Activity identifier.
         @param connection 当前短事务连接 / Current short-transaction connection.
-        @return 活动快照与可选 claim token / Activity snapshot and optional claim token.
+        @return 活动聚合、可选 token 与可选 lease / Aggregate, optional token, and optional lease.
         @raise TurnNotFoundError 活动不存在时抛出 / Raised when the activity does not exist.
         """
 
         row = await db.fetch_one(
             "SELECT "
             + _INFERENCE_ACTIVITY_COLUMNS
-            + ", claim_token FROM conversation.inference_activities "
+            + ", claim_token, lease_expires_at FROM conversation.inference_activities "
             "WHERE activity_id = CAST(%s AS UUID) FOR UPDATE",
             (str(activity_id),),
             connection=connection,
         )
         if row is None:
             raise TurnNotFoundError(f"Inference activity {activity_id} does not exist")
-        values = _row_values(row, 17)
+        values = _row_values(row, 18)
         token = LeaseToken.parse(_uuid(values[16])) if values[16] is not None else None
-        return _map_inference_activity(values[:16]), token
+        return (
+            _map_inference_activity(values[:16]),
+            token,
+            _optional_datetime(values[17]),
+        )
 
 
 def _has_matching_current_turn_upload(request: Mapping[str, object]) -> bool:

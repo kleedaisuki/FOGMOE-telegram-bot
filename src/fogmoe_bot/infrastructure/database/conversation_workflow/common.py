@@ -56,7 +56,7 @@ def _map_inference_activity(row: object) -> InferenceActivity:
     completion_token = (
         LeaseToken.parse(_uuid(values[12])) if values[12] is not None else None
     )
-    return InferenceActivity(
+    return InferenceActivity.restore(
         draft=draft,
         status=InferenceActivityStatus(_text(values[4])),
         version=_integer(values[5]),
@@ -73,16 +73,15 @@ def _map_inference_activity(row: object) -> InferenceActivity:
 
 def _validate_inference_activity_idempotency(
     existing: InferenceActivity,
-    requested: InferenceActivityDraft,
+    requested: InferenceActivityDraft | InferenceActivity,
 ) -> None:
     """@brief 验证活动意图的幂等语义 / Validate inference-activity idempotency semantics."""
 
-    canonical = existing.draft
     if (
-        canonical.activity_id != requested.activity_id
-        or canonical.turn_id != requested.turn_id
-        or canonical.conversation_id != requested.conversation_id
-        or canonical.request != requested.request
+        existing.activity_id != requested.activity_id
+        or existing.turn_id != requested.turn_id
+        or existing.conversation_id != requested.conversation_id
+        or existing.request != requested.request
     ):
         raise IdempotencyConflictError(
             f"Inference activity {requested.activity_id} or Turn was reused with different semantics"
