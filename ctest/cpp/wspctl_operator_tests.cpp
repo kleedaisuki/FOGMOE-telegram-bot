@@ -89,6 +89,45 @@ ready_status(const wspctl::domain::RuntimeId& runtime) {
 }
 
 /**
+ * @brief 构造规范测试 listing / Construct a canonical test listing.
+ * @param path 被列举路径 / Listed path.
+ * @param entries 待规范化目录项 / Entries to canonicalize.
+ * @param truncated 固定上限截断标记 / Fixed-cap truncation marker.
+ * @return 已验证 listing / Validated listing.
+ */
+[[nodiscard]] wspctl::domain::WorkspaceListing
+test_listing(const wspctl::domain::OperatorWorkspacePath& path,
+             std::vector<wspctl::domain::WorkspaceEntry> entries = {},
+             const bool truncated = false) {
+    /** @brief factory 验证结果 / Factory validation result. */
+    const auto listing =
+        wspctl::domain::WorkspaceListing::create(path, std::move(entries), truncated);
+    expect(listing.has_value(), "create canonical operator test listing");
+    return *listing;
+}
+
+/**
+ * @brief 在测试 payload 中覆写 little-endian u32 / Overwrite a little-endian u32 in a test
+ * payload.
+ * @param payload 待修改 payload / Payload to modify.
+ * @param offset u32 起始偏移 / Starting offset of the u32.
+ * @param value 新值 / New value.
+ * @return 偏移有效并完成写入 / Whether the offset was valid and the write completed.
+ */
+[[nodiscard]] bool overwrite_u32_le(std::vector<std::byte>& payload, const std::size_t offset,
+                                    const std::uint32_t value) {
+    if (offset > payload.size() || payload.size() - offset < sizeof(value)) {
+        return false;
+    }
+    /** @brief 当前 little-endian byte 序号 / Current little-endian byte index. */
+    for (unsigned int index = 0U; index < sizeof(value); ++index) {
+        payload[offset + index] =
+            std::byte{static_cast<unsigned char>((value >> (index * 8U)) & 0xffU)};
+    }
+    return true;
+}
+
+/**
  * @brief 计算移除 ANSI SGR 后的单行可见宽度 / Compute one line's visible width after removing
  * ANSI SGR.
  * @param line 待检查行 / Line to inspect.
@@ -384,11 +423,7 @@ void test_operator_dashboard_rendering() {
     expect(root_path.has_value(), "parse empty-listing fixture path");
     if (root_path.has_value()) {
         /** @brief 空 workspace listing / Empty workspace listing. */
-        const wspctl::domain::WorkspaceListing empty_listing{
-            .path = *root_path,
-            .entries = {},
-            .truncated = false,
-        };
+        const wspctl::domain::WorkspaceListing empty_listing = test_listing(*root_path);
         /** @brief 空 listing 页面 / Empty-listing page. */
         const std::string empty_page =
             cli::render_listing_page(empty_listing, cli::RenderOptions{
@@ -564,18 +599,77 @@ void test_protocol_isolation_and_round_trip() {
     const auto entry = wspctl::domain::WorkspaceEntry::create(
         "safe%0Aname", wspctl::domain::WorkspaceEntryKind::regular_file, 7U);
     expect(entry.has_value(), "create safe list entry");
-    const auto list_payload =
-        op::encode_list_response(op::ListResponse{.listing = wspctl::domain::WorkspaceListing{
-                                                      .path = *path,
-                                                      .entries = {*entry},
-                                                      .truncated = false,
-                                                  }});
+    /** @brief 协议 round-trip 使用的规范 listing / Canonical listing used by the protocol round
+     * trip. */
+    const wspctl::domain::WorkspaceListing listing = test_listing(*path, {*entry});
+    const auto list_payload = op::encode_list_response(op::ListResponse{.listing = listing});
     const auto decoded_list =
         list_payload ? op::decode_list_response(*list_payload)
                      : wspctl::Result<op::ListResponse>{std::unexpected(list_payload.error())};
     expect(decoded_list.has_value() &&
-               decoded_list->listing.entries.front().encoded_name() == "safe%0Aname",
+               decoded_list->listing.entries().front().encoded_name() == "safe%0Aname",
            "round trip safely encoded operator list entry");
+    if (!path || !entry || !list_payload) {
+        return;
+    }
+
+    /** @brief truncated flag 的 wire 偏移 / Wire offset of the truncated flag. */
+    const std::size_t truncated_offset = sizeof(std::uint32_t) + path->value().size();
+    /** @brief entry count 的 wire 偏移 / Wire offset of the entry count. */
+    const std::size_t entry_count_offset = truncated_offset + sizeof(std::uint8_t);
+
+    /** @brief 未填满上限却声称截断的恶意 payload / Malicious payload claiming truncation below
+     * the fixed cap. */
+    std::vector<std::byte> false_truncated_payload = *list_payload;
+    false_truncated_payload[truncated_offset] = std::byte{1U};
+    expect(!op::decode_list_response(false_truncated_payload).has_value(),
+           "reject wire listing with a false truncated flag");
+
+    /** @brief 声明超过固定上限条目数的恶意 payload / Malicious payload declaring an entry count
+     * above the fixed cap. */
+    std::vector<std::byte> overlimit_payload = *list_payload;
+    expect(overwrite_u32_le(
+               overlimit_payload, entry_count_offset,
+               static_cast<std::uint32_t>(wspctl::domain::kOperatorWorkspaceListingLimit + 1U)),
+           "locate operator list entry-count field");
+    expect(!op::decode_list_response(overlimit_payload).has_value(),
+           "reject wire listing declaring more than the fixed entry cap");
+
+    /** @brief 第一个唯一 wire entry / First unique wire entry. */
+    const auto first_entry = wspctl::domain::WorkspaceEntry::create(
+        "a", wspctl::domain::WorkspaceEntryKind::regular_file, 1U);
+    /** @brief 第二个唯一 wire entry / Second unique wire entry. */
+    const auto second_entry = wspctl::domain::WorkspaceEntry::create(
+        "b", wspctl::domain::WorkspaceEntryKind::regular_file, 2U);
+    expect(first_entry.has_value() && second_entry.has_value(),
+           "construct duplicate-wire fixtures");
+    if (!first_entry || !second_entry) {
+        return;
+    }
+    /** @brief 编码前仍满足唯一性的 listing / Listing still unique before wire mutation. */
+    const wspctl::domain::WorkspaceListing unique_listing =
+        test_listing(*path, {*first_entry, *second_entry});
+    /** @brief 含两个唯一项的合法 payload / Valid payload containing two unique entries. */
+    const auto unique_payload =
+        op::encode_list_response(op::ListResponse{.listing = unique_listing});
+    expect(unique_payload.has_value(), "encode unique two-entry operator listing");
+    if (!unique_payload) {
+        return;
+    }
+    /** @brief 第一个 entry 的 wire 大小 / Wire size of the first entry. */
+    const std::size_t first_entry_wire_bytes = sizeof(std::uint32_t) +
+                                               first_entry->encoded_name().size() +
+                                               sizeof(std::uint8_t) + sizeof(std::uint64_t);
+    /** @brief 第二个 encoded name 首 byte 的偏移 / Offset of the second encoded name's first byte.
+     */
+    const std::size_t second_name_offset =
+        entry_count_offset + sizeof(std::uint32_t) + first_entry_wire_bytes + sizeof(std::uint32_t);
+    /** @brief 把第二个名称改成与第一个重复的恶意 payload / Malicious payload mutating the second
+     * name into a duplicate of the first. */
+    std::vector<std::byte> duplicate_payload = *unique_payload;
+    duplicate_payload[second_name_offset] = std::byte{static_cast<unsigned char>('a')};
+    expect(!op::decode_list_response(duplicate_payload).has_value(),
+           "reject wire listing containing duplicate encoded names");
 }
 
 /** @brief 只读 operator 端口 fake / Read-only fake operator port. */
@@ -605,7 +699,7 @@ public:
          const wspctl::domain::OperatorWorkspacePath& path) const override {
         static_cast<void>(runtime);
         ++list_calls;
-        return wspctl::domain::WorkspaceListing{.path = path, .entries = {}, .truncated = false};
+        return test_listing(path);
     }
 
     /** @brief status 调用数 / Status-call count. */
@@ -683,7 +777,7 @@ void test_reader_uses_upper_dirfd_and_refuses_symlink_traversal() {
     const auto encoded_hostile = wspctl::domain::encode_workspace_entry_name(hostile_name);
     const bool found_encoded_hostile =
         root_listing.has_value() &&
-        std::ranges::any_of(root_listing->entries,
+        std::ranges::any_of(root_listing->entries(),
                             [&](const wspctl::domain::WorkspaceEntry& entry) {
                                 return entry.encoded_name() == *encoded_hostile;
                             });

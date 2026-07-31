@@ -76,9 +76,4 @@ std::uint64_t RuntimeStatus::borrowed_dispatches() const noexcept { return borro
 
 bool RuntimeStatus::cleanup_pending() const noexcept { return cleanup_pending_; }
 
-domain::Result<RuntimeStatus> RuntimeStatusService::inspect(const RuntimeStatusQuery& query,
-                                                            const RuntimeStatusPort& port) const {
-    return port.observe(query);
-}
-
 } // namespace wspctl::application

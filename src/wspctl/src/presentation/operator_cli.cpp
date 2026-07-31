@@ -684,7 +684,7 @@ void append_box_row(std::string& output, const std::string_view text, const std:
  */
 void append_compact_entries(std::string& output, const domain::WorkspaceListing& listing,
                             const RenderOptions& options, const std::size_t columns) {
-    for (const domain::WorkspaceEntry& entry : listing.entries) {
+    for (const domain::WorkspaceEntry& entry : listing.entries()) {
         /** @brief 类型和名称前缀 / Kind-and-name prefix. */
         const std::string prefix = std::string(entry_kind_name(entry.kind())) + " ";
         /** @brief 名称首行容量 / First-line name capacity. */
@@ -1115,10 +1115,10 @@ std::string render_dashboard(const domain::OperatorWorkspaceStatus& status,
 std::string render_listing_record(const domain::WorkspaceListing& listing) {
     /** @brief 输出记录 / Output record. */
     std::ostringstream output;
-    output << "path=" << terminal_safe_text(listing.path.value(), true, false) << '\n';
-    output << "truncated=" << (listing.truncated ? "true" : "false") << '\n';
+    output << "path=" << terminal_safe_text(listing.path().value(), true, false) << '\n';
+    output << "truncated=" << (listing.truncated() ? "true" : "false") << '\n';
     output << "kind\tsize_bytes\tencoded_name\n";
-    for (const domain::WorkspaceEntry& entry : listing.entries) {
+    for (const domain::WorkspaceEntry& entry : listing.entries()) {
         output << entry_kind_letter(entry.kind()) << '\t' << entry.size_bytes() << '\t'
                << entry.encoded_name() << '\n';
     }
@@ -1133,14 +1133,14 @@ std::string render_listing_page(const domain::WorkspaceListing& listing,
     std::string output;
     append_wrapped(output, "", "WORKSPACE / PERSISTENT UPPER LAYER", columns, Tone::title,
                    options.color);
-    append_wrapped(output, "", "Path: " + terminal_safe_text(listing.path.value(), true, false),
+    append_wrapped(output, "", "Path: " + terminal_safe_text(listing.path().value(), true, false),
                    columns);
     append_wrapped(output, "",
-                   listing.truncated ? "Result: truncated at safety limit"
-                                     : "Result: complete one-level listing",
+                   listing.truncated() ? "Result: truncated at safety limit"
+                                       : "Result: complete one-level listing",
                    columns);
     output.push_back('\n');
-    if (listing.entries.empty()) {
+    if (listing.entries().empty()) {
         append_wrapped(output, "", "No entries in this persistent upper-layer directory.", columns);
         return output;
     }
@@ -1163,7 +1163,7 @@ std::string render_listing_page(const domain::WorkspaceListing& listing,
         output.push_back('\n');
         output.append(columns, '-');
         output.push_back('\n');
-        for (const domain::WorkspaceEntry& entry : listing.entries) {
+        for (const domain::WorkspaceEntry& entry : listing.entries()) {
             /** @brief 类型 cell / Kind cell. */
             std::string kind{entry_kind_name(entry.kind())};
             kind.append(kTypeWidth - kind.size(), ' ');
@@ -1178,7 +1178,7 @@ std::string render_listing_page(const domain::WorkspaceListing& listing,
             output.push_back('\n');
         }
     }
-    if (listing.truncated) {
+    if (listing.truncated()) {
         output.push_back('\n');
         append_wrapped(output, "", "More entries exist; narrow the --path and query again.",
                        columns);

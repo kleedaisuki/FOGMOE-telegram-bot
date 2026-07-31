@@ -250,16 +250,61 @@ private:
     std::uint64_t size_bytes_{};
 };
 
-/** @brief 一次有界、只读的 workspace 目录列举结果 / One bounded read-only workspace directory
- * listing. */
-struct WorkspaceListing final {
-    /** @brief 已验证的被列举路径 / Validated path being listed. */
-    OperatorWorkspacePath path;
-    /** @brief 按 encoded_name 字节序排序的目录项 / Directory entries sorted by encoded-name byte
-     * order. */
-    std::vector<WorkspaceEntry> entries;
+/**
+ * @brief 一次有界、规范且只读的 workspace 目录列举结果 / One bounded, canonical, read-only
+ * workspace directory listing.
+ *
+ * factory 将目录项规范化为 encoded-name 字节序，并拒绝重复名称与超过固定上限的集合，因此任何
+ * 已构造实例都可安全跨 application、protocol 与 presentation 边界。/ The factory canonicalizes
+ * entries into encoded-name byte order, rejects duplicate names and collections above the fixed
+ * limit, and permits `truncated=true` only when the fixed limit is saturated, so every constructed
+ * instance is safe to cross application, protocol, and presentation boundaries.
+ */
+class WorkspaceListing final {
+public:
+    /**
+     * @brief 验证并创建规范目录列举 / Validate and create a canonical directory listing.
+     * @param path 已验证的被列举路径 / Validated path being listed.
+     * @param entries 待排序并验证唯一性的目录项 / Directory entries to sort and validate for
+     * uniqueness.
+     * @param truncated 是否因固定上限而省略后续项 / Whether later entries were omitted by the fixed
+     * cap.
+     * @return 规范列举或领域错误 / Canonical listing or a domain error.
+     * @note 输入顺序不承载语义；factory 按 encoded name 规范化它。/ Input order carries no
+     * semantics; the factory canonicalizes it by encoded name.
+     * @note `truncated=true` 要求条目数恰好等于固定上限。/ `truncated=true` requires the entry
+     * count to equal the fixed limit exactly.
+     */
+    [[nodiscard]] static Result<WorkspaceListing>
+    create(OperatorWorkspacePath path, std::vector<WorkspaceEntry> entries, bool truncated);
+
+    /** @brief 取得已验证的被列举路径 / Get the validated listed path. */
+    [[nodiscard]] const OperatorWorkspacePath& path() const noexcept;
+    /** @brief 取得已排序且名称唯一的目录项 / Get sorted entries with unique names. */
+    [[nodiscard]] const std::vector<WorkspaceEntry>& entries() const noexcept;
     /** @brief 是否因固定上限而省略后续项 / Whether later entries were omitted by the fixed cap. */
-    bool truncated{false};
+    [[nodiscard]] bool truncated() const noexcept;
+
+    /** @brief 比较规范目录列举 / Compare canonical directory listings. */
+    [[nodiscard]] bool operator==(const WorkspaceListing&) const noexcept = default;
+
+private:
+    /**
+     * @brief 从已验证字段构造规范列举 / Construct a canonical listing from validated fields.
+     * @param path 已验证路径 / Validated path.
+     * @param entries 已排序且名称唯一的目录项 / Sorted entries with unique names.
+     * @param truncated 固定上限截断标记 / Fixed-cap truncation marker.
+     */
+    WorkspaceListing(OperatorWorkspacePath path, std::vector<WorkspaceEntry> entries,
+                     bool truncated) noexcept;
+
+    /** @brief 已验证的被列举路径 / Validated path being listed. */
+    OperatorWorkspacePath path_;
+    /** @brief 按 encoded-name 字节序排序且名称唯一的目录项 / Entries sorted by encoded-name byte
+     * order with unique names. */
+    std::vector<WorkspaceEntry> entries_;
+    /** @brief 固定上限截断标记 / Fixed-cap truncation marker. */
+    bool truncated_{false};
 };
 
 /**

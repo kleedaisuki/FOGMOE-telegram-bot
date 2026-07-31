@@ -1437,7 +1437,7 @@ expect_successful_result(const wspctl::presentation::ClientExecutionResult& resu
         return false;
     }
     const bool contains_persisted_file =
-        std::any_of(listing->entries.begin(), listing->entries.end(),
+        std::any_of(listing->entries().begin(), listing->entries().end(),
                     [](const wspctl::domain::WorkspaceEntry& entry) {
                         return entry.encoded_name() == "e2e-persist.txt";
                     });

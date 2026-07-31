@@ -13,6 +13,20 @@ DOMAIN_HEADER = (
 )
 #: @brief 领域实现路径 / Domain implementation path.
 DOMAIN_SOURCE = REPOSITORY_ROOT / "src" / "wspctl" / "src" / "domain" / "runtime.cpp"
+#: @brief operator workspace 领域头路径 / Operator-workspace domain header path.
+OPERATOR_DOMAIN_HEADER = (
+    REPOSITORY_ROOT
+    / "src"
+    / "wspctl"
+    / "include"
+    / "wspctl"
+    / "domain"
+    / "operator_workspace.hpp"
+)
+#: @brief operator workspace 领域实现路径 / Operator-workspace domain source path.
+OPERATOR_DOMAIN_SOURCE = (
+    REPOSITORY_ROOT / "src" / "wspctl" / "src" / "domain" / "operator_workspace.cpp"
+)
 #: @brief 应用用例头路径 / Application use-case header path.
 APPLICATION_HEADER = (
     REPOSITORY_ROOT
@@ -23,7 +37,11 @@ APPLICATION_HEADER = (
     / "application"
     / "runtime_activation.hpp"
 )
-#: @brief RuntimeProcess 状态查询用例头路径 / RuntimeProcess status-query use-case header path.
+#: @brief 应用 lifecycle 用例实现路径 / Application lifecycle use-case source path.
+APPLICATION_SOURCE = (
+    REPOSITORY_ROOT / "src" / "wspctl" / "src" / "application" / "runtime_activation.cpp"
+)
+#: @brief RuntimeProcess 状态查询应用边界头路径 / RuntimeProcess status-query application-boundary header path.
 RUNTIME_STATUS_HEADER = (
     REPOSITORY_ROOT
     / "src"
@@ -33,7 +51,7 @@ RUNTIME_STATUS_HEADER = (
     / "application"
     / "runtime_status.hpp"
 )
-#: @brief RuntimeProcess 状态查询用例实现路径 / RuntimeProcess status-query use-case implementation path.
+#: @brief RuntimeProcess 状态查询应用模型实现路径 / RuntimeProcess status-query application-model implementation path.
 RUNTIME_STATUS_SOURCE = (
     REPOSITORY_ROOT
     / "src"
@@ -133,9 +151,125 @@ def test_application_declares_a_port_and_use_case() -> None:
     assert "class RuntimeActivationPort" in text
     assert "class RuntimeActivationService" in text
     assert "establish(" in text
-    assert "retire(" in text
+    assert "terminate(" in text
+    assert "stop(domain::Runtime& runtime" in text
     assert "<sys/" not in text
     assert "<filesystem>" not in text
+
+
+def test_runtime_failure_cleanup_is_domain_owned() -> None:
+    """@brief Runtime 失败清理必须校验 owner，且 Broker 不得维护影子 poisoned 状态 / Runtime failure cleanup must validate its owner, and Broker must not maintain shadow poisoned state.
+
+    @return None / None.
+    """
+
+    domain = DOMAIN_HEADER.read_text(encoding="utf-8") + DOMAIN_SOURCE.read_text(encoding="utf-8")
+    application = APPLICATION_HEADER.read_text(encoding="utf-8")
+    broker = BROKER_SOURCE.read_text(encoding="utf-8")
+    assert "void fail() noexcept" not in domain
+    assert "Result<void> reject_activation(const ActivationId& activation)" in domain
+    assert "Result<void> quarantine_activation(const ActivationId& activation)" in domain
+    assert "Result<void> begin_stop(const ActivationId& activation)" in domain
+    assert "Result<void> record_stop_failure(const ActivationId& activation)" in domain
+    assert "Result<void> finish_stop(const ActivationId& activation)" in domain
+    assert "std::optional<ActivationId> failure_cleanup_activation_" in domain
+    assert "Result<void> stop(domain::Runtime& runtime" in application
+    assert "bool poisoned" not in broker
+    assert "session->poisoned" not in broker
+
+
+def test_establish_failure_dispositions_are_explicit() -> None:
+    """@brief establish 必须区分 clean rejection、通用清理与 unknown quarantine / Establishment must distinguish clean rejection, generic cleanup, and unknown quarantine.
+
+    @return None / None.
+    """
+
+    application = APPLICATION_HEADER.read_text(
+        encoding="utf-8"
+    ) + APPLICATION_SOURCE.read_text(encoding="utf-8")
+    broker = BROKER_SOURCE.read_text(encoding="utf-8")
+    for disposition in ("rejected_cleanly", "cleanup_required", "outcome_unknown"):
+        assert disposition in application
+    assert "using RuntimeEstablishResult = std::expected<void, RuntimeEstablishFailure>" in application
+    assert "switch (established.error().disposition())" in application
+    assert "runtime.reject_activation(activation)" in application
+    assert "stop(runtime, activation, port)" in application
+    assert "runtime.quarantine_activation(activation)" in application
+    assert "application::RuntimeEstablishFailure::outcome_unknown" in broker
+    assert "completed.error().code == ErrorCode::invocation_in_doubt" in broker
+    assert "state_->launch_unknown.insert(runtime_key)" in broker
+
+
+def test_stale_cgroup_cleanup_failure_quarantines_activation() -> None:
+    """@brief 旧 cgroup 清理无法证明时必须进入 unknown quarantine / Failure to prove stale-cgroup cleanup must enter unknown quarantine.
+
+    @return None / None.
+    """
+
+    sandbox = SANDBOX_SOURCE.read_text(encoding="utf-8")
+    prepare_start = sandbox.index("Result<TaskCgroupControl> prepare_runtime_cgroup(")
+    prepare_end = sandbox.index("Result<void> kill_runtime_cgroup(", prepare_start)
+    prepare = sandbox[prepare_start:prepare_end]
+    stale_cleanup_index = prepare.index("kill_runtime_cgroup(config, runtime_key)")
+    proof_failure_index = prepare.index("ErrorCode::invocation_in_doubt", stale_cleanup_index)
+    assert stale_cleanup_index < proof_failure_index
+    assert "existing runtime cgroup cleanup could not be proven" in prepare[proof_failure_index:]
+
+
+def test_session_lease_revalidates_map_identity_after_mutex() -> None:
+    """@brief session lease 与 reaper 必须按 session→map 锁序重验 identity，且只返回 reusable Runtime / Session leases and the reaper must revalidate identity in session→map lock order and return only reusable Runtime.
+
+    @return None / None.
+    """
+
+    broker = BROKER_SOURCE.read_text(encoding="utf-8")
+    acquire_start = broker.index("Broker::acquire_session(")
+    acquire_end = broker.index("Result<ExecutionResult> Broker::dispatch(", acquire_start)
+    acquire = broker[acquire_start:acquire_end]
+    lease_index = acquire.index("auto lease = std::make_unique<SessionLease>")
+    identity_index = acquire.index("bool current_session", lease_index)
+    map_lock_index = acquire.index("std::lock_guard map_lock(state_->sessions_mutex)", identity_index)
+    stale_index = acquire.index("if (!current_session)", map_lock_index)
+    reusable_index = acquire.index("runtime.reusable()", stale_index)
+    return_index = acquire.index("return lease", reusable_index)
+    assert lease_index < identity_index < map_lock_index < stale_index < reusable_index < return_index
+    stale_block = acquire[stale_index:reusable_index]
+    assert "lease.reset()" in stale_block
+    assert "session.reset()" in stale_block
+    assert "continue" in stale_block
+
+    reaper_start = broker.index("void Broker::reap_expired_sessions()")
+    reaper_end = broker.index("Result<void> Broker::serve_forever(", reaper_start)
+    reaper = broker[reaper_start:reaper_end]
+    session_lock_index = reaper.index("std::unique_lock session_lock(session->mutex")
+    reaper_identity_index = reaper.index("bool current_session", session_lock_index)
+    reaper_map_lock_index = reaper.index(
+        "std::lock_guard map_lock(state_->sessions_mutex)", reaper_identity_index
+    )
+    observation_index = reaper.index("launcher_exited(session->launcher_pidfd)", reaper_map_lock_index)
+    assert session_lock_index < reaper_identity_index < reaper_map_lock_index < observation_index
+
+
+def test_workspace_listing_is_a_closed_domain_value() -> None:
+    """@brief workspace listing 必须由领域 factory 封闭构造 / Workspace listings must be closed domain values constructed by a factory.
+
+    @return None / None.
+    """
+
+    text = OPERATOR_DOMAIN_HEADER.read_text(encoding="utf-8")
+    source = OPERATOR_DOMAIN_SOURCE.read_text(encoding="utf-8")
+    assert "class WorkspaceListing final" in text
+    assert "[[nodiscard]] static Result<WorkspaceListing>" in text
+    assert "create(OperatorWorkspacePath path" in text
+    assert "const OperatorWorkspacePath& path() const noexcept" in text
+    assert "const std::vector<WorkspaceEntry>& entries() const noexcept" in text
+    assert "bool truncated() const noexcept" in text
+    assert "struct WorkspaceListing final" not in text
+    assert "truncated && entries.size() != kOperatorWorkspaceListingLimit" in source
+    private_section = text[text.index("class WorkspaceListing final") :]
+    assert private_section.index("private:") < private_section.index(
+        "std::vector<WorkspaceEntry> entries_;"
+    )
 
 
 def test_proc_mount_is_agent_usable_and_masks_host_global_surfaces() -> None:
@@ -334,7 +468,7 @@ def test_payload_resource_limits_are_irreversible_and_scoped() -> None:
 
 
 def test_broker_uses_application_lifecycle_port_in_real_paths() -> None:
-    """@brief 特权 broker 必须通过 application use case 驱动真实 activation/retire，而非旁路 domain 状态机 / The privileged broker must drive real activation/retirement through the application use case rather than bypassing the domain state machine.
+    """@brief 特权 broker 必须通过 application use case 驱动真实 activation/stop，而非旁路 domain 状态机 / The privileged broker must drive real activation/stop through the application use case rather than bypassing the domain state machine.
 
     @return None / None.
     """
@@ -344,12 +478,13 @@ def test_broker_uses_application_lifecycle_port_in_real_paths() -> None:
     assert '#include "wspctl/application/runtime_activation.hpp"' in broker
     assert "class BrokerRuntimeActivationPort" in broker
     assert "lifecycle.activate(created->runtime, created->activation, port)" in broker
-    assert "lifecycle.retire(session->runtime, session->activation, port)" in broker
-    assert "lifecycle.abort(session->runtime, session->activation, port)" in broker
+    assert "lifecycle.stop(session->runtime, session->activation, port)" in broker
+    assert "session->runtime.state() == domain::RuntimeState::ready" not in broker
     assert ".runtime.begin_activation(" not in broker
     assert ".runtime.mark_ready(" not in broker
-    assert ".runtime.begin_retirement(" not in broker
-    assert ".runtime.finish_retirement(" not in broker
+    assert ".runtime.begin_stop(" not in broker
+    assert ".runtime.record_stop_failure(" not in broker
+    assert ".runtime.finish_stop(" not in broker
     infrastructure_block = cmake[
         cmake.index("target_link_libraries(wspctl_infrastructure") : cmake.index(
             "wspctl_enable_warnings(wspctl_infrastructure)"
@@ -378,15 +513,13 @@ def test_runtime_status_is_a_read_only_application_query() -> None:
     assert "class RuntimeSnapshot" in domain
     assert "RuntimeSnapshot snapshot() const;" in domain
     assert "class RuntimeStatusPort" in application
-    assert "class RuntimeStatusService" in application
-    assert "domain::Result<RuntimeStatus> inspect(" in application
+    assert "class RuntimeStatusService" not in application
     for prohibited in ("<sys/", "<filesystem>", "infrastructure/"):
         assert prohibited not in application, f"status application layer leaked {prohibited}"
     status_start = broker.index("Result<RuntimeStatusResult> Broker::read_runtime_status(")
     status_end = broker.index("Result<PayloadResult> Broker::replay_payload(", status_start)
     status_block = broker[status_start:status_end]
-    assert "RuntimeStatusService service" in status_block
-    assert "service.inspect(query, port)" in status_block
+    assert "port.observe(query)" in status_block
     for forbidden in (
         "acquire_session(",
         "ensure_runtime(",
@@ -554,6 +687,11 @@ def _run_contract_tests() -> None:
 
     test_domain_has_no_host_or_transport_dependencies()
     test_application_declares_a_port_and_use_case()
+    test_runtime_failure_cleanup_is_domain_owned()
+    test_establish_failure_dispositions_are_explicit()
+    test_stale_cgroup_cleanup_failure_quarantines_activation()
+    test_session_lease_revalidates_map_identity_after_mutex()
+    test_workspace_listing_is_a_closed_domain_value()
     test_proc_mount_is_agent_usable_and_masks_host_global_surfaces()
     test_runtime_uts_identity_is_fixed_before_pid1_fork()
     test_workspace_overlay_remains_executable_for_untrusted_payload_scripts()

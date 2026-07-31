@@ -89,8 +89,8 @@ cgroup 只是实现这些语义的 Linux 外设。下面的名称以当前 `src/
 ### 领域层：`Runtime` 聚合与值对象
 
 `wspctl::domain::Runtime` 是聚合根（aggregate root）。它不保存 PID、socket FD、mount path 或
-cgroup path；这些都是可失效的基础设施事实。它只保存持久 `RuntimeId`、当前状态和可选的
-`ActivationId`，并以类型与状态机约束“谁有权使用这个 runtime”。
+cgroup path；这些都是可失效的基础设施事实。它只保存持久 `RuntimeId`、当前状态、active owner
+以及失败清理期间的私有 cleanup owner，并以类型与状态机约束“谁有权使用或清理这个 runtime”。
 
 | 类型 | 表达的语义与验证 | 不能表达的东西 |
 | --- | --- | --- |
@@ -102,37 +102,50 @@ cgroup path；这些都是可失效的基础设施事实。它只保存持久 `R
 | `ExecutionBudget` | 正数 wall-clock 与正数合并输出字节上限 | Linux cgroup、RLIMIT 或 filesystem quota 配置 |
 | `CommandJournalDecision` | 新执行、已完成回放、hash 冲突、既有结果未知四种确定性决定 | journal 文件格式或 fsync 实现 |
 
-`Runtime` 的真实状态机如下；除开始 activation 与 `fail()` 外，所有转换都要求完全相同的
-`ActivationId`。这把“旧 handle 在新 activation 后仍可发命令”的问题变成类型化的
-`activation_mismatch`，而不是靠时间或 PID 猜测。
+`Runtime` 的真实状态机如下；所有会改变既有 activation 的转换都要求完全相同的
+`ActivationId`。这把“旧 handle 在新 activation 后仍可发命令”以及“错误调用方擦除失败
+owner”的问题变成类型化的 `activation_mismatch`，而不是靠时间或 PID 猜测。
 
 ```text
 dormant ─begin_activation(A)→ activating ─mark_ready(A)→ ready
 ready ─begin_execution(A)→ executing ─finish_execution(A)→ ready
-ready ─begin_retirement(A)→ retiring ─finish_retirement(A)→ dormant
-任意状态 ─fail()→ failed（清除 active activation）
+ready ─begin_stop(A)→ retiring ─finish_stop(A)→ dormant
+activating/executing ─begin_stop(A)→ failed[cleanup=A] ─finish_stop(A)→ failed
+retiring ─record_stop_failure(A)→ failed[cleanup=A]
+failed[cleanup=A] ─begin_stop(A)→ failed[cleanup=A]（同一 owner 重试）
+activating ─reject_activation(A)→ failed（establish 未成功，无 cleanup owner）
+activating ─quarantine_activation(A)→ failed[quarantine]（establish 结果未知）
 ```
 
-`failed` 是当前内存聚合的 fail-closed 终态，不是假装可恢复的 runtime。broker 需要重新建立
-真实资源时，会清理旧 session 后以同一持久 `RuntimeId` 构造新的 aggregate；它绝不把旧 PID
-或旧 activation 当成可恢复状态。
+`failed` 是当前内存聚合的 fail-closed 终态，不是假装可恢复的 runtime。对外 snapshot 仍不
+暴露 active activation；但外部资源尚未确认清理时，aggregate 会私有保存 cleanup owner，只有
+同一 activation 能重试。broker 清理旧 session 后才以同一持久 `RuntimeId` 构造新的 aggregate；
+它绝不把旧 PID 或旧 activation 当成可恢复状态。建立结果未知时，聚合另外保存
+quarantine 事实，broker 的 `launch_unknown` recovery ledger 按 `RuntimeId` 禁止后续复用；
+通用 `terminate` 不得猜测如何清理这个未知对象。
 
 ### 应用层：生命周期端口与补偿
 
 `wspctl::application::RuntimeActivationPort` 是 outbound port（出站端口）：它只声明
-`establish(RuntimeId, ActivationId)` 和 `retire(RuntimeId, ActivationId)`，所以应用层既不知道
+`establish(RuntimeId, ActivationId)` 和 `terminate(RuntimeId, ActivationId)`，所以应用层既不知道
 namespace/cgroup/mount/socket，也不能把这些 host capability 泄漏到领域层。
 
 `RuntimeActivationService` 将领域转换与外部副作用编排为一个小的 use case（用例）：
 
 ```text
 activate: begin_activation → port.establish → mark_ready
-retire:   begin_retirement → port.retire    → finish_retirement
-abort:    fail → port.retire
+                     rejected_cleanly ↘ reject_activation
+                     cleanup_required ↘ stop → port.terminate
+                     outcome_unknown ↘ quarantine_activation
+stop:     begin_stop → port.terminate → finish_stop
+                            error ↘ record_stop_failure（保留 cleanup owner）
 ```
 
-任一步外设失败都会使 aggregate 进入 `failed`；若 `mark_ready` 后置检查失败，服务先尝试
-`retire` 作补偿（compensation），再失败关闭。实际 host adapter 是
+建立端口返回封闭的 `std::expected<void, RuntimeEstablishFailure>`，其失败值必须在
+`rejected_cleanly`、`cleanup_required` 和 `outcome_unknown` 三种已证明处置中选一。
+只有已知部分建立且通用终止效果可清理时才调用 `terminate`；结果未知时必须隔离。
+任一步终止效果失败都会使 aggregate 进入 `failed` 并保留清理 ownership；若 `mark_ready`
+后置检查失败，服务走同一 `stop` 路径作补偿（compensation）。实际 host adapter 是
 `src/wspctl/src/infrastructure/broker.cpp` 内的 `BrokerRuntimeActivationPort`：它执行 cgroup、
 OverlayFS、fork-server、PID 1 release 与清理，并保留 native `Error`，避免 domain 为 Linux
 I/O 不确定性而反向依赖 infrastructure 错误类型。
@@ -226,7 +239,7 @@ upper layer 或同一 `/workspace` 同时写入。
 
 15 分钟（900 秒）是 broker 的 cache policy，而不是 `Runtime` 聚合中虚构的 `IdleGrace` 状态：
 它从最后一个 `RuntimeProcess` lease 释放后开始计时，新控制请求取消 timer；到期时 broker 经
-`RuntimeActivationService::retire` 退役 ready activation。broker 重启只执行**冷恢复**：重新验证
+`RuntimeActivationService::stop` 终止 ready activation。broker 重启只执行**冷恢复**：重新验证
 manifest、清理 stale activation、重挂 workspace overlay 并启动新的 PID 1。它不承诺恢复 PID、
 内存或正在运行的命令；那是 CRIU 级别的另一项能力。
 

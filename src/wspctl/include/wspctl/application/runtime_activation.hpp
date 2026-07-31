@@ -4,6 +4,65 @@
 
 namespace wspctl::application {
 
+/** @brief RuntimeProcess 建立失败后的已证明处置 / Proven disposition after RuntimeProcess
+ * establishment failure. */
+enum class RuntimeEstablishFailureDisposition : std::uint8_t {
+    /** @brief 已证明没有待清理 RuntimeProcess / Proven to leave no RuntimeProcess to clean up. */
+    rejected_cleanly,
+    /** @brief 已知存在可由通用 terminate 清理的部分建立 / Known partial establishment that the
+     * generic terminate effect can clean up. */
+    cleanup_required,
+    /** @brief 外部结果未知，必须隔离并交给 recovery ledger / External outcome is unknown and must
+     * be quarantined for the recovery ledger. */
+    outcome_unknown,
+};
+
+/** @brief 携带建立失败原因与已证明处置的封闭结果 / Closed establishment failure carrying its
+ * cause and proven disposition. */
+class RuntimeEstablishFailure final {
+public:
+    /**
+     * @brief 构造已证明 clean rejection / Construct a proven clean rejection.
+     * @param cause 归一化失败原因 / Normalized failure cause.
+     * @return clean rejection / Clean rejection.
+     */
+    [[nodiscard]] static RuntimeEstablishFailure rejected_cleanly(domain::Error cause);
+    /**
+     * @brief 构造需要通用清理的失败 / Construct a failure requiring generic cleanup.
+     * @param cause 归一化失败原因 / Normalized failure cause.
+     * @return cleanup-required failure / Cleanup-required failure.
+     */
+    [[nodiscard]] static RuntimeEstablishFailure cleanup_required(domain::Error cause);
+    /**
+     * @brief 构造结果未知的失败 / Construct an unknown-outcome failure.
+     * @param cause 归一化失败原因 / Normalized failure cause.
+     * @return unknown-outcome failure / Unknown-outcome failure.
+     */
+    [[nodiscard]] static RuntimeEstablishFailure outcome_unknown(domain::Error cause);
+
+    /** @brief 取得已证明处置 / Get the proven disposition. */
+    [[nodiscard]] RuntimeEstablishFailureDisposition disposition() const noexcept;
+    /** @brief 取得归一化失败原因 / Get the normalized failure cause. */
+    [[nodiscard]] const domain::Error& cause() const noexcept;
+
+private:
+    /**
+     * @brief 从已证明处置与原因构造 / Construct from a proven disposition and cause.
+     * @param disposition 已证明处置 / Proven disposition.
+     * @param cause 归一化失败原因 / Normalized failure cause.
+     */
+    RuntimeEstablishFailure(RuntimeEstablishFailureDisposition disposition,
+                            domain::Error cause) noexcept;
+
+    /** @brief 已证明处置 / Proven disposition. */
+    RuntimeEstablishFailureDisposition disposition_;
+    /** @brief 归一化失败原因 / Normalized failure cause. */
+    domain::Error cause_;
+};
+
+/** @brief RuntimeProcess 建立结果 / RuntimeProcess establishment result. */
+using RuntimeEstablishResult = std::expected<void, RuntimeEstablishFailure>;
+
 /**
  * @brief RuntimeProcess 生命周期外设端口 / RuntimeProcess lifecycle outbound port.
  *
@@ -21,29 +80,30 @@ public:
      * activation.
      * @param runtime 长期 runtime 标识 / Long-lived runtime identifier.
      * @param activation 新 activation 标识 / New activation identifier.
-     * @return 成功或已归一化的领域错误 / Success or a normalized domain error.
+     * @return 成功或带已证明处置的建立失败 / Success or establishment failure with a proven
+     * disposition.
      */
-    [[nodiscard]] virtual domain::Result<void>
+    [[nodiscard]] virtual RuntimeEstablishResult
     establish(const domain::RuntimeId& runtime, const domain::ActivationId& activation) = 0;
 
     /**
      * @brief 终止并清理指定 activation / Terminate and clean up an activation.
      * @param runtime 长期 runtime 标识 / Long-lived runtime identifier.
-     * @param activation 待退役 activation 标识 / Activation to retire.
+     * @param activation 待终止 activation 标识 / Activation to terminate.
      * @return 成功或已归一化的领域错误 / Success or a normalized domain error.
      */
-    [[nodiscard]] virtual domain::Result<void> retire(const domain::RuntimeId& runtime,
-                                                      const domain::ActivationId& activation) = 0;
+    [[nodiscard]] virtual domain::Result<void>
+    terminate(const domain::RuntimeId& runtime, const domain::ActivationId& activation) = 0;
 };
 
 /**
- * @brief RuntimeProcess 激活用例 / RuntimeProcess activation use case.
+ * @brief RuntimeProcess 生命周期用例 / RuntimeProcess lifecycle use case.
  *
- * 该服务是领域状态机与外部副作用之间的事务编排点：外设失败时聚合进入 failed，
- * 因此不会把一个未证明的 RuntimeProcess 作为 ready 返回给调用方。
+ * 该服务是领域状态机与外部副作用之间的事务编排点：外设终止失败时聚合保留清理 ownership，
+ * 因此不会把未证明的 RuntimeProcess 作为 ready 返回，也不会静默脱离其 owner。
  * This service is the transaction orchestration point between the domain state machine and external
- * effects. When the port fails the aggregate becomes failed, so an unproven RuntimeProcess is never
- * returned as ready.
+ * effects. When termination fails, the aggregate retains cleanup ownership; an unproven
+ * RuntimeProcess is never returned as ready or silently detached from its owner.
  */
 class RuntimeActivationService final {
 public:
@@ -59,30 +119,19 @@ public:
                                                 RuntimeActivationPort& port) const;
 
     /**
-     * @brief 退役一个空闲 activation / Retire an idle activation.
-     * @param runtime 待退役聚合 / Aggregate to retire.
-     * @param activation 当前 activation / Current activation.
-     * @param port 执行受控外设效果的端口 / Port that performs controlled external effects.
-     * @return dormant 状态或失败原因 / Dormant state or failure reason.
-     */
-    [[nodiscard]] domain::Result<void> retire(domain::Runtime& runtime,
-                                              const domain::ActivationId& activation,
-                                              RuntimeActivationPort& port) const;
-
-    /**
-     * @brief 在执行或协议失败后强制回收 activation / Force cleanup of an activation after execution
-     * or protocol failure.
-     * @param runtime 待标记失败的聚合 / Aggregate to mark failed.
-     * @param activation 待清理 activation / Activation to clean up.
+     * @brief 停止或重试清理当前 activation / Stop or retry cleanup of the current activation.
+     * @param runtime 待停止聚合 / Aggregate to stop.
+     * @param activation 当前 lifecycle owner / Current lifecycle owner.
      * @param port 执行受控外设清理的端口 / Port that performs controlled external cleanup.
-     * @return 外设清理成功或失败原因 / External cleanup success or failure reason.
-     * @note 该用例故意不要求 ready 状态；失败态不能继续接受任务，但仍必须回收真实 Process。
-     *       This use case intentionally does not require ready state: a failed aggregate cannot
-     * accept work but must still reap a real Process.
+     * @return 外部清理与领域转换均完成，或精确失败原因 / Completed external cleanup and domain
+     * transition, or a precise failure reason.
+     * @note 由 Runtime 根据当前状态选择正常退役或失败清理；调用方不能通过读取 enum 手工拼接
+     * 生命周期。/ Runtime chooses normal retirement or failure cleanup from its current state;
+     * callers cannot splice the lifecycle by inspecting an enum.
      */
-    [[nodiscard]] domain::Result<void> abort(domain::Runtime& runtime,
-                                             const domain::ActivationId& activation,
-                                             RuntimeActivationPort& port) const;
+    [[nodiscard]] domain::Result<void> stop(domain::Runtime& runtime,
+                                            const domain::ActivationId& activation,
+                                            RuntimeActivationPort& port) const;
 };
 
 } // namespace wspctl::application

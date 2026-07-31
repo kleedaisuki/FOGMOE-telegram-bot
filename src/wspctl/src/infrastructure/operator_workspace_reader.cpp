@@ -1,6 +1,5 @@
 #include "wspctl/infrastructure/operator_workspace_reader.hpp"
 
-#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <dirent.h>
@@ -276,15 +275,15 @@ OperatorWorkspaceReader::list(const RuntimeQuotaBinding& binding,
         return std::unexpected(
             errno_error(ErrorCode::io_failure, "close operator workspace directory"));
     }
-    std::ranges::sort(entries,
-                      [](const domain::WorkspaceEntry& left, const domain::WorkspaceEntry& right) {
-                          return left.encoded_name() < right.encoded_name();
-                      });
-    return domain::WorkspaceListing{
-        .path = path,
-        .entries = std::move(entries),
-        .truncated = truncated,
-    };
+    /** @brief 从 filesystem 事实构造的规范领域 listing / Canonical domain listing built from
+     * filesystem facts. */
+    const auto listing = domain::WorkspaceListing::create(path, std::move(entries), truncated);
+    if (!listing) {
+        return std::unexpected(
+            make_error(ErrorCode::internal,
+                       "operator workspace reader produced a non-canonical domain listing"));
+    }
+    return *listing;
 }
 
 } // namespace wspctl

@@ -1694,7 +1694,10 @@ Result<TaskCgroupControl> prepare_runtime_cgroup(const SandboxConfig& config,
         // a stale runtime hierarchy: kill the whole runtime root (supervisor and task leaves)
         // and require cgroup.events populated 0 before reusing its persistent workspace key.
         if (const auto killed = kill_runtime_cgroup(config, runtime_key); !killed) {
-            return std::unexpected(killed.error());
+            return std::unexpected(make_error(
+                ErrorCode::invocation_in_doubt,
+                "existing runtime cgroup cleanup could not be proven before activation: " +
+                    killed.error().message));
         }
     }
     if (const auto wspctl = create_cgroup_directory(wspctl_cgroup); !wspctl) {

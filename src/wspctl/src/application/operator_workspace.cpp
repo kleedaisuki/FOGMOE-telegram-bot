@@ -33,10 +33,10 @@ OperatorWorkspaceQueryService::list(const domain::RuntimeId& runtime,
     if (!listing) {
         return std::unexpected(listing.error());
     }
-    if (listing->path != path || listing->entries.size() > domain::kOperatorWorkspaceListingLimit) {
+    if (listing->path() != path) {
         return std::unexpected(make_operator_workspace_query_error(
             OperatorWorkspaceQueryErrorCode::inconsistent,
-            "operator workspace listing violates its path or entry bound invariant"));
+            "operator workspace listing does not match the requested path"));
     }
     return listing;
 }

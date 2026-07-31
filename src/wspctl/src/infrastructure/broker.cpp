@@ -343,34 +343,61 @@ public:
      * @param activation 预期 activation / Expected activation.
      * @param establish 建立 PID1/cgroup/overlay 的效果 / Effect that establishes
      * PID1/cgroup/overlay.
-     * @param retire 终止 PID1/cgroup/overlay 的效果 / Effect that retires PID1/cgroup/overlay.
+     * @param terminate 终止 PID1/cgroup/overlay 的效果 / Effect that terminates
+     * PID1/cgroup/overlay.
      */
     BrokerRuntimeActivationPort(const domain::RuntimeId& runtime,
                                 const domain::ActivationId& activation, Operation establish,
-                                Operation retire)
+                                Operation terminate)
         : runtime_(runtime), activation_(activation), establish_(std::move(establish)),
-          retire_(std::move(retire)) {}
+          terminate_(std::move(terminate)) {}
 
     /**
      * @brief 执行建立效果 / Perform the establish effect.
      * @param runtime application 提供的 runtime / Runtime supplied by application.
      * @param activation application 提供的 activation / Activation supplied by application.
-     * @return 成功或映射后的领域错误 / Success or mapped domain error.
+     * @return 成功或带已证明处置的建立失败 / Success or establishment failure with a proven
+     * disposition.
      */
-    [[nodiscard]] domain::Result<void> establish(const domain::RuntimeId& runtime,
-                                                 const domain::ActivationId& activation) override {
-        return invoke(runtime, activation, establish_, "establish");
+    [[nodiscard]] application::RuntimeEstablishResult
+    establish(const domain::RuntimeId& runtime, const domain::ActivationId& activation) override {
+        if (runtime != runtime_ || activation != activation_) {
+            return std::unexpected(application::RuntimeEstablishFailure::rejected_cleanly(
+                domain::make_error(domain::ErrorCode::activation_mismatch,
+                                   "activation port was invoked for a different runtime or "
+                                   "activation")));
+        }
+        if (!establish_) {
+            return std::unexpected(application::RuntimeEstablishFailure::rejected_cleanly(
+                domain::make_error(domain::ErrorCode::illegal_transition,
+                                   "runtime activation port has no establish operation")));
+        }
+        /** @brief 原生建立操作结果 / Native establishment operation result. */
+        const auto completed = establish_();
+        if (completed) {
+            return {};
+        }
+        native_error_ = completed.error();
+        /** @brief 供 application 分支的归一化失败原因 / Normalized failure cause for application
+         * branching. */
+        domain::Error cause = normalize_native_error(completed.error(), "establish");
+        if (completed.error().code == ErrorCode::invocation_in_doubt) {
+            return std::unexpected(
+                application::RuntimeEstablishFailure::outcome_unknown(std::move(cause)));
+        }
+        return std::unexpected(
+            application::RuntimeEstablishFailure::rejected_cleanly(std::move(cause)));
     }
 
     /**
-     * @brief 执行退役效果 / Perform the retire effect.
+     * @brief 执行终止清理效果 / Perform the termination-cleanup effect.
      * @param runtime application 提供的 runtime / Runtime supplied by application.
      * @param activation application 提供的 activation / Activation supplied by application.
      * @return 成功或映射后的领域错误 / Success or mapped domain error.
      */
-    [[nodiscard]] domain::Result<void> retire(const domain::RuntimeId& runtime,
-                                              const domain::ActivationId& activation) override {
-        return invoke(runtime, activation, retire_, "retire");
+    [[nodiscard]] domain::Result<void> terminate(const domain::RuntimeId& runtime,
+                                                 const domain::ActivationId& activation) override {
+        return invoke(runtime, activation, terminate_, "terminate");
     }
 
     /** @brief 返回保留的 native failure / Return the retained native failure. */
@@ -379,6 +406,22 @@ public:
     }
 
 private:
+    /**
+     * @brief 将 native failure 归一化为领域原因 / Normalize a native failure into a domain cause.
+     * @param error native failure / Native failure.
+     * @param operation 操作诊断名 / Diagnostic operation name.
+     * @return 不泄漏 infrastructure 类型的领域原因 / Domain cause without infrastructure type
+     * leakage.
+     */
+    [[nodiscard]] static domain::Error normalize_native_error(const Error& error,
+                                                              const std::string_view operation) {
+        const domain::ErrorCode category = error.code == ErrorCode::invalid_argument
+                                               ? domain::ErrorCode::invalid_identity
+                                               : domain::ErrorCode::illegal_transition;
+        return domain::make_error(category, "privileged runtime " + std::string(operation) +
+                                                " failed: " + error.message);
+    }
+
     /**
      * @brief 验证所有权后执行一个 host 效果 / Validate ownership and run one host effect.
      * @param runtime application 提供的 runtime / Runtime supplied by application.
@@ -405,12 +448,7 @@ private:
             return {};
         }
         native_error_ = completed.error();
-        const domain::ErrorCode category = completed.error().code == ErrorCode::invalid_argument
-                                               ? domain::ErrorCode::invalid_identity
-                                               : domain::ErrorCode::illegal_transition;
-        return std::unexpected(
-            domain::make_error(category, "privileged runtime " + std::string(name) +
-                                             " failed: " + completed.error().message));
+        return std::unexpected(normalize_native_error(completed.error(), name));
     }
 
     /** @brief 绑定 runtime / Bound runtime. */
@@ -419,8 +457,8 @@ private:
     const domain::ActivationId& activation_;
     /** @brief 实际 establish 操作 / Actual establish operation. */
     Operation establish_;
-    /** @brief 实际 retire 操作 / Actual retire operation. */
-    Operation retire_;
+    /** @brief 实际 termination 操作 / Actual termination operation. */
+    Operation terminate_;
     /** @brief 最近一次 native 失败 / Most recent native failure. */
     std::optional<Error> native_error_;
 };
@@ -2036,9 +2074,6 @@ struct Broker::RuntimeSession final {
     /** @brief 强制 lifecycle 不变量的 domain aggregate / Domain aggregate enforcing lifecycle
      * invariants. */
     domain::Runtime runtime;
-    /** @brief 清理失败后不可复用的 session / Session that cannot be reused after cleanup failure.
-     */
-    bool poisoned{false};
     /** @brief session 所绑定的强类型 activation / Strongly typed activation bound to this session.
      */
     domain::ActivationId activation;
@@ -2415,48 +2450,41 @@ Result<void> Broker::release_launch(const std::uint64_t launch_id) {
     return {};
 }
 
-Result<void> Broker::retire_session(const std::string& runtime_key,
-                                    const std::shared_ptr<RuntimeSession>& session) {
+Result<void> Broker::stop_session(const std::string& runtime_key,
+                                  const std::shared_ptr<RuntimeSession>& session) {
     if (!session) {
         return std::unexpected(
-            make_error(ErrorCode::internal, "cannot retire an empty runtime session"));
+            make_error(ErrorCode::internal, "cannot stop an empty runtime session"));
     }
     const auto cleanup = [this, &runtime_key, &session]() -> Result<void> {
         if (const auto killed = kill_runtime_cgroup(config_.sandbox, runtime_key); !killed) {
-            session->poisoned = true;
             return std::unexpected(killed.error());
         }
         if (const auto exited =
                 wait_launcher_exit(session->launcher_pidfd, std::chrono::seconds(5));
             !exited) {
-            session->poisoned = true;
             return std::unexpected(exited.error());
         }
         if (!session->activation_lease.has_value()) {
-            session->poisoned = true;
             return std::unexpected(make_error(ErrorCode::internal,
                                               "running runtime session lost its activation lease"));
         }
         if (const auto cleaned = cleanup_task_layer(config_.sandbox, quota_,
                                                     *session->activation_lease, session->layer);
             !cleaned) {
-            session->poisoned = true;
             return std::unexpected(cleaned.error());
         }
         return {};
     };
     BrokerRuntimeActivationPort port(session->runtime.id(), session->activation, {}, cleanup);
     application::RuntimeActivationService lifecycle;
-    const domain::Result<void> retired =
-        session->runtime.state() == domain::RuntimeState::ready
-            ? lifecycle.retire(session->runtime, session->activation, port)
-            : lifecycle.abort(session->runtime, session->activation, port);
-    if (!retired) {
-        session->poisoned = true;
+    const domain::Result<void> stopped =
+        lifecycle.stop(session->runtime, session->activation, port);
+    if (!stopped) {
         if (port.native_error().has_value()) {
             return std::unexpected(*port.native_error());
         }
-        return std::unexpected(transport_error(retired.error()));
+        return std::unexpected(transport_error(stopped.error()));
     }
     // Slow operations are complete before taking sessions_mutex. Conditional erasure protects a
     // newly activated session for the same runtime from an old reaper/worker observation.
@@ -2770,6 +2798,10 @@ Broker::acquire_session(const std::string& runtime_key, const std::string& activ
     std::shared_ptr<RuntimeSession> session;
     const auto activate_session = [&]() -> Result<std::shared_ptr<RuntimeSession>> {
         auto created = std::make_shared<RuntimeSession>(*runtime_id, *typed_activation_id);
+        // This operation returns an ordinary native error only after proving that no process or
+        // activation layer remains. Any path that cannot prove rollback is normalized to
+        // invocation_in_doubt below, so BrokerRuntimeActivationPort can quarantine it instead of
+        // guessing that generic termination is safe.
         const auto establish = [this, &runtime_key, &activation_id, &created]() -> Result<void> {
             auto activation_lease = quota_.acquire_activation_lease(runtime_key);
             if (!activation_lease) {
@@ -3007,18 +3039,38 @@ Broker::acquire_session(const std::string& runtime_key, const std::string& activ
                 session->dispatch_references.fetch_add(1U, std::memory_order_acq_rel));
         }
         auto lease = std::make_unique<SessionLease>(session, std::unique_lock(session->mutex));
-        if (lease->session->poisoned) {
+        /** @brief 取得 session mutex 后重新验证的 map identity / Map identity revalidated after
+         * acquiring the session mutex. */
+        bool current_session{false};
+        {
+            // Lock order is session -> map, matching stop_session. A reaper may have removed this
+            // shared_ptr while acquire_session waited for the session mutex.
+            std::lock_guard map_lock(state_->sessions_mutex);
+            const auto current = state_->sessions.find(runtime_key);
+            current_session =
+                current != state_->sessions.end() && current->second == lease->session;
+        }
+        if (!current_session) {
+            lease.reset();
+            session.reset();
+            continue;
+        }
+        if (lease->session->runtime.cleanup_pending()) {
+            return std::unexpected(
+                make_error(ErrorCode::child_failure, "runtime session has failed cleanup pending"));
+        }
+        if (!lease->session->runtime.reusable()) {
             return std::unexpected(make_error(
-                ErrorCode::child_failure, "runtime session is poisoned pending cgroup cleanup"));
+                ErrorCode::internal, "current runtime session is not in reusable ready state"));
         }
         if (lease->session->activation == *typed_activation_id) {
             return lease;
         }
         // A new RuntimeProcess is a new activation. The per-runtime execution lease is held by
-        // the caller, so retire the idle old PID 1 deterministically instead of returning busy.
-        const auto retired = retire_session(runtime_key, lease->session);
-        if (!retired) {
-            return std::unexpected(retired.error());
+        // the caller, so stop the idle old PID 1 deterministically instead of returning busy.
+        const auto stopped = stop_session(runtime_key, lease->session);
+        if (!stopped) {
+            return std::unexpected(stopped.error());
         }
         lease.reset();
         session.reset();
@@ -3032,8 +3084,8 @@ Result<ExecutionResult> Broker::dispatch(const ExecuteRequest& request) {
     }
     RuntimeSession& session = *(*lease)->session;
     const auto fail_session = [&](const Error& error) -> Result<ExecutionResult> {
-        if (const auto retired = retire_session(request.runtime_key, (*lease)->session); !retired) {
-            return std::unexpected(retired.error());
+        if (const auto stopped = stop_session(request.runtime_key, (*lease)->session); !stopped) {
+            return std::unexpected(stopped.error());
         }
         return std::unexpected(error);
     };
@@ -3162,17 +3214,15 @@ Result<RuntimeStatusResult> Broker::read_runtime_status(const RuntimeStatusReque
             // "alive" means healthy and reusable, not merely that an untrusted PID might still
             // exist during a failed cleanup. `cleanup_pending` is the explicit signal for that
             // latter case.
-            const bool supervisor_alive = !session->poisoned &&
-                                          snapshot.state() != domain::RuntimeState::failed &&
+            const bool supervisor_alive = snapshot.state() != domain::RuntimeState::failed &&
                                           !launcher_exited(session->launcher_pidfd);
             return application::RuntimeStatus::create(
                 observed_query, snapshot, supervisor_alive, idle_for, config_.idle_ttl,
                 static_cast<std::uint64_t>(
                     session->dispatch_references.load(std::memory_order_acquire)),
-                session->poisoned || quota_cleanup_pending);
+                session->runtime.cleanup_pending() || quota_cleanup_pending);
         });
-    application::RuntimeStatusService service;
-    const auto observed = service.inspect(query, port);
+    const auto observed = port.observe(query);
     if (!observed) {
         return std::unexpected(transport_error(observed.error()));
     }
@@ -3218,9 +3268,7 @@ Broker::status(const domain::RuntimeId& runtime) const {
     }
     if (session) {
         std::lock_guard session_lock(session->mutex);
-        activity = session->poisoned
-                       ? domain::WorkspaceActivity::failed
-                       : workspace_activity_from_runtime_state(session->runtime.state());
+        activity = workspace_activity_from_runtime_state(session->runtime.state());
     }
 
     const auto binding = quota_.find_ready_runtime(runtime.value());
@@ -3327,8 +3375,8 @@ Result<void> Broker::dispatch_payload_stream(const int client_fd,
     }
     RuntimeSession& session = *(*lease)->session;
     const auto fail_session = [&](const Error& error) -> Result<void> {
-        if (const auto retired = retire_session(request.runtime_key, (*lease)->session); !retired) {
-            return std::unexpected(retired.error());
+        if (const auto stopped = stop_session(request.runtime_key, (*lease)->session); !stopped) {
+            return std::unexpected(stopped.error());
         }
         return std::unexpected(error);
     };
@@ -3958,9 +4006,22 @@ void Broker::reap_expired_sessions() noexcept {
         if (session->dispatch_references.load(std::memory_order_acquire) != 0U) {
             continue;
         }
+        /** @brief 取得 session mutex 后重新验证的 map identity / Map identity revalidated after
+         * acquiring the session mutex. */
+        bool current_session{false};
+        {
+            // Lock order is session -> map. Another reaper may have removed this candidate while
+            // this pass waited for the session mutex.
+            std::lock_guard map_lock(state_->sessions_mutex);
+            const auto current = state_->sessions.find(runtime_key);
+            current_session = current != state_->sessions.end() && current->second == session;
+        }
+        if (!current_session) {
+            continue;
+        }
         const bool dead = launcher_exited(session->launcher_pidfd);
         const bool expired = now - session->last_used >= config_.idle_ttl;
-        if (!session->poisoned && !dead && !expired) {
+        if (!session->runtime.cleanup_pending() && !dead && !expired) {
             continue;
         }
         if (!dead) {
@@ -3971,10 +4032,9 @@ void Broker::reap_expired_sessions() noexcept {
                 static_cast<void>(send_frame(session->control_fd, *shutdown));
             }
         }
-        if (const auto retired = retire_session(runtime_key, session); !retired) {
+        if (const auto stopped = stop_session(runtime_key, session); !stopped) {
             // Never drop tracking when cgroup.kill/cgroup.events/pidfd exit failed. A later
-            // reaper pass retries the authoritative cleanup, while dispatch rejects poisoned.
-            session->poisoned = true;
+            // reaper pass retries the authoritative cleanup, while Runtime rejects new work.
             session->last_used = now;
         }
     }

@@ -195,6 +195,15 @@ const std::optional<ActivationId>& Runtime::active_activation() const noexcept {
     return active_activation_;
 }
 
+bool Runtime::cleanup_pending() const noexcept { return failure_cleanup_activation_.has_value(); }
+
+bool Runtime::reusable() const noexcept {
+    return state_ == RuntimeState::ready && active_activation_.has_value() &&
+           !failure_cleanup_activation_.has_value() && !quarantined_;
+}
+
+bool Runtime::quarantined() const noexcept { return quarantined_; }
+
 RuntimeSnapshot Runtime::snapshot() const {
     // Runtime owns the state machine, so its state/activation pair already satisfies
     // RuntimeSnapshot::create's invariant. Keeping this construction here also prevents a
@@ -203,7 +212,8 @@ RuntimeSnapshot Runtime::snapshot() const {
 }
 
 Result<void> Runtime::begin_activation(const ActivationId& activation) {
-    if (state_ != RuntimeState::dormant || active_activation_.has_value()) {
+    if (state_ != RuntimeState::dormant || active_activation_.has_value() ||
+        failure_cleanup_activation_.has_value() || quarantined_) {
         return std::unexpected(illegal_transition("begin activation"));
     }
     active_activation_ = activation;
@@ -217,6 +227,29 @@ Result<void> Runtime::mark_ready(const ActivationId& activation) {
         return std::unexpected(valid.error());
     }
     state_ = RuntimeState::ready;
+    return {};
+}
+
+Result<void> Runtime::reject_activation(const ActivationId& activation) {
+    if (const auto valid = require_active(RuntimeState::activating, activation,
+                                          "reject activation after establish failure");
+        !valid) {
+        return std::unexpected(valid.error());
+    }
+    active_activation_.reset();
+    state_ = RuntimeState::failed;
+    return {};
+}
+
+Result<void> Runtime::quarantine_activation(const ActivationId& activation) {
+    if (const auto valid = require_active(RuntimeState::activating, activation,
+                                          "quarantine unknown activation outcome");
+        !valid) {
+        return std::unexpected(valid.error());
+    }
+    active_activation_.reset();
+    quarantined_ = true;
+    state_ = RuntimeState::failed;
     return {};
 }
 
@@ -238,28 +271,60 @@ Result<void> Runtime::finish_execution(const ActivationId& activation) {
     return {};
 }
 
-Result<void> Runtime::begin_retirement(const ActivationId& activation) {
-    if (const auto valid = require_active(RuntimeState::ready, activation, "begin retirement");
-        !valid) {
-        return std::unexpected(valid.error());
+Result<void> Runtime::begin_stop(const ActivationId& activation) {
+    switch (state_) {
+    case RuntimeState::ready:
+        if (const auto valid = require_active(RuntimeState::ready, activation, "begin stop");
+            !valid) {
+            return std::unexpected(valid.error());
+        }
+        state_ = RuntimeState::retiring;
+        return {};
+    case RuntimeState::retiring:
+        return require_active(RuntimeState::retiring, activation, "retry retiring stop");
+    case RuntimeState::activating:
+        return begin_failure_cleanup(RuntimeState::activating, activation,
+                                     "stop activating runtime");
+    case RuntimeState::executing:
+        return begin_failure_cleanup(RuntimeState::executing, activation, "stop executing runtime");
+    case RuntimeState::failed:
+        return require_cleanup_owner(activation, "retry failed cleanup");
+    case RuntimeState::dormant:
+        return std::unexpected(illegal_transition("stop dormant runtime"));
     }
-    state_ = RuntimeState::retiring;
-    return {};
+    return std::unexpected(illegal_transition("stop runtime with unknown state"));
 }
 
-Result<void> Runtime::finish_retirement(const ActivationId& activation) {
-    if (const auto valid = require_active(RuntimeState::retiring, activation, "finish retirement");
-        !valid) {
-        return std::unexpected(valid.error());
+Result<void> Runtime::record_stop_failure(const ActivationId& activation) {
+    if (state_ == RuntimeState::retiring) {
+        return begin_failure_cleanup(RuntimeState::retiring, activation,
+                                     "record retirement cleanup failure");
     }
-    active_activation_.reset();
-    state_ = RuntimeState::dormant;
-    return {};
+    if (state_ == RuntimeState::failed) {
+        return require_cleanup_owner(activation, "record failed cleanup retry failure");
+    }
+    return std::unexpected(illegal_transition("record stop failure"));
 }
 
-void Runtime::fail() noexcept {
-    active_activation_.reset();
-    state_ = RuntimeState::failed;
+Result<void> Runtime::finish_stop(const ActivationId& activation) {
+    if (state_ == RuntimeState::retiring) {
+        if (const auto valid = require_active(RuntimeState::retiring, activation, "finish stop");
+            !valid) {
+            return std::unexpected(valid.error());
+        }
+        active_activation_.reset();
+        quarantined_ = false;
+        state_ = RuntimeState::dormant;
+        return {};
+    }
+    if (state_ == RuntimeState::failed) {
+        if (const auto valid = require_cleanup_owner(activation, "finish failed cleanup"); !valid) {
+            return std::unexpected(valid.error());
+        }
+        failure_cleanup_activation_.reset();
+        return {};
+    }
+    return std::unexpected(illegal_transition("finish stop"));
 }
 
 Result<void> Runtime::require_active(const RuntimeState expected, const ActivationId& activation,
@@ -272,6 +337,32 @@ Result<void> Runtime::require_active(const RuntimeState expected, const Activati
             make_error(ErrorCode::activation_mismatch,
                        "activation does not own runtime for " + std::string(operation)));
     }
+    return {};
+}
+
+Result<void> Runtime::require_cleanup_owner(const ActivationId& activation,
+                                            const std::string_view operation) const {
+    if (state_ != RuntimeState::failed || !failure_cleanup_activation_.has_value()) {
+        return std::unexpected(illegal_transition(operation));
+    }
+    if (*failure_cleanup_activation_ != activation) {
+        return std::unexpected(
+            make_error(ErrorCode::activation_mismatch,
+                       "activation does not own runtime cleanup for " + std::string(operation)));
+    }
+    return {};
+}
+
+Result<void> Runtime::begin_failure_cleanup(const RuntimeState expected,
+                                            const ActivationId& activation,
+                                            const std::string_view operation) {
+    if (const auto valid = require_active(expected, activation, operation); !valid) {
+        return std::unexpected(valid.error());
+    }
+    failure_cleanup_activation_ = activation;
+    active_activation_.reset();
+    quarantined_ = false;
+    state_ = RuntimeState::failed;
     return {};
 }
 

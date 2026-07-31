@@ -274,6 +274,45 @@ WorkspaceEntryKind WorkspaceEntry::kind() const noexcept { return kind_; }
 
 std::uint64_t WorkspaceEntry::size_bytes() const noexcept { return size_bytes_; }
 
+WorkspaceListing::WorkspaceListing(OperatorWorkspacePath path, std::vector<WorkspaceEntry> entries,
+                                   const bool truncated) noexcept
+    : path_(std::move(path)), entries_(std::move(entries)), truncated_(truncated) {}
+
+Result<WorkspaceListing> WorkspaceListing::create(OperatorWorkspacePath path,
+                                                  std::vector<WorkspaceEntry> entries,
+                                                  const bool truncated) {
+    if (entries.size() > kOperatorWorkspaceListingLimit) {
+        return std::unexpected(make_error(ErrorCode::invalid_budget,
+                                          "operator workspace listing exceeds the entry limit"));
+    }
+    if (truncated && entries.size() != kOperatorWorkspaceListingLimit) {
+        return std::unexpected(
+            make_error(ErrorCode::invalid_budget,
+                       "truncated operator workspace listing must saturate the entry limit"));
+    }
+    std::ranges::sort(entries,
+                      [](const WorkspaceEntry& left, const WorkspaceEntry& right) noexcept {
+                          return left.encoded_name() < right.encoded_name();
+                      });
+    /** @brief 首个重复 encoded name 的位置 / Position of the first duplicate encoded name. */
+    const auto duplicate = std::ranges::adjacent_find(
+        entries, [](const WorkspaceEntry& left, const WorkspaceEntry& right) noexcept {
+            return left.encoded_name() == right.encoded_name();
+        });
+    if (duplicate != entries.end()) {
+        return std::unexpected(
+            make_error(ErrorCode::invalid_identity,
+                       "operator workspace listing contains duplicate encoded entry names"));
+    }
+    return WorkspaceListing(std::move(path), std::move(entries), truncated);
+}
+
+const OperatorWorkspacePath& WorkspaceListing::path() const noexcept { return path_; }
+
+const std::vector<WorkspaceEntry>& WorkspaceListing::entries() const noexcept { return entries_; }
+
+bool WorkspaceListing::truncated() const noexcept { return truncated_; }
+
 Result<std::string> encode_workspace_entry_name(const std::string_view raw_name) {
     if (raw_name.empty() || raw_name.size() > kMaximumFilenameBytes || raw_name == "." ||
         raw_name == ".." || raw_name.find('/') != std::string_view::npos ||

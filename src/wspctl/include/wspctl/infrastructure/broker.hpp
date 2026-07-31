@@ -203,11 +203,11 @@ private:
      * @param activation_id 已校验的 RuntimeProcess activation 标识 / Validated RuntimeProcess
      * activation identifier.
      * @return 持有 session mutex 的租约或错误 / A mutex-owning lease or an error.
-     * @note 租约在 map lookup 与 mutex 获取之间持有 reaper reference；其生命周期覆盖整次流式
-     *       文件传输，避免断连时 PID 1 的临时文件与 session 生命周期脱节。/ The lease holds a
-     *       reaper reference between map lookup and mutex acquisition and spans the whole streamed
-     *       file transfer, preventing PID1 temporary-file cleanup from drifting from session
-     * lifetime.
+     * @note 租约在 map lookup 与 mutex 获取之间持有 reaper reference；取得 session mutex 后按
+     *       session→map 锁序重新验证 map identity，且只有 ready/reusable aggregate 才能返回。
+     *       The lease holds a reaper reference between map lookup and mutex acquisition; after
+     *       acquiring the session mutex it revalidates map identity in session→map lock order and
+     *       returns only a ready/reusable aggregate.
      */
     [[nodiscard]] Result<std::unique_ptr<SessionLease>>
     acquire_session(const std::string& runtime_key, const std::string& activation_id);
@@ -276,15 +276,15 @@ private:
     [[nodiscard]] Result<void> release_launch(std::uint64_t launch_id);
 
     /**
-     * @brief 终止一个 session 并在 launcher 已退出后条件移除 / Retire a session and conditionally
+     * @brief 终止一个 session 并在 launcher 已退出后条件移除 / Stop a session and conditionally
      * erase it after launcher exit.
      * @param runtime_key runtime 标识 / Runtime key.
      * @param session 已由调用方持有 mutex 的 session / Session whose mutex is held by the caller.
-     * @return cgroup 与 launcher 均确认终止，或保留 poisoned tracking 的错误 / Confirmed cgroup and
-     * launcher termination, or an error retaining poisoned tracking.
+     * @return cgroup 与 launcher 均确认终止，或保留领域清理 ownership 的错误 / Confirmed cgroup
+     * and launcher termination, or an error retaining domain cleanup ownership.
      */
-    [[nodiscard]] Result<void> retire_session(const std::string& runtime_key,
-                                              const std::shared_ptr<RuntimeSession>& session);
+    [[nodiscard]] Result<void> stop_session(const std::string& runtime_key,
+                                            const std::shared_ptr<RuntimeSession>& session);
 
     /** @brief 停止并回收 fork-server / Stop and reap the fork server. */
     void stop_launcher_server() noexcept;

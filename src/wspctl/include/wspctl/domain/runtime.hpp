@@ -305,6 +305,15 @@ public:
     /** @brief 取得当前 activation；dormant/failed 时为空 / Get the active activation; empty while
      * dormant/failed. */
     [[nodiscard]] const std::optional<ActivationId>& active_activation() const noexcept;
+    /** @brief 是否仍有失败 activation 的外部清理待完成 / Whether cleanup remains pending for a
+     * failed activation. */
+    [[nodiscard]] bool cleanup_pending() const noexcept;
+    /** @brief 当前 runtime 是否可安全复用执行任务 / Whether the runtime is safely reusable for
+     * task execution. */
+    [[nodiscard]] bool reusable() const noexcept;
+    /** @brief activation 建立结果是否未知并等待外部恢复 / Whether activation establishment is
+     * quarantined with an unknown outcome awaiting external recovery. */
+    [[nodiscard]] bool quarantined() const noexcept;
     /** @brief 取得满足聚合不变量的无载荷观察快照 / Get a payload-free snapshot satisfying aggregate
      * invariants. */
     [[nodiscard]] RuntimeSnapshot snapshot() const;
@@ -323,6 +332,26 @@ public:
      */
     [[nodiscard]] Result<void> mark_ready(const ActivationId& activation);
     /**
+     * @brief 拒绝未建立成功的 activation / Reject an activation that failed to establish.
+     * @param activation 当前 activating owner / Current activating owner.
+     * @return 成功或所有权/状态错误 / Success or ownership/state error.
+     * @note 仅适用于外部 establish 失败且没有可复用 RuntimeProcess 的场景；它不会创建清理
+     * ownership。/ This is only for a failed external establish with no reusable RuntimeProcess; it
+     * does not create cleanup ownership.
+     */
+    [[nodiscard]] Result<void> reject_activation(const ActivationId& activation);
+    /**
+     * @brief 隔离建立结果未知的 activation / Quarantine an activation whose establishment outcome
+     * is unknown.
+     * @param activation 当前 activating owner / Current activating owner.
+     * @return 成功或所有权/状态错误 / Success or ownership/state error.
+     * @note 该转换释放 active owner，但记录不可通过通用 terminate 猜测恢复的 quarantine 事实；
+     * 外层 recovery ledger 必须继续追踪它。/ This transition releases the active owner while
+     * recording a quarantine fact that generic terminate must not guess away; the outer recovery
+     * ledger must continue tracking it.
+     */
+    [[nodiscard]] Result<void> quarantine_activation(const ActivationId& activation);
+    /**
      * @brief 标记任务开始 / Mark task execution started.
      * @param activation 当前 activation / Current activation.
      * @return 成功或所有权/状态错误 / Success or ownership/state error.
@@ -335,20 +364,32 @@ public:
      */
     [[nodiscard]] Result<void> finish_execution(const ActivationId& activation);
     /**
-     * @brief 开始退役空闲 activation / Begin retiring an idle activation.
-     * @param activation 当前 activation / Current activation.
+     * @brief 开始或重试停止当前 activation / Begin or retry stopping the current activation.
+     * @param activation 当前 lifecycle owner / Current lifecycle owner.
      * @return 成功或所有权/状态错误 / Success or ownership/state error.
+     * @note ready activation 进入 retiring；activating/executing activation 进入 failed 并把 owner
+     * 转为私有清理 ownership；failed cleanup 可由同一 owner 重试。/ A ready activation enters
+     * retiring; an activating/executing activation enters failed and transfers its owner into
+     * private cleanup ownership; failed cleanup may be retried by that same owner.
      */
-    [[nodiscard]] Result<void> begin_retirement(const ActivationId& activation);
+    [[nodiscard]] Result<void> begin_stop(const ActivationId& activation);
     /**
-     * @brief 确认退役完成并回到 dormant / Confirm retirement and return to dormant.
-     * @param activation 当前 activation / Current activation.
+     * @brief 记录外部停止效果失败 / Record failure of the external stop effect.
+     * @param activation 当前停止 owner / Current stop owner.
      * @return 成功或所有权/状态错误 / Success or ownership/state error.
+     * @note 失败后聚合保留私有清理 ownership，阻止其他 activation 擦除或接管它。/ After failure,
+     * the aggregate retains private cleanup ownership so no other activation can erase or take it.
      */
-    [[nodiscard]] Result<void> finish_retirement(const ActivationId& activation);
-    /** @brief 标记本进程失败并清除 activation / Mark this process failed and clear its activation.
+    [[nodiscard]] Result<void> record_stop_failure(const ActivationId& activation);
+    /**
+     * @brief 确认停止效果完成 / Confirm completion of the stop effect.
+     * @param activation 当前停止 owner / Current stop owner.
+     * @return 成功或所有权/状态错误 / Success or ownership/state error.
+     * @note 正常 retiring 完成后回到 dormant；失败清理完成后保持 failed，但释放清理 ownership。
+     * / A normal retirement returns to dormant; completed failure cleanup remains failed while
+     * releasing cleanup ownership.
      */
-    void fail() noexcept;
+    [[nodiscard]] Result<void> finish_stop(const ActivationId& activation);
 
 private:
     /**
@@ -360,6 +401,25 @@ private:
      */
     [[nodiscard]] Result<void> require_active(RuntimeState expected, const ActivationId& activation,
                                               std::string_view operation) const;
+    /**
+     * @brief 验证失败清理 ownership / Validate failed-cleanup ownership.
+     * @param activation 发起者 activation / Caller activation.
+     * @param operation 操作诊断名 / Diagnostic operation name.
+     * @return 成功或精确不变量错误 / Success or precise invariant error.
+     */
+    [[nodiscard]] Result<void> require_cleanup_owner(const ActivationId& activation,
+                                                     std::string_view operation) const;
+    /**
+     * @brief 把 active owner 转为失败清理 owner / Transfer the active owner into failed-cleanup
+     * ownership.
+     * @param expected 预期当前状态 / Expected current state.
+     * @param activation 发起者 activation / Caller activation.
+     * @param operation 操作诊断名 / Diagnostic operation name.
+     * @return 成功或精确不变量错误 / Success or precise invariant error.
+     */
+    [[nodiscard]] Result<void> begin_failure_cleanup(RuntimeState expected,
+                                                     const ActivationId& activation,
+                                                     std::string_view operation);
 
     /** @brief 长期 runtime 标识 / Long-lived runtime identifier. */
     RuntimeId id_;
@@ -368,6 +428,12 @@ private:
     /** @brief 对当前 RuntimeProcess 的唯一所有权 / Exclusive ownership of the current
      * RuntimeProcess. */
     std::optional<ActivationId> active_activation_;
+    /** @brief failed 状态下仍待完成的外部清理 owner / Owner of external cleanup still pending in
+     * failed state. */
+    std::optional<ActivationId> failure_cleanup_activation_;
+    /** @brief activation 建立结果未知且只能由外部 recovery ledger 处理 / Activation establishment
+     * has an unknown outcome that only the outer recovery ledger may resolve. */
+    bool quarantined_{false};
 };
 
 } // namespace wspctl::domain

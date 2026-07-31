@@ -384,15 +384,11 @@ Result<StatusResponse> decode_status_response(const std::span<const std::byte> p
 }
 
 Result<std::vector<std::byte>> encode_list_response(const ListResponse& response) {
-    if (response.listing.entries.size() > domain::kOperatorWorkspaceListingLimit) {
-        return std::unexpected(
-            make_error(ErrorCode::invalid_argument, "operator listing exceeds entry cap"));
-    }
     Writer writer;
-    writer.string(response.listing.path.value());
-    writer.u8(response.listing.truncated ? 1U : 0U);
-    writer.u32(static_cast<std::uint32_t>(response.listing.entries.size()));
-    for (const domain::WorkspaceEntry& entry : response.listing.entries) {
+    writer.string(response.listing.path().value());
+    writer.u8(response.listing.truncated() ? 1U : 0U);
+    writer.u32(static_cast<std::uint32_t>(response.listing.entries().size()));
+    for (const domain::WorkspaceEntry& entry : response.listing.entries()) {
         writer.string(entry.encoded_name());
         writer.u8(static_cast<std::uint8_t>(entry.kind()));
         writer.u64(entry.size_bytes());
@@ -444,11 +440,16 @@ Result<ListResponse> decode_list_response(const std::span<const std::byte> paylo
         return std::unexpected(
             make_error(ErrorCode::malformed_frame, "operator list response has trailing bytes"));
     }
-    return ListResponse{.listing = domain::WorkspaceListing{
-                            .path = *path,
-                            .entries = std::move(entries),
-                            .truncated = *truncated == 1U,
-                        }};
+    /** @brief 由 wire 数据恢复并验证的领域 listing / Domain listing restored and validated from
+     * wire data. */
+    const auto listing =
+        domain::WorkspaceListing::create(*path, std::move(entries), *truncated == 1U);
+    if (!listing) {
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame,
+                       "operator list response violates the domain listing contract"));
+    }
+    return ListResponse{.listing = *listing};
 }
 
 Result<std::vector<std::byte>> encode_error_response(const ErrorResponse& response) {

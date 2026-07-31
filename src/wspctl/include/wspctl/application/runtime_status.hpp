@@ -139,24 +139,4 @@ public:
     observe(const RuntimeStatusQuery& query) const = 0;
 };
 
-/**
- * @brief RuntimeProcess 状态查询用例 / RuntimeProcess status-query use case.
- *
- * 保留一个显式 CQRS read boundary：调用方只能得到 allowlisted snapshot，不能把 status 查询意外
- * 变成 activation 或任意 host 检查入口。/ This preserves an explicit CQRS read boundary: callers
- * receive only an allowlisted snapshot and cannot accidentally turn a status query into activation
- * or an arbitrary host-inspection entry point.
- */
-class RuntimeStatusService final {
-public:
-    /**
-     * @brief 读取 runtime 状态 / Read runtime status.
-     * @param query 已验证身份的只读查询 / Read-only query with validated identities.
-     * @param port read-model 实现 / Read-model implementation.
-     * @return allowlisted 运行态或错误 / Allowlisted operating status or error.
-     */
-    [[nodiscard]] domain::Result<RuntimeStatus> inspect(const RuntimeStatusQuery& query,
-                                                        const RuntimeStatusPort& port) const;
-};
-
 } // namespace wspctl::application
