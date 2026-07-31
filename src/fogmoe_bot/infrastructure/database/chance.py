@@ -44,23 +44,19 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from fogmoe_bot.application.chance.models import (
+from fogmoe_bot.application.chance.commands import (
+    BindAndSettleChanceRound,
     CommitChanceRound,
-    PreparedChanceRound,
-    PrivateCommittedChanceRound,
+    CommitDurableChanceRound,
+    LookupChanceRound,
 )
 from fogmoe_bot.application.chance.ports import (
     ChanceRoundOperations,
     ChanceRoundPreparer,
 )
-from fogmoe_bot.application.chance.workflow_models import (
-    BindAndSettleChanceRound,
-    ChanceRoundStatus,
-    ChanceRoundView,
+from fogmoe_bot.application.chance.results import (
     ChanceWorkflowCode,
     ChanceWorkflowResult,
-    CommitDurableChanceRound,
-    LookupChanceRound,
 )
 from fogmoe_bot.domain.banking.ledger import LedgerAccount, LedgerReason
 from fogmoe_bot.domain.banking.money import SystemAccountKind, TokenAmount, TokenBucket
@@ -73,8 +69,12 @@ from fogmoe_bot.domain.chance.fairness import (
 )
 from fogmoe_bot.domain.chance.money import FreeTokenPayout, FreeTokenStake
 from fogmoe_bot.domain.chance.rounds import (
+    ChanceRoundStatus,
+    ChanceRoundView,
     ChanceSettlement,
     CommittedChanceRound,
+    PreparedChanceRound,
+    PrivateCommittedChanceRound,
 )
 from fogmoe_bot.domain.chance.rules import ChanceOutcome, ChanceRule, ChanceRuleset
 from fogmoe_bot.domain.chance.scope import (
@@ -230,7 +230,7 @@ class PostgresChanceRoundOperations(ChanceRoundOperations):
                 command.client_seed,
             ):
                 return ChanceWorkflowResult(ChanceWorkflowCode.CONFLICT)
-            settlement = prepared.settlement()
+            settlement = prepared.settle()
 
             player_wallet = LedgerAccount.user(committed.player_id, TokenBucket.FREE)
             activity_pot = LedgerAccount.system(SystemAccountKind.ACTIVITY_POT)

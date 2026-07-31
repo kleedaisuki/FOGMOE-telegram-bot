@@ -54,6 +54,7 @@ from fogmoe_bot.domain.assistant.messages import (
     text_message,
 )
 from fogmoe_bot.domain.assistant.request_metadata import RequestMeta
+from fogmoe_bot.domain.assistant.streaming import AssistantStreamState
 from fogmoe_bot.domain.context import (
     ContextState,
     ConversationScope,
@@ -108,10 +109,9 @@ from .inference_command import (
 )
 from .reply_filter import normalize_ai_reply_text
 from .streaming import (
-    AssistantStreamAddress,
     AssistantStreamProjection,
     AssistantStreamSession,
-    AssistantStreamState,
+    AssistantStreamTarget,
 )
 from .tool_runtime import ToolExecutionContext
 from .workspace_attachment_preprocessor import (
@@ -308,15 +308,16 @@ class DurableAssistantInferenceAdapter:
 
         _validate_execution_deadline(execution_deadline_monotonic)
         command = self._parse_request(request)
-        if generation_fence is not None and generation_fence.turn_id != command.typed_turn_id:
+        if (
+            generation_fence is not None
+            and generation_fence.turn_id != command.typed_turn_id
+        ):
             raise PermanentInferenceError(
                 "Inference generation fence belongs to another Turn",
                 category=InferenceErrorCategory.INTERNAL,
             )
         input_revision = (
-            0
-            if generation_fence is None
-            else int(generation_fence.input_revision)
+            0 if generation_fence is None else int(generation_fence.input_revision)
         )
         base_context = self._base_context(command)
         try:
@@ -465,17 +466,10 @@ class DurableAssistantInferenceAdapter:
             return None
         generation = 1 if generation_fence is None else generation_fence.attempt
         revision = (
-            0
-            if generation_fence is None
-            else int(generation_fence.input_revision)
+            0 if generation_fence is None else int(generation_fence.input_revision)
         )
         state = AssistantStreamState.begin(
             turn_id=command.typed_turn_id,
-            address=AssistantStreamAddress(
-                chat_id=command.chat_id,
-                is_group=command.scope.is_group,
-                message_thread_id=command.message_thread_id,
-            ),
             generation=generation,
             revision=revision,
             revised=(
@@ -484,7 +478,15 @@ class DurableAssistantInferenceAdapter:
             ),
             emitted_at=self._clock.now(),
         )
-        session = AssistantStreamSession(state=state, projection=projection)
+        session = AssistantStreamSession(
+            target=AssistantStreamTarget(
+                chat_id=command.chat_id,
+                is_group=command.scope.is_group,
+                message_thread_id=command.message_thread_id,
+            ),
+            state=state,
+            projection=projection,
+        )
         try:
             await session.start()
         except asyncio.CancelledError:

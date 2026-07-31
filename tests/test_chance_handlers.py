@@ -7,23 +7,28 @@ from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
-from fogmoe_bot.application.chance.models import PrivateCommittedChanceRound
-from fogmoe_bot.application.chance.service import ChanceService, ServerSeedSource
-from fogmoe_bot.application.chance.workflow import ChanceWorkflow
-from fogmoe_bot.application.chance.workflow_models import (
+from fogmoe_bot.application.chance.commands import (
     BindAndSettleChanceRound,
-    ChanceRoundStatus,
-    ChanceRoundView,
-    ChanceWorkflowCode,
-    ChanceWorkflowResult,
     CommitDurableChanceRound,
     LookupChanceRound,
 )
+from fogmoe_bot.application.chance.commitment import ChanceCommitmentService
+from fogmoe_bot.application.chance.ports import ServerSeedSource
+from fogmoe_bot.application.chance.results import (
+    ChanceWorkflowCode,
+    ChanceWorkflowResult,
+)
+from fogmoe_bot.application.chance.workflow import ChanceWorkflow
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
 from fogmoe_bot.domain.chance.fairness import ServerSeed
 from fogmoe_bot.domain.chance.money import FreeTokenStake
+from fogmoe_bot.domain.chance.rounds import (
+    ChanceRoundStatus,
+    ChanceRoundView,
+    PrivateCommittedChanceRound,
+)
 from fogmoe_bot.domain.chance.scope import GroupRoundScope, PersonalRoundScope
 from fogmoe_bot.domain.conversation.identity import ConversationId, UpdateId
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
@@ -54,7 +59,7 @@ class _Workflow:
     """@brief 记录 Telegram 适配器命令并生成有效视图 / Record Telegram-adapter commands and generate valid views."""
 
     def __init__(self) -> None:
-        """@brief 初始化记录器与纯数学服务 / Initialize recorder and pure mathematical service."""
+        """@brief 初始化记录器与承诺编排 / Initialize recorder and commitment orchestration."""
 
         self.commit_commands: list[CommitDurableChanceRound] = []
         """@brief 收到的承诺命令 / Received commitment commands."""
@@ -66,7 +71,9 @@ class _Workflow:
         """@brief 最近私有承诺态 / Most recent private committed state."""
         self.next_code: ChanceWorkflowCode | None = None
         """@brief 可选的下一次工作流错误 / Optional next workflow error."""
-        self._chance = ChanceService(cast(ServerSeedSource, _FixedSeeds()))
+        self._commitments = ChanceCommitmentService(
+            cast(ServerSeedSource, _FixedSeeds())
+        )
 
     async def commit(
         self,
@@ -83,7 +90,7 @@ class _Workflow:
             code = self.next_code
             self.next_code = None
             return ChanceWorkflowResult(code)
-        self.private_round = self._chance.commit(command.round)
+        self.private_round = self._commitments.commit(command.round)
         return ChanceWorkflowResult(
             ChanceWorkflowCode.SUCCESS,
             ChanceRoundView(
@@ -109,10 +116,8 @@ class _Workflow:
             return ChanceWorkflowResult(code)
         if self.private_round is None:
             return ChanceWorkflowResult(ChanceWorkflowCode.NOT_FOUND)
-        prepared = self._chance.bind_client_seed(
-            self.private_round, command.client_seed
-        )
-        settlement = prepared.settlement()
+        prepared = self.private_round.bind_client_seed(command.client_seed)
+        settlement = prepared.settle()
         return ChanceWorkflowResult(
             ChanceWorkflowCode.SUCCESS,
             ChanceRoundView(

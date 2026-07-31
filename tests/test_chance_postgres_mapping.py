@@ -8,19 +8,21 @@ from uuid import UUID
 
 import pytest
 
-from fogmoe_bot.application.chance.models import CommitChanceRound
-from fogmoe_bot.application.chance.service import ChanceService, ServerSeedSource
-from fogmoe_bot.application.chance.workflow_models import (
+from fogmoe_bot.application.chance.commands import (
     BindAndSettleChanceRound,
-    ChanceRoundStatus,
-    ChanceRoundView,
+    CommitChanceRound,
+    CommitDurableChanceRound,
+)
+from fogmoe_bot.application.chance.commitment import ChanceCommitmentService
+from fogmoe_bot.application.chance.ports import ServerSeedSource
+from fogmoe_bot.application.chance.results import (
     ChanceWorkflowCode,
     ChanceWorkflowResult,
-    CommitDurableChanceRound,
 )
 from fogmoe_bot.domain.chance.examples import sicbo_like_ruleset
 from fogmoe_bot.domain.chance.fairness import ClientSeed, ServerSeed
 from fogmoe_bot.domain.chance.money import FreeTokenStake
+from fogmoe_bot.domain.chance.rounds import ChanceRoundStatus, ChanceRoundView
 from fogmoe_bot.domain.chance.scope import GroupRoundScope
 from fogmoe_bot.infrastructure.database.chance import (
     _activity_pot_can_cover_payout,
@@ -46,10 +48,10 @@ class _FixedSeeds:
         return ServerSeed(b"postgres-chance-mapping-seed-0001")
 
 
-def _private_round() -> tuple[ChanceService, CommitChanceRound]:
-    """@brief 构造固定的机会活动服务和开轮命令 / Build a fixed chance service and commit command.
+def _private_round() -> tuple[ChanceCommitmentService, CommitChanceRound]:
+    """@brief 构造固定承诺编排和开轮命令 / Build fixed commitment orchestration and a commit command.
 
-    @return 服务与有效开轮命令 / Service and valid commit command.
+    @return 承诺编排与有效开轮命令 / Commitment orchestration and valid commit command.
     """
 
     command = CommitChanceRound(
@@ -61,7 +63,7 @@ def _private_round() -> tuple[ChanceService, CommitChanceRound]:
         stake=FreeTokenStake(100),
         nonce=17,
     )
-    return ChanceService(cast(ServerSeedSource, _FixedSeeds())), command
+    return ChanceCommitmentService(cast(ServerSeedSource, _FixedSeeds())), command
 
 
 def test_receipt_mapping_replays_complete_committed_and_settled_views() -> None:
@@ -69,8 +71,8 @@ def test_receipt_mapping_replays_complete_committed_and_settled_views() -> None:
     Receipt JSON fully restores committed/settled views without premature seed disclosure.
     """
 
-    service, command = _private_round()
-    private = service.commit(command)
+    commitments, command = _private_round()
+    private = commitments.commit(command)
     committed_result = ChanceWorkflowResult(
         ChanceWorkflowCode.SUCCESS,
         ChanceRoundView(private.committed_round, ChanceRoundStatus.COMMITTED),
@@ -83,7 +85,7 @@ def test_receipt_mapping_replays_complete_committed_and_settled_views() -> None:
     assert replayed_committed.replayed
     assert replayed_committed.view == committed_result.view
 
-    settlement = private.bind_client_seed(ClientSeed("klee-seed")).settlement()
+    settlement = private.bind_client_seed(ClientSeed("klee-seed")).settle()
     settled_result = ChanceWorkflowResult(
         ChanceWorkflowCode.SUCCESS,
         ChanceRoundView(
@@ -105,8 +107,8 @@ def test_receipt_mapping_replays_complete_committed_and_settled_views() -> None:
 def test_receipt_mapping_rejects_a_ruleset_payload_with_wrong_fingerprint() -> None:
     """@brief 回执恢复拒绝被替换规则集负载 / Receipt restoration rejects a substituted ruleset payload."""
 
-    service, command = _private_round()
-    private = service.commit(command)
+    commitments, command = _private_round()
+    private = commitments.commit(command)
     payload = _result_mapping(
         ChanceWorkflowResult(
             ChanceWorkflowCode.SUCCESS,

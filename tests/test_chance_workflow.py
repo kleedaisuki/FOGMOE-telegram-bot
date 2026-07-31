@@ -6,25 +6,28 @@ import asyncio
 from typing import cast
 from uuid import UUID
 
-from fogmoe_bot.application.chance.models import (
+from fogmoe_bot.application.chance.commands import (
+    BindAndSettleChanceRound,
     CommitChanceRound,
-    PreparedChanceRound,
-    PrivateCommittedChanceRound,
+    CommitDurableChanceRound,
+    LookupChanceRound,
 )
+from fogmoe_bot.application.chance.commitment import ChanceCommitmentService
 from fogmoe_bot.application.chance.ports import (
     ChanceRoundOperations,
     ChanceRoundPreparer,
+    ServerSeedSource,
 )
-from fogmoe_bot.application.chance.service import ChanceService, ServerSeedSource
-from fogmoe_bot.application.chance.workflow import ChanceWorkflow
-from fogmoe_bot.application.chance.workflow_models import (
-    BindAndSettleChanceRound,
-    ChanceRoundStatus,
-    ChanceRoundView,
+from fogmoe_bot.application.chance.results import (
     ChanceWorkflowCode,
     ChanceWorkflowResult,
-    CommitDurableChanceRound,
-    LookupChanceRound,
+)
+from fogmoe_bot.application.chance.workflow import ChanceWorkflow
+from fogmoe_bot.domain.chance.rounds import (
+    ChanceRoundStatus,
+    ChanceRoundView,
+    PreparedChanceRound,
+    PrivateCommittedChanceRound,
 )
 from fogmoe_bot.domain.chance.examples import sicbo_like_ruleset
 from fogmoe_bot.domain.chance.fairness import ClientSeed, ServerSeed
@@ -112,7 +115,7 @@ class _Operations:
         prepared = prepare(self.private_round)
         self.prepared_rounds.append(prepared)
         assert isinstance(prepared.round.stake, FreeTokenStake)
-        settlement = prepared.settlement()
+        settlement = prepared.settle()
         return ChanceWorkflowResult(
             ChanceWorkflowCode.SUCCESS,
             ChanceRoundView(
@@ -174,9 +177,9 @@ def _workflow() -> tuple[ChanceWorkflow, _Operations, _FixedSeeds]:
 
     operations = _Operations()
     seeds = _FixedSeeds()
-    chance = ChanceService(cast(ServerSeedSource, seeds))
+    commitments = ChanceCommitmentService(cast(ServerSeedSource, seeds))
     return (
-        ChanceWorkflow(cast(ChanceRoundOperations, operations), chance),
+        ChanceWorkflow(cast(ChanceRoundOperations, operations), commitments),
         operations,
         seeds,
     )

@@ -23,13 +23,15 @@ from fogmoe_bot.application.context_window.projection import (
     project_conversation_message,
 )
 from fogmoe_bot.application.assistant.streaming import (
-    AssistantStreamAddress,
-    AssistantStreamFrame,
     AssistantStreamSession,
-    AssistantStreamState,
+    AssistantStreamTarget,
 )
 from fogmoe_bot.application.runtime import AdaptivePollingPolicy
 from fogmoe_bot.domain.conversation.errors import StaleClaimError
+from fogmoe_bot.domain.assistant.streaming import (
+    AssistantStreamFrame,
+    AssistantStreamState,
+)
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
@@ -205,9 +207,7 @@ class _Repository:
     ) -> object:
         """@brief 记录最终失败与安全反馈 / Record final failure and safe feedback."""
 
-        self.failed.append(
-            (claim, assistant_message, outbounds, failed_at, error)
-        )
+        self.failed.append((claim, assistant_message, outbounds, failed_at, error))
         self.failure_budgets.append(retry_budget_used)
         return object()
 
@@ -256,7 +256,9 @@ class _Inference:
 
         del stream
         assert request["prompt"] == "hello"
-        assert execution_deadline_monotonic is None or execution_deadline_monotonic > 0.0
+        assert (
+            execution_deadline_monotonic is None or execution_deadline_monotonic > 0.0
+        )
         assert generation_fence is not None
         self.started += 1
         if self.release is not None:
@@ -296,26 +298,35 @@ class _StreamStarter:
         assert isinstance(chat_id, int) and not isinstance(chat_id, bool)
         state = AssistantStreamState.begin(
             turn_id=generation_fence.turn_id,
-            address=AssistantStreamAddress(
-                chat_id=chat_id,
-                is_group=False,
-                message_thread_id=None,
-            ),
             generation=generation_fence.attempt,
             revision=int(generation_fence.input_revision),
             emitted_at=NOW,
         )
-        session = AssistantStreamSession(state=state, projection=self)
+        session = AssistantStreamSession(
+            target=AssistantStreamTarget(
+                chat_id=chat_id,
+                is_group=False,
+                message_thread_id=None,
+            ),
+            state=state,
+            projection=self,
+        )
         await session.start()
         return session
 
-    async def project(self, frame: AssistantStreamFrame) -> None:
+    async def project(
+        self,
+        target: AssistantStreamTarget,
+        frame: AssistantStreamFrame,
+    ) -> None:
         """@brief 记录流帧 / Record a stream frame.
 
+        @param target 显式投影目标 / Explicit projection target.
         @param frame 当前流帧 / Current stream frame.
         @return None / None.
         """
 
+        assert target.chat_id == 7
         self.frames.append(frame)
         self.order.append(f"stream:{frame.kind.value}")
 
@@ -617,7 +628,9 @@ def test_durable_dependency_wait_does_not_exhaust_ordinary_retry_budget() -> Non
     asyncio.run(scenario())
 
 
-def test_first_ordinary_failure_after_many_dependency_claims_has_a_fresh_budget() -> None:
+def test_first_ordinary_failure_after_many_dependency_claims_has_a_fresh_budget() -> (
+    None
+):
     """@brief 多次 dependency claim 后首个普通失败仍是预算一 /
     The first ordinary failure after many dependency claims still consumes only budget one.
     """

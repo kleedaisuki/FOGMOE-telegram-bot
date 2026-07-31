@@ -276,6 +276,90 @@ def test_application_context_roots_do_not_reexport_owned_types() -> None:
     assert offenders == []
 
 
+def test_chance_lifecycle_has_domain_ownership_and_explicit_application_messages() -> (
+    None
+):
+    """@brief Chance 生命周期归领域且应用消息按语义拆分 /
+    Chance lifecycle belongs to the domain and application messages have semantic modules.
+
+    @return None / None.
+    """
+
+    application_root = SRC_ROOT / "application" / "chance"
+    domain_rounds = SRC_ROOT / "domain" / "chance" / "rounds.py"
+    entropy_adapter = SRC_ROOT / "infrastructure" / "chance" / "randomness.py"
+    removed_modules = (
+        application_root / "models.py",
+        application_root / "workflow_models.py",
+        application_root / "service.py",
+    )
+    owned_modules = (
+        application_root / "commands.py",
+        application_root / "results.py",
+        application_root / "commitment.py",
+    )
+
+    assert [path for path in removed_modules if path.exists()] == []
+    assert all(path.is_file() for path in owned_modules)
+    assert entropy_adapter.is_file()
+    assert "class SystemServerSeedSource" in entropy_adapter.read_text(encoding="utf-8")
+    domain_source = domain_rounds.read_text(encoding="utf-8")
+    for symbol in (
+        "class PrivateCommittedChanceRound",
+        "class PreparedChanceRound",
+        "class ChanceRoundStatus",
+        "class ChanceRoundView",
+    ):
+        assert symbol in domain_source
+
+    forbidden_imports = {
+        "fogmoe_bot.application.chance.models",
+        "fogmoe_bot.application.chance.workflow_models",
+        "fogmoe_bot.application.chance.service",
+    }
+    offenders: list[str] = []
+    for root in (SRC_ROOT, PROJECT_ROOT / "tests"):
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module in forbidden_imports
+                ):
+                    offenders.append(f"{path.relative_to(PROJECT_ROOT)}:{node.lineno}")
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name in forbidden_imports:
+                            offenders.append(
+                                f"{path.relative_to(PROJECT_ROOT)}:{node.lineno}"
+                            )
+
+    assert offenders == []
+
+
+def test_assistant_stream_lifecycle_is_provider_neutral_and_domain_owned() -> None:
+    """@brief Assistant 流生命周期归领域且 Telegram 身份留在 adapter /
+    Assistant stream lifecycle belongs to the domain while Telegram identity stays in its adapter.
+
+    @return None / None.
+    """
+
+    domain_path = SRC_ROOT / "domain" / "assistant" / "streaming.py"
+    application_path = SRC_ROOT / "application" / "assistant" / "streaming.py"
+    telegram_path = SRC_ROOT / "infrastructure" / "telegram" / "assistant_streaming.py"
+    domain_source = domain_path.read_text(encoding="utf-8")
+    application_source = application_path.read_text(encoding="utf-8")
+    telegram_source = telegram_path.read_text(encoding="utf-8")
+
+    assert "class AssistantStreamState" in domain_source
+    assert "class AssistantStreamFrame" in domain_source
+    assert "class AssistantStreamState" not in application_source
+    assert "class AssistantStreamFrame" not in application_source
+    for provider_term in ("chat_id", "draft_id", "message_thread_id", "telegram"):
+        assert provider_term not in domain_source.casefold()
+    assert "def _stable_telegram_draft_id" in telegram_source
+
+
 def test_crypto_workflows_have_pure_core_thin_telegram_and_no_process_locks() -> None:
     """@brief Crypto 写流程只通过端口访问外层且无进程级正确性状态 / Crypto write workflows reach outer layers only through ports and own no process-local correctness state."""
 

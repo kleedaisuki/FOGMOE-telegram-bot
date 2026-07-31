@@ -30,12 +30,14 @@ from fogmoe_bot.application.assistant.progress import (
     AssistantProgressKind,
 )
 from fogmoe_bot.application.assistant.streaming import (
+    AssistantStreamSession,
+    AssistantStreamTarget,
+)
+from fogmoe_bot.domain.assistant.streaming import (
     AssistantActivityKind,
     AssistantActivityStatus,
-    AssistantStreamAddress,
     AssistantStreamFrame,
     AssistantStreamKind,
-    AssistantStreamSession,
     AssistantStreamState,
 )
 from fogmoe_bot.application.assistant.tool_runtime import (
@@ -364,13 +366,19 @@ class _StreamProjection:
 
         self.frames: list[AssistantStreamFrame] = []
 
-    async def project(self, frame: AssistantStreamFrame) -> None:
+    async def project(
+        self,
+        target: AssistantStreamTarget,
+        frame: AssistantStreamFrame,
+    ) -> None:
         """@brief 记录 frame / Record a frame.
 
+        @param target 显式投影目标 / Explicit projection target.
         @param frame 当前累计流状态 / Current cumulative stream state.
         @return None / None.
         """
 
+        assert target.chat_id == 42
         self.frames.append(frame)
 
 
@@ -636,9 +644,13 @@ def test_agent_loop_appends_checkpoint_commentary_and_receipt_backed_tool_progre
         projection = _StreamProjection()
         progress = _ProgressPersistence()
         session = AssistantStreamSession(
+            target=AssistantStreamTarget(
+                chat_id=42,
+                is_group=False,
+                message_thread_id=None,
+            ),
             state=AssistantStreamState.begin(
                 turn_id=turn_id,
-                address=AssistantStreamAddress(42, False, None),
                 generation=1,
                 revision=0,
                 emitted_at=datetime.now(UTC),
@@ -1179,13 +1191,13 @@ def test_visible_stream_delta_failure_interrupts_generation_before_checkpoint() 
         turn_id = TurnId.new()
         observed_at = datetime.now(UTC)
         session = AssistantStreamSession(
+            target=AssistantStreamTarget(
+                chat_id=42,
+                is_group=False,
+                message_thread_id=None,
+            ),
             state=AssistantStreamState.begin(
                 turn_id=turn_id,
-                address=AssistantStreamAddress(
-                    chat_id=42,
-                    is_group=False,
-                    message_thread_id=None,
-                ),
                 generation=1,
                 revision=0,
                 emitted_at=observed_at,
@@ -1239,9 +1251,13 @@ def test_provider_stream_generator_stays_in_one_asyncio_task_context() -> None:
         projection = _StreamProjection()
         turn_id = TurnId.new()
         session = AssistantStreamSession(
+            target=AssistantStreamTarget(
+                chat_id=42,
+                is_group=False,
+                message_thread_id=None,
+            ),
             state=AssistantStreamState.begin(
                 turn_id=turn_id,
-                address=AssistantStreamAddress(42, False, None),
                 generation=1,
                 revision=0,
                 emitted_at=datetime.now(UTC),
@@ -1299,13 +1315,13 @@ def test_steer_fence_closes_the_old_provider_stream_within_one_poll_interval() -
             cause=InferenceGenerationCause.INITIAL,
         )
         session = AssistantStreamSession(
+            target=AssistantStreamTarget(
+                chat_id=42,
+                is_group=False,
+                message_thread_id=None,
+            ),
             state=AssistantStreamState.begin(
                 turn_id=turn_id,
-                address=AssistantStreamAddress(
-                    chat_id=42,
-                    is_group=False,
-                    message_thread_id=None,
-                ),
                 generation=1,
                 revision=0,
                 emitted_at=datetime.now(UTC),
@@ -1372,9 +1388,13 @@ def test_steer_before_tool_start_emits_no_false_failed_tool_activity() -> None:
         projection = _StreamProjection()
         progress = _ProgressPersistence()
         session = AssistantStreamSession(
+            target=AssistantStreamTarget(
+                chat_id=42,
+                is_group=False,
+                message_thread_id=None,
+            ),
             state=AssistantStreamState.begin(
                 turn_id=turn_id,
-                address=AssistantStreamAddress(42, False, None),
                 generation=1,
                 revision=0,
                 emitted_at=datetime.now(UTC),

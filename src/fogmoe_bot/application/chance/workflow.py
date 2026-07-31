@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+from fogmoe_bot.domain.chance.rounds import (
+    PreparedChanceRound,
+    PrivateCommittedChanceRound,
+)
 from fogmoe_bot.domain.chance.scope import PersonalRoundScope, RoundScope
 
-from .models import PreparedChanceRound, PrivateCommittedChanceRound
-from .ports import ChanceRoundOperations
-from .service import ChanceService
-from .workflow_models import (
+from .commands import (
     BindAndSettleChanceRound,
-    ChanceWorkflowCode,
-    ChanceWorkflowResult,
     CommitDurableChanceRound,
     LookupChanceRound,
 )
+from .commitment import ChanceCommitmentService
+from .ports import ChanceRoundOperations
+from .results import ChanceWorkflowCode, ChanceWorkflowResult
 
 CHANCE_WORKFLOW_DATA_KEY = "chance.workflow"
 """@brief runtime capability 中可验证随机活动工作流稳定键 / Stable verifiable-chance workflow key in runtime capabilities."""
@@ -29,22 +31,24 @@ class ChanceWorkflow:
     transitions to ``ChanceRoundOperations``.
 
     @param operations 耐久原子事务端口 / Durable atomic transaction port.
-    @param chance 纯数学承诺、绑定与结算服务 / Pure mathematical commitment, binding, and settlement service.
+    @param commitments 服务器熵与领域承诺工厂的编排服务 /
+        Orchestration service connecting server entropy to the domain commitment factory.
     """
 
     def __init__(
         self,
         operations: ChanceRoundOperations,
-        chance: ChanceService,
+        commitments: ChanceCommitmentService,
     ) -> None:
-        """@brief 注入耐久端口和纯数学服务 / Inject durable port and pure mathematical service.
+        """@brief 注入耐久端口和承诺编排 / Inject durable port and commitment orchestration.
 
         @param operations 耐久原子事务端口 / Durable atomic transaction port.
-        @param chance 纯数学随机服务 / Pure mathematical chance service.
+        @param commitments 服务器熵与领域承诺工厂的编排服务 /
+            Orchestration service connecting server entropy to the domain commitment factory.
         """
 
         self._operations = operations
-        self._chance = chance
+        self._commitments = commitments
 
     async def commit(
         self,
@@ -60,7 +64,7 @@ class ChanceWorkflow:
             return ChanceWorkflowResult(ChanceWorkflowCode.FORBIDDEN)
         if not _actor_may_use_scope(command.actor_id, command.round.scope):
             return ChanceWorkflowResult(ChanceWorkflowCode.FORBIDDEN)
-        private_round = self._chance.commit(command.round)
+        private_round = self._commitments.commit(command.round)
         return await self._operations.commit_chance_round(command, private_round)
 
     async def bind_and_settle(
@@ -89,7 +93,7 @@ class ChanceWorkflow:
                 Prepared state usable for settlement only in this transaction.
             """
 
-            return self._chance.bind_client_seed(private_round, command.client_seed)
+            return private_round.bind_client_seed(command.client_seed)
 
         return await self._operations.bind_and_settle_chance_round(command, prepare)
 

@@ -9,8 +9,9 @@ from uuid import UUID
 
 import pytest
 
-from fogmoe_bot.application.chance.models import CommitChanceRound
-from fogmoe_bot.application.chance.service import ChanceService, ServerSeedSource
+from fogmoe_bot.application.chance.commands import CommitChanceRound
+from fogmoe_bot.application.chance.commitment import ChanceCommitmentService
+from fogmoe_bot.application.chance.ports import ServerSeedSource
 from fogmoe_bot.domain.banking.money import TokenAmount
 from fogmoe_bot.domain.chance.examples import sicbo_like_ruleset
 from fogmoe_bot.domain.chance.fairness import (
@@ -22,7 +23,14 @@ from fogmoe_bot.domain.chance.fairness import (
     verify_fairness_proof,
 )
 from fogmoe_bot.domain.chance.money import FreeTokenStake
-from fogmoe_bot.domain.chance.rounds import ChanceRound, ChanceSettlement
+from fogmoe_bot.domain.chance.rounds import (
+    ChanceRound,
+    ChanceRoundStatus,
+    ChanceRoundView,
+    ChanceSettlement,
+    PreparedChanceRound,
+    PrivateCommittedChanceRound,
+)
 from fogmoe_bot.domain.chance.rules import ChanceRule
 from fogmoe_bot.domain.chance.scope import GroupRoundScope, PersonalRoundScope
 
@@ -183,8 +191,8 @@ def test_commit_then_client_seed_then_settlement_produces_a_verifiable_proof() -
     """@brief 承诺先于客户端种子，结算生成可独立复验的证明 / Commitment precedes client seed and settlement creates an independently verifiable proof."""
 
     seeds = _FixedSeeds(_SERVER_SEED)
-    service = ChanceService(cast(ServerSeedSource, seeds))
-    committed = service.commit(_command(scope=PersonalRoundScope(42)))
+    commitments = ChanceCommitmentService(cast(ServerSeedSource, seeds))
+    committed = commitments.commit(_command(scope=PersonalRoundScope(42)))
 
     assert seeds.calls == 1
     assert committed.committed_round.commitment == commit_server_seed(_SERVER_SEED)
@@ -194,8 +202,8 @@ def test_commit_then_client_seed_then_settlement_produces_a_verifiable_proof() -
     )
     assert "redacted" in repr(committed.server_seed)
 
-    prepared = service.bind_client_seed(committed, ClientSeed("Klee-seed-v1"))
-    settlement = service.settle(prepared)
+    prepared = committed.bind_client_seed(ClientSeed("Klee-seed-v1"))
+    settlement = prepared.settle()
 
     assert settlement.proof.verifies()
     assert verify_fairness_proof(settlement.proof)
@@ -223,6 +231,67 @@ def test_commit_then_client_seed_then_settlement_produces_a_verifiable_proof() -
             outcome=prepared.round.ruleset.outcome_for_ticket(changed_ticket),
             proof=tampered_proof,
             payout=None,
+        )
+
+
+def test_domain_factory_and_public_view_enforce_the_complete_round_lifecycle() -> None:
+    """@brief 领域工厂拥有完整状态转换且公开视图拒绝混合轮次 /
+    The domain factory owns every state transition and the public view rejects mixed rounds.
+
+    @return None / None.
+    """
+
+    private_round = PrivateCommittedChanceRound.commit(
+        round_id=_ROUND_ID,
+        scope=PersonalRoundScope(42),
+        player_id=42,
+        ruleset=sicbo_like_ruleset(),
+        rule_code="big",
+        stake=FreeTokenStake(10),
+        server_seed=_SERVER_SEED,
+        nonce=11,
+    )
+    settlement = private_round.bind_client_seed(
+        ClientSeed("domain-owned-lifecycle")
+    ).settle()
+    settled_view = ChanceRoundView(
+        private_round.committed_round,
+        ChanceRoundStatus.SETTLED,
+        settlement,
+    )
+
+    assert settled_view.round_id == _ROUND_ID
+    assert settled_view.owner_id == 42
+    assert settled_view.scope == PersonalRoundScope(42)
+    assert settled_view.settlement == settlement
+
+    another_round = PrivateCommittedChanceRound.commit(
+        round_id=UUID("00000000-0000-0000-0000-000000000124"),
+        scope=PersonalRoundScope(42),
+        player_id=42,
+        ruleset=sicbo_like_ruleset(),
+        rule_code="big",
+        stake=FreeTokenStake(10),
+        server_seed=_SERVER_SEED,
+        nonce=11,
+    )
+    with pytest.raises(ValueError, match="another round"):
+        ChanceRoundView(
+            another_round.committed_round,
+            ChanceRoundStatus.SETTLED,
+            settlement,
+        )
+
+    mismatched_seed = ServerSeed(b"mismatch" * 4)
+    with pytest.raises(ValueError, match="does not match its commitment"):
+        PrivateCommittedChanceRound(
+            committed_round=private_round.committed_round,
+            server_seed=mismatched_seed,
+        )
+    with pytest.raises(ValueError, match="does not match its commitment"):
+        PreparedChanceRound(
+            round=settlement.round,
+            server_seed=mismatched_seed,
         )
 
 

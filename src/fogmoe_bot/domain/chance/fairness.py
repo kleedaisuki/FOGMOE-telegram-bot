@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import secrets
 from dataclasses import dataclass, field
 from typing import Final
 from uuid import UUID
@@ -52,19 +51,6 @@ class ServerSeed:
             raise TypeError("Server seed must be immutable bytes")
         if len(self.value) < 16:
             raise ValueError("Server seed must contain at least 128 bits")
-
-    @classmethod
-    def random(cls, *, length: int = 32) -> ServerSeed:
-        """@brief 从系统熵生成服务器种子 / Generate a server seed from operating-system entropy.
-
-        @param length 随机字节长度，至少 16 / Random byte length, at least 16.
-        @return 新服务器种子 / New server seed.
-        @raise ValueError 长度不足时抛出 / Raised when the requested length is too short.
-        """
-
-        if isinstance(length, bool) or not isinstance(length, int) or length < 16:
-            raise ValueError("Server-seed length must be at least 16 bytes")
-        return cls(secrets.token_bytes(length))
 
     def reveal_hex(self) -> str:
         """@brief 显式编码已结算种子 / Explicitly encode a settled seed for publication.

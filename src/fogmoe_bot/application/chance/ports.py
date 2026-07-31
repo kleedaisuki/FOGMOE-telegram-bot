@@ -5,16 +5,33 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Protocol
 
-from .models import PreparedChanceRound, PrivateCommittedChanceRound
-from .workflow_models import (
+from fogmoe_bot.domain.chance.fairness import ServerSeed
+from fogmoe_bot.domain.chance.rounds import (
+    PreparedChanceRound,
+    PrivateCommittedChanceRound,
+)
+
+from .commands import (
     BindAndSettleChanceRound,
-    ChanceWorkflowResult,
     CommitDurableChanceRound,
     LookupChanceRound,
 )
+from .results import ChanceWorkflowResult
 
 type ChanceRoundPreparer = Callable[[PrivateCommittedChanceRound], PreparedChanceRound]
 """@brief 在存储事务内由私有承诺态生成准备态的回调 / Callback producing prepared state from private committed state inside storage transaction."""
+
+
+class ServerSeedSource(Protocol):
+    """@brief 为承诺用例提供未使用服务器熵的端口 / Port supplying unused server entropy to the commitment use case."""
+
+    def next_server_seed(self) -> ServerSeed:
+        """@brief 提供一个尚未使用的服务器种子 / Provide one unused server seed.
+
+        @return 尚未揭示的服务器种子 / Unrevealed server seed.
+        """
+
+        ...
 
 
 class ChanceRoundOperations(Protocol):

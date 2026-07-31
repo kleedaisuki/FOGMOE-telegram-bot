@@ -7,8 +7,9 @@ from datetime import UTC, datetime
 
 from telegram.error import BadRequest, TelegramError
 
-from fogmoe_bot.application.assistant.streaming import (
-    AssistantStreamAddress,
+from fogmoe_bot.application.assistant.streaming import AssistantStreamTarget
+from fogmoe_bot.domain.assistant.streaming import (
+    AssistantStreamFrame,
     AssistantStreamState,
 )
 from fogmoe_bot.domain.conversation.identity import TurnId
@@ -150,6 +151,10 @@ class _TransientDraftBot(_RecordingBot):
         return True
 
 
+_TARGETS: dict[TurnId, AssistantStreamTarget] = {}
+"""@brief 测试 Turn 到显式投影目标的映射 / Test-Turn to explicit-projection-target mapping."""
+
+
 def _state(
     *,
     chat_id: int = 42,
@@ -164,13 +169,32 @@ def _state(
     @return started 流状态 / Started stream state.
     """
 
-    return AssistantStreamState.begin(
+    state = AssistantStreamState.begin(
         turn_id=TurnId.parse("5c55082f-0904-4b9d-839a-c20718fd3729"),
-        address=AssistantStreamAddress(chat_id, is_group, message_thread_id),
         generation=1,
         revision=0,
         emitted_at=datetime(2026, 7, 31, tzinfo=UTC),
     )
+    _TARGETS[state.turn_id] = AssistantStreamTarget(
+        chat_id=chat_id,
+        is_group=is_group,
+        message_thread_id=message_thread_id,
+    )
+    return state
+
+
+async def _project(
+    projection: TelegramAssistantStreamProjection,
+    frame: AssistantStreamFrame,
+) -> None:
+    """@brief 向测试 Turn 的显式目标投影一帧 / Project a frame to its test Turn's explicit target.
+
+    @param projection Telegram 投影 adapter / Telegram projection adapter.
+    @param frame provider-neutral 流帧 / Provider-neutral stream frame.
+    @return None / None.
+    """
+
+    await projection.project(_TARGETS[frame.turn_id], frame)
 
 
 def test_private_stream_coalesces_deltas_and_stops_typing_at_completion() -> None:
@@ -190,18 +214,20 @@ def test_private_stream_coalesces_deltas_and_stops_typing_at_completion() -> Non
             typing_refresh_seconds=0.01,
         )
         state = _state()
-        await projection.project(state.current_frame)
+        await _project(projection, state.current_frame)
         await asyncio.wait_for(bot.typing_event.wait(), timeout=1.0)
 
         for delta in ("流", "式", "回", "答"):
-            await projection.project(state.append(delta, emitted_at=datetime.now(UTC)))
-        await projection.project(state.complete(emitted_at=datetime.now(UTC)))
+            await _project(
+                projection, state.append(delta, emitted_at=datetime.now(UTC))
+            )
+        await _project(projection, state.complete(emitted_at=datetime.now(UTC)))
         await asyncio.wait_for(bot.draft_event.wait(), timeout=1.0)
         await asyncio.sleep(0.03)
 
         assert bot.draft_calls[-1][2] == "最后的回答整理好了，正在接着发给你～"
         assert all("流式回答" not in str(call[2]) for call in bot.draft_calls)
-        assert {call[1] for call in bot.draft_calls} == {state.current_frame.draft_id}
+        assert len({call[1] for call in bot.draft_calls}) == 1
         typing_count = len(bot.typing_calls)
         await asyncio.sleep(0.03)
         assert len(bot.typing_calls) == typing_count
@@ -226,10 +252,12 @@ def test_group_stream_uses_topic_typing_without_native_drafts() -> None:
             typing_refresh_seconds=0.02,
         )
         state = _state(chat_id=-100123, is_group=True, message_thread_id=77)
-        await projection.project(state.current_frame)
-        await projection.project(state.append("群聊回答", emitted_at=datetime.now(UTC)))
+        await _project(projection, state.current_frame)
+        await _project(
+            projection, state.append("群聊回答", emitted_at=datetime.now(UTC))
+        )
         await asyncio.wait_for(bot.typing_event.wait(), timeout=1.0)
-        await projection.project(state.complete(emitted_at=datetime.now(UTC)))
+        await _project(projection, state.complete(emitted_at=datetime.now(UTC)))
         await asyncio.sleep(0.03)
 
         assert bot.typing_calls[0] == (-100123, "typing", 77)
@@ -253,23 +281,25 @@ def test_native_drafts_are_opt_in_to_avoid_client_side_redraw() -> None:
             typing_refresh_seconds=0.01,
         )
         state = _state()
-        await projection.project(state.current_frame)
-        await projection.project(
+        await _project(projection, state.current_frame)
+        await _project(
+            projection,
             state.commentary(
                 "step:0:commentary",
                 "我先确认一下资料。",
                 emitted_at=datetime.now(UTC),
-            )
+            ),
         )
-        await projection.project(
+        await _project(
+            projection,
             state.start_tool(
                 "step:0:call:0",
                 "google_search",
                 emitted_at=datetime.now(UTC),
-            )
+            ),
         )
         await asyncio.wait_for(bot.typing_event.wait(), timeout=1.0)
-        await projection.project(state.complete(emitted_at=datetime.now(UTC)))
+        await _project(projection, state.complete(emitted_at=datetime.now(UTC)))
         await asyncio.sleep(0.03)
 
         assert bot.typing_calls
@@ -296,24 +326,25 @@ def test_steer_reuses_draft_identity_and_discards_a_stale_generation_frame() -> 
             typing_refresh_seconds=0.05,
         )
         state = _state()
-        await projection.project(state.current_frame)
+        await _project(projection, state.current_frame)
         stale = state.append("旧答案", emitted_at=datetime.now(UTC))
-        await projection.project(stale)
-        await projection.project(
+        await _project(projection, stale)
+        await _project(
+            projection,
             state.revise(
                 generation=2,
                 revision=1,
                 emitted_at=datetime.now(UTC),
-            )
+            ),
         )
-        await projection.project(state.append("新答案", emitted_at=datetime.now(UTC)))
-        await projection.project(stale)
-        await projection.project(state.complete(emitted_at=datetime.now(UTC)))
+        await _project(projection, state.append("新答案", emitted_at=datetime.now(UTC)))
+        await _project(projection, stale)
+        await _project(projection, state.complete(emitted_at=datetime.now(UTC)))
         await asyncio.wait_for(bot.draft_event.wait(), timeout=1.0)
         await asyncio.sleep(0.03)
 
         assert bot.draft_calls[-1][2] == "最后的回答整理好了，正在接着发给你～"
-        assert {call[1] for call in bot.draft_calls} == {state.current_frame.draft_id}
+        assert len({call[1] for call in bot.draft_calls}) == 1
         await projection.aclose()
 
     asyncio.run(scenario())
@@ -336,13 +367,15 @@ def test_native_draft_rejection_degrades_to_typing_without_failing_projection() 
             typing_refresh_seconds=0.02,
         )
         state = _state()
-        await projection.project(state.current_frame)
-        await projection.project(
-            state.append("不会中断推理", emitted_at=datetime.now(UTC))
+        await _project(projection, state.current_frame)
+        await _project(
+            projection, state.append("不会中断推理", emitted_at=datetime.now(UTC))
         )
         await asyncio.wait_for(bot.draft_event.wait(), timeout=1.0)
-        await projection.project(state.append("，只降级", emitted_at=datetime.now(UTC)))
-        await projection.project(state.complete(emitted_at=datetime.now(UTC)))
+        await _project(
+            projection, state.append("，只降级", emitted_at=datetime.now(UTC))
+        )
+        await _project(projection, state.complete(emitted_at=datetime.now(UTC)))
         await asyncio.sleep(0.03)
 
         assert len(bot.draft_calls) == 1
@@ -373,27 +406,26 @@ def test_suspended_actor_hands_off_the_next_generation_without_losing_its_start(
             typing_refresh_seconds=0.01,
         )
         first = _state()
-        await projection.project(first.current_frame)
+        await _project(projection, first.current_frame)
         await asyncio.wait_for(bot.typing_event.wait(), timeout=1.0)
-        await projection.project(first.suspend(emitted_at=datetime.now(UTC)))
+        await _project(projection, first.suspend(emitted_at=datetime.now(UTC)))
 
         retry = AssistantStreamState.begin(
             turn_id=first.turn_id,
-            address=first.address,
             generation=2,
             revision=0,
             emitted_at=datetime.now(UTC),
         )
-        await projection.project(retry.current_frame)
-        await projection.project(
-            retry.append("重试后的回答", emitted_at=datetime.now(UTC))
+        await _project(projection, retry.current_frame)
+        await _project(
+            projection, retry.append("重试后的回答", emitted_at=datetime.now(UTC))
         )
-        await projection.project(retry.complete(emitted_at=datetime.now(UTC)))
+        await _project(projection, retry.complete(emitted_at=datetime.now(UTC)))
         await asyncio.wait_for(bot.draft_event.wait(), timeout=1.0)
         await asyncio.sleep(0.03)
 
         assert bot.draft_calls[-1][2] == "最后的回答整理好了，正在接着发给你～"
-        assert {call[1] for call in bot.draft_calls} == {first.current_frame.draft_id}
+        assert len({call[1] for call in bot.draft_calls}) == 1
         await projection.aclose()
 
     asyncio.run(scenario())
@@ -415,12 +447,12 @@ def test_committed_retry_replaces_partial_text_with_an_explicit_status() -> None
             typing_refresh_seconds=0.01,
         )
         state = _state()
-        await projection.project(state.current_frame)
-        await projection.project(
-            state.append("不完整回答", emitted_at=datetime.now(UTC))
+        await _project(projection, state.current_frame)
+        await _project(
+            projection, state.append("不完整回答", emitted_at=datetime.now(UTC))
         )
         await asyncio.wait_for(bot.draft_event.wait(), timeout=1.0)
-        await projection.project(state.suspend(emitted_at=datetime.now(UTC)))
+        await _project(projection, state.suspend(emitted_at=datetime.now(UTC)))
 
         async with asyncio.timeout(1.0):
             while (
@@ -453,26 +485,25 @@ def test_terminal_actor_does_not_drop_a_racing_new_generation() -> None:
             typing_refresh_seconds=0.05,
         )
         old = _state()
-        await projection.project(old.current_frame)
+        await _project(projection, old.current_frame)
         await asyncio.wait_for(bot.typing_event.wait(), timeout=1.0)
-        await projection.project(old.append("旧答案", emitted_at=datetime.now(UTC)))
+        await _project(projection, old.append("旧答案", emitted_at=datetime.now(UTC)))
         await asyncio.wait_for(bot.draft_event.wait(), timeout=1.0)
 
         bot.block_next_draft = True
-        await projection.project(old.complete(emitted_at=datetime.now(UTC)))
+        await _project(projection, old.complete(emitted_at=datetime.now(UTC)))
         await asyncio.wait_for(bot.terminal_entered.wait(), timeout=1.0)
 
         new = AssistantStreamState.begin(
             turn_id=old.turn_id,
-            address=old.address,
             generation=2,
             revision=1,
             revised=True,
             emitted_at=datetime.now(UTC),
         )
-        await projection.project(new.current_frame)
-        await projection.project(new.append("新答案", emitted_at=datetime.now(UTC)))
-        await projection.project(new.complete(emitted_at=datetime.now(UTC)))
+        await _project(projection, new.current_frame)
+        await _project(projection, new.append("新答案", emitted_at=datetime.now(UTC)))
+        await _project(projection, new.complete(emitted_at=datetime.now(UTC)))
         bot.release_terminal.set()
 
         async with asyncio.timeout(1.0):
@@ -483,7 +514,7 @@ def test_terminal_actor_does_not_drop_a_racing_new_generation() -> None:
                 await asyncio.sleep(0)
 
         assert bot.draft_calls[-1][2] == "最后的回答整理好了，正在接着发给你～"
-        assert {call[1] for call in bot.draft_calls} == {old.current_frame.draft_id}
+        assert len({call[1] for call in bot.draft_calls}) == 1
         await projection.aclose()
 
     asyncio.run(scenario())
@@ -511,14 +542,13 @@ def test_terminal_high_water_rejects_an_old_generation_after_actor_exit() -> Non
         stale_suspended = old.suspend(emitted_at=datetime.now(UTC))
         new = AssistantStreamState.begin(
             turn_id=old.turn_id,
-            address=old.address,
             generation=2,
             revision=0,
             emitted_at=datetime.now(UTC),
         )
-        await projection.project(new.current_frame)
-        await projection.project(new.append("新答案", emitted_at=datetime.now(UTC)))
-        await projection.project(new.complete(emitted_at=datetime.now(UTC)))
+        await _project(projection, new.current_frame)
+        await _project(projection, new.append("新答案", emitted_at=datetime.now(UTC)))
+        await _project(projection, new.complete(emitted_at=datetime.now(UTC)))
 
         async with asyncio.timeout(1.0):
             while (
@@ -530,8 +560,8 @@ def test_terminal_high_water_rejects_an_old_generation_after_actor_exit() -> Non
         draft_count = len(bot.draft_calls)
         typing_count = len(bot.typing_calls)
 
-        await projection.project(stale_delta)
-        await projection.project(stale_suspended)
+        await _project(projection, stale_delta)
+        await _project(projection, stale_suspended)
         await asyncio.sleep(0.03)
 
         assert len(bot.draft_calls) == draft_count
@@ -558,9 +588,9 @@ def test_failed_stream_exposes_only_the_stable_safe_code_and_stops_typing() -> N
             typing_refresh_seconds=0.01,
         )
         state = _state()
-        await projection.project(state.current_frame)
-        await projection.project(
-            state.fail("provider_unavailable", emitted_at=datetime.now(UTC))
+        await _project(projection, state.current_frame)
+        await _project(
+            projection, state.fail("provider_unavailable", emitted_at=datetime.now(UTC))
         )
         await asyncio.wait_for(bot.draft_event.wait(), timeout=1.0)
         await asyncio.sleep(0.02)
@@ -594,7 +624,7 @@ def test_transient_draft_failure_retries_latest_snapshot_without_a_new_model_fra
             typing_refresh_seconds=0.05,
         )
         state = _state()
-        await projection.project(state.current_frame)
+        await _project(projection, state.current_frame)
 
         async with asyncio.timeout(1.5):
             while len(bot.draft_calls) < 2:
@@ -637,48 +667,53 @@ def test_current_action_draft_is_fixed_height_deduplicated_and_hides_answer_toke
                     await asyncio.sleep(0)
 
         state = _state()
-        await projection.project(state.current_frame)
+        await _project(projection, state.current_frame)
         await wait_for_text("我在处理这件事，稳定进展会一条条发在下面～")
-        await projection.project(
+        await _project(
+            projection,
             state.commentary(
                 "step:0:commentary",
                 "我先查一下最新资料，再回来给你一个完整答案。",
                 emitted_at=datetime.now(UTC),
-            )
+            ),
         )
         await wait_for_text("✓ 工作说明已经稳定记下，继续往下做～")
-        await projection.project(
+        await _project(
+            projection,
             state.start_tool(
                 "step:0:call:0",
                 "google_search",
                 emitted_at=datetime.now(UTC),
-            )
+            ),
         )
         await wait_for_text("✦ 我去网上查查最新资料…\n  能力：google_search")
-        await projection.project(
-            state.append("不应该出现在状态卡片里的答案", emitted_at=datetime.now(UTC))
+        await _project(
+            projection,
+            state.append("不应该出现在状态卡片里的答案", emitted_at=datetime.now(UTC)),
         )
-        await projection.project(
+        await _project(
+            projection,
             state.finish_tool(
                 "step:0:call:0",
                 "google_search",
                 succeeded=True,
                 emitted_at=datetime.now(UTC),
-            )
+            ),
         )
         await wait_for_text("✓ 这个步骤已经稳定记录，继续处理下一步～")
         before_duplicate = len(bot.draft_calls)
-        await projection.project(
+        await _project(
+            projection,
             state.finish_tool(
                 "step:0:call:0",
                 "google_search",
                 succeeded=True,
                 emitted_at=datetime.now(UTC),
-            )
+            ),
         )
         await asyncio.sleep(0.01)
         assert len(bot.draft_calls) == before_duplicate
-        await projection.project(state.complete(emitted_at=datetime.now(UTC)))
+        await _project(projection, state.complete(emitted_at=datetime.now(UTC)))
 
         await wait_for_text("最后的回答整理好了，正在接着发给你～")
 

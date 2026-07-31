@@ -26,11 +26,12 @@ from typing import Protocol
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 
-from fogmoe_bot.application.assistant.streaming import (
+from fogmoe_bot.application.assistant.streaming import AssistantStreamTarget
+from fogmoe_bot.domain.assistant.streaming import (
     AssistantActivityKind,
     AssistantActivityStatus,
-    AssistantStreamFrame,
     AssistantStreamActivity,
+    AssistantStreamFrame,
     AssistantStreamKind,
 )
 from fogmoe_bot.domain.conversation.identity import TurnId
@@ -58,6 +59,9 @@ _DEFAULT_TERMINAL_CURSOR_CAPACITY = 8_192
 
 _DEFAULT_TERMINAL_CURSOR_TTL_SECONDS = 1_200.0
 """@brief 覆盖默认 inference lease 的 tombstone 保留期 / Tombstone retention covering the default inference lease."""
+
+_TELEGRAM_DRAFT_ID_MAX = 2_147_483_647
+"""@brief Telegram draft ID 的正 Int32 上界 / Positive Int32 ceiling for Telegram draft IDs."""
 
 _REVISED_PREVIEW = "收到啦，我按你的新想法重新整理～"
 """@brief steer 后新活动快照到达前的私聊预览 / Private-chat preview shown after a steer until the next activity snapshot."""
@@ -154,6 +158,7 @@ class _ProjectionSession:
     """@brief 一个 Turn 的有界 Telegram 投影 actor 状态 / Bounded Telegram projection actor state for one Turn.
 
     @param turn_id durable Turn identity / Durable Turn identity.
+    @param target 不随帧变化的 Telegram 目标 / Telegram target that does not vary between frames.
     @param mailbox 仅保留最新帧的容量一 mailbox / Capacity-one mailbox retaining only the latest frame.
     @param accepted_cursor 已接受的最新单调游标 / Latest accepted monotonic cursor.
     @param task actor 任务 / Actor task.
@@ -169,6 +174,7 @@ class _ProjectionSession:
     """
 
     turn_id: TurnId
+    target: AssistantStreamTarget
     mailbox: asyncio.Queue[AssistantStreamFrame] = field(
         default_factory=lambda: asyncio.Queue(maxsize=1)
     )
@@ -273,9 +279,14 @@ class TelegramAssistantStreamProjection:
         await stop_event.wait()
         await self.aclose()
 
-    async def project(self, frame: AssistantStreamFrame) -> None:
+    async def project(
+        self,
+        target: AssistantStreamTarget,
+        frame: AssistantStreamFrame,
+    ) -> None:
         """@brief 非阻塞接收最新累计帧 / Accept the newest cumulative frame without network backpressure.
 
+        @param target 已验证且与 Turn 绑定的 Telegram 目标 / Validated Telegram target bound to the Turn.
         @param frame 已验证的 Assistant 流帧 / Validated Assistant stream frame.
         @return None / None.
         @note DELTA 不进入 actor；容量一 mailbox 满时会原子替换旧活动快照。每帧都含
@@ -301,9 +312,12 @@ class TelegramAssistantStreamProjection:
                 self._terminal_cursors.pop(frame.turn_id, None)
                 session = _ProjectionSession(
                     frame.turn_id,
+                    target,
                     drafts_enabled=self._native_drafts_enabled,
                 )
                 self._sessions[frame.turn_id] = session
+            elif session.target != target:
+                raise ValueError("Assistant stream target changed within one Turn")
             if cursor <= session.accepted_cursor:
                 return
             session.accepted_cursor = cursor
@@ -315,7 +329,10 @@ class TelegramAssistantStreamProjection:
             if session.task is None:
                 session.task = asyncio.create_task(
                     self._run_session(session),
-                    name=f"telegram-assistant-stream-{frame.draft_id}",
+                    name=(
+                        "telegram-assistant-stream-"
+                        f"{_stable_telegram_draft_id(frame.turn_id)}"
+                    ),
                 )
 
     async def aclose(self) -> None:
@@ -360,7 +377,10 @@ class TelegramAssistantStreamProjection:
                     await self._send_typing(session, frame)
                     session.typing_task = asyncio.create_task(
                         self._refresh_typing(session),
-                        name=f"telegram-assistant-typing-{frame.draft_id}",
+                        name=(
+                            "telegram-assistant-typing-"
+                            f"{_stable_telegram_draft_id(frame.turn_id)}"
+                        ),
                     )
                 if frame.kind not in {
                     AssistantStreamKind.SUSPENDED,
@@ -464,7 +484,8 @@ class TelegramAssistantStreamProjection:
         else:
             text = _render_current_activity_draft(frame)
 
-        if frame.is_group or not isinstance(frame.chat_id, int):
+        target = session.target
+        if target.is_group or not isinstance(target.chat_id, int):
             return
         if text is None or not session.drafts_enabled:
             return
@@ -473,8 +494,8 @@ class TelegramAssistantStreamProjection:
             return
         try:
             acknowledged = await self._bot.send_message_draft(
-                chat_id=frame.chat_id,
-                draft_id=frame.draft_id,
+                chat_id=target.chat_id,
+                draft_id=_stable_telegram_draft_id(frame.turn_id),
                 text=bounded_text,
                 message_thread_id=None,
             )
@@ -578,7 +599,7 @@ class TelegramAssistantStreamProjection:
         """@brief 最佳努力发送一次 typing / Best-effort send one typing action.
 
         @param session 当前 Turn actor / Current Turn actor.
-        @param frame 提供 Telegram 地址的最新帧 / Latest frame providing the Telegram address.
+        @param frame 提供日志身份的最新帧 / Latest frame providing log identity.
         @return None / None.
         """
 
@@ -586,10 +607,11 @@ class TelegramAssistantStreamProjection:
         if loop.time() < session.next_typing_at:
             return
         try:
+            target = session.target
             acknowledged = await self._bot.send_chat_action(
-                chat_id=frame.chat_id,
+                chat_id=target.chat_id,
                 action=ChatAction.TYPING,
-                message_thread_id=frame.message_thread_id,
+                message_thread_id=target.message_thread_id,
             )
             if not acknowledged:
                 raise TelegramError("Telegram did not acknowledge sendChatAction")
@@ -701,6 +723,16 @@ def _frame_cursor(frame: AssistantStreamFrame) -> _FrameCursor:
     """
 
     return (frame.revision, frame.generation, frame.sequence)
+
+
+def _stable_telegram_draft_id(turn_id: TurnId) -> int:
+    """@brief 从 Turn UUID 派生稳定非零 Int32 draft ID / Derive a stable non-zero Int32 draft ID from a Turn UUID.
+
+    @param turn_id durable Turn / Durable Turn.
+    @return ``1..2^31-1`` 内稳定 Telegram ID / Stable Telegram ID in ``1..2^31-1``.
+    """
+
+    return (turn_id.value.int % _TELEGRAM_DRAFT_ID_MAX) + 1
 
 
 def _replace_mailbox_frame(

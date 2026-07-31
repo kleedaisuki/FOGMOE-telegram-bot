@@ -11,7 +11,7 @@ from fogmoe_bot.application.billing.service import (
     BILLING_SERVICE_DATA_KEY,
     BillingService,
 )
-from fogmoe_bot.application.chance.service import ChanceService
+from fogmoe_bot.application.chance.commitment import ChanceCommitmentService
 from fogmoe_bot.application.chance.workflow import (
     CHANCE_WORKFLOW_DATA_KEY,
     ChanceWorkflow,
@@ -55,6 +55,7 @@ from fogmoe_bot.domain.accounts.plan import AccountPlanPolicy
 from fogmoe_bot.infrastructure.billing.payment_events import (
     DenyUnconfiguredPaymentEventVerifier,
 )
+from fogmoe_bot.infrastructure.chance.randomness import SystemServerSeedSource
 from fogmoe_bot.infrastructure.database.account_operations import (
     PostgresAccountOperations,
 )
@@ -224,13 +225,14 @@ def create_billing_service(identity: IdentitySettings) -> BillingService:
 def create_chance_workflow() -> ChanceWorkflow:
     """@brief 装配 Free-only 的可验证随机活动工作流 / Assemble the Free-only verifiable-chance workflow.
 
-    @return 连接纯数学服务与原子 PostgreSQL 端口的工作流 /
-        Workflow connecting the pure mathematical service to an atomic PostgreSQL port.
+    @return 连接显式熵编排、领域状态转换与原子 PostgreSQL 端口的工作流 /
+        Workflow connecting explicit entropy orchestration, domain transitions, and an atomic
+        PostgreSQL port.
     """
 
     return ChanceWorkflow(
         operations=PostgresChanceRoundOperations(),
-        chance=ChanceService(),
+        commitments=ChanceCommitmentService(SystemServerSeedSource()),
     )
 
 

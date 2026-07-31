@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
+from typing import Self
 from uuid import UUID
 
 from .fairness import (
@@ -11,11 +13,22 @@ from .fairness import (
     FairnessProof,
     ServerSeed,
     ServerSeedCommitment,
+    commit_server_seed,
     reveal_fairness_proof,
 )
 from .money import FreeTokenPayout, FreeTokenStake
 from .rules import ChanceOutcome, ChanceQuote, ChanceRule, ChanceRuleset
 from .scope import GroupRoundScope, PersonalRoundScope, RoundScope
+
+
+class ChanceRoundStatus(StrEnum):
+    """@brief 随机活动轮次的领域生命周期状态 / Domain lifecycle status of a chance round."""
+
+    COMMITTED = "committed"
+    """@brief 承诺已公开，仍等待玩家种子 / Commitment is public and awaits a player seed."""
+
+    SETTLED = "settled"
+    """@brief 已揭示种子、完成账本结算 / Seed is revealed and ledger settlement is complete."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +132,105 @@ class CommittedChanceRound:
             commitment=self.commitment,
             client_seed=client_seed,
             nonce=self.nonce,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateCommittedChanceRound:
+    """@brief 已承诺、尚待玩家种子的私有领域状态 / Private domain state committed before a player seed.
+
+    此状态同时持有可公开的承诺轮次和结算前必须保密的服务器种子。调用方必须先持久化
+    并公开 ``committed_round.commitment``，随后才能绑定玩家种子。任何日志或传输对象
+    都不得序列化 ``server_seed``。
+    This state owns both the public committed round and the server seed that must remain secret
+    until settlement. Callers must persist and publish ``committed_round.commitment`` before
+    binding a player seed. Logs and transport objects must never serialize ``server_seed``.
+
+    @param committed_round 可公开展示承诺的轮次 / Round whose commitment may be displayed publicly.
+    @param server_seed 结算前不得揭示的服务器种子 / Server seed hidden until settlement.
+    """
+
+    committed_round: CommittedChanceRound
+    """@brief 可公开的承诺轮次 / Public committed round."""
+
+    server_seed: ServerSeed
+    """@brief 结算前保密的服务器种子 / Server seed kept secret before settlement."""
+
+    def __post_init__(self) -> None:
+        """@brief 校验私有承诺状态 / Validate private committed state.
+
+        @return None / None.
+        @raise TypeError 承诺轮次或服务器种子类型不匹配时抛出 /
+            Raised when the committed round or server seed has the wrong type.
+        @raise ValueError 服务器种子与公开承诺不匹配时抛出 /
+            Raised when the server seed does not match the public commitment.
+        """
+
+        if not isinstance(self.committed_round, CommittedChanceRound):
+            raise TypeError("Private chance commitment requires CommittedChanceRound")
+        if not isinstance(self.server_seed, ServerSeed):
+            raise TypeError("Private chance commitment requires ServerSeed")
+        if commit_server_seed(self.server_seed) != self.committed_round.commitment:
+            raise ValueError("Private chance server seed does not match its commitment")
+
+    @classmethod
+    def commit(
+        cls,
+        *,
+        round_id: UUID,
+        scope: RoundScope,
+        player_id: int,
+        ruleset: ChanceRuleset,
+        rule_code: str,
+        stake: FreeTokenStake,
+        server_seed: ServerSeed,
+        nonce: int,
+    ) -> Self:
+        """@brief 以显式服务器种子创建私有承诺态 / Create private committed state from an explicit server seed.
+
+        这是领域工厂（domain factory）：它只执行确定性的承诺计算与领域对象构造，不负责
+        获取熵或持久化。应用层必须在调用前取得一次未使用的服务器种子。
+        This domain factory performs only deterministic commitment calculation and domain-object
+        construction. Entropy acquisition and persistence remain application concerns.
+
+        @param round_id 稳定轮次 UUID / Stable round UUID.
+        @param scope 明确个人或群组范围 / Explicit personal or group scope.
+        @param player_id 下单玩家标识 / Wagering-player identity.
+        @param ruleset 冻结规则集 / Frozen ruleset.
+        @param rule_code 玩家选中的规则编码 / Player-selected rule code.
+        @param stake 免费金币押注 / Free-token stake.
+        @param server_seed 尚未使用且未揭示的服务器种子 / Unused unrevealed server seed.
+        @param nonce 轮次内业务 nonce / Business nonce within the round.
+        @return 等待玩家种子的私有承诺态 / Private committed state awaiting a player seed.
+        @raise TypeError 服务器种子类型不匹配时抛出 / Raised when the server seed has the wrong type.
+        """
+
+        if not isinstance(server_seed, ServerSeed):
+            raise TypeError("Private chance commitment requires ServerSeed")
+        return cls(
+            committed_round=CommittedChanceRound(
+                round_id=round_id,
+                scope=scope,
+                player_id=player_id,
+                ruleset=ruleset,
+                rule_code=rule_code,
+                stake=stake,
+                commitment=commit_server_seed(server_seed),
+                nonce=nonce,
+            ),
+            server_seed=server_seed,
+        )
+
+    def bind_client_seed(self, client_seed: ClientSeed) -> PreparedChanceRound:
+        """@brief 在公开承诺后绑定玩家种子 / Bind a player seed after commitment publication.
+
+        @param client_seed 玩家在揭示前提交的种子 / Player seed supplied before reveal.
+        @return 可结算的私有准备态 / Private prepared state ready for settlement.
+        """
+
+        return PreparedChanceRound(
+            round=self.committed_round.bind_client_seed(client_seed),
+            server_seed=self.server_seed,
         )
 
 
@@ -242,6 +354,48 @@ class ChanceRound:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedChanceRound:
+    """@brief 已绑定玩家种子、等待原子结算的私有领域状态 / Private domain state ready for atomic settlement.
+
+    @param round 已绑定玩家种子的完整轮次 / Full round with a bound player seed.
+    @param server_seed 尚未揭示的服务器种子 / Unrevealed server seed.
+    """
+
+    round: ChanceRound
+    """@brief 可结算的完整轮次 / Full round ready for settlement."""
+
+    server_seed: ServerSeed
+    """@brief 结算前保密的服务器种子 / Server seed kept secret before settlement."""
+
+    def __post_init__(self) -> None:
+        """@brief 校验可结算私有状态 / Validate private settle-ready state.
+
+        @return None / None.
+        @raise TypeError 完整轮次或服务器种子类型不匹配时抛出 /
+            Raised when the full round or server seed has the wrong type.
+        @raise ValueError 服务器种子与轮次承诺不匹配时抛出 /
+            Raised when the server seed does not match the round commitment.
+        """
+
+        if not isinstance(self.round, ChanceRound):
+            raise TypeError("Prepared chance round requires ChanceRound")
+        if not isinstance(self.server_seed, ServerSeed):
+            raise TypeError("Prepared chance round requires ServerSeed")
+        if commit_server_seed(self.server_seed) != self.round.commitment:
+            raise ValueError(
+                "Prepared chance server seed does not match its commitment"
+            )
+
+    def settle(self) -> ChanceSettlement:
+        """@brief 使用保存的服务器种子结算该轮 / Settle the round using its retained server seed.
+
+        @return 包含可复验公平性证明的结算 / Settlement containing a verifiable fairness proof.
+        """
+
+        return self.round.settle(self.server_seed)
+
+
+@dataclass(frozen=True, slots=True)
 class ChanceSettlement:
     """@brief 一轮免费金币随机活动的结算 / Settlement of one free-token chance activity.
 
@@ -325,6 +479,99 @@ class ChanceSettlement:
         """
 
         return self.credited - self.round.stake.value
+
+
+@dataclass(frozen=True, slots=True)
+class ChanceRoundView:
+    """@brief 可安全公开的耐久轮次领域视图 / Durable domain view safe for public disclosure.
+
+    结算前只显示承诺；结算后仅通过 ``settlement.proof`` 显示协议要求揭示的种子。
+    Before settlement the view exposes only the commitment. After settlement it exposes the seed
+    only through the protocol-mandated ``settlement.proof``.
+
+    @param committed_round 已公开承诺的轮次快照 / Publicly committed round snapshot.
+    @param status 轮次生命周期状态 / Round lifecycle status.
+    @param settlement 已结算时的公开结算；未结算为 None / Public settlement when settled; None otherwise.
+    """
+
+    committed_round: CommittedChanceRound
+    """@brief 已公开承诺的轮次 / Publicly committed round."""
+
+    status: ChanceRoundStatus
+    """@brief 轮次生命周期状态 / Round lifecycle status."""
+
+    settlement: ChanceSettlement | None = None
+    """@brief 可公开结算或空值 / Public settlement or null."""
+
+    def __post_init__(self) -> None:
+        """@brief 校验公开视图与结算快照一致 / Validate public-view and settlement-snapshot consistency.
+
+        @return None / None.
+        @raise TypeError 承诺轮次、状态或结算类型不匹配时抛出 /
+            Raised when the committed round, status, or settlement has the wrong type.
+        @raise ValueError 生命周期状态和结算快照不一致时抛出 /
+            Raised when lifecycle status and settlement snapshot disagree.
+        """
+
+        if not isinstance(self.committed_round, CommittedChanceRound):
+            raise TypeError("Chance round view requires CommittedChanceRound")
+        if not isinstance(self.status, ChanceRoundStatus):
+            raise TypeError("Chance round view requires ChanceRoundStatus")
+        if self.settlement is not None and not isinstance(
+            self.settlement, ChanceSettlement
+        ):
+            raise TypeError("Chance round view settlement must be ChanceSettlement")
+        if self.status is ChanceRoundStatus.COMMITTED and self.settlement is not None:
+            raise ValueError("Committed chance view cannot expose a settlement")
+        if self.status is ChanceRoundStatus.SETTLED and self.settlement is None:
+            raise ValueError("Settled chance view requires a settlement")
+        if self.settlement is None:
+            return
+
+        round_snapshot = self.settlement.round
+        if round_snapshot.round_id != self.committed_round.round_id:
+            raise ValueError("Chance view settlement belongs to another round")
+        if round_snapshot.player_id != self.committed_round.player_id:
+            raise ValueError("Chance view settlement belongs to another owner")
+        if round_snapshot.scope != self.committed_round.scope:
+            raise ValueError("Chance view settlement belongs to another scope")
+        if round_snapshot.commitment != self.committed_round.commitment:
+            raise ValueError("Chance view settlement has another commitment")
+        if round_snapshot.ruleset != self.committed_round.ruleset:
+            raise ValueError("Chance view settlement has another ruleset")
+        if round_snapshot.rule_code != self.committed_round.rule_code:
+            raise ValueError("Chance view settlement has another selected rule")
+        if round_snapshot.stake != self.committed_round.stake:
+            raise ValueError("Chance view settlement has another free-token stake")
+        if round_snapshot.nonce != self.committed_round.nonce:
+            raise ValueError("Chance view settlement has another nonce")
+
+    @property
+    def round_id(self) -> UUID:
+        """@brief 返回耐久轮次 UUID / Return the durable round UUID.
+
+        @return 轮次 UUID / Round UUID.
+        """
+
+        return self.committed_round.round_id
+
+    @property
+    def owner_id(self) -> int:
+        """@brief 返回拥有免费押注的玩家 / Return the player owning the free-token stake.
+
+        @return 玩家标识 / Player identity.
+        """
+
+        return self.committed_round.player_id
+
+    @property
+    def scope(self) -> RoundScope:
+        """@brief 返回明确个人或群组范围 / Return the explicit personal or group scope.
+
+        @return 轮次范围 / Round scope.
+        """
+
+        return self.committed_round.scope
 
 
 def _validate_round_core(

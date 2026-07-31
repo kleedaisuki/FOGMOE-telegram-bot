@@ -25,9 +25,8 @@ from fogmoe_bot.application.assistant.inference_command import (
     DurableUserProfile,
 )
 from fogmoe_bot.application.assistant.streaming import (
-    AssistantStreamFrame,
-    AssistantStreamKind,
     AssistantStreamSession,
+    AssistantStreamTarget,
 )
 from fogmoe_bot.application.assistant.tool_runtime import ToolExecutionContext
 from fogmoe_bot.application.context_window.projection import (
@@ -52,6 +51,10 @@ from fogmoe_bot.domain.assistant.messages import (
     ToolCallPart,
     ToolResultPart,
     text_message,
+)
+from fogmoe_bot.domain.assistant.streaming import (
+    AssistantStreamFrame,
+    AssistantStreamKind,
 )
 from fogmoe_bot.domain.assistant.request_metadata import RequestMeta
 from fogmoe_bot.domain.context import ContextState
@@ -371,14 +374,21 @@ class _RecordingStreamProjection:
         """@brief 初始化 frame 日志 / Initialize the frame log."""
 
         self.frames: list[AssistantStreamFrame] = []
+        self.targets: list[AssistantStreamTarget] = []
 
-    async def project(self, frame: AssistantStreamFrame) -> None:
+    async def project(
+        self,
+        target: AssistantStreamTarget,
+        frame: AssistantStreamFrame,
+    ) -> None:
         """@brief 记录流 frame / Record one stream frame.
 
+        @param target 显式投影目标 / Explicit projection target.
         @param frame 当前累计状态 / Current cumulative state.
         @return None / None.
         """
 
+        self.targets.append(target)
         self.frames.append(frame)
 
 
@@ -443,6 +453,15 @@ def test_configured_stream_reaches_inference_without_precommitting_a_terminal() 
         ]
         assert projection.frames[-1].cumulative_text == "streamed "
         assert all(frame.generation == 2 for frame in projection.frames)
+        assert all(
+            target
+            == AssistantStreamTarget(
+                chat_id=-100,
+                is_group=True,
+                message_thread_id=9,
+            )
+            for target in projection.targets
+        )
 
     asyncio.run(scenario())
 

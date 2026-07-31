@@ -6,14 +6,15 @@ from datetime import UTC, datetime
 import pytest
 
 from fogmoe_bot.application.assistant.streaming import (
+    AssistantStreamSession,
+    AssistantStreamTarget,
+)
+from fogmoe_bot.domain.assistant.streaming import (
     AssistantActivityKind,
     AssistantActivityStatus,
-    AssistantStreamAddress,
     AssistantStreamFrame,
     AssistantStreamKind,
-    AssistantStreamSession,
     AssistantStreamState,
-    stable_telegram_draft_id,
 )
 from fogmoe_bot.domain.conversation.identity import TurnId
 
@@ -34,13 +35,19 @@ class _BlockingTerminalProjection:
         self.frames: list[AssistantStreamFrame] = []
         """@brief 已完成入队的 frames / Frames whose enqueue completed."""
 
-    async def project(self, frame: AssistantStreamFrame) -> None:
+    async def project(
+        self,
+        target: AssistantStreamTarget,
+        frame: AssistantStreamFrame,
+    ) -> None:
         """@brief 记录普通帧并阻塞终态帧 / Record ordinary frames and block a terminal frame.
 
+        @param target 显式投影目标 / Explicit projection target.
         @param frame 当前流帧 / Current stream frame.
         @return None / None.
         """
 
+        assert target.chat_id == 42
         if frame.kind in {
             AssistantStreamKind.SUSPENDED,
             AssistantStreamKind.COMPLETED,
@@ -51,17 +58,12 @@ class _BlockingTerminalProjection:
         self.frames.append(frame)
 
 
-def test_stream_frames_are_cumulative_monotonic_and_keep_one_draft_id() -> None:
-    """@brief 文本流形成单调累计帧且始终复用同一 draft ID / Text streaming forms monotonic cumulative frames sharing one draft ID."""
+def test_stream_frames_are_cumulative_and_monotonic() -> None:
+    """@brief 文本流形成单调累计帧 / Text streaming forms monotonic cumulative frames."""
 
     turn_id = TurnId.parse("00000000-0000-4000-8000-000000000042")
     state = AssistantStreamState.begin(
         turn_id=turn_id,
-        address=AssistantStreamAddress(
-            chat_id=42,
-            is_group=False,
-            message_thread_id=None,
-        ),
         generation=3,
         revision=0,
         emitted_at=NOW,
@@ -87,22 +89,39 @@ def test_stream_frames_are_cumulative_monotonic_and_keep_one_draft_id() -> None:
     assert first.delta_text == "Hel"
     assert second.delta_text == "lo"
     assert completed.cumulative_text == "Hello"
-    assert {frame.draft_id for frame in (started, first, second, completed)} == {
-        stable_telegram_draft_id(turn_id)
-    }
+    assert not hasattr(completed, "chat_id")
+    assert not hasattr(completed, "draft_id")
 
 
-def test_steer_revision_resets_preview_without_changing_draft_identity() -> None:
-    """@brief steer 提升 revision 并重置预览但不更换 draft identity / A steer advances the revision and resets the preview without changing draft identity."""
+def test_stream_aggregate_closes_construction_and_mutable_activity_state() -> None:
+    """@brief 聚合拒绝裸构造且不泄漏可变活动集合 /
+    The aggregate rejects bare construction and does not leak its mutable activity collection.
+
+    @return None / None.
+    """
+
+    with pytest.raises(TypeError, match=r"AssistantStreamState\.begin"):
+        AssistantStreamState()
+
+    state = AssistantStreamState.begin(
+        turn_id=TurnId.new(),
+        generation=1,
+        revision=0,
+        emitted_at=NOW,
+    )
+    state.commentary("checkpoint", "正在检查。", emitted_at=NOW)
+
+    assert isinstance(state.activities, tuple)
+    with pytest.raises(AttributeError):
+        state.activities = ()  # type: ignore[misc]
+
+
+def test_steer_revision_resets_provider_neutral_preview() -> None:
+    """@brief steer 提升 revision 并重置 provider-neutral 预览 / A steer advances the revision and resets the provider-neutral preview."""
 
     turn_id = TurnId.parse("00000000-0000-4000-8000-000000000043")
     state = AssistantStreamState.begin(
         turn_id=turn_id,
-        address=AssistantStreamAddress(
-            chat_id=-1001,
-            is_group=True,
-            message_thread_id=9,
-        ),
         generation=1,
         revision=0,
         emitted_at=NOW,
@@ -121,9 +140,6 @@ def test_steer_revision_resets_preview_without_changing_draft_identity() -> None
     assert revised.generation == 2
     assert revised.cumulative_text == ""
     assert fresh.cumulative_text == "fresh"
-    assert fresh.draft_id == revised.draft_id
-    assert fresh.message_thread_id == 9
-    assert fresh.is_group is True
 
 
 def test_activity_frames_keep_model_commentary_and_tool_identity_without_payloads() -> (
@@ -135,7 +151,6 @@ def test_activity_frames_keep_model_commentary_and_tool_identity_without_payload
 
     state = AssistantStreamState.begin(
         turn_id=TurnId.new(),
-        address=AssistantStreamAddress(42, False, None),
         generation=1,
         revision=0,
         emitted_at=NOW,
@@ -185,11 +200,6 @@ def test_stream_failure_exposes_only_a_stable_safe_code() -> None:
 
     state = AssistantStreamState.begin(
         turn_id=TurnId.new(),
-        address=AssistantStreamAddress(
-            chat_id=42,
-            is_group=False,
-            message_thread_id=None,
-        ),
         generation=1,
         revision=0,
         emitted_at=NOW,
@@ -203,7 +213,6 @@ def test_stream_failure_exposes_only_a_stable_safe_code() -> None:
 
     fresh = AssistantStreamState.begin(
         turn_id=TurnId.new(),
-        address=AssistantStreamAddress(42, False, None),
         generation=1,
         revision=0,
         emitted_at=NOW,
@@ -212,13 +221,17 @@ def test_stream_failure_exposes_only_a_stable_safe_code() -> None:
         fresh.fail("/srv/secret key=abc", emitted_at=NOW)
 
 
-def test_private_and_group_address_invariants_are_explicit() -> None:
+def test_private_and_group_target_invariants_are_explicit() -> None:
     """@brief 私聊拒绝 Topic，群聊要求数值 chat ID / Private chats reject topics and groups require numeric chat IDs."""
 
     with pytest.raises(ValueError, match="Private"):
-        AssistantStreamAddress(42, False, 7)
+        AssistantStreamTarget(chat_id=42, is_group=False, message_thread_id=7)
     with pytest.raises(ValueError, match="integer"):
-        AssistantStreamAddress("@channel", True, None)
+        AssistantStreamTarget(
+            chat_id="@channel",
+            is_group=True,
+            message_thread_id=None,
+        )
 
 
 def test_terminal_projection_finishes_enqueue_before_cancellation_propagates() -> None:
@@ -231,9 +244,13 @@ def test_terminal_projection_finishes_enqueue_before_cancellation_propagates() -
 
         projection = _BlockingTerminalProjection()
         session = AssistantStreamSession(
+            target=AssistantStreamTarget(
+                chat_id=42,
+                is_group=False,
+                message_thread_id=None,
+            ),
             state=AssistantStreamState.begin(
                 turn_id=TurnId.new(),
-                address=AssistantStreamAddress(42, False, None),
                 generation=1,
                 revision=0,
                 emitted_at=NOW,
