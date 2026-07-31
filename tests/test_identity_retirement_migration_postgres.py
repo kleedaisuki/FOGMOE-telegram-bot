@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy.exc import DBAPIError
 
 from fogmoe_bot.domain.assistant.messages import CanonicalMessage, ToolCallPart
@@ -339,6 +341,29 @@ def _scalar(
         sql=sql,
         tuples_only=True,
     )
+
+
+def _run_alembic_downgrade(
+    settings: DbctlSettings,
+    revision: str,
+) -> None:
+    """@brief 用与 dbctl 相同的显式属性执行真实降级 / Run a real downgrade with the same explicit attributes as dbctl.
+
+    @param settings 目标数据库设置 / Target database settings.
+    @param revision 目标 Alembic revision / Target Alembic revision.
+    @return None / None.
+    """
+
+    alembic_config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    alembic_config.attributes["database_url"] = (
+        migration_execution.maintenance_database_url(settings)
+    )
+    alembic_config.attributes["migration_schema"] = (
+        settings.maintenance.migration_schema
+    )
+    alembic_config.attributes["admin_user_id"] = settings.administrator.user_id
+    alembic_config.attributes["application_role"] = settings.application.username
+    command.downgrade(alembic_config, revision)
 
 
 def _seed_users_and_wallets(
@@ -783,7 +808,7 @@ def test_0062_business_data_matrix_and_fresh_head_are_transactional() -> None:
         )
         assert (
             _scalar(cluster, success, "SELECT version_num FROM infra.alembic_version;")
-            == "0074_retrieval_vector_job_state"
+            == "0075_user_profile_dream_state"
         )
         assert (
             _scalar(
@@ -863,7 +888,7 @@ def test_0062_business_data_matrix_and_fresh_head_are_transactional() -> None:
         )
         assert (
             _scalar(cluster, fresh, "SELECT version_num FROM infra.alembic_version;")
-            == "0074_retrieval_vector_job_state"
+            == "0075_user_profile_dream_state"
         )
         assert (
             _scalar(
@@ -1328,4 +1353,941 @@ def test_0074_preserves_business_data_and_atomically_rejects_ambiguity() -> None
                 "SELECT version_num FROM infra.alembic_version;",
             )
             == "0073_streaming_turn_steering"
+        )
+
+
+def _seed_0075_evidence_graph(
+    cluster: _EphemeralPostgres,
+    settings: DbctlSettings,
+    sources: tuple[tuple[int, int, int], ...],
+) -> None:
+    """@brief 建立 Dream 夹具的真实 Profile/evidence 来源图 / Build the real Profile/evidence source graph for Dream fixtures.
+
+    @param cluster 临时 PostgreSQL 集群 / Ephemeral PostgreSQL cluster.
+    @param settings 目标数据库设置 / Target database settings.
+    @param sources ``(user_id, event_id, observed_watermark)`` 元组 / ``(user_id, event_id, observed_watermark)`` tuples.
+    @return None / None.
+    """
+
+    user_values = ",\n".join(
+        f"({user_id}, {user_id}, 'telegram', 'dream-migration-{user_id}')"
+        for user_id, _, _ in sources
+    )
+    turn_values = ",\n".join(
+        "("
+        + ", ".join(
+            (
+                f"'75000000-0000-4000-8000-{event_id:012d}'",
+                f"'assistant-user:{user_id}'",
+                "'delivered'",
+                "'2035-02-03 04:05:06+00'",
+                "'2035-02-03 04:05:06+00'",
+                "'2035-02-03 04:05:06+00'",
+                "'scheduled.prompt'",
+                f"'dream-migration:{event_id}'",
+            )
+        )
+        + ")"
+        for user_id, event_id, _ in sources
+    )
+    evidence_values = ",\n".join(
+        "("
+        + ", ".join(
+            (
+                str(event_id),
+                f"'75000000-0000-4000-8000-{event_id:012d}'",
+                str(user_id),
+                "'migration source user text'",
+                "'migration source assistant text'",
+                "'2035-02-03 04:05:06+00'",
+                '\'{"display_name":"Migration source"}\'::JSONB',
+                f"lpad(to_hex({event_id}), 64, '0')",
+                "'2035-02-03 04:05:06+00'",
+            )
+        )
+        + ")"
+        for user_id, event_id, _ in sources
+    )
+    profile_values = ",\n".join(
+        "("
+        + ", ".join(
+            (
+                str(user_id),
+                "NULL",
+                str(observed_watermark),
+                "NULL",
+                "'2035-02-03 04:05:06+00'",
+                (
+                    "'2035-02-03 04:07:06+00'"
+                    if observed_watermark > 0
+                    else "'2035-02-03 04:05:06+00'"
+                ),
+            )
+        )
+        + ")"
+        for user_id, _, observed_watermark in sources
+    )
+    _maintenance_sql(
+        cluster,
+        settings,
+        f"""
+        INSERT INTO identity.users (id, tg_uid, provider, name)
+        VALUES {user_values};
+
+        INSERT INTO conversation.conversation_turns (
+          turn_id, conversation_id, state, created_at, updated_at, completed_at,
+          source_kind, source_key
+        ) VALUES {turn_values};
+
+        INSERT INTO user_profile.evidence_events (
+          event_id, source_turn_id, owner_user_id, user_text, assistant_text,
+          occurred_at, metadata, source_digest, projected_at
+        ) OVERRIDING SYSTEM VALUE VALUES {evidence_values};
+
+        INSERT INTO user_profile.profiles (
+          user_id, current_revision, observed_through_event_id, next_eligible_at,
+          created_at, updated_at
+        ) VALUES {profile_values};
+        """,
+    )
+
+
+def _seed_0075_dream_states(
+    cluster: _EphemeralPostgres,
+    settings: DbctlSettings,
+    *,
+    ambiguous_counter: bool,
+    malformed_operation: bool = False,
+    float_evidence_id: bool = False,
+    malformed_metadata: bool = False,
+    whitespace_error: bool = False,
+    whitespace_statement: bool = False,
+    nonpositive_owner: bool = False,
+    infinite_timestamp: bool = False,
+) -> None:
+    """@brief 在 0074 约束下写入五态或含糊 counter 夹具 / Seed five states or an ambiguous counter under 0074 constraints.
+
+    @param cluster 临时 PostgreSQL 集群 / Ephemeral PostgreSQL cluster.
+    @param settings 目标数据库设置 / Target database settings.
+    @param ambiguous_counter 是否只写入 version/attempt 不一致的 pending 行 / Whether to seed only a pending row with divergent version and attempts.
+    @param malformed_operation 是否只写入无法 hydrate 的 completed operation / Whether to seed only a completed operation that cannot hydrate.
+    @param float_evidence_id 是否写入 JSON float provenance ID / Whether to seed a JSON-float provenance ID.
+    @param malformed_metadata 是否写入无法 hydrate 的 metadata / Whether to seed metadata that cannot hydrate.
+    @param whitespace_error 是否写入纯空白 failure summary / Whether to seed a whitespace-only failure summary.
+    @param whitespace_statement 是否写入纯空白 upsert statement / Whether to seed a whitespace-only upsert statement.
+    @param nonpositive_owner 是否写入领域无法恢复的零 owner / Whether to seed a zero owner that the domain cannot restore.
+    @param infinite_timestamp 是否写入 Python 无法恢复的 infinity 时间 / Whether to seed an infinity timestamp that Python cannot restore.
+    @return None / None.
+    """
+
+    if (
+        sum(
+            (
+                ambiguous_counter,
+                malformed_operation,
+                float_evidence_id,
+                malformed_metadata,
+                whitespace_error,
+                whitespace_statement,
+                nonpositive_owner,
+                infinite_timestamp,
+            )
+        )
+        > 1
+    ):
+        raise ValueError("Choose exactly one ambiguous Dream fixture")
+    if nonpositive_owner:
+        _seed_0075_evidence_graph(cluster, settings, ((0, 75993, 0),))
+        _maintenance_sql(
+            cluster,
+            settings,
+            """
+            INSERT INTO user_profile.dreams (
+              dream_id, user_id, base_revision, base_observed_through_event_id,
+              through_event_id, source_count, metadata, status, version,
+              attempt_count, next_attempt_at, claim_token, lease_expires_at,
+              result_patch, route_key, last_error, created_at, updated_at,
+              completed_at
+            ) VALUES (
+              '75000000-0000-4000-8000-000000000093', 0, 0, 0,
+              75993, 1, '{"display_name":"Zero owner"}'::JSONB,
+              'pending', 0, 0, '2035-02-03 04:05:06+00', NULL, NULL,
+              NULL, NULL, NULL, '2035-02-03 04:05:06+00',
+              '2035-02-03 04:05:06+00', NULL
+            );
+
+            INSERT INTO user_profile.dream_sources (dream_id, ordinal, event_id)
+            VALUES ('75000000-0000-4000-8000-000000000093', 0, 75993);
+            """,
+        )
+        return
+    if infinite_timestamp:
+        _seed_0075_evidence_graph(cluster, settings, ((7592, 75992, 0),))
+        _maintenance_sql(
+            cluster,
+            settings,
+            """
+            INSERT INTO user_profile.dreams (
+              dream_id, user_id, base_revision, base_observed_through_event_id,
+              through_event_id, source_count, metadata, status, version,
+              attempt_count, next_attempt_at, claim_token, lease_expires_at,
+              result_patch, route_key, last_error, created_at, updated_at,
+              completed_at
+            ) VALUES (
+              '75000000-0000-4000-8000-000000000092', 7592, 0, 0,
+              75992, 1, '{"display_name":"Infinite time"}'::JSONB,
+              'pending', 0, 0, 'infinity', NULL, NULL, NULL, NULL, NULL,
+              'infinity', 'infinity', NULL
+            );
+
+            INSERT INTO user_profile.dream_sources (dream_id, ordinal, event_id)
+            VALUES ('75000000-0000-4000-8000-000000000092', 0, 75992);
+            """,
+        )
+        return
+    if ambiguous_counter:
+        _seed_0075_evidence_graph(cluster, settings, ((7599, 75999, 0),))
+        _maintenance_sql(
+            cluster,
+            settings,
+            """
+            INSERT INTO user_profile.dreams (
+              dream_id, user_id, base_revision, base_observed_through_event_id,
+              through_event_id, source_count, metadata, status, version,
+              attempt_count, next_attempt_at, claim_token, lease_expires_at,
+              result_patch, route_key, last_error, created_at, updated_at,
+              completed_at
+            ) VALUES (
+              '75000000-0000-4000-8000-000000000099', 7599, 0, 0,
+              75999, 1, '{"display_name":"Ambiguous"}'::JSONB, 'pending', 1,
+              0, '2035-02-03 04:05:06+00', NULL, NULL,
+              NULL, NULL, NULL, '2035-02-03 04:05:06+00',
+              '2035-02-03 04:05:06+00', NULL
+            );
+
+            INSERT INTO user_profile.dream_sources (dream_id, ordinal, event_id)
+            VALUES ('75000000-0000-4000-8000-000000000099', 0, 75999);
+            """,
+        )
+        return
+    if malformed_metadata:
+        _seed_0075_evidence_graph(cluster, settings, ((7596, 75996, 0),))
+        _maintenance_sql(
+            cluster,
+            settings,
+            """
+            INSERT INTO user_profile.dreams (
+              dream_id, user_id, base_revision, base_observed_through_event_id,
+              through_event_id, source_count, metadata, status, version,
+              attempt_count, next_attempt_at, claim_token, lease_expires_at,
+              result_patch, route_key, last_error, created_at, updated_at,
+              completed_at
+            ) VALUES (
+              '75000000-0000-4000-8000-000000000096', 7596, 0, 0,
+              75996, 1, '{"display_name":"\\u00a0"}'::JSONB, 'pending', 0, 0,
+              '2035-02-03 04:05:06+00', NULL, NULL, NULL, NULL, NULL,
+              '2035-02-03 04:05:06+00', '2035-02-03 04:05:06+00', NULL
+            );
+
+            INSERT INTO user_profile.dream_sources (dream_id, ordinal, event_id)
+            VALUES ('75000000-0000-4000-8000-000000000096', 0, 75996);
+            """,
+        )
+        return
+    if whitespace_error:
+        _seed_0075_evidence_graph(cluster, settings, ((7595, 75995, 0),))
+        _maintenance_sql(
+            cluster,
+            settings,
+            """
+            INSERT INTO user_profile.dreams (
+              dream_id, user_id, base_revision, base_observed_through_event_id,
+              through_event_id, source_count, metadata, status, version,
+              attempt_count, next_attempt_at, claim_token, lease_expires_at,
+              result_patch, route_key, last_error, created_at, updated_at,
+              completed_at
+            ) VALUES (
+              '75000000-0000-4000-8000-000000000095', 7595, 0, 0,
+              75995, 1, '{"display_name":"Whitespace error"}'::JSONB,
+              'retry_wait', 1, 1, '2035-02-03 04:08:06+00', NULL, NULL,
+              NULL, NULL, E'\\t', '2035-02-03 04:05:06+00',
+              '2035-02-03 04:07:06+00', NULL
+            );
+
+            INSERT INTO user_profile.dream_sources (dream_id, ordinal, event_id)
+            VALUES ('75000000-0000-4000-8000-000000000095', 0, 75995);
+            """,
+        )
+        return
+    if whitespace_statement:
+        _seed_0075_evidence_graph(cluster, settings, ((7594, 75994, 75994),))
+        _maintenance_sql(
+            cluster,
+            settings,
+            """
+            INSERT INTO user_profile.dreams (
+              dream_id, user_id, base_revision, base_observed_through_event_id,
+              through_event_id, source_count, metadata, status, version,
+              attempt_count, next_attempt_at, claim_token, lease_expires_at,
+              result_patch, route_key, last_error, created_at, updated_at,
+              completed_at
+            ) VALUES (
+              '75000000-0000-4000-8000-000000000094', 7594, 0, 0,
+              75994, 1, '{"display_name":"Whitespace statement"}'::JSONB,
+              'completed', 1, 1, NULL, NULL, NULL,
+              '{"prompt_version":1,"operations":[{"op":"upsert","key":"fact.note","kind":"fact","statement":"\u00a0","confidence":"explicit","evidence_event_ids":[75994]}]}'::JSONB,
+              'fixture/profile-model', NULL, '2035-02-03 04:05:06+00',
+              '2035-02-03 04:07:06+00', '2035-02-03 04:07:06+00'
+            );
+
+            INSERT INTO user_profile.dream_sources (dream_id, ordinal, event_id)
+            VALUES ('75000000-0000-4000-8000-000000000094', 0, 75994);
+            """,
+        )
+        return
+    if float_evidence_id:
+        _seed_0075_evidence_graph(cluster, settings, ((7597, 75997, 75997),))
+        _maintenance_sql(
+            cluster,
+            settings,
+            """
+            INSERT INTO user_profile.dreams (
+              dream_id, user_id, base_revision, base_observed_through_event_id,
+              through_event_id, source_count, metadata, status, version,
+              attempt_count, next_attempt_at, claim_token, lease_expires_at,
+              result_patch, route_key, last_error, created_at, updated_at,
+              completed_at
+            ) VALUES (
+              '75000000-0000-4000-8000-000000000097', 7597, 0, 0,
+              75997, 1, '{"display_name":"Float provenance"}'::JSONB,
+              'completed', 1, 1, NULL, NULL, NULL,
+              '{"prompt_version":1,"operations":[{"op":"delete","key":"fact.legacy","evidence_event_ids":[75997.0]}]}'::JSONB,
+              'fixture/profile-model', NULL, '2035-02-03 04:05:06+00',
+              '2035-02-03 04:07:06+00', '2035-02-03 04:07:06+00'
+            );
+
+            INSERT INTO user_profile.dream_sources (dream_id, ordinal, event_id)
+            VALUES ('75000000-0000-4000-8000-000000000097', 0, 75997);
+            """,
+        )
+        return
+    if malformed_operation:
+        _seed_0075_evidence_graph(cluster, settings, ((7598, 75998, 75998),))
+        _maintenance_sql(
+            cluster,
+            settings,
+            """
+            INSERT INTO user_profile.dreams (
+              dream_id, user_id, base_revision, base_observed_through_event_id,
+              through_event_id, source_count, metadata, status, version,
+              attempt_count, next_attempt_at, claim_token, lease_expires_at,
+              result_patch, route_key, last_error, created_at, updated_at,
+              completed_at
+            ) VALUES (
+              '75000000-0000-4000-8000-000000000098', 7598, 0, 0,
+              75998, 1, '{"display_name":"Invalid result"}'::JSONB, 'completed', 1,
+              1, NULL, NULL, NULL,
+              '{"prompt_version":1,"operations":[null]}'::JSONB,
+              'fixture/profile-model', NULL,
+              '2035-02-03 04:05:06+00', '2035-02-03 04:07:06+00',
+              '2035-02-03 04:07:06+00'
+            );
+
+            INSERT INTO user_profile.dream_sources (dream_id, ordinal, event_id)
+            VALUES ('75000000-0000-4000-8000-000000000098', 0, 75998);
+            """,
+        )
+        return
+
+    _seed_0075_evidence_graph(
+        cluster,
+        settings,
+        (
+            (7501, 75001, 0),
+            (7502, 75002, 0),
+            (7503, 75003, 0),
+            (7504, 75004, 75004),
+            (7505, 75005, 0),
+        ),
+    )
+    _maintenance_sql(
+        cluster,
+        settings,
+        """
+        INSERT INTO user_profile.dreams (
+          dream_id, user_id, base_revision, base_observed_through_event_id,
+          through_event_id, source_count, metadata, status, version,
+          attempt_count, next_attempt_at, claim_token, lease_expires_at,
+          result_patch, route_key, last_error, created_at, updated_at,
+          completed_at
+        ) VALUES
+          (
+            '75000000-0000-4000-8000-000000000001', 7501, 0, 0,
+            75001, 1, '{"display_name":"Pending"}'::JSONB, 'pending', 0, 0,
+            '2035-02-03 04:05:06+00', NULL, NULL, NULL, NULL, NULL,
+            '2035-02-03 04:05:06+00', '2035-02-03 04:05:06+00', NULL
+          ),
+          (
+            '75000000-0000-4000-8000-000000000002', 7502, 0, 0,
+            75002, 1, '{"display_name":"Processing"}'::JSONB, 'processing', 1, 1,
+            NULL, '75000000-0000-4000-8000-000000000012',
+            '2035-02-03 04:10:06+00', NULL, NULL, NULL,
+            '2035-02-03 04:05:06+00', '2035-02-03 04:06:06+00', NULL
+          ),
+          (
+            '75000000-0000-4000-8000-000000000003', 7503, 0, 0,
+            75003, 1, '{"display_name":"Retry"}'::JSONB, 'retry_wait', 2, 2,
+            '2035-02-03 04:08:06+00', NULL, NULL, NULL, NULL,
+            'provider unavailable', '2035-02-03 04:05:06+00',
+            '2035-02-03 04:07:06+00', NULL
+          ),
+          (
+            '75000000-0000-4000-8000-000000000004', 7504, 0, 0,
+            75004, 1, '{"display_name":"Completed"}'::JSONB, 'completed', 1, 1,
+            NULL, NULL, NULL,
+            '{"prompt_version":1,"operations":[]}'::JSONB,
+            'fixture/profile-model', NULL, '2035-02-03 04:05:06+00',
+            '2035-02-03 04:07:06+00', '2035-02-03 04:07:06+00'
+          ),
+          (
+            '75000000-0000-4000-8000-000000000005', 7505, 0, 0,
+            75005, 1, '{"display_name":"Failed"}'::JSONB, 'failed_final', 3, 3,
+            NULL, NULL, NULL, NULL, NULL, 'retry budget exhausted',
+            '2035-02-03 04:05:06+00', '2035-02-03 04:09:06+00',
+            '2035-02-03 04:09:06+00'
+          );
+
+        INSERT INTO user_profile.dream_sources (dream_id, ordinal, event_id) VALUES
+          ('75000000-0000-4000-8000-000000000001', 0, 75001),
+          ('75000000-0000-4000-8000-000000000002', 0, 75002),
+          ('75000000-0000-4000-8000-000000000003', 0, 75003),
+          ('75000000-0000-4000-8000-000000000004', 0, 75004),
+          ('75000000-0000-4000-8000-000000000005', 0, 75005);
+        """,
+    )
+
+
+def _dream_business_digest(
+    cluster: _EphemeralPostgres,
+    settings: DbctlSettings,
+) -> str:
+    """@brief 摘要 Dream 的全部持久化业务列 / Hash every persisted Dream business column.
+
+    @param cluster 临时 PostgreSQL 集群 / Ephemeral PostgreSQL cluster.
+    @param settings 目标数据库设置 / Target database settings.
+    @return 按 Dream ID 排序后的稳定 MD5 摘要 / Stable MD5 digest ordered by Dream ID.
+    """
+
+    return _scalar(
+        cluster,
+        settings,
+        """
+        SELECT md5(string_agg(to_jsonb(dream)::TEXT, E'\\x1e' ORDER BY dream_id))
+        FROM user_profile.dreams AS dream;
+        """,
+    )
+
+
+def _dream_constraint_digest(
+    cluster: _EphemeralPostgres,
+    settings: DbctlSettings,
+) -> str:
+    """@brief 摘要 Dream 的完整约束 catalog / Hash the complete Dream constraint catalog.
+
+    @param cluster 临时 PostgreSQL 集群 / Ephemeral PostgreSQL cluster.
+    @param settings 目标数据库设置 / Target database settings.
+    @return 名称、定义和验证状态的稳定 MD5 / Stable MD5 of names, definitions, and validation states.
+    """
+
+    return _scalar(
+        cluster,
+        settings,
+        """
+        SELECT md5(string_agg(
+          conname || E'\\x1f' || pg_get_constraintdef(oid) || E'\\x1f'
+          || convalidated::TEXT,
+          E'\\x1e' ORDER BY conname
+        ))
+        FROM pg_constraint
+        WHERE conrelid = 'user_profile.dreams'::REGCLASS;
+        """,
+    )
+
+
+def test_0075_preserves_all_five_states_and_atomically_rejects_ambiguity() -> None:
+    """@brief 0075 原样保留合法五态，并原子拒绝无法恢复的持久化值 / 0075 preserves all five valid states and atomically rejects non-hydratable persistence values.
+
+    @return None / None.
+    @note 测试从真实 0074 schema 升级，摘要覆盖 Dream 行的全部列；失败场景同时证明
+        数据与 Alembic revision 均停留在 0074。/ The test upgrades a real 0074 schema and
+        hashes every Dream column; the failure case proves that both data and the Alembic revision
+        remain at 0074.
+    """
+
+    with _postgres_cluster() as cluster:
+        template_database = "fogmoe_test_0074_dream_template"
+        template = _bootstrap_database(cluster, template_database)
+        migration_execution.run_alembic(
+            settings=template,
+            revision="0074_retrieval_vector_job_state",
+            dry_run=False,
+        )
+
+        safe = _clone_database(
+            cluster,
+            template=template_database,
+            database="fogmoe_test_0075_dream_safe",
+        )
+        _seed_0075_dream_states(cluster, safe, ambiguous_counter=False)
+        assert (
+            _scalar(
+                cluster,
+                safe,
+                """
+                SELECT count(*)
+                FROM user_profile.dreams AS dream
+                JOIN user_profile.profiles AS profile ON profile.user_id = dream.user_id
+                WHERE COALESCE(profile.current_revision, 0) = dream.base_revision
+                  AND profile.observed_through_event_id = CASE
+                    WHEN dream.status = 'completed' THEN dream.through_event_id
+                    ELSE dream.base_observed_through_event_id
+                  END
+                  AND dream.source_count = (
+                    SELECT count(*) FROM user_profile.dream_sources AS source
+                    WHERE source.dream_id = dream.dream_id
+                  )
+                  AND dream.base_observed_through_event_id < (
+                    SELECT min(source.event_id)
+                    FROM user_profile.dream_sources AS source
+                    WHERE source.dream_id = dream.dream_id
+                  )
+                  AND dream.through_event_id = (
+                    SELECT max(source.event_id)
+                    FROM user_profile.dream_sources AS source
+                    WHERE source.dream_id = dream.dream_id
+                  )
+                  AND 0 = (
+                    SELECT min(source.ordinal)
+                    FROM user_profile.dream_sources AS source
+                    WHERE source.dream_id = dream.dream_id
+                  )
+                  AND dream.source_count - 1 = (
+                    SELECT max(source.ordinal)
+                    FROM user_profile.dream_sources AS source
+                    WHERE source.dream_id = dream.dream_id
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM user_profile.dream_sources AS source
+                    JOIN user_profile.evidence_events AS evidence
+                      ON evidence.event_id = source.event_id
+                    WHERE source.dream_id = dream.dream_id
+                      AND evidence.owner_user_id <> dream.user_id
+                  );
+                """,
+            )
+            == "5"
+        )
+        safe_before = _dream_business_digest(cluster, safe)
+        safe_catalog_before = _dream_constraint_digest(cluster, safe)
+
+        migration_execution.run_alembic(
+            settings=safe,
+            revision="0075_user_profile_dream_state",
+            dry_run=False,
+        )
+
+        assert _dream_business_digest(cluster, safe) == safe_before
+        assert (
+            _scalar(cluster, safe, "SELECT count(*) FROM user_profile.dreams;") == "5"
+        )
+        assert (
+            _scalar(
+                cluster,
+                safe,
+                """
+                SELECT count(*) FROM pg_constraint
+                WHERE conrelid = 'user_profile.dreams'::REGCLASS
+                  AND conname IN (
+                    'user_profile_dreams_owner_ck',
+                    'user_profile_dreams_timestamp_range_ck',
+                    'user_profile_dreams_counter_ck',
+                    'user_profile_dreams_metadata_ck',
+                    'user_profile_dreams_state_ck',
+                    'user_profile_dreams_result_payload_ck'
+                  )
+                  AND convalidated;
+                """,
+            )
+            == "6"
+        )
+        assert (
+            _scalar(cluster, safe, "SELECT version_num FROM infra.alembic_version;")
+            == "0075_user_profile_dream_state"
+        )
+
+        _run_alembic_downgrade(safe, "0074_retrieval_vector_job_state")
+
+        assert _dream_business_digest(cluster, safe) == safe_before
+        assert _dream_constraint_digest(cluster, safe) == safe_catalog_before
+        assert (
+            _scalar(
+                cluster,
+                safe,
+                """
+                SELECT count(*) FROM pg_constraint
+                WHERE conrelid = 'user_profile.dreams'::REGCLASS
+                  AND conname IN (
+                    'user_profile_dreams_ready_ck',
+                    'user_profile_dreams_lease_ck',
+                    'user_profile_dreams_terminal_ck',
+                    'user_profile_dreams_result_ck'
+                  );
+                """,
+            )
+            == "4"
+        )
+        assert (
+            _scalar(cluster, safe, "SELECT version_num FROM infra.alembic_version;")
+            == "0074_retrieval_vector_job_state"
+        )
+
+        nonpositive_owner = _clone_database(
+            cluster,
+            template=template_database,
+            database="fogmoe_test_0075_dream_nonpositive_owner",
+        )
+        _seed_0075_dream_states(
+            cluster,
+            nonpositive_owner,
+            ambiguous_counter=False,
+            nonpositive_owner=True,
+        )
+        owner_before = _dream_business_digest(cluster, nonpositive_owner)
+        owner_catalog_before = _dream_constraint_digest(cluster, nonpositive_owner)
+
+        with pytest.raises(DBAPIError, match="nonpositive owner identity"):
+            migration_execution.run_alembic(
+                settings=nonpositive_owner,
+                revision="0075_user_profile_dream_state",
+                dry_run=False,
+            )
+
+        assert _dream_business_digest(cluster, nonpositive_owner) == owner_before
+        assert (
+            _dream_constraint_digest(cluster, nonpositive_owner) == owner_catalog_before
+        )
+        assert (
+            _scalar(
+                cluster,
+                nonpositive_owner,
+                "SELECT (user_id = 0)::TEXT FROM user_profile.dreams;",
+            )
+            == "true"
+        )
+        assert (
+            _scalar(
+                cluster,
+                nonpositive_owner,
+                "SELECT version_num FROM infra.alembic_version;",
+            )
+            == "0074_retrieval_vector_job_state"
+        )
+
+        infinite_timestamp = _clone_database(
+            cluster,
+            template=template_database,
+            database="fogmoe_test_0075_dream_infinite_timestamp",
+        )
+        _seed_0075_dream_states(
+            cluster,
+            infinite_timestamp,
+            ambiguous_counter=False,
+            infinite_timestamp=True,
+        )
+        time_before = _dream_business_digest(cluster, infinite_timestamp)
+        time_catalog_before = _dream_constraint_digest(cluster, infinite_timestamp)
+
+        with pytest.raises(DBAPIError, match="outside the Python datetime range"):
+            migration_execution.run_alembic(
+                settings=infinite_timestamp,
+                revision="0075_user_profile_dream_state",
+                dry_run=False,
+            )
+
+        assert _dream_business_digest(cluster, infinite_timestamp) == time_before
+        assert (
+            _dream_constraint_digest(cluster, infinite_timestamp) == time_catalog_before
+        )
+        assert (
+            _scalar(
+                cluster,
+                infinite_timestamp,
+                "SELECT (created_at = 'infinity'::TIMESTAMPTZ)::TEXT "
+                "FROM user_profile.dreams;",
+            )
+            == "true"
+        )
+        assert (
+            _scalar(
+                cluster,
+                infinite_timestamp,
+                "SELECT version_num FROM infra.alembic_version;",
+            )
+            == "0074_retrieval_vector_job_state"
+        )
+
+        ambiguous = _clone_database(
+            cluster,
+            template=template_database,
+            database="fogmoe_test_0075_dream_ambiguous",
+        )
+        _seed_0075_dream_states(cluster, ambiguous, ambiguous_counter=True)
+        ambiguous_before = _dream_business_digest(cluster, ambiguous)
+        ambiguous_catalog_before = _dream_constraint_digest(cluster, ambiguous)
+
+        with pytest.raises(DBAPIError, match="version differing from attempt_count"):
+            migration_execution.run_alembic(
+                settings=ambiguous,
+                revision="0075_user_profile_dream_state",
+                dry_run=False,
+            )
+
+        assert _dream_business_digest(cluster, ambiguous) == ambiguous_before
+        assert _dream_constraint_digest(cluster, ambiguous) == ambiguous_catalog_before
+        assert (
+            _scalar(
+                cluster,
+                ambiguous,
+                "SELECT (version = 1 AND attempt_count = 0)::TEXT "
+                "FROM user_profile.dreams;",
+            )
+            == "true"
+        )
+        assert (
+            _scalar(
+                cluster,
+                ambiguous,
+                "SELECT version_num FROM infra.alembic_version;",
+            )
+            == "0074_retrieval_vector_job_state"
+        )
+
+        invalid_statement = _clone_database(
+            cluster,
+            template=template_database,
+            database="fogmoe_test_0075_dream_invalid_statement",
+        )
+        _seed_0075_dream_states(
+            cluster,
+            invalid_statement,
+            ambiguous_counter=False,
+            whitespace_statement=True,
+        )
+        statement_before = _dream_business_digest(cluster, invalid_statement)
+        statement_catalog_before = _dream_constraint_digest(cluster, invalid_statement)
+
+        with pytest.raises(DBAPIError, match="malformed result operation"):
+            migration_execution.run_alembic(
+                settings=invalid_statement,
+                revision="0075_user_profile_dream_state",
+                dry_run=False,
+            )
+
+        assert _dream_business_digest(cluster, invalid_statement) == statement_before
+        assert (
+            _dream_constraint_digest(cluster, invalid_statement)
+            == statement_catalog_before
+        )
+        assert (
+            _scalar(
+                cluster,
+                invalid_statement,
+                "SELECT version_num FROM infra.alembic_version;",
+            )
+            == "0074_retrieval_vector_job_state"
+        )
+
+        invalid_error = _clone_database(
+            cluster,
+            template=template_database,
+            database="fogmoe_test_0075_dream_invalid_error",
+        )
+        _seed_0075_dream_states(
+            cluster,
+            invalid_error,
+            ambiguous_counter=False,
+            whitespace_error=True,
+        )
+        error_before = _dream_business_digest(cluster, invalid_error)
+        error_catalog_before = _dream_constraint_digest(cluster, invalid_error)
+
+        with pytest.raises(DBAPIError, match="error outside a failure state"):
+            migration_execution.run_alembic(
+                settings=invalid_error,
+                revision="0075_user_profile_dream_state",
+                dry_run=False,
+            )
+
+        assert _dream_business_digest(cluster, invalid_error) == error_before
+        assert _dream_constraint_digest(cluster, invalid_error) == error_catalog_before
+        assert (
+            _scalar(
+                cluster,
+                invalid_error,
+                "SELECT version_num FROM infra.alembic_version;",
+            )
+            == "0074_retrieval_vector_job_state"
+        )
+
+        invalid_metadata = _clone_database(
+            cluster,
+            template=template_database,
+            database="fogmoe_test_0075_dream_invalid_metadata",
+        )
+        _seed_0075_dream_states(
+            cluster,
+            invalid_metadata,
+            ambiguous_counter=False,
+            malformed_metadata=True,
+        )
+        metadata_before = _dream_business_digest(cluster, invalid_metadata)
+        metadata_catalog_before = _dream_constraint_digest(cluster, invalid_metadata)
+
+        with pytest.raises(DBAPIError, match="metadata that cannot hydrate"):
+            migration_execution.run_alembic(
+                settings=invalid_metadata,
+                revision="0075_user_profile_dream_state",
+                dry_run=False,
+            )
+
+        assert _dream_business_digest(cluster, invalid_metadata) == metadata_before
+        assert (
+            _dream_constraint_digest(cluster, invalid_metadata)
+            == metadata_catalog_before
+        )
+        assert (
+            _scalar(
+                cluster,
+                invalid_metadata,
+                "SELECT version_num FROM infra.alembic_version;",
+            )
+            == "0074_retrieval_vector_job_state"
+        )
+
+        float_provenance = _clone_database(
+            cluster,
+            template=template_database,
+            database="fogmoe_test_0075_dream_float_provenance",
+        )
+        _seed_0075_dream_states(
+            cluster,
+            float_provenance,
+            ambiguous_counter=False,
+            float_evidence_id=True,
+        )
+        float_before = _dream_business_digest(cluster, float_provenance)
+        float_catalog_before = _dream_constraint_digest(cluster, float_provenance)
+
+        with pytest.raises(DBAPIError, match="malformed result operation"):
+            migration_execution.run_alembic(
+                settings=float_provenance,
+                revision="0075_user_profile_dream_state",
+                dry_run=False,
+            )
+
+        assert _dream_business_digest(cluster, float_provenance) == float_before
+        assert (
+            _dream_constraint_digest(cluster, float_provenance) == float_catalog_before
+        )
+        assert (
+            _scalar(
+                cluster,
+                float_provenance,
+                "SELECT version_num FROM infra.alembic_version;",
+            )
+            == "0074_retrieval_vector_job_state"
+        )
+
+        invalid_result = _clone_database(
+            cluster,
+            template=template_database,
+            database="fogmoe_test_0075_dream_invalid_result",
+        )
+        _seed_0075_dream_states(
+            cluster,
+            invalid_result,
+            ambiguous_counter=False,
+            malformed_operation=True,
+        )
+        invalid_result_before = _dream_business_digest(cluster, invalid_result)
+        invalid_result_catalog_before = _dream_constraint_digest(
+            cluster, invalid_result
+        )
+
+        with pytest.raises(DBAPIError, match="malformed result operation"):
+            migration_execution.run_alembic(
+                settings=invalid_result,
+                revision="0075_user_profile_dream_state",
+                dry_run=False,
+            )
+
+        assert _dream_business_digest(cluster, invalid_result) == invalid_result_before
+        assert (
+            _dream_constraint_digest(cluster, invalid_result)
+            == invalid_result_catalog_before
+        )
+        assert (
+            _scalar(
+                cluster,
+                invalid_result,
+                "SELECT version_num FROM infra.alembic_version;",
+            )
+            == "0074_retrieval_vector_job_state"
+        )
+
+        partial_ddl = _clone_database(
+            cluster,
+            template=template_database,
+            database="fogmoe_test_0075_dream_partial_ddl",
+        )
+        _maintenance_sql(
+            cluster,
+            partial_ddl,
+            "ALTER TABLE user_profile.dreams "
+            "DROP CONSTRAINT user_profile_dreams_result_ck;",
+        )
+        partial_catalog_before = _dream_constraint_digest(cluster, partial_ddl)
+
+        with pytest.raises(DBAPIError, match="user_profile_dreams_result_ck"):
+            migration_execution.run_alembic(
+                settings=partial_ddl,
+                revision="0075_user_profile_dream_state",
+                dry_run=False,
+            )
+
+        assert _dream_constraint_digest(cluster, partial_ddl) == partial_catalog_before
+        assert (
+            _scalar(
+                cluster,
+                partial_ddl,
+                """
+                SELECT count(*) FROM pg_constraint
+                WHERE conrelid = 'user_profile.dreams'::REGCLASS
+                  AND conname IN (
+                    'user_profile_dreams_ready_ck',
+                    'user_profile_dreams_lease_ck',
+                    'user_profile_dreams_terminal_ck'
+                  );
+                """,
+            )
+            == "3"
+        )
+        assert (
+            _scalar(
+                cluster,
+                partial_ddl,
+                "SELECT version_num FROM infra.alembic_version;",
+            )
+            == "0074_retrieval_vector_job_state"
         )

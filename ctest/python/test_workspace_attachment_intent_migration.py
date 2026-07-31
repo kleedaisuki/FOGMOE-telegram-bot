@@ -120,8 +120,8 @@ class WorkspaceAttachmentIntentMigrationTests(unittest.TestCase):
 
         snapshot = _SCHEMA_PATH.read_text(encoding="utf-8")
         for fragment in (
-            "through 0074_retrieval_vector_job_state",
-            "Alembic head: 0074_retrieval_vector_job_state",
+            "through 0075_user_profile_dream_state",
+            "Alembic head: 0075_user_profile_dream_state",
             "CREATE TABLE workspace.attachment_import_intents",
             "workspace_attachment_import_intents_validate_tr",
             "workspace_attachment_import_intents_immutable_tr",

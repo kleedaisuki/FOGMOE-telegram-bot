@@ -177,8 +177,8 @@ class WorkspaceMigrationTests(unittest.TestCase):
         """
 
         snapshot = _SCHEMA_PATH.read_text(encoding="utf-8")
-        self.assertIn("through 0074_retrieval_vector_job_state", snapshot)
-        self.assertIn("Alembic head: 0074_retrieval_vector_job_state", snapshot)
+        self.assertIn("through 0075_user_profile_dream_state", snapshot)
+        self.assertIn("Alembic head: 0075_user_profile_dream_state", snapshot)
         self.assertIn("CREATE SCHEMA IF NOT EXISTS workspace", snapshot)
         self.assertIn("CREATE TABLE workspace.runtimes", snapshot)
         self.assertIn("CREATE FUNCTION workspace.forbid_runtime_mutation", snapshot)

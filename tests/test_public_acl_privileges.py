@@ -124,7 +124,7 @@ def test_schema_snapshot_records_the_public_boundary_head() -> None:
 
     snapshot = _SNAPSHOT_PATH.read_text(encoding="utf-8")
 
-    assert "-- Alembic head: 0074_retrieval_vector_job_state" in snapshot
+    assert "-- Alembic head: 0075_user_profile_dream_state" in snapshot
     assert "REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC" in snapshot
     assert "REVOKE ALL PRIVILEGES ON TYPES FROM PUBLIC" in snapshot
     assert "fogmoe_snapshot_public_acl" in snapshot

@@ -1,7 +1,7 @@
 -- FogMoe PostgreSQL schema snapshot
 --
--- Source migrations: 0001_initial through 0074_retrieval_vector_job_state
--- Alembic head: 0074_retrieval_vector_job_state
+-- Source migrations: 0001_initial through 0075_user_profile_dream_state
+-- Alembic head: 0075_user_profile_dream_state
 --
 -- This file is a DDL-only snapshot.  It intentionally excludes data migrations
 -- (including the initial stake_reward_pool row and retired user-plan backfill) and the
@@ -1213,21 +1213,176 @@ CREATE TABLE user_profile.dreams (
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   completed_at TIMESTAMPTZ,
-  CONSTRAINT user_profile_dreams_ready_ck CHECK (
-    (status IN ('pending','retry_wait')) = (next_attempt_at IS NOT NULL)
+  CONSTRAINT user_profile_dreams_owner_ck CHECK (
+    user_id > 0
   ),
-  CONSTRAINT user_profile_dreams_lease_ck CHECK (
-    (status = 'processing') = (
-      claim_token IS NOT NULL AND lease_expires_at IS NOT NULL
+  CONSTRAINT user_profile_dreams_timestamp_range_ck CHECK (
+    created_at >= TIMESTAMPTZ '0001-01-01 00:00:00+00'
+    AND created_at < TIMESTAMPTZ '10000-01-01 00:00:00+00'
+    AND updated_at >= TIMESTAMPTZ '0001-01-01 00:00:00+00'
+    AND updated_at < TIMESTAMPTZ '10000-01-01 00:00:00+00'
+    AND (
+      next_attempt_at IS NULL
+      OR (
+        next_attempt_at >= TIMESTAMPTZ '0001-01-01 00:00:00+00'
+        AND next_attempt_at < TIMESTAMPTZ '10000-01-01 00:00:00+00'
+      )
+    )
+    AND (
+      lease_expires_at IS NULL
+      OR (
+        lease_expires_at >= TIMESTAMPTZ '0001-01-01 00:00:00+00'
+        AND lease_expires_at < TIMESTAMPTZ '10000-01-01 00:00:00+00'
+      )
+    )
+    AND (
+      completed_at IS NULL
+      OR (
+        completed_at >= TIMESTAMPTZ '0001-01-01 00:00:00+00'
+        AND completed_at < TIMESTAMPTZ '10000-01-01 00:00:00+00'
+      )
     )
   ),
-  CONSTRAINT user_profile_dreams_terminal_ck CHECK (
-    (status IN ('completed','failed_final')) = (completed_at IS NOT NULL)
-  ),
-  CONSTRAINT user_profile_dreams_result_ck CHECK (
-    status <> 'completed' OR (
-      result_patch IS NOT NULL AND route_key IS NOT NULL
+  CONSTRAINT user_profile_dreams_counter_ck CHECK (
+    version = attempt_count
+    AND (
+      (status = 'pending' AND version = 0 AND attempt_count = 0)
+      OR
+      (status <> 'pending' AND version >= 1 AND attempt_count >= 1)
     )
+  ),
+  CONSTRAINT user_profile_dreams_metadata_ck CHECK (
+    CASE
+      WHEN jsonb_typeof(metadata) = 'object' THEN
+        CASE
+          WHEN
+            jsonb_typeof(metadata -> 'display_name') = 'string'
+            AND char_length(btrim(metadata ->> 'display_name', E' \t\n\r\f\v' || U&'\001C\001D\001E\001F\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000')) BETWEEN 1 AND 256
+            AND (
+              NOT (metadata ? 'username')
+              OR metadata -> 'username' = 'null'::JSONB
+              OR (
+                jsonb_typeof(metadata -> 'username') = 'string'
+                AND char_length(btrim(metadata ->> 'username', E' \t\n\r\f\v' || U&'\001C\001D\001E\001F\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000')) BETWEEN 1 AND 64
+              )
+            )
+            AND (
+              NOT (metadata ? 'personal_info')
+              OR (
+                jsonb_typeof(metadata -> 'personal_info') = 'string'
+                AND char_length(metadata ->> 'personal_info') <= 500
+              )
+            )
+            AND (
+              NOT (metadata ? 'provider')
+              OR (
+                jsonb_typeof(metadata -> 'provider') = 'string'
+                AND (metadata ->> 'provider') ~ '^[a-z][a-z0-9_.-]{0,31}$'
+                AND char_length(btrim(metadata ->> 'provider', E' \t\n\r\f\v' || U&'\001C\001D\001E\001F\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000')) BETWEEN 1 AND 32
+              )
+            )
+          THEN TRUE
+          ELSE FALSE
+        END
+      ELSE FALSE
+    END
+  ),
+  CONSTRAINT user_profile_dreams_state_ck CHECK (
+    (
+      status = 'pending'
+      AND next_attempt_at IS NOT NULL
+      AND next_attempt_at = created_at
+      AND updated_at = created_at
+      AND claim_token IS NULL
+      AND lease_expires_at IS NULL
+      AND result_patch IS NULL
+      AND route_key IS NULL
+      AND last_error IS NULL
+      AND completed_at IS NULL
+    )
+    OR (
+      status = 'processing'
+      AND next_attempt_at IS NULL
+      AND claim_token IS NOT NULL
+      AND lease_expires_at IS NOT NULL
+      AND lease_expires_at > updated_at
+      AND result_patch IS NULL
+      AND route_key IS NULL
+      AND last_error IS NULL
+      AND completed_at IS NULL
+    )
+    OR (
+      status = 'retry_wait'
+      AND next_attempt_at IS NOT NULL
+      AND next_attempt_at >= updated_at
+      AND claim_token IS NULL
+      AND lease_expires_at IS NULL
+      AND result_patch IS NULL
+      AND route_key IS NULL
+      AND last_error IS NOT NULL
+      AND char_length(last_error) BETWEEN 1 AND 1000
+      AND char_length(btrim(last_error, E' \t\n\r\f\v' || U&'\001C\001D\001E\001F\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000')) > 0
+      AND completed_at IS NULL
+    )
+    OR (
+      status = 'completed'
+      AND next_attempt_at IS NULL
+      AND claim_token IS NULL
+      AND lease_expires_at IS NULL
+      AND result_patch IS NOT NULL
+      AND route_key IS NOT NULL
+      AND char_length(route_key) BETWEEN 1 AND 300
+      AND char_length(btrim(route_key, E' \t\n\r\f\v' || U&'\001C\001D\001E\001F\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000')) > 0
+      AND last_error IS NULL
+      AND completed_at IS NOT NULL
+      AND completed_at = updated_at
+    )
+    OR (
+      status = 'failed_final'
+      AND next_attempt_at IS NULL
+      AND claim_token IS NULL
+      AND lease_expires_at IS NULL
+      AND result_patch IS NULL
+      AND route_key IS NULL
+      AND last_error IS NOT NULL
+      AND char_length(last_error) BETWEEN 1 AND 1000
+      AND char_length(btrim(last_error, E' \t\n\r\f\v' || U&'\001C\001D\001E\001F\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000')) > 0
+      AND completed_at IS NOT NULL
+      AND completed_at = updated_at
+    )
+  ),
+  CONSTRAINT user_profile_dreams_result_payload_ck CHECK (
+    status <> 'completed'
+    OR CASE
+      WHEN jsonb_typeof(result_patch) = 'object'
+        AND jsonb_typeof(result_patch -> 'operations') = 'array'
+        AND jsonb_typeof(result_patch -> 'prompt_version') = 'number'
+      THEN
+        (result_patch ->> 'prompt_version') ~ '^[1-9][0-9]*$'
+        AND jsonb_array_length(result_patch -> 'operations') <= 64
+        AND NOT jsonb_path_exists(
+          result_patch,
+          '$.operations[*] ? (
+            @.type() != "object"
+            || !(exists(@.op) && @.op.type() == "string" && (@.op == "delete" || @.op == "upsert"))
+            || !(exists(@.key) && @.key.type() == "string" && @.key like_regex "^[a-z][a-z0-9_.-]{0,79}$")
+            || !(exists(@.evidence_event_ids) && @.evidence_event_ids.type() == "array" && @.evidence_event_ids.size() >= 1 && @.evidence_event_ids.size() <= 16)
+            || exists(@.evidence_event_ids[*] ? (@.type() != "number" || @ <= 0 || @ > 9223372036854775807 || @ != @.floor()))
+            || (@.op == "delete" && exists(@.keyvalue() ? (@.key != "op" && @.key != "key" && @.key != "evidence_event_ids")))
+            || (@.op == "upsert" && (
+                 !(exists(@.kind) && @.kind.type() == "string" && (@.kind == "fact" || @.kind == "preference" || @.kind == "goal" || @.kind == "interaction_style"))
+                 || !(exists(@.confidence) && @.confidence.type() == "string" && (@.confidence == "explicit" || @.confidence == "inferred"))
+                 || !(exists(@.statement) && @.statement.type() == "string" && @.statement like_regex "^.{1,250}(.{1,250})?$" flag "s" && @.statement like_regex ".*[^\u0009\u000A\u000B\u000C\u000D\u001C\u001D\u001E\u001F\u0020\u0085\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000].*" flag "s")
+                 || exists(@.keyvalue() ? (@.key != "op" && @.key != "key" && @.key != "kind" && @.key != "statement" && @.key != "confidence" && @.key != "evidence_event_ids"))
+               ))
+          )'
+        )
+        AND jsonb_path_query_array(
+          result_patch,
+          '$.operations[*].evidence_event_ids[*]'
+        )::TEXT ~ $integer_ids$^\[([1-9][0-9]*([[:space:]]*,[[:space:]]*[1-9][0-9]*)*)?\]$$integer_ids$
+      ELSE FALSE
+    END
   ),
   CONSTRAINT user_profile_dreams_time_ck CHECK (
     updated_at >= created_at
