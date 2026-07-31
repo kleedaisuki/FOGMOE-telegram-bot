@@ -237,7 +237,7 @@ python -m pip install '.[dashboard-gui]'
 fogmoe-dashboard-gui --config ./config.json --window 6h --auto-refresh 10
 ~~~
 
-需要自由查询时，可通过 `fogmoe-dbctl` 打开前台 psql；连接参数只从根目录
+需要自由查询时，可通过 `fogmoe-dbctl` 打开前台 psql；连接参数只从启动目录的
 `config.json` 读取：
 
 ~~~bash

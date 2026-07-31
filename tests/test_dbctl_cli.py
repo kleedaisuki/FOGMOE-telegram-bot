@@ -179,6 +179,49 @@ def test_cli_reads_root_configuration_once_and_injects_it(
     assert calls == [config_path, settings]
 
 
+def test_cli_uses_startup_directory_for_its_default_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """@brief 未显式指定时 dbctl 从启动目录读取配置 / dbctl reads its default config from the startup directory.
+
+    @param tmp_path 模拟普通 wheel 部署目录 / Simulated ordinary wheel deployment directory.
+    @param monkeypatch pytest 环境替换器 / pytest environment patcher.
+    @return None / None.
+    """
+
+    settings = _settings()
+    calls: list[object] = []
+
+    def fake_reader(path: Path) -> DbctlSettings:
+        """@brief 记录默认配置路径 / Record the default configuration path.
+
+        @param path 组合根传入的配置路径 / Configuration path supplied by the composition root.
+        @return 测试设置 / Test settings.
+        """
+
+        calls.append(path)
+        return settings
+
+    def fake_handler(*_args: object, **kwargs: object) -> None:
+        """@brief 记录注入设置 / Record injected settings.
+
+        @param _args 未使用的位置参数 / Unused positional arguments.
+        @param kwargs 处理函数关键字参数 / Handler keyword arguments.
+        @return None / None.
+        """
+
+        calls.append(kwargs["settings"])
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "read_dbctl_settings", fake_reader)
+    monkeypatch.setattr(bootstrap, "execute", fake_handler)
+
+    cli.main(["bootstrap"])
+
+    assert calls == [tmp_path / "config.json", settings]
+
+
 def test_commands_require_settings_injected_by_the_cli_root() -> None:
     """@brief 命令只接受根入口注入的配置 / Commands accept only settings injected by the CLI root.
 
