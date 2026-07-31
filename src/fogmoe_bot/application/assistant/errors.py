@@ -139,6 +139,20 @@ class AssistantInferenceUnavailableError(RuntimeError):
         self.last_error = last_error
 
 
+class AssistantInvariantError(RuntimeError):
+    """@brief Assistant 本地不变量被破坏 / Assistant local invariant was violated.
+
+    该类型跨 application 与 infrastructure 边界表达“重放相同 generation、切换 provider
+    或等待外部依赖都不能修复”的本地状态损坏、持久化后置条件或装配错误。它不是模型可恢复的
+    工具业务拒绝；后者必须作为公开 ``ToolRuntimeResult.error`` 回填给模型。/
+    This type crosses the application/infrastructure boundary for local state corruption,
+    persistence postcondition, or assembly errors that replaying the same generation, switching
+    providers, or waiting for an external dependency cannot repair. It is not a model-recoverable
+    business tool rejection; those must be returned to the model as public
+    ``ToolRuntimeResult.error`` values.
+    """
+
+
 class PartialAgentResponseError(RuntimeError):
     """@brief Runtime 已产生事件但 Agent 未完成 / Agent failed after Runtime events.
 
@@ -185,6 +199,7 @@ def is_local_invariant_failure(error: Exception | None) -> bool:
         error,
         (
             AgentCheckpointConflictError,
+            AssistantInvariantError,
             ToolEffectConflictError,
             ValueError,
             TypeError,
@@ -210,6 +225,7 @@ def is_deterministic_agent_failure(error: Exception) -> bool:
 
 __all__ = [
     "AssistantInferenceUnavailableError",
+    "AssistantInvariantError",
     "is_deterministic_agent_failure",
     "is_local_invariant_failure",
     "PartialAgentResponseError",

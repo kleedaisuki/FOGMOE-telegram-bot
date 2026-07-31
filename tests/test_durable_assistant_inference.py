@@ -13,6 +13,7 @@ from fogmoe_bot.application.assistant.durable_inference import (
 )
 from fogmoe_bot.application.assistant.errors import (
     AssistantInferenceUnavailableError,
+    AssistantInvariantError,
     ProviderContractError,
     ProviderFailure,
     ProviderFailureKind,
@@ -959,13 +960,13 @@ def test_local_agent_invariant_becomes_immediate_durable_final_failure() -> None
             @param tool_context durable 工具身份 / Durable tool identity.
             @param stream 可选易失流 / Optional ephemeral stream.
             @return 永不返回 / Never returns.
-            @raise ValueError 模拟 diary 默认值边界被破坏 /
-                Raised to simulate a broken diary-default boundary.
+            @raise AssistantInvariantError 模拟损坏的持久化 checkpoint /
+                Raised to simulate a corrupted persisted checkpoint.
             """
 
             del context, config, tool_context, stream
             self.calls += 1
-            raise ValueError("page must be an integer")
+            raise AssistantInvariantError("Invalid tool checkpoint row")
 
     async def scenario() -> None:
         """@brief 穿过真实 service 与 durable adapter 运行错误路径 / Run the error path through the real service and durable adapter.

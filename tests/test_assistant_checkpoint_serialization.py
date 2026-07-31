@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from fogmoe_bot.application.assistant.completion import AssistantCompletion
+from fogmoe_bot.application.assistant.errors import AssistantInvariantError
 from fogmoe_bot.domain.assistant.messages import CanonicalMessage, text_message
 from fogmoe_bot.domain.conversation.message import MessageRole
 from fogmoe_bot.infrastructure.database.assistant_tool_effects import (
@@ -72,7 +73,7 @@ def test_checkpoint_completion_rejects_legacy_wire_payload() -> None:
     @return None / None.
     """
 
-    with pytest.raises(RuntimeError, match="canonical V2"):
+    with pytest.raises(AssistantInvariantError, match="canonical V2"):
         _decode_completion(
             {
                 "content": "legacy",
@@ -90,7 +91,7 @@ def test_checkpoint_completion_rejects_extra_duplicate_tool_calls() -> None:
 
     message = _assistant_message().to_json()
 
-    with pytest.raises(RuntimeError, match="canonical V2"):
+    with pytest.raises(AssistantInvariantError, match="canonical V2"):
         _decode_completion(
             {
                 "schema_version": 2,
@@ -108,7 +109,7 @@ def test_checkpoint_completion_rejects_non_assistant_canonical_message() -> None
 
     user_message = text_message(MessageRole.USER, "hello")
 
-    with pytest.raises(RuntimeError, match="completion is invalid"):
+    with pytest.raises(AssistantInvariantError, match="completion is invalid"):
         _decode_completion(
             {
                 "schema_version": 2,

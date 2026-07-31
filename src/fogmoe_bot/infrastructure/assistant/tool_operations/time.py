@@ -1,5 +1,6 @@
 """@brief Assistant 当前时间工具操作 / Assistant current-time tool operation."""
 
+from fogmoe_bot.application.assistant.errors import AssistantInvariantError
 from fogmoe_bot.application.assistant.tool_runtime import ToolEffectRequest
 from fogmoe_bot.application.timekeeping.service import TimeService
 from fogmoe_bot.domain.conversation.payloads import JsonValue
@@ -28,13 +29,17 @@ def get_current_time(
     @param request 已验证工具请求 / Validated tool request.
     @param time 统一时间应用服务 / Unified time application service.
     @return Provider-neutral JSON 时间读数 / Provider-neutral JSON time reading.
+    @raise AssistantInvariantError 已声明 aware local time 却没有 UTC offset 时抛出 /
+        Raised when a declared aware local time unexpectedly lacks a UTC offset.
     """
 
     reading = time.now(optional_text(request.arguments, "timezone"))
     local = reading.local_datetime
     offset = local.utcoffset()
     if offset is None:
-        raise RuntimeError("Aware local time unexpectedly has no UTC offset")
+        raise AssistantInvariantError(
+            "Aware local time unexpectedly has no UTC offset"
+        )
     offset_seconds = int(offset.total_seconds())
     offset_sign = "+" if offset_seconds >= 0 else "-"
     offset_minutes = abs(offset_seconds) // 60

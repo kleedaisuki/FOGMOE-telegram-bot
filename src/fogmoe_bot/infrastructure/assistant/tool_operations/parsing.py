@@ -4,15 +4,22 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from fogmoe_bot.application.assistant.errors import AssistantInvariantError
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.temporal import ensure_utc
 
 
 def required_connection(connection: AsyncConnection | None) -> AsyncConnection:
-    """要求 caller 已打开 mutation transaction / Require a caller transaction."""
+    """@brief 要求 caller 已打开 mutation transaction / Require a caller transaction.
+
+    @param connection 可选活动数据库连接 / Optional active database connection.
+    @return 非空的活动数据库连接 / Non-null active database connection.
+    @raise AssistantInvariantError mutation operation 被错误地脱离 transaction 调用时抛出 /
+        Raised when a mutation operation is incorrectly invoked outside its transaction.
+    """
 
     if connection is None:
-        raise RuntimeError("Mutating tool requires an active transaction")
+        raise AssistantInvariantError("Mutating tool requires an active transaction")
     return connection
 
 

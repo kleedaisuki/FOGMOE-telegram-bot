@@ -18,6 +18,7 @@ from fogmoe_bot.application.assistant.completion import (
     AgentStepCheckpoint,
     AssistantCompletion,
 )
+from fogmoe_bot.application.assistant.errors import AssistantInvariantError
 from fogmoe_bot.application.assistant.progress import AssistantProgressItem
 from fogmoe_bot.application.assistant.tool_runtime import (
     PersistedToolResult,
@@ -249,7 +250,9 @@ class PostgresAssistantToolStore:
                 connection=connection,
             )
             if row is None:
-                raise RuntimeError("Agent checkpoint insert returned no row")
+                raise AssistantInvariantError(
+                    "Agent checkpoint insert returned no row"
+                )
             canonical = _checkpoint(
                 checkpoint.turn_id,
                 checkpoint.generation,
@@ -440,7 +443,7 @@ class PostgresAssistantToolStore:
                 connection=connection,
             )
             if row is None:
-                raise RuntimeError("Tool receipt insert returned no row")
+                raise AssistantInvariantError("Tool receipt insert returned no row")
             if str(row[0]) != request.request_hash:
                 raise ToolEffectConflictError(
                     f"Tool receipt request conflict for {request.invocation_id}"
@@ -473,7 +476,7 @@ class PostgresAssistantToolStore:
                 connection=connection,
             )
             if rowcount != 1:
-                raise RuntimeError("Could not claim tool receipt")
+                raise AssistantInvariantError("Could not claim tool receipt")
             return None
 
     async def _execute_atomic(
@@ -723,7 +726,7 @@ def _checkpoint(
 
     values = tuple(row)
     if len(values) != 3:
-        raise RuntimeError("Invalid tool checkpoint row")
+        raise AssistantInvariantError("Invalid tool checkpoint row")
     return AgentStepCheckpoint(
         turn_id=turn_id,
         step_no=step_no,
@@ -752,26 +755,33 @@ def _decode_completion(raw: object) -> AssistantCompletion:
 
     @param raw JSONB 值 / JSONB value.
     @return 从 message parts 派生工具调用的完成 / Completion with tool calls derived from message parts.
-    @raise RuntimeError checkpoint 不是规范 V2 载荷时抛出 / Raised when the checkpoint is not canonical V2.
+    @raise AssistantInvariantError checkpoint 不是规范 V2 载荷时抛出 /
+        Raised when the checkpoint is not canonical V2.
     """
 
     value = _json_value(raw)
     if not isinstance(value, dict):
-        raise RuntimeError("Tool checkpoint response must be an object")
+        raise AssistantInvariantError("Tool checkpoint response must be an object")
     expected = {"schema_version", "message"}
     if set(value) != expected or value.get("schema_version") != 2:
-        raise RuntimeError("Tool checkpoint response must be canonical V2")
+        raise AssistantInvariantError("Tool checkpoint response must be canonical V2")
     raw_message = value.get("message")
     if not isinstance(raw_message, Mapping):
-        raise RuntimeError("Tool checkpoint response message must be an object")
+        raise AssistantInvariantError(
+            "Tool checkpoint response message must be an object"
+        )
     try:
         message = CanonicalMessage.from_json(cast(Mapping[str, object], raw_message))
     except CanonicalMessageError as error:
-        raise RuntimeError("Tool checkpoint response message is invalid") from error
+        raise AssistantInvariantError(
+            "Tool checkpoint response message is invalid"
+        ) from error
     try:
         return AssistantCompletion(message=message)
     except ValueError as error:
-        raise RuntimeError("Tool checkpoint completion is invalid") from error
+        raise AssistantInvariantError(
+            "Tool checkpoint completion is invalid"
+        ) from error
 
 
 def _json_value(raw: object) -> JsonValue:
