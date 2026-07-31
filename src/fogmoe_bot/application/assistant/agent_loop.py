@@ -86,7 +86,6 @@ from .tool_runtime import (
     AgentRuntime,
     AssistantToolCallEvent,
     RuntimeEvent,
-    ToolEffectConflictError,
     ToolExecutionContext,
     ToolResultEvent,
     ToolRuntimeResult,
@@ -579,15 +578,12 @@ class AgentLoop:
                         tool_context=tool_context,
                         stream=stream,
                     )
-                except (
-                    ResumableAgentInterruptedError,
-                    StaleClaimError,
-                    ValueError,
-                    TypeError,
-                    AssertionError,
-                ):
-                    raise
                 except Exception as error:
+                    if isinstance(
+                        error,
+                        (ResumableAgentInterruptedError, StaleClaimError),
+                    ) or is_deterministic_agent_failure(error):
+                        raise
                     raise ResumableAgentInterruptedError(
                         str(error) or error.__class__.__name__
                     ) from error
@@ -606,16 +602,12 @@ class AgentLoop:
                     tool_context=cast(ToolExecutionContext, tool_context),
                     stream=stream,
                 )
-            except (
-                ResumableAgentInterruptedError,
-                StaleClaimError,
-                ToolEffectConflictError,
-                ValueError,
-                TypeError,
-                AssertionError,
-            ):
-                raise
             except Exception as error:
+                if isinstance(
+                    error,
+                    (ResumableAgentInterruptedError, StaleClaimError),
+                ) or is_deterministic_agent_failure(error):
+                    raise
                 raise ResumableAgentInterruptedError(
                     str(error) or error.__class__.__name__
                 ) from error

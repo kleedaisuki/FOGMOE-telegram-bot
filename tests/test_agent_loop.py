@@ -409,6 +409,26 @@ class _ProgressPersistence:
         self.items.append((context, item))
 
 
+class _KeyErrorProgressPersistence:
+    """@brief 模拟 progress receipt 的本地键不变量失败 / Simulate a local key-invariant failure in progress receipt persistence."""
+
+    async def publish_progress(
+        self,
+        context: ToolExecutionContext,
+        item: AssistantProgressItem,
+    ) -> None:
+        """@brief 抛出可识别的本地不变量异常 / Raise a recognizable local invariant exception.
+
+        @param context 当前工具执行上下文 / Current tool execution context.
+        @param item 待持久化的稳定过程项 / Stable progress item to persist.
+        @return 不返回 / Does not return.
+        @raise KeyError 模拟本地 receipt 键缺失 / Raised to simulate a missing local receipt key.
+        """
+
+        del context, item
+        raise KeyError("missing commentary receipt key")
+
+
 class _Memory:
     """@brief 记录每次 fresh WorkingMemory 查询 / Record every fresh WorkingMemory query."""
 
@@ -493,6 +513,21 @@ class _RejectedToolReceipts:
             {"error": "Diary page must be created sequentially"},
             replayed=False,
         )
+
+
+class _KeyErrorToolReceipts:
+    """@brief 模拟工具 receipt 的本地键不变量失败 / Simulate a local key-invariant failure in tool receipt persistence."""
+
+    async def execute(self, request: ToolEffectRequest) -> PersistedToolResult:
+        """@brief 抛出可识别的本地工具 receipt 错误 / Raise a recognizable local tool-receipt error.
+
+        @param request 工具副作用请求 / Tool effect request.
+        @return 不返回 / Does not return.
+        @raise KeyError 模拟本地 effect receipt 键缺失 / Raised to simulate a missing local effect-receipt key.
+        """
+
+        del request
+        raise KeyError("missing tool receipt key")
 
 
 class _FreshMemoryTool:
@@ -954,6 +989,93 @@ def test_business_tool_rejection_is_marked_error_and_allows_final_reply() -> Non
             event for event in response.events if event["type"] == "tool_result"
         )
         assert tool_event["is_error"] is True
+
+    asyncio.run(scenario())
+
+
+def test_local_key_error_after_tool_checkpoint_is_not_retried() -> None:
+    """@brief 工具 receipt 的 KeyError 必须成为终态本地失败 / A tool-receipt KeyError must remain a terminal local failure."""
+
+    async def scenario() -> None:
+        """@brief 在 checkpoint 后执行会失败的工具 receipt / Execute a tool receipt that fails after checkpointing.
+
+        @return None / None.
+        """
+
+        order: list[str] = []
+        loop = AgentLoop(
+            runtime=AgentRuntime(
+                catalog=DEFAULT_TOOL_CATALOG,
+                persistence=_KeyErrorToolReceipts(),
+            ),
+            completion=_Completion(
+                [
+                    _assistant_tool_call(
+                        "",
+                        call_id="key-error-tool",
+                        name="get_current_time",
+                        arguments={},
+                    )
+                ],
+                order,
+            ),
+            checkpoints=_Checkpoints(order),
+            memory=_Memory(),
+            telemetry=make_telemetry(),
+        )
+
+        with pytest.raises(KeyError, match="missing tool receipt key"):
+            await loop.run(
+                _context(),
+                AgentExecutionConfig(route=_route(), model="model", allow_tools=True),
+                tool_context=_tool_context(TurnId.new()),
+            )
+
+        assert order == ["provider:0", "checkpoint:0"]
+
+    asyncio.run(scenario())
+
+
+def test_local_key_error_in_commentary_progress_is_not_retried() -> None:
+    """@brief commentary receipt 的 KeyError 必须成为终态本地失败 / A commentary-receipt KeyError must remain a terminal local failure."""
+
+    async def scenario() -> None:
+        """@brief 在工具 checkpoint 后写入会失败的 commentary / Persist commentary that fails after a tool checkpoint.
+
+        @return None / None.
+        """
+
+        order: list[str] = []
+        loop = AgentLoop(
+            runtime=AgentRuntime(
+                catalog=DEFAULT_TOOL_CATALOG,
+                persistence=_Receipts(order),
+            ),
+            completion=_Completion(
+                [
+                    _assistant_tool_call(
+                        "我先查询一下时间。",
+                        call_id="key-error-commentary",
+                        name="get_current_time",
+                        arguments={},
+                    )
+                ],
+                order,
+            ),
+            checkpoints=_Checkpoints(order),
+            memory=_Memory(),
+            telemetry=make_telemetry(),
+            progress=_KeyErrorProgressPersistence(),
+        )
+
+        with pytest.raises(KeyError, match="missing commentary receipt key"):
+            await loop.run(
+                _context(),
+                AgentExecutionConfig(route=_route(), model="model", allow_tools=True),
+                tool_context=_tool_context(TurnId.new()),
+            )
+
+        assert order == ["provider:0", "checkpoint:0"]
 
     asyncio.run(scenario())
 

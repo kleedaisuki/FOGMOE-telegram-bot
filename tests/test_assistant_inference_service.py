@@ -602,10 +602,14 @@ def test_local_invariant_failure_is_not_wrapped_as_provider_unavailability() -> 
         runner=runner,
     )
 
-    with pytest.raises(ValueError, match="page must be an integer"):
-        asyncio.run(service.infer(_context([])))
+    for _ in range(3):
+        with pytest.raises(ValueError, match="page must be an integer"):
+            asyncio.run(service.infer(_context([])))
 
-    assert calls == [("primary", "model-a")]
+    assert calls == [("primary", "model-a")] * 3
+    permit = service.circuit.try_acquire("primary")
+    assert permit is not None
+    service.circuit.abandon(permit)
 
 
 def test_transient_provider_failure_still_falls_back_to_the_next_model() -> None:

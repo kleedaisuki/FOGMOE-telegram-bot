@@ -217,6 +217,11 @@ class AssistantInferenceService:
                 continue
             except Exception as error:
                 logging.warning("Assistant route %s failed: %s", route.route_id, error)
+                # A local invariant is neither evidence that this provider is unhealthy nor
+                # something another provider/model can repair.  Leave the permit unrecorded so
+                # ``finally`` abandons it, then let the durable boundary emit one final reply.
+                if is_local_invariant_failure(error):
+                    raise
                 self._circuit.record_failure(permit)
                 outcome_recorded = True
                 last_error = error
