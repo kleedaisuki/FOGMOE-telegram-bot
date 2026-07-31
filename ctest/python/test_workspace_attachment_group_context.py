@@ -12,7 +12,10 @@ from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectRequest,
     ToolExecutionContext,
 )
-from fogmoe_bot.application.chat.group_messages import GroupMessage
+from fogmoe_bot.domain.chat.group_messages import (
+    GroupContextQuery,
+    GroupMessage,
+)
 from fogmoe_bot.domain.conversation.identity import (
     ConversationId,
     DeliveryStreamId,
@@ -50,14 +53,7 @@ class _Groups:
 
         self._messages = tuple(messages)
 
-    async def fetch_before(
-        self,
-        group_id: int,
-        *,
-        message_thread_id: int | None,
-        before_message_id: int | None,
-        limit: int,
-    ) -> Sequence[GroupMessage]:
+    async def fetch_before(self, query: GroupContextQuery) -> Sequence[GroupMessage]:
         """@brief 返回受请求边界约束的规范消息 / Return canonical messages bounded by the request.
 
         @param group_id 当前群 ID / Current group identifier.
@@ -70,10 +66,8 @@ class _Groups:
         return tuple(
             message
             for message in self._messages
-            if message.group_id == group_id
-            and message.message_thread_id == message_thread_id
-            and (before_message_id is None or message.message_id < before_message_id)
-        )[-limit:]
+            if query.includes(message)
+        )[-query.limit :]
 
 
 def _update(
@@ -118,8 +112,7 @@ def _as_group_message(update: InboundUpdate) -> GroupMessage:
     if observation is None:
         raise AssertionError("test media update must yield a group observation")
     return GroupMessage(
-        group_id=observation.group_id,
-        message_id=observation.message_id,
+        identity=observation.identity,
         sender_user_id=observation.sender_user_id,
         sender_name=observation.sender_name,
         sender_username=observation.sender_username,
@@ -127,7 +120,6 @@ def _as_group_message(update: InboundUpdate) -> GroupMessage:
         content=observation.content,
         created_at=observation.created_at,
         edited=observation.edited,
-        message_thread_id=observation.message_thread_id,
     )
 
 
