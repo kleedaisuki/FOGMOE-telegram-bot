@@ -5,6 +5,21 @@
 # discover a version-compatible Python without pybind11. Wheel builds explicitly provide
 # their isolated interpreter, so this fallback only applies to source-tree local/host builds.
 option(WSPCTL_BUILD_PYTHON_BINDINGS "构建 pybind11 client / Build the pybind11 client" ON)
+option(WSPCTL_BUILD_HOST_PUBLISHER "构建 root-owned OCI publisher/verifier / Build the root-owned OCI publisher/verifier" OFF)
+option(WSPCTL_BUILD_HOST_RUNTIME "构建 root-owned broker/operator runtime / Build the root-owned broker/operator runtime" OFF)
+option(WSPCTL_BUILD_WORKSPACE_SUPERVISOR "构建 workspace PID 1 supervisor / Build the workspace PID 1 supervisor" OFF)
+
+# The native client, host runtime, OCI workspace supervisor, and CTest all require the full
+# broker graph.  The host publisher deliberately does not: its independent image graph needs
+# only OpenSSL, which keeps publisher-only preparation viable on a minimal build host.
+set(WSPCTL_NEEDS_RUNTIME_GRAPH OFF)
+if(WSPCTL_BUILD_PYTHON_BINDINGS OR WSPCTL_BUILD_HOST_RUNTIME OR WSPCTL_BUILD_WORKSPACE_SUPERVISOR OR (BUILD_TESTING AND WSPCTL_BUILD_TESTING))
+    set(WSPCTL_NEEDS_RUNTIME_GRAPH ON)
+endif()
+set(WSPCTL_NEEDS_IMAGE_GRAPH OFF)
+if(WSPCTL_BUILD_HOST_PUBLISHER OR WSPCTL_NEEDS_RUNTIME_GRAPH)
+    set(WSPCTL_NEEDS_IMAGE_GRAPH ON)
+endif()
 
 if(WSPCTL_BUILD_PYTHON_BINDINGS)
     set(WSPCTL_PROJECT_VENV_PYTHON "${CMAKE_SOURCE_DIR}/.venv/bin/python")
@@ -33,13 +48,15 @@ if(WSPCTL_BUILD_PYTHON_BINDINGS)
         find_package(pybind11 CONFIG REQUIRED)
     endif()
 endif()
-find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-find_package(Threads REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SECCOMP REQUIRED IMPORTED_TARGET libseccomp)
-pkg_check_modules(LIBCAP REQUIRED IMPORTED_TARGET libcap)
-
-option(WSPCTL_INSTALL_HOST_TOOLS "安装特权 host tools 与 systemd unit / Install privileged host tools and systemd unit" OFF)
+if(WSPCTL_NEEDS_IMAGE_GRAPH)
+    find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+endif()
+if(WSPCTL_NEEDS_RUNTIME_GRAPH)
+    find_package(Threads REQUIRED)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SECCOMP REQUIRED IMPORTED_TARGET libseccomp)
+    pkg_check_modules(LIBCAP REQUIRED IMPORTED_TARGET libcap)
+endif()
 
 # 为原生 target 应用严格编译告警 / Apply strict compiler warnings to a native target.
 function(wspctl_enable_warnings target)
@@ -57,6 +74,7 @@ endfunction()
 
 # Dependency direction is intentionally one way: domain -> application -> infrastructure -> presentation.
 # The domain target is pure C++ and must never acquire host, Linux, filesystem, socket, or pybind headers.
+if(WSPCTL_NEEDS_RUNTIME_GRAPH)
 add_library(wspctl_domain STATIC
     src/domain/operator_workspace.cpp
     src/domain/runtime.cpp
@@ -83,9 +101,11 @@ target_link_libraries(wspctl_application
         wspctl_domain
 )
 wspctl_enable_warnings(wspctl_application)
+endif()
 
 # Image publication is an independent infrastructure capability.  Keeping it in its own target
 # prevents the privileged publisher from linking broker, quota, journal, and sandbox machinery.
+if(WSPCTL_NEEDS_IMAGE_GRAPH)
 add_library(wspctl_image_infrastructure STATIC
     src/infrastructure/image.cpp
 )
@@ -99,7 +119,9 @@ target_link_libraries(wspctl_image_infrastructure
         OpenSSL::Crypto
 )
 wspctl_enable_warnings(wspctl_image_infrastructure)
+endif()
 
+if(WSPCTL_NEEDS_RUNTIME_GRAPH)
 add_library(wspctl_infrastructure STATIC
     src/infrastructure/broker.cpp
     src/infrastructure/journal.cpp
@@ -150,22 +172,35 @@ target_link_libraries(wspctl_presentation
         wspctl_infrastructure
 )
 wspctl_enable_warnings(wspctl_presentation)
+endif()
 
-add_executable(wspctld src/presentation/broker/main.cpp)
-target_link_libraries(wspctld PRIVATE wspctl_presentation)
-wspctl_enable_warnings(wspctld)
+# The publisher/verifier is an independent host capability: its build must not force broker,
+# namespace, quota, seccomp, or libcap development dependencies onto a publication-only machine.
+if(WSPCTL_BUILD_HOST_PUBLISHER)
+    add_executable(wspctl-image src/presentation/image/main.cpp)
+    target_link_libraries(wspctl-image PRIVATE wspctl_image_infrastructure)
+    wspctl_enable_warnings(wspctl-image)
+endif()
 
-add_executable(wsp-systemd src/presentation/systemd/main.cpp)
-target_link_libraries(wsp-systemd PRIVATE wspctl_presentation)
-wspctl_enable_warnings(wsp-systemd)
+# Broker and operator CLI are a separate host-runtime capability.  A Python wheel and a
+# publisher-only build never define these executable targets.
+if(WSPCTL_BUILD_HOST_RUNTIME)
+    add_executable(wspctld src/presentation/broker/main.cpp)
+    target_link_libraries(wspctld PRIVATE wspctl_presentation)
+    wspctl_enable_warnings(wspctld)
 
-add_executable(wspctl-image src/presentation/image/main.cpp)
-target_link_libraries(wspctl-image PRIVATE wspctl_image_infrastructure)
-wspctl_enable_warnings(wspctl-image)
+    add_executable(wspctl src/presentation/operator/main.cpp)
+    target_link_libraries(wspctl PRIVATE wspctl_presentation)
+    wspctl_enable_warnings(wspctl)
+endif()
 
-add_executable(wspctl src/presentation/operator/main.cpp)
-target_link_libraries(wspctl PRIVATE wspctl_presentation)
-wspctl_enable_warnings(wspctl)
+# The workspace PID 1 binary belongs only in the OCI runtime image.  It is deliberately separate
+# from host-tool installation so the wheel and host broker builds never produce it accidentally.
+if(WSPCTL_BUILD_WORKSPACE_SUPERVISOR)
+    add_executable(wsp-systemd src/presentation/systemd/main.cpp)
+    target_link_libraries(wsp-systemd PRIVATE wspctl_presentation)
+    wspctl_enable_warnings(wsp-systemd)
+endif()
 
 if(WSPCTL_BUILD_PYTHON_BINDINGS)
     pybind11_add_module(_native MODULE src/presentation/python/bindings.cpp)
@@ -197,15 +232,23 @@ if(WSPCTL_BUILD_PYTHON_BINDINGS)
     install(FILES __init__.py _native.pyi py.typed DESTINATION wspctl)
 endif()
 
-if(WSPCTL_INSTALL_HOST_TOOLS)
+if(WSPCTL_BUILD_HOST_RUNTIME)
     install(
         TARGETS wspctld wspctl
         RUNTIME DESTINATION bin
         COMPONENT WspctlHost
     )
+endif()
+if(WSPCTL_BUILD_HOST_PUBLISHER)
+    include(GNUInstallDirs)
     install(
         TARGETS wspctl-image
         RUNTIME DESTINATION bin
+        COMPONENT WspctlPublisher
+    )
+    install(
+        PROGRAMS "${CMAKE_SOURCE_DIR}/tools/publish_wspctl_image.py"
+        DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/wspctl"
         COMPONENT WspctlPublisher
     )
 endif()

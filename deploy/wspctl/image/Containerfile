@@ -49,7 +49,9 @@ RUN cmake \
       -G Ninja \
       -DBUILD_TESTING=OFF \
       -DWSPCTL_BUILD_PYTHON_BINDINGS=OFF \
-      -DWSPCTL_INSTALL_HOST_TOOLS=OFF \
+      -DWSPCTL_BUILD_HOST_PUBLISHER=OFF \
+      -DWSPCTL_BUILD_HOST_RUNTIME=OFF \
+      -DWSPCTL_BUILD_WORKSPACE_SUPERVISOR=ON \
       -DCMAKE_BUILD_TYPE=Release \
     && cmake --build /build --target wsp-systemd \
     && install \

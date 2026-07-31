@@ -12,9 +12,9 @@ include(CTest)
 
 add_subdirectory(src/wspctl)
 
-# Host deployment assets are deliberately absent from the Bot wheel configuration.  They are
-# generated only together with explicitly requested privileged host tools.
-if(WSPCTL_INSTALL_HOST_TOOLS)
+# Host deployment assets are deliberately absent from the Bot wheel and publisher-only
+# configuration. They are generated only with the explicitly requested broker/operator runtime.
+if(WSPCTL_BUILD_HOST_RUNTIME)
     add_subdirectory(deploy/wspctl)
 endif()
 

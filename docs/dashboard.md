@@ -10,7 +10,7 @@ GUI 作为可选依赖安装，避免在仅运行 bot 或 CLI 的服务器上引
 runtime：
 
 ~~~bash
-pip install -e '.[dashboard-gui]'
+python -m pip install '.[dashboard-gui]'
 fogmoe-dashboard-gui --window 6h
 fogmoe-dashboard-gui --window 24h --auto-refresh 10
 ~~~

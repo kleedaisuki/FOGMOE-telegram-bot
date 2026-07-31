@@ -37,13 +37,16 @@ systemd environment 和 store path 都不接受 tag、短 hash、任意 generati
 开发 checkout 的完整 host control-plane 安装只有一个入口：
 
 ```bash
-./installWspctl.sh
+./install.sh
 ```
 
 该安装器依次执行 OCI build、root-owned publication、host artifact/systemd unit 安装，并
-enable/start `wspctld.service`。这是显式、可能要求 sudo 的部署操作。部署过程始终从当前
-checkout 构建普通 wheel，并拒绝 `direct_url.json` 标记为 editable 的 Python 安装；
-Python 源码与 `wspctl._native` 因而不会处于一份实时映射、一份陈旧二进制的混合状态。
+enable/start `wspctld.service`。这是显式、可能要求 sudo 的部署操作。普通 wheel reconciler 将
+源码内容身份、`project.version`、Python `SOABI`（扩展 ABI）、non-editable metadata、
+`wspctl._native` import 与 wheel `RECORD` 的全部带哈希文件绑定在一起；host receipt 再绑定源码
+身份、角色化 artifact 集合及每个已安装文件的 SHA-256。全部验证通过时不会运行 pip wheel 或 CMake；
+任一条件失效时才构建普通 wheel 并用 `--force-reinstall` 替换旧安装（包括 editable mapping）。因此
+Python 源码与 `wspctl._native` 不会处于一份实时映射、一份陈旧二进制的混合状态。
 
 `./runBot.sh start` 属于纯运行阶段：它只读取 Bot 配置中的 socket 路径，检查已经安装的
 `wspctld.service` 与 Unix socket，然后启动无特权 Bot。它绝不构建 image、安装 host binary、
@@ -80,9 +83,10 @@ Python 源码与 `wspctl._native` 因而不会处于一份实时映射、一份�
 - image 内实际执行 Python imports 和 `ldd` smoke test；
 - setuid/setgid bits 被移除，固定 mountpoints 和 supervisor entrypoint 写入 image config。
 
-基础 image digest 固定符合 Docker/OCI 生产建议；Debian snapshot 进一步固定包解析。`SOURCE_DATE_EPOCH`
-默认取当前 Git commit time，可由 operator/CI 显式设置。它只是可复现构建（reproducible build）的一个
-输入；独立 clean build 仍必须比较最终 OCI manifest digest，不能把同一 store 的 cache hit 当证明。
+基础 image digest 固定符合 Docker/OCI 生产建议；Debian snapshot 进一步固定包解析。仅当 OCI receipt
+未命中时，`SOURCE_DATE_EPOCH` 默认取当前 Git commit time，也可由 operator/CI 显式设置。它只是
+可复现构建（reproducible build）的审计输入；独立 clean build 仍必须比较最终 OCI manifest digest，
+不能把同一 store 的 cache hit 当证明。
 
 ## 验证式 ingest 与发布
 
@@ -97,7 +101,8 @@ Python 源码与 `wspctl._native` 因而不会处于一份实时映射、一份�
 ```text
 .runtime/wspctl-rootfs/
 ├── sha256/<manifest-hex>/oci-layout/
-└── current-image-digest
+├── current-image-digest
+└── build-receipt
 ```
 
 也可显式指定：
@@ -108,7 +113,10 @@ WSPCTL_IMAGE_REFERENCE=wspctl-runtime \
 ./scripts/publish-wspctl-rootfs.sh /absolute/path/to/oci-layout
 ```
 
-发布器绝不直接 `sudo umoci unpack` 用户可写 layout。流程是：
+发布器会先调用 `scripts/start-wspctld.sh prepare-host-tools`，只复用 publisher/verifier 的
+version/source identity/checksum receipt；它不创建 state、不安装 Python wheel、不检查 lxcfs/loopback
+或 runtime 前提。因此它绝不配置独立的 CMake build directory，也不会重复编译 publisher/verifier。
+随后它绝不直接 `sudo umoci unpack` 用户可写 layout。流程是：
 
 1. operator 必须提供完整 OCI manifest digest；
 2. Skopeo `--preserve-digests` 将 reference 复制进 artifact store 内的 root-owned private staging；
@@ -147,12 +155,13 @@ import、mount、native verify 和 selection 由 root-owned `publish.lock` 串�
 正常安装只运行聚合入口：
 
 ```bash
-./installWspctl.sh
+./install.sh
 ```
 
 聚合入口内部固定执行 `build-wspctl-rootfs.sh` → `publish-wspctl-rootfs.sh` →
-`start-wspctld.sh`。最后一个脚本只负责 host broker/state/service 阶段，并会 enable unit；
-它不会反向调用 image builder。
+`start-wspctld.sh`。第二阶段只共享 `prepare-host-tools` 的 publisher/verifier receipt；最后一个阶段
+再收敛普通 Python wheel 与 broker/runtime artifact receipt，并在通过验证后跳过已验证工件。它只负责
+host broker/state/service 阶段并会 enable unit，不会反向调用 image builder。
 
 每次聚合安装都会把三个阶段的 stdout/stderr 实时显示并完整写入
 `logs/wspctl_install_<timestamp>_<pid>.log`。日志以 `0600` 创建，失败时保留底层阶段的原始
@@ -196,13 +205,13 @@ socket 和应用配置也可能进入 root 进程。
 直接 host Bot 默认安装为当前 UID：
 
 ```bash
-./installWspctl.sh
+./install.sh
 ```
 
 Compose Bot 安装使用固定 UID：
 
 ```bash
-WSPCTL_CLIENT_UID=65532 ./installWspctl.sh
+WSPCTL_CLIENT_UID=65532 ./install.sh
 ```
 
 高级 operator 仍可用内部阶段选择已经发布的另一个 image：
@@ -219,32 +228,25 @@ WSPCTL_IMAGE_DIGEST=sha256:<64hex> ./scripts/start-wspctld.sh
 默认使用 `WSPCTL_IO_WEIGHT=100`；部分 WSL2 kernel 只暴露 `io.max/io.latency` 而没有
 `io.weight`，此时安装器明确记录 capability 降级并写入 `WSPCTL_IO_WEIGHT=0`。这只关闭相对
 I/O QoS，不放松 memory、CPU、PIDs、namespace、seccomp 或 XFS project quota。operator 可用
-`WSPCTL_IO_WEIGHT=0..10000 ./installWspctl.sh` 显式覆盖自动选择；在不支持 `io.weight` 的 host
+`WSPCTL_IO_WEIGHT=0..10000 ./install.sh` 显式覆盖自动选择；在不支持 `io.weight` 的 host
 上强制非零值仍会 fail closed。
 
 `./runBot.sh start` 不再调用任何安装脚本。readiness 失败时它只提示
-`./installWspctl.sh` 与 `./statusWspctl.sh`，不会在应用运行路径中提权修复 host。
+`./install.sh` 与 `./statusWspctl.sh`，不会在应用运行路径中提权修复 host。
 
-## 生产 host control plane
+## host control plane 的作用域
 
-生产工作根必须位于 root-owned、祖先不可 group/world-write 的绝对路径：
+`install.sh`、`scripts/start-wspctld.sh` 与 `scripts/publish-wspctl-rootfs.sh` 是同一个
+checkout 的开发部署入口，特权工作根固定为 `$REPOSITORY_ROOT/.wspctl`。它们**拒绝**
+`WSPCTL_WORK_ROOT` 覆盖，也拒绝以 symlink 将该路径重定向到别处：否则一个仅做字符串校验的
+环境变量会变成对任意 root 路径的 `sudo install/chmod` 权限。
 
-```bash
-cmake -S . -B build/wspctl-prod \
-  -DPython_EXECUTABLE="$PWD/.venv/bin/python" \
-  -DWSPCTL_INSTALL_HOST_TOOLS=ON \
-  -DWSPCTL_HOST_WORKDIR=/srv/fogmoe-wspctl \
-  -DCMAKE_INSTALL_PREFIX=/usr/local
-cmake --build build/wspctl-prod --parallel
-sudo cmake --install build/wspctl-prod
-```
+`/usr/local` artifact 与固定的 `wspctld.service`/`wspctl-lxcfs.service` 名称是**单 host
+singleton（单例）**：安装器用 root-owned 全局锁串行化不同 checkout 的安装，但不支持并行激活多个
+checkout。若需要多实例，必须由独立的生产部署系统分配独立 prefix、unit 名与 root-owned work root。
 
-生产发布使用同一个显式入口，但必须把 work root 指向上述 CMake 固定路径：
-
-```bash
-WSPCTL_WORK_ROOT=/srv/fogmoe-wspctl \
-./scripts/publish-wspctl-rootfs.sh /absolute/path/to/oci-layout
-```
+生产主机不应把 checkout-local 开发安装器当作通用部署器。应使用单独审计、打包并由平台团队
+托管的 release workflow；本仓库不提供将此脚本指向 `/srv/...` 或其他自定义路径的兼容模式。
 
 该入口先把 publisher 与 native verifier 安装到 root-owned `/usr/local`，随后只允许
 `/usr/bin/python3`、`/usr/bin/skopeo`、`/usr/bin/umoci`、systemd/util-linux 工具和
@@ -252,16 +254,16 @@ WSPCTL_WORK_ROOT=/srv/fogmoe-wspctl \
 computing base, TCB）。它不会通过 `sudo` 执行 checkout `.venv`、checkout Python module、
 checkout build artifact 或调用者 `PATH` 选出的工具。
 
-checkout-local 模式必须显式设置 `WSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT=ON`；它仅表示把
+构建 host runtime 时安装器显式设置 `WSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT=ON`；它仅表示把
 local developer 纳入 trusted control plane（TCB），不能用于多用户 production host。
 
-systemd environment 使用：
+checkout-local systemd environment 使用：
 
 ```text
-WSPCTL_IMAGES_ROOT=/srv/fogmoe-wspctl/images
+WSPCTL_IMAGES_ROOT=<checkout>/.wspctl/images
 WSPCTL_IMAGE_DIGEST=sha256:<64hex>
-WSPCTL_STATE_ROOT=/srv/fogmoe-wspctl/state
-WSPCTL_OPERATOR_SOCKET=/srv/fogmoe-wspctl/run/operator/wspctld.sock
+WSPCTL_STATE_ROOT=<checkout>/.wspctl/state
+WSPCTL_OPERATOR_SOCKET=<checkout>/.wspctl/run/operator/wspctld.sock
 ```
 
 `wspctld` 只接收 `--image-store` 与 `--image-digest`。它从强类型 digest 唯一派生

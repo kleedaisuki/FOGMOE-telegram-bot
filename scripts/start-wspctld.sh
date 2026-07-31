@@ -2,9 +2,9 @@
 
 # @brief 启动本 checkout 的 wspctld 开发服务 / Start the checkout-local wspctld development service.
 #
-# 这是 installWspctl.sh 调用的 host-broker 内部阶段：只构建 host control-plane 程序并
+# 这是 install.sh 调用的 host-broker 内部阶段：只构建 host control-plane 程序并
 # 管理 daemon。workspace OCI image 必须由前序安装阶段显式发布；Bot 从不直接执行本脚本。/
-# This is the internal host-broker stage invoked by installWspctl.sh: it only builds host
+# This is the internal host-broker stage invoked by install.sh: it only builds host
 # control-plane programs and manages the daemon. The preceding installation stage must explicitly
 # publish the workspace OCI image; the Bot never invokes this script directly.
 
@@ -16,8 +16,12 @@ REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 VENV_DIR="$REPOSITORY_ROOT/.venv"
 # @brief 受控 Python 解释器 / Controlled Python interpreter.
 PYTHON_EXECUTABLE="$VENV_DIR/bin/python"
-# @brief checkout-local wspctl control-plane root / Checkout-local wspctl control-plane root.
-WORK_ROOT="$REPOSITORY_ROOT/.wspctl"
+# @brief 仅用于 host receipt/source identity 的标准库 Python / Standard-library Python used only for host receipt/source identity.
+HOST_IDENTITY_PYTHON="${PYTHON:-python}"
+# @brief 未规范化的 checkout-local wspctl control-plane 根 / Unnormalized checkout-local wspctl control-plane root.
+REQUESTED_WORK_ROOT="${WSPCTL_WORK_ROOT:-$REPOSITORY_ROOT/.wspctl}"
+# @brief 规范化后的 checkout-local wspctl control-plane 根 / Canonical checkout-local wspctl control-plane root.
+WORK_ROOT="$(realpath --canonicalize-missing -- "$REQUESTED_WORK_ROOT")"
 # @brief XFS persistent-state mountpoint / XFS persistent-state mountpoint.
 STATE_ROOT="$WORK_ROOT/state"
 # @brief checkout-local loopback XFS image / Checkout-local loopback XFS image.
@@ -30,6 +34,26 @@ IMAGES_ROOT="$WORK_ROOT/images"
 CGROUP_PARENT="/sys/fs/cgroup/system.slice"
 # @brief CMake build directory for host tools / CMake build directory for host tools.
 BUILD_DIRECTORY="$REPOSITORY_ROOT/build/wspctld-dev"
+# @brief wspctl 构建输入身份计算器 / wspctl build-input identity calculator.
+BUILD_IDENTITY_TOOL="$REPOSITORY_ROOT/tools/wspctl_build_identity.py"
+# @brief 普通 Python wheel 的唯一 reconciler / Sole reconciler for the regular Python wheel.
+CLIENT_RECONCILER="$REPOSITORY_ROOT/scripts/ensure-wspctl-client.sh"
+# @brief 已安装 broker executable / Installed broker executable.
+HOST_WSPCTLD="/usr/local/bin/wspctld"
+# @brief 已安装 operator CLI / Installed operator CLI.
+HOST_OPERATOR_CLI="/usr/local/bin/wspctl"
+# @brief 已安装 image verifier / Installed image verifier.
+HOST_IMAGE_VERIFIER="/usr/local/bin/wspctl-image"
+# @brief 已安装 root-owned publisher / Installed root-owned publisher.
+HOST_PUBLISHER="/usr/local/libexec/wspctl/publish_wspctl_image.py"
+# @brief 已安装 systemd 资产目录 / Installed systemd asset directory.
+HOST_SYSTEMD_ASSET_DIRECTORY="/usr/local/share/fogmoe-wspctl/systemd"
+# @brief 已安装 wspctld unit 资产 / Installed wspctld unit asset.
+HOST_WSPCTLD_UNIT_SOURCE="$HOST_SYSTEMD_ASSET_DIRECTORY/wspctld.service"
+# @brief 已安装 LXCFS unit 资产 / Installed LXCFS unit asset.
+HOST_LXCFS_UNIT_SOURCE="$HOST_SYSTEMD_ASSET_DIRECTORY/wspctl-lxcfs.service"
+# @brief 已安装 broker environment 模板 / Installed broker environment template.
+HOST_ENVIRONMENT_TEMPLATE="$HOST_SYSTEMD_ASSET_DIRECTORY/wspctld.env.example"
 # @brief host service unit name / Host service-unit name.
 SERVICE_NAME="wspctld.service"
 # @brief wspctl 专用 LXCFS service unit / Dedicated wspctl LXCFS service unit.
@@ -72,10 +96,16 @@ CPU_PERIOD_US="${WSPCTL_CPU_PERIOD_US:-100000}"
 WORKSPACE_HARD_BYTES="${WSPCTL_RUNTIME_WORKSPACE_HARD_BYTES:-4294967296}"
 # @brief checkout-local lifecycle lock / Checkout-local lifecycle lock.
 LOCK_FILE="$REPOSITORY_ROOT/.runtime/wspctld-control.lock"
+# @brief 跨 checkout 串行化 /usr/local host artifact 安装的 root-owned 锁 / Root-owned lock serializing /usr/local host-artifact installation across checkouts.
+HOST_INSTALL_LOCK="/run/lock/fogmoe-wspctl-host-install.lock"
 # @brief 最近一次已应用 broker 配置的 fingerprint / Fingerprint of the most recently applied broker configuration.
 FINGERPRINT_FILE="$REPOSITORY_ROOT/.runtime/wspctld-fingerprint"
 # @brief 由本 checkout 安装的 host artifacts 清单 / Manifest of host artifacts installed by this checkout.
 INSTALL_MANIFEST_FILE="$WORK_ROOT/install-manifest"
+# @brief 由本 checkout 安装的 publisher/verifier host artifacts 构建收据 / Build receipt for publisher/verifier host artifacts installed by this checkout.
+PUBLISHER_DEPLOYMENT_RECEIPT_FILE="$WORK_ROOT/publisher-deployment-receipt"
+# @brief 由本 checkout 安装的 broker/runtime host artifacts 构建收据 / Build receipt for broker/runtime host artifacts installed by this checkout.
+RUNTIME_DEPLOYMENT_RECEIPT_FILE="$WORK_ROOT/deployment-receipt"
 # @brief Bot 专属 daemon socket 路径 / Bot-exclusive daemon socket path.
 SOCKET_PATH="$WORK_ROOT/run/bot/wspctld.sock"
 # @brief root/operator 专属 daemon socket 路径 / Root/operator-exclusive daemon socket path.
@@ -128,6 +158,19 @@ require_decimal() {
     [[ "$1" =~ ^[0-9]+$ ]] || die "$2 必须是非负十进制整数"
 }
 
+# @brief 校验唯一受控的 checkout-local control-plane 根路径 / Validate the sole managed checkout-local control-plane root.
+# @return 路径安全时返回零 / Zero when the path is safe.
+require_work_root() {
+    local managed_work_root="$REPOSITORY_ROOT/.wspctl"
+
+    # A privileged installer may create/chmod this directory.  Accepting arbitrary absolute
+    # paths would turn spelling-only validation into attacker-controlled root mutation.  Comparing
+    # requested and canonical forms also rejects a symlink substituted at .wspctl.
+    [[ "$REQUESTED_WORK_ROOT" == "$managed_work_root" \
+        && "$WORK_ROOT" == "$managed_work_root" ]] \
+        || die "不支持自定义 WSPCTL_WORK_ROOT；特权 control plane 只能使用 $managed_work_root"
+}
+
 # @brief 幂等写入 root-owned broker 环境设置 / Idempotently write one root-owned broker environment setting.
 # @param $1 环境文件 / Environment file.
 # @param $2 设置名 / Setting name.
@@ -165,73 +208,436 @@ resolve_io_weight() {
     note "host cgroup v2 不提供 io.weight；禁用相对 I/O 权重（memory/CPU/PIDs/XFS quota 仍强制）"
 }
 
-# @brief 验证开发机的基础命令 / Verify development-machine prerequisite commands.
-require_commands() {
+# @brief 验证 receipt 快路径所需的最小 host 命令 / Verify the minimal host commands needed by the receipt fast path.
+# @return 成功时返回零 / Zero on success.
+require_receipt_commands() {
     local command_name
-    for command_name in cmake sudo systemctl journalctl udevadm findmnt mountpoint mount install bash sha256sum flock grep tr stat awk fallocate losetup mkfs.xfs blkid find sort xargs lxcfs fusermount3; do
+
+    command -v "$HOST_IDENTITY_PYTHON" >/dev/null 2>&1 \
+        || die "缺少用于 host receipt 的 Python: $HOST_IDENTITY_PYTHON"
+    for command_name in sudo sha256sum awk flock mkdir realpath stat; do
         command -v "$command_name" >/dev/null 2>&1 \
-            || die "缺少必需命令: $command_name"
+            || die "缺少 receipt 快路径必需命令: $command_name"
     done
 }
 
-# @brief 验证部署环境安装的是普通 wheel 且 native client 可导入 / Verify that deployment uses a regular wheel and the native client is importable.
-# @return 0 表示普通安装且 native client 可用 / Zero when regularly installed and the native client is usable.
-deployed_client_is_regular_install() {
-    "$PYTHON_EXECUTABLE" - <<'PY'
-import importlib.metadata
-import json
+# @brief 获取跨 checkout 的 root-owned host-install flock / Acquire the cross-checkout root-owned host-install flock.
+# @return 成功时返回零 / Zero on success.
+# @note 锁文件可由普通调用者打开以取得 advisory lock，但其父目录与 inode 所有权均由 root
+#       控制；文件内容不承载状态，因而不存在可替换的业务数据。/
+#       The caller may open the lock file for the advisory lock, while root controls its parent
+#       directory and inode ownership. The file carries no state and therefore no replaceable
+#       business data.
+acquire_host_install_lock() {
+    if ! sudo test -e "$HOST_INSTALL_LOCK"; then
+        sudo install -o root -g root -m 0666 /dev/null "$HOST_INSTALL_LOCK"
+    fi
+    sudo chown root:root "$HOST_INSTALL_LOCK"
+    sudo chmod 0666 "$HOST_INSTALL_LOCK"
+    exec 8>"$HOST_INSTALL_LOCK"
+    flock 8
+}
 
-import wspctl._native
+# @brief 验证仅在 host receipt 失效时才需要的编译命令 / Verify compilation commands needed only after a host receipt miss.
+# @return 成功时返回零 / Zero on success.
+require_host_build_commands() {
+    local command_name
 
-distribution = importlib.metadata.distribution("fogmoe-telegram-bot")
-direct_url_text = distribution.read_text("direct_url.json")
-if direct_url_text is None:
-    raise SystemExit(0)
-direct_url = json.loads(direct_url_text)
-if direct_url.get("dir_info", {}).get("editable") is True:
-    raise SystemExit("deployment rejected an editable fogmoe-telegram-bot install")
+    for command_name in cmake "${CXX:-c++}"; do
+        command -v "$command_name" >/dev/null 2>&1 \
+            || die "host artifact 收据失效后缺少编译命令: $command_name"
+    done
+}
+
+# @brief 验证仅在实际 daemon 启动时才需要的运行时命令 / Verify runtime commands needed only when actually starting the daemon.
+# @return 成功时返回零 / Zero on success.
+require_runtime_commands() {
+    local command_name
+
+    for command_name in systemctl journalctl udevadm findmnt mountpoint mount install bash grep tr stat \
+        fallocate losetup mkfs.xfs blkid find sort xargs lxcfs fusermount3 mktemp; do
+        command -v "$command_name" >/dev/null 2>&1 \
+            || die "启动 wspctld 所需命令缺失: $command_name"
+    done
+}
+
+# @brief 读取 pyproject 中的发布版本 / Read the distribution version from pyproject.
+# @return 规范 project version / Canonical project version.
+project_version() {
+    "$HOST_IDENTITY_PYTHON" -I - "$REPOSITORY_ROOT/pyproject.toml" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+project = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("project")
+version = project.get("version") if isinstance(project, dict) else None
+if not isinstance(version, str) or not version:
+    raise SystemExit("pyproject.toml is missing project.version")
+print(version)
 PY
 }
 
-# @brief 建立项目 virtual environment 并从普通 wheel 部署 native client / Create the project virtual environment and deploy the native client from a regular wheel.
-# @return 成功时返回零 / Zero on success.
-# @note 显式 host 部署始终重建当前 checkout，禁止 editable mapping 与陈旧 C++ 扩展混装。/
-#     Explicit host deployment always rebuilds the current checkout and forbids mixing editable
-#     mappings with stale C++ extensions.
-ensure_deployed_client() {
-    if [[ ! -x "$PYTHON_EXECUTABLE" ]]; then
-        command -v python >/dev/null 2>&1 || die "找不到 python，无法创建 $VENV_DIR"
-        note "创建项目 virtual environment: $VENV_DIR"
-        python -m venv "$VENV_DIR"
-    fi
-    "$PYTHON_EXECUTABLE" -c 'import sys; raise SystemExit(sys.version_info < (3, 14))' \
-        || die "项目 virtual environment 必须使用 Python 3.14 或更新版本"
-    note "从当前 checkout 构建并安装非 editable wheel（含 wspctl._native）"
-    "$PYTHON_EXECUTABLE" -m pip install --no-deps "$REPOSITORY_ROOT"
-    deployed_client_is_regular_install \
-        || die "部署后的 Python client 不可用或仍为 editable 安装"
+# @brief 计算一个声明组件的构建输入身份 / Compute the build-input identity of one declared component.
+# @param $1 组件名 / Component name.
+# @param $@ 附加 ``--attribute`` 参数 / Additional ``--attribute`` arguments.
+# @return 小写十六进制 SHA-256 身份 / Lowercase hexadecimal SHA-256 identity.
+build_identity() {
+    local component="$1"
+
+    shift
+    [[ -f "$BUILD_IDENTITY_TOOL" ]] \
+        || die "缺少 wspctl 构建身份工具: $BUILD_IDENTITY_TOOL"
+    "$HOST_IDENTITY_PYTHON" -I "$BUILD_IDENTITY_TOOL" \
+        --source-root "$REPOSITORY_ROOT" \
+        --component "$component" \
+        "$@"
 }
 
-# @brief 配置、编译并安装 host broker 工件 / Configure, build, and install host-broker artifacts.
-ensure_host_artifacts() {
-    note "配置并构建 host wspctld / wspctl-image / wspctl operator shell"
-    remove_retired_host_artifacts
-    cmake -S "$REPOSITORY_ROOT" -B "$BUILD_DIRECTORY" \
-        -DPython_EXECUTABLE="$PYTHON_EXECUTABLE" \
-        -DWSPCTL_INSTALL_HOST_TOOLS=ON \
-        -DWSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT=ON \
-        -DWSPCTL_HOST_WORKDIR="$WORK_ROOT" \
-        -DCMAKE_INSTALL_PREFIX=/usr/local
-    cmake --build "$BUILD_DIRECTORY" --parallel
-    sudo cmake --install "$BUILD_DIRECTORY"
+# @brief 计算 host C++ toolchain 的可追溯身份 / Compute a traceable identity for the host C++ toolchain.
+# @return C++ 编译器与 CMake 版本的 SHA-256 / SHA-256 of the C++ compiler and CMake versions.
+host_toolchain_identity() {
+    local cxx_command="${CXX:-c++}"
 
-    [[ -x "$BUILD_DIRECTORY/src/wspctl/wspctld" ]] \
-        || die "CMake 没有产生 wspctld"
-    [[ -x "$BUILD_DIRECTORY/src/wspctl/wspctl-image" ]] \
-        || die "CMake 没有产生 wspctl-image"
-    [[ -x "$BUILD_DIRECTORY/src/wspctl/wspctl" ]] \
-        || die "CMake 没有产生 operator wspctl"
+    {
+        "$cxx_command" --version
+        cmake --version
+    } | sha256sum | awk '{print $1}'
+}
+
+# @brief 计算当前特权 host 工件的构建身份 / Compute the current privileged host-artifact build identity.
+# @return 小写十六进制 SHA-256 身份 / Lowercase hexadecimal SHA-256 identity.
+host_build_identity() {
+    build_identity host \
+        --attribute "build_type=Release" \
+        --attribute "cxx_standard=23" \
+        --attribute "development_root=ON" \
+        --attribute "install_prefix=/usr/local" \
+        --attribute "platform=$(uname -m)" \
+        --attribute "work_root=$WORK_ROOT"
+}
+
+# @brief 输出 publisher/verifier 所拥有的已安装 host artifact 路径 / Print installed publisher/verifier artifact paths owned by this checkout.
+# @return 每行一个绝对路径 / One absolute path per line.
+publisher_artifact_paths() {
+    printf '%s\n' "$HOST_IMAGE_VERIFIER" "$HOST_PUBLISHER"
+}
+
+# @brief 输出 broker/runtime 所拥有的已安装 host artifact 路径 / Print installed broker/runtime artifact paths owned by this checkout.
+# @return 每行一个绝对路径 / One absolute path per line.
+runtime_artifact_paths() {
+    printf '%s\n' \
+        "$HOST_WSPCTLD" \
+        "$HOST_OPERATOR_CLI" \
+        "$HOST_LXCFS_UNIT_SOURCE" \
+        "$HOST_WSPCTLD_UNIT_SOURCE" \
+        "$HOST_ENVIRONMENT_TEMPLATE"
+}
+
+# @brief 输出本 checkout 所拥有的全部已安装 host artifact 路径 / Print all installed host-artifact paths owned by this checkout.
+# @return 每行一个绝对路径 / One absolute path per line.
+host_artifact_paths() {
+    publisher_artifact_paths
+    runtime_artifact_paths
+}
+
+# @brief 验证一个特权路径的非跟随 inode 元数据 / Verify non-following inode metadata for one privileged path.
+# @param $1 path 绝对路径 / Absolute path.
+# @param $2 expected_kind ``regular`` 或 ``directory`` / ``regular`` or ``directory``.
+# @return 路径为 root:root、目标 inode 类型正确且不允许 group/world 写入时返回零 /
+#         Zero when the path is root:root, has the expected inode type, and is not group/world writable.
+# @note ``stat`` 默认不跟随 symlink；因此一个 symlink 不能在此处伪装成可信 artifact。验证完
+#       所有不可写父目录后，非 root 攻击者也不能在 hash 与 systemd exec 之间替换路径。/
+#       ``stat`` does not follow symlinks by default, so a symlink cannot masquerade as a trusted
+#       artifact here. Once all non-writable parent directories are verified, a non-root attacker
+#       cannot replace the path between hashing and systemd execution.
+host_path_is_trusted() {
+    local path="$1"
+    local expected_kind="$2"
+    local metadata
+    local owner_uid
+    local owner_gid
+    local raw_mode
+    local normalized_raw_mode
+    local mode_value
+    local expected_type_bits
+
+    metadata="$(sudo stat --format='%u:%g:%f' -- "$path")" || return 1
+    IFS=':' read -r owner_uid owner_gid raw_mode <<< "$metadata"
+    [[ "$owner_uid" == "0" && "$owner_gid" == "0" \
+        && "$raw_mode" =~ ^[0-9A-Fa-f]+$ ]] || return 1
+    normalized_raw_mode="${raw_mode,,}"
+    mode_value=$((16#$normalized_raw_mode))
+    case "$expected_kind" in
+        regular) expected_type_bits=$((16#8000)) ;;
+        directory) expected_type_bits=$((16#4000)) ;;
+        *) return 1 ;;
+    esac
+    (( (mode_value & 16#f000) == expected_type_bits \
+        && (mode_value & 8#022) == 0 ))
+}
+
+# @brief 输出承载已安装 host artifact 的固定受信父目录 / Print the fixed trusted parent directories for installed host artifacts.
+# @return 每行一个绝对目录 / One absolute directory per line.
+# @note 这份白名单刻意没有从 receipt 读取；receipt 只能证明已知安装目标，不能声明新的
+#       root 执行路径。/
+#       This allowlist is deliberately not read from the receipt: a receipt may prove only known
+#       install targets, never declare a new root-executed path.
+host_artifact_parent_directories() {
+    printf '%s\n' \
+        /usr \
+        /usr/local \
+        /usr/local/bin \
+        /usr/local/libexec \
+        /usr/local/libexec/wspctl \
+        /usr/local/share \
+        /usr/local/share/fogmoe-wspctl \
+        /usr/local/share/fogmoe-wspctl/systemd
+}
+
+# @brief 验证所有 host artifact 父目录的特权信任边界 / Verify the privileged trust boundary of every host-artifact parent directory.
+# @return 所有目录均为可信 root-owned directory 时返回零 / Zero when every directory is a trusted root-owned directory.
+host_artifact_parent_directories_are_trusted() {
+    local directory_path
+
+    while IFS= read -r directory_path; do
+        host_path_is_trusted "$directory_path" directory || return 1
+    done < <(host_artifact_parent_directories)
+}
+
+# @brief 验证已安装 host artifact 的类型、权限与信任链 / Verify an installed host artifact's type, permissions, and trust chain.
+# @param $1 artifact 绝对路径 / Absolute artifact path.
+# @return 可执行程序可执行、所有 artifact/root parent 均可信时返回零 /
+#         Zero when executables are executable and the artifact/root-parent trust chain is valid.
+host_artifact_is_usable() {
+    local artifact_path="$1"
+    local requires_execute=false
+
+    case "$artifact_path" in
+        "$HOST_WSPCTLD"|"$HOST_OPERATOR_CLI"|"$HOST_IMAGE_VERIFIER"|"$HOST_PUBLISHER")
+            requires_execute=true
+            ;;
+        "$HOST_LXCFS_UNIT_SOURCE"|"$HOST_WSPCTLD_UNIT_SOURCE"|"$HOST_ENVIRONMENT_TEMPLATE")
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    host_artifact_parent_directories_are_trusted || return 1
+    host_path_is_trusted "$artifact_path" regular || return 1
+    [[ "$requires_execute" == true ]] || return 0
+    sudo test -x "$artifact_path"
+}
+
+# @brief 验证一组已安装 host artifact 的 receipt、来源身份与内容校验和 / Verify one installed host-artifact set's receipt, source identity, and content checksums.
+# @param $1 root-owned receipt 文件 / Root-owned receipt file.
+# @param $2 receipt 中的角色 / Receipt role.
+# @param $3 期望源码身份 / Expected source identity.
+# @param $4 期望 project version / Expected project version.
+# @param $5 输出该角色 artifact 的函数名 / Function printing that role's artifacts.
+# @param $6 该角色 artifact 数量 / Artifact count for that role.
+# @return 全部 artifact 均可信时为零 / Zero when every artifact is trusted.
+host_artifacts_are_current() {
+    local receipt_file="$1"
+    local expected_role="$2"
+    local expected_identity="$3"
+    local expected_version="$4"
+    local artifact_provider="$5"
+    local expected_artifact_count="$6"
+    local receipt_identity=""
+    local receipt_version=""
+    local receipt_platform=""
+    local receipt_schema=""
+    local receipt_role=""
+    local receipt_toolchain=""
+    local record_key
+    local record_value
+    local artifact_path
+    local expected_checksum
+    local actual_checksum
+    local verified_artifact_count=0
+
+    host_path_is_trusted "$WORK_ROOT" directory || return 1
+    host_path_is_trusted "$receipt_file" regular || return 1
+    sudo test -r "$receipt_file" || return 1
+    while IFS='=' read -r record_key record_value; do
+        case "$record_key" in
+            schema) receipt_schema="$record_value" ;;
+            role) receipt_role="$record_value" ;;
+            source_identity) receipt_identity="$record_value" ;;
+            project_version) receipt_version="$record_value" ;;
+            platform) receipt_platform="$record_value" ;;
+            toolchain_identity) receipt_toolchain="$record_value" ;;
+        esac
+    done < <(sudo cat "$receipt_file")
+    [[ "$receipt_schema" == "2" \
+        && "$receipt_role" == "$expected_role" \
+        && "$receipt_identity" == "$expected_identity" \
+        && "$receipt_version" == "$expected_version" \
+        && "$receipt_platform" == "$(uname -m)" \
+        && "$receipt_toolchain" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+    while IFS= read -r artifact_path; do
+        host_artifact_is_usable "$artifact_path" || return 1
+        expected_checksum="$(
+            sudo awk -v path="$artifact_path" \
+                '$1 == "artifact" && $2 == path { print $3 }' "$receipt_file"
+        )"
+        [[ "$expected_checksum" =~ ^[0-9a-f]{64}$ ]] || return 1
+        actual_checksum="$(sudo sha256sum "$artifact_path" | awk '{print $1}')"
+        [[ "$actual_checksum" == "$expected_checksum" ]] || return 1
+        ((verified_artifact_count += 1))
+    done < <("$artifact_provider")
+    [[ "$verified_artifact_count" == "$expected_artifact_count" ]]
+}
+
+# @brief 仅为 receipt 创建 root-owned metadata 根，不创建 runtime state / Create only the root-owned receipt metadata root, not runtime state.
+# @return 成功时返回零 / Zero on success.
+ensure_receipt_parent() {
+    sudo install -d -o root -g root -m 0700 "$WORK_ROOT"
+}
+
+# @brief 原子写入一组已安装 host artifact 的构建收据 / Atomically write the build receipt for one installed host-artifact set.
+# @param $1 root-owned receipt 文件 / Root-owned receipt file.
+# @param $2 receipt 角色 / Receipt role.
+# @param $3 源码身份 / Source identity.
+# @param $4 project version / Project version.
+# @param $5 toolchain identity / Toolchain identity.
+# @param $6 输出该角色 artifact 的函数名 / Function printing that role's artifacts.
+# @return 成功时返回零 / Zero on success.
+write_host_deployment_receipt() {
+    local receipt_file="$1"
+    local receipt_role="$2"
+    local source_identity="$3"
+    local expected_version="$4"
+    local toolchain_identity="$5"
+    local artifact_provider="$6"
+    local temporary_file="$REPOSITORY_ROOT/.runtime/wspctl-${receipt_role}-receipt.$$.tmp"
+    local artifact_path
+    local artifact_checksum
+
+    ensure_receipt_parent
+    {
+        printf 'schema=2\nrole=%s\nsource_identity=%s\nproject_version=%s\nplatform=%s\ntoolchain_identity=%s\n' \
+            "$receipt_role" "$source_identity" "$expected_version" "$(uname -m)" "$toolchain_identity"
+        while IFS= read -r artifact_path; do
+            artifact_checksum="$(sudo sha256sum "$artifact_path" | awk '{print $1}')"
+            printf 'artifact %s %s\n' "$artifact_path" "$artifact_checksum"
+        done < <("$artifact_provider")
+    } > "$temporary_file"
+    sudo install -o root -g root -m 0600 "$temporary_file" "$receipt_file"
+    rm -f -- "$temporary_file"
+}
+
+# @brief 配置专用 host-tool build tree；仅在 receipt 失效后调用 / Configure the dedicated host-tool build tree; called only after a receipt miss.
+# @param $1 publisher 或 runtime 的最小构建角色 / Minimal build role: publisher or runtime.
+# @return 成功时返回零 / Zero on success.
+configure_host_build() {
+    local build_role="$1"
+    local -a role_definitions
+
+    case "$build_role" in
+        publisher)
+            role_definitions=(
+                -DWSPCTL_BUILD_HOST_PUBLISHER=ON
+                -DWSPCTL_BUILD_HOST_RUNTIME=OFF
+                -DWSPCTL_BUILD_WORKSPACE_SUPERVISOR=OFF
+            )
+            ;;
+        runtime)
+            role_definitions=(
+                -DWSPCTL_BUILD_HOST_PUBLISHER=OFF
+                -DWSPCTL_BUILD_HOST_RUNTIME=ON
+                -DWSPCTL_BUILD_WORKSPACE_SUPERVISOR=OFF
+                -DWSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT=ON
+                "-DWSPCTL_HOST_WORKDIR=$WORK_ROOT"
+            )
+            ;;
+        *)
+            die "未知 host build role: $build_role"
+            ;;
+    esac
+    cmake -S "$REPOSITORY_ROOT" -B "$BUILD_DIRECTORY" \
+        -DBUILD_TESTING=OFF \
+        -DPython_EXECUTABLE="$HOST_IDENTITY_PYTHON" \
+        -DWSPCTL_BUILD_TESTING=OFF \
+        -DWSPCTL_BUILD_PYTHON_BINDINGS=OFF \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        "${role_definitions[@]}"
+}
+
+# @brief 验证或按需构建 publisher/verifier host tools；不创建 runtime state / Verify or build publisher/verifier host tools only; never create runtime state.
+# @return 成功时返回零 / Zero on success.
+ensure_publisher_host_artifacts() {
+    local expected_version
+    local expected_identity
+    local toolchain_identity
+
+    expected_version="$(project_version)" \
+        || die "无法读取 publisher artifact 的 project.version"
+    expected_identity="$(host_build_identity)" \
+        || die "无法计算 publisher artifact 的构建身份"
+    if host_artifacts_are_current "$PUBLISHER_DEPLOYMENT_RECEIPT_FILE" publisher \
+        "$expected_identity" "$expected_version" publisher_artifact_paths 2; then
+        note "host wspctl-image / publisher 已通过 version/source identity/checksum 验证；跳过 CMake 构建"
+        return 0
+    fi
+
+    require_host_build_commands
+    toolchain_identity="$(host_toolchain_identity)" \
+        || die "无法记录 publisher C++ toolchain identity"
+    note "publisher artifact 收据失效；仅配置并构建 wspctl-image"
+    configure_host_build publisher
+    cmake --build "$BUILD_DIRECTORY" --target wspctl-image --parallel
+    sudo cmake --install "$BUILD_DIRECTORY" --component WspctlPublisher
+    sudo test -x "$HOST_IMAGE_VERIFIER" \
+        || die "CMake install 未产生 wspctl-image: $HOST_IMAGE_VERIFIER"
+    sudo test -x "$HOST_PUBLISHER" \
+        || die "CMake install 未产生 publisher: $HOST_PUBLISHER"
+    write_host_deployment_receipt "$PUBLISHER_DEPLOYMENT_RECEIPT_FILE" publisher \
+        "$expected_identity" "$expected_version" "$toolchain_identity" publisher_artifact_paths \
+        || die "无法写入 publisher artifact 构建收据"
+    host_artifacts_are_current "$PUBLISHER_DEPLOYMENT_RECEIPT_FILE" publisher \
+        "$expected_identity" "$expected_version" publisher_artifact_paths 2 \
+        || die "publisher artifact 安装后未通过构建收据验证"
+}
+
+# @brief 验证或按需构建 broker/runtime host tools；不负责 Python client / Verify or build broker/runtime host tools; does not own the Python client.
+# @return 成功时返回零 / Zero on success.
+ensure_runtime_host_artifacts() {
+    local expected_version
+    local expected_identity
+    local toolchain_identity
+
+    expected_version="$(project_version)" \
+        || die "无法读取 runtime artifact 的 project.version"
+    expected_identity="$(host_build_identity)" \
+        || die "无法计算 runtime artifact 的构建身份"
+    if host_artifacts_are_current "$RUNTIME_DEPLOYMENT_RECEIPT_FILE" runtime \
+        "$expected_identity" "$expected_version" runtime_artifact_paths 5; then
+        note "host wspctld / wspctl / systemd assets 已通过 version/source identity/checksum 验证；跳过 CMake 构建"
+        return 0
+    fi
+
+    require_host_build_commands
+    toolchain_identity="$(host_toolchain_identity)" \
+        || die "无法记录 runtime C++ toolchain identity"
+    note "runtime artifact 收据失效；仅配置并构建 wspctld / wspctl"
+    remove_retired_host_artifacts
+    configure_host_build runtime
+    cmake --build "$BUILD_DIRECTORY" --target wspctld wspctl --parallel
+    sudo cmake --install "$BUILD_DIRECTORY" --component WspctlHost
+    sudo test -x "$HOST_WSPCTLD" \
+        || die "CMake install 未产生 wspctld: $HOST_WSPCTLD"
+    sudo test -x "$HOST_OPERATOR_CLI" \
+        || die "CMake install 未产生 operator wspctl: $HOST_OPERATOR_CLI"
     write_install_manifest
+    write_host_deployment_receipt "$RUNTIME_DEPLOYMENT_RECEIPT_FILE" runtime \
+        "$expected_identity" "$expected_version" "$toolchain_identity" runtime_artifact_paths \
+        || die "无法写入 runtime artifact 构建收据"
+    host_artifacts_are_current "$RUNTIME_DEPLOYMENT_RECEIPT_FILE" runtime \
+        "$expected_identity" "$expected_version" runtime_artifact_paths 5 \
+        || die "runtime artifact 安装后未通过构建收据验证"
 }
 
 # @brief 按旧 install manifest 安全移除已退役的 host artifact / Safely remove retired host artifacts proven by the prior install manifest.
@@ -270,23 +676,14 @@ write_install_manifest() {
     local temporary_file="$REPOSITORY_ROOT/.runtime/wspctl-install-manifest.$$.tmp"
     local artifact_path
     local artifact_checksum
-    local artifact_paths=(
-        /usr/local/bin/wspctld
-        /usr/local/bin/wspctl
-        /usr/local/bin/wspctl-image
-        /usr/local/libexec/wspctl/publish_wspctl_image.py
-        /usr/local/share/fogmoe-wspctl/systemd/wspctl-lxcfs.service
-        /usr/local/share/fogmoe-wspctl/systemd/wspctld.service
-        /usr/local/share/fogmoe-wspctl/systemd/wspctld.env.example
-    )
 
     : > "$temporary_file"
-    for artifact_path in "${artifact_paths[@]}"; do
-        [[ -f "$artifact_path" || -x "$artifact_path" ]] \
+    while IFS= read -r artifact_path; do
+        sudo test -f "$artifact_path" \
             || die "CMake install 未产生预期 host artifact: $artifact_path"
-        artifact_checksum="$(sha256sum "$artifact_path" | awk '{print $1}')"
+        artifact_checksum="$(sudo sha256sum "$artifact_path" | awk '{print $1}')"
         printf 'artifact %s %s\n' "$artifact_path" "$artifact_checksum" >> "$temporary_file"
-    done
+    done < <(host_artifact_paths)
     sudo install -o root -g root -m 0600 "$temporary_file" "$INSTALL_MANIFEST_FILE"
     rm -f -- "$temporary_file"
 }
@@ -419,7 +816,7 @@ prepare_control_plane_directories() {
 select_published_image() {
     if [[ -z "$IMAGE_DIGEST" ]]; then
         sudo test -r "$CURRENT_IMAGE_FILE" \
-            || die "尚未安装 workspace image；请运行 ./installWspctl.sh"
+            || die "尚未安装 workspace image；请运行 ./install.sh"
         IMAGE_DIGEST="$(sudo cat "$CURRENT_IMAGE_FILE")"
     fi
     [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
@@ -433,7 +830,7 @@ select_published_image() {
     sudo findmnt --noheadings --output OPTIONS --target "$BASE_ROOT" \
         | grep --extended-regexp --quiet '(^|,)ro(,|$)' \
         || die "指定 OCI image 必须是 readonly mount: $BASE_ROOT"
-    sudo "$BUILD_DIRECTORY/src/wspctl/wspctl-image" \
+    sudo "$HOST_IMAGE_VERIFIER" \
         --verify true \
         --base-root "$BASE_ROOT" \
         --images-root "$IMAGES_ROOT" \
@@ -444,9 +841,9 @@ select_published_image() {
 
 # @brief 安装生成的 unit 与受控 environment file / Install generated unit and the controlled environment file.
 install_service_configuration() {
-    local unit_source="$BUILD_DIRECTORY/deploy/wspctl/systemd/wspctld.service"
-    local lxcfs_unit_source="$BUILD_DIRECTORY/deploy/wspctl/systemd/wspctl-lxcfs.service"
-    local environment_template="$BUILD_DIRECTORY/deploy/wspctl/systemd/wspctld.env.example"
+    local unit_source="$HOST_WSPCTLD_UNIT_SOURCE"
+    local lxcfs_unit_source="$HOST_LXCFS_UNIT_SOURCE"
+    local environment_template="$HOST_ENVIRONMENT_TEMPLATE"
     local environment_file="$WORK_ROOT/wspctld.env"
     local filesystem_bytes
     local filesystem_inodes
@@ -455,8 +852,10 @@ install_service_configuration() {
     local admission_bytes
     local admission_inodes
 
-    [[ -f "$unit_source" && -f "$lxcfs_unit_source" && -f "$environment_template" ]] \
-        || die "CMake 没有生成 systemd 部署资产"
+    sudo test -f "$unit_source" \
+        && sudo test -f "$lxcfs_unit_source" \
+        && sudo test -f "$environment_template" \
+        || die "缺少已安装的 systemd 部署资产；请运行 ./install.sh"
     sudo install -o root -g root -m 0644 "$lxcfs_unit_source" "/etc/systemd/system/$LXCFS_SERVICE_NAME"
     sudo install -o root -g root -m 0644 "$unit_source" "/etc/systemd/system/$SERVICE_NAME"
     if [[ ! -f "$environment_file" ]]; then
@@ -533,15 +932,15 @@ install_service_configuration() {
 # @brief 计算会影响正在运行 broker 的配置 fingerprint / Compute a fingerprint of inputs that affect the running broker.
 # @return SHA-256 fingerprint / SHA-256 fingerprint.
 broker_fingerprint() {
-    local unit_source="$BUILD_DIRECTORY/deploy/wspctl/systemd/wspctld.service"
-    local lxcfs_unit_source="$BUILD_DIRECTORY/deploy/wspctl/systemd/wspctl-lxcfs.service"
+    local unit_source="$HOST_WSPCTLD_UNIT_SOURCE"
+    local lxcfs_unit_source="$HOST_LXCFS_UNIT_SOURCE"
     local environment_file="$WORK_ROOT/wspctld.env"
 
     {
         printf 'health_contract=static-ready-v2-image-lxcfs-service-sockets\n'
         printf 'source_oci_manifest_digest=%s\nclient_uid=%s\noperator_uid=%s\noperator_socket=%s\n' \
             "$IMAGE_DIGEST" "$CLIENT_UID" "$OPERATOR_UID" "$OPERATOR_SOCKET_PATH"
-        sha256sum "$BUILD_DIRECTORY/src/wspctl/wspctld" "$unit_source" "$lxcfs_unit_source"
+        sudo sha256sum "$HOST_WSPCTLD" "$unit_source" "$lxcfs_unit_source"
         sudo sha256sum "$environment_file"
     } | sha256sum | awk '{print $1}'
 }
@@ -739,8 +1138,42 @@ stop_service() {
     sudo systemctl stop "$LXCFS_SERVICE_NAME"
 }
 
+# @brief 获取 checkout-local control-plane 锁 / Acquire the checkout-local control-plane lock.
+# @return 成功时返回零 / Zero on success.
+acquire_control_lock() {
+    mkdir -p "$REPOSITORY_ROOT/.runtime"
+    exec 9>"$LOCK_FILE"
+    flock 9
+}
+
+# @brief 仅准备 OCI publisher/verifier host tools，不创建 runtime state 或 Python wheel / Prepare only OCI publisher/verifier host tools, without runtime state or the Python wheel.
+# @return 成功时返回零 / Zero on success.
+# @note publish-wspctl-rootfs.sh 只能调用该窄阶段；它不接触 lxcfs、loopback、systemd unit、
+#       control-plane directory 或 client wheel。/
+#       publish-wspctl-rootfs.sh may call only this narrow phase; it never touches lxcfs,
+#       loopback, systemd units, control-plane directories, or the client wheel.
+prepare_host_tools() {
+    require_work_root
+    require_receipt_commands
+    acquire_control_lock
+    acquire_host_install_lock
+    ensure_publisher_host_artifacts
+}
+
+# @brief 准备普通 Python wheel 与完整 host runtime tools，不创建 state 或启动 daemon / Prepare the regular Python wheel and complete host runtime tools without state or daemon startup.
+# @return 成功时返回零 / Zero on success.
+prepare() {
+    prepare_host_tools
+    [[ -x "$CLIENT_RECONCILER" ]] \
+        || die "缺少普通 wheel reconciler: $CLIENT_RECONCILER"
+    "$CLIENT_RECONCILER" --venv "$VENV_DIR"
+    ensure_runtime_host_artifacts
+}
+
 # @brief 执行启动流程 / Execute the start flow.
+# @return 成功时返回零 / Zero on success.
 start() {
+    require_work_root
     require_uid "$CLIENT_UID" "WSPCTL_CLIENT_UID"
     require_uid "$OPERATOR_UID" "WSPCTL_OPERATOR_UID"
     [[ "$CLIENT_UID" != "$OPERATOR_UID" ]] \
@@ -756,15 +1189,11 @@ start() {
     (( MEMORY_HIGH_BYTES <= MEMORY_MAX_BYTES )) \
         || die "WSPCTL_MEMORY_HIGH 不得高于 WSPCTL_MEMORY_MAX"
     resolve_io_weight
-    require_commands
-    mkdir -p "$REPOSITORY_ROOT/.runtime"
-    exec 9>"$LOCK_FILE"
-    flock 9
+    prepare
+    require_runtime_commands
     prepare_control_plane_directories
     ensure_loopback_state_mount
     require_state_mount
-    ensure_deployed_client
-    ensure_host_artifacts
     select_published_image
     install_service_configuration
     prepare_restart_decision
@@ -774,17 +1203,21 @@ start() {
 # @brief 显示脚本用法 / Display script usage.
 show_help() {
     cat <<'EOF'
-用法: scripts/start-wspctld.sh [start|status|stop|help]
+用法: scripts/start-wspctld.sh [start|prepare|prepare-host-tools|status|stop|help]
 
-本脚本是 ./installWspctl.sh 的内部 host-broker 阶段。start（默认）会在
+本脚本是 ./install.sh 的内部 host-broker 阶段。start（默认）会在
 ./.wspctl/state.xfs.img 首次创建预分配的 loopback XFS（32G），
-以 prjquota 挂载到 ./.wspctl/state，构建 host control-plane 程序，验证已显式发布且
+以 prjquota 挂载到 ./.wspctl/state，验证已显式发布且
 按 OCI manifest digest 固定的 workspace image，再 enable/start systemd service。
-正常安装请运行 ./installWspctl.sh；日常 Bot 启动不会调用本脚本。
+prepare 仅验证或按需构建普通 wheel 与完整 host tools，不创建 state、不发布 image、也不启动 service。
+prepare-host-tools 是 OCI publisher 专用窄阶段，只验证或按需构建 wspctl-image 与 publisher；
+它不创建 state、不安装 client wheel、也不检查 lxcfs/loopback/runtime 前提。
+正常安装请运行 ./install.sh；日常 Bot 启动不会调用本脚本。
 
 环境变量：
   WSPCTL_CLIENT_UID   broker 接受的 Bot UID；默认当前运行 runBot.sh 的 UID。
   WSPCTL_OPERATOR_UID 独立 operator UID；默认 root。使用 sudo wspctl 查询，且不得等于 Bot UID。
+  WSPCTL_WORK_ROOT    不支持覆盖；特权 control plane 固定为 checkout 的 ./.wspctl。
   WSPCTL_IMAGE_DIGEST 可选 sha256:<64hex> OCI manifest digest；默认读取已发布 current-image-digest。
   WSPCTL_LOOP_SIZE    首次创建 image 的容量；默认 32G，已有 image 不会自动 resize。
   WSPCTL_IO_WEIGHT    auto（默认）按 host cgroup v2 capability 选择 100 或 0；也可显式设为 0..10000。
@@ -806,6 +1239,12 @@ main() {
         start)
             start
             ;;
+        prepare)
+            prepare
+            ;;
+        prepare-host-tools)
+            prepare_host_tools
+            ;;
         status)
             show_status
             ;;
@@ -816,7 +1255,7 @@ main() {
             show_help
             ;;
         *)
-            die "未知命令: $1（可用 start、status、stop、help）"
+            die "未知命令: $1（可用 start、prepare、prepare-host-tools、status、stop、help）"
             ;;
     esac
 }

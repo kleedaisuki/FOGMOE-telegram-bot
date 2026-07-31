@@ -524,12 +524,15 @@ Python wheel 由 `scikit-build-core` 驱动 CMake；`pybind11` 是 build depende
 开发依赖中。开发构建示例：
 
 ```bash
-uv sync --group dev
+uv sync --group dev --no-editable
 cmake -S . -B build -G Ninja -DPython_EXECUTABLE="$PWD/.venv/bin/python"
 cmake --build build
 ctest --test-dir build --output-on-failure
 uv build
 ```
+
+`--no-editable` 是必需的：`wspctl._native` 是 C++ 扩展，editable install 可能让源码包与上一次
+编译出的扩展 ABI 脱节。`uv sync` 会安装普通 wheel；需要重建时再显式运行该命令。
 
 所有新增 Runtime 测试在 `ctest/`：纯 C++ 测试覆盖协议、journal、状态机、quota fail-closed
 configuration 与 timeout；无特权 Python contract 测试由 CTest 调用；需要 overlay/cgroup delegation/

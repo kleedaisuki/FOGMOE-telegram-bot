@@ -98,18 +98,25 @@ def test_bot_image_builds_native_client_but_excludes_host_broker_programs() -> N
     assert '"cmake>=3.28"' in dockerfile
     assert "libseccomp-dev" in dockerfile
     assert "libcap-dev" in dockerfile
-    assert "--config-settings=cmake.define.WSPCTL_INSTALL_HOST_TOOLS=OFF" in dockerfile
-    assert (
-        re.search(
-            r'option\(WSPCTL_INSTALL_HOST_TOOLS\s+"[^"]+"\s+OFF\)',
-            cmake,
-        )
-        is not None
-    )
+    assert "--config-settings=cmake.define.WSPCTL_BUILD_HOST_PUBLISHER=OFF" in dockerfile
+    assert "--config-settings=cmake.define.WSPCTL_BUILD_HOST_RUNTIME=OFF" in dockerfile
+    assert "--config-settings=cmake.define.BUILD_TESTING=OFF" in dockerfile
+    assert "--config-settings=cmake.define.WSPCTL_BUILD_TESTING=OFF" in dockerfile
+    for option_name in (
+        "WSPCTL_BUILD_HOST_PUBLISHER",
+        "WSPCTL_BUILD_HOST_RUNTIME",
+        "WSPCTL_BUILD_WORKSPACE_SUPERVISOR",
+    ):
+        assert re.search(rf'option\({option_name}\s+"[^"]+"\s+OFF\)', cmake)
+    cmake_defines = pyproject["tool"]["scikit-build"]["cmake"]["define"]
+    assert cmake_defines["BUILD_TESTING"] == "OFF"
+    assert cmake_defines["WSPCTL_BUILD_TESTING"] == "OFF"
+    assert cmake_defines["WSPCTL_BUILD_HOST_PUBLISHER"] == "OFF"
+    assert cmake_defines["WSPCTL_BUILD_HOST_RUNTIME"] == "OFF"
     assert "src/wspctl" not in wheel_packages
     assert "AS bot-runtime" in dockerfile
     assert (
-        "if(WSPCTL_INSTALL_HOST_TOOLS)\n"
+        "if(WSPCTL_BUILD_HOST_RUNTIME)\n"
         "    add_subdirectory(deploy/wspctl)\n"
         "endif()" in root_cmake
     )
@@ -127,6 +134,9 @@ def test_bot_image_builds_native_client_but_excludes_host_broker_programs() -> N
         "target_link_libraries(wspctl-image PRIVATE wspctl_image_infrastructure)"
         in cmake
     )
+    assert "if(WSPCTL_BUILD_HOST_PUBLISHER)" in cmake
+    assert "if(WSPCTL_BUILD_HOST_RUNTIME)" in cmake
+    assert "if(WSPCTL_NEEDS_RUNTIME_GRAPH)" in cmake
     assert "USER 65532:65532" in dockerfile
     assert 'CMD ["fogmoe-bot", "--config", "/app/config.json"]' in dockerfile
 
@@ -180,6 +190,9 @@ def test_workspace_runtime_is_a_digest_pinned_explicit_oci_build() -> None:
     assert re.search(r"(?m)^[0-9a-f]{64}  node-v24\.", build_tools_lock)
     assert re.search(r"(?m)^[0-9a-f]{64}  pnpm-11\.", build_tools_lock)
     assert "-DWSPCTL_BUILD_PYTHON_BINDINGS=OFF" in containerfile
+    assert "-DWSPCTL_BUILD_HOST_PUBLISHER=OFF" in containerfile
+    assert "-DWSPCTL_BUILD_HOST_RUNTIME=OFF" in containerfile
+    assert "-DWSPCTL_BUILD_WORKSPACE_SUPERVISOR=ON" in containerfile
     assert "cmake --build /build --target wsp-systemd" in containerfile
     assert "libcap2" in containerfile
     assert "libseccomp2" in containerfile
@@ -311,6 +324,7 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_image_mount() -> None:
     lxcfs_unit = LXCFS_SYSTEMD_UNIT_TEMPLATE_PATH.read_text(encoding="utf-8")
     environment = SYSTEMD_ENVIRONMENT_TEMPLATE_PATH.read_text(encoding="utf-8")
     deployment_cmake = DEPLOYMENT_CMAKE_PATH.read_text(encoding="utf-8")
+    wspctl_cmake = WSPCTL_CMAKE_PATH.read_text(encoding="utf-8")
     deployment_guide = DEPLOYMENT_GUIDE_PATH.read_text(encoding="utf-8")
     quota_guide = XFS_QUOTA_GUIDE_PATH.read_text(encoding="utf-8")
     assert not (REPOSITORY_ROOT / "systemd").exists()
@@ -435,8 +449,9 @@ def test_host_unit_requires_exact_socket_uid_and_readonly_image_mount() -> None:
         'DESTINATION "${CMAKE_INSTALL_DATADIR}/fogmoe-wspctl/systemd"'
         in deployment_cmake
     )
-    assert "tools/publish_wspctl_image.py" in deployment_cmake
-    assert 'DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/wspctl"' in deployment_cmake
+    assert "tools/publish_wspctl_image.py" not in deployment_cmake
+    assert "tools/publish_wspctl_image.py" in wspctl_cmake
+    assert 'DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/wspctl"' in wspctl_cmake
     assert "local developer 纳入 trusted control plane" in deployment_guide
     assert "WSPCTL_OPERATOR_SOCKET" in deployment_guide
     assert "workspace ls" in deployment_guide

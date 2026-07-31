@@ -84,7 +84,7 @@ report_install_log() {
 
     heading "installation log"
     if ! install_log="$(latest_install_log)" || [[ -z "$install_log" ]]; then
-        info "尚无 wspctl_install 日志；下一次 ./installWspctl.sh 会完整记录三个安装阶段"
+        info "尚无 wspctl_install 日志；下一次 ./install.sh 会完整记录三个安装阶段"
         return 0
     fi
     log_metadata="$(stat --format='owner=%U mode=%a size=%s modified=%y' "$install_log" 2>/dev/null || true)"
@@ -188,7 +188,7 @@ report_readiness_validation() {
         done < "$FINGERPRINT_FILE"
     fi
     if [[ "$validated_invocation_id" != "$current_invocation_id" ]]; then
-        warning "当前 invocation 尚无静态 readiness evidence；重新运行 ./installWspctl.sh"
+        warning "当前 invocation 尚无静态 readiness evidence；重新运行 ./install.sh"
         return 0
     fi
     ok "InvocationID=$current_invocation_id passed image/service/socket readiness validation"

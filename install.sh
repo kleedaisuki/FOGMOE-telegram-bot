@@ -47,7 +47,7 @@ require_arguments() {
             ;;
         help|--help|-h)
             cat <<'EOF'
-用法: ./installWspctl.sh
+用法: ./install.sh
 
 依次完成 workspace OCI image 构建、root-owned readonly 发布、host artifacts/systemd unit
 安装，以及 wspctld.service 的 enable/start。该命令是显式部署操作，可能要求 sudo 密码。
@@ -69,7 +69,10 @@ require_install_prerequisites() {
     local missing_commands=()
     local script_path
 
-    for command_name in sudo buildah skopeo umoci cmake tee date; do
+    # Buildah/CMake are deliberately checked by their receipt-miss branches.  A valid OCI or
+    # host-artifact receipt must remain a real fast path on a machine that no longer has build
+    # tooling installed.
+    for command_name in sudo tee date; do
         command -v "$command_name" >/dev/null 2>&1 \
             || missing_commands+=("$command_name")
     done

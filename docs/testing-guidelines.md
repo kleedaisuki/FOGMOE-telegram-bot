@@ -33,7 +33,7 @@ git diff --check
 开发依赖通过项目虚拟环境安装：
 
 ```bash
-uv pip install --python .venv/bin/python -e '.[dev]'
+uv pip install --python .venv/bin/python '.[dev]'
 ```
 
 ## 显式集成测试

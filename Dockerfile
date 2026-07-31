@@ -27,7 +27,11 @@ COPY pyproject.toml uv.lock README.md LICENSE CMakeLists.txt ./
 COPY src ./src
 
 RUN python -m pip wheel \
-    --config-settings=cmake.define.WSPCTL_INSTALL_HOST_TOOLS=OFF \
+    --config-settings=cmake.define.BUILD_TESTING=OFF \
+    --config-settings=cmake.define.WSPCTL_BUILD_TESTING=OFF \
+    --config-settings=cmake.define.WSPCTL_BUILD_HOST_PUBLISHER=OFF \
+    --config-settings=cmake.define.WSPCTL_BUILD_HOST_RUNTIME=OFF \
+    --config-settings=cmake.define.WSPCTL_BUILD_WORKSPACE_SUPERVISOR=OFF \
     --wheel-dir /wheels .
 
 

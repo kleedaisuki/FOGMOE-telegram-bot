@@ -68,6 +68,7 @@ fogmoe-dbctl = "fogmoe_dbctl.cli:main"
 minimum-version = "build-system.requires"
 cmake.version = ">=3.28"
 ninja.version = ">=1.11"
+cmake.define = { BUILD_TESTING = "OFF", WSPCTL_BUILD_TESTING = "OFF", WSPCTL_BUILD_HOST_PUBLISHER = "OFF", WSPCTL_BUILD_HOST_RUNTIME = "OFF", WSPCTL_BUILD_WORKSPACE_SUPERVISOR = "OFF" }
 wheel.packages = [
     "src/fogmoe_bot",
     "src/fogmoe_config",

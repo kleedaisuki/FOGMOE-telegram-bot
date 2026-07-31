@@ -20,25 +20,27 @@ set_tests_properties(
         LABELS "privileged;security"
 )
 
-# 这是唯一真正启动 broker、namespace PID 1、OverlayFS 与 XFS quota 的验收路径。它从不把
-# 普通开发机的 skip 当作通过；operator/CI 必须显式提供 disposable 的特权环境。
-# This is the sole acceptance path that actually starts the broker, namespace PID 1, OverlayFS,
-# and XFS quota. A normal-development skip is never treated as success; operator/CI must provide
-# an explicit disposable privileged environment.
-add_executable(wspctl_privileged_e2e_tests cpp/wspctl_privileged_e2e_tests.cpp)
-target_link_libraries(wspctl_privileged_e2e_tests PRIVATE wspctl_presentation)
-target_compile_options(wspctl_privileged_e2e_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2 -Werror=return-type)
-add_dependencies(wspctl_privileged_e2e_tests wspctld)
-add_test(
-    NAME wspctl.privileged_e2e
-    COMMAND wspctl_privileged_e2e_tests $<TARGET_FILE:wspctld>
-)
-set_tests_properties(
-    wspctl.privileged_e2e
-    PROPERTIES
-        SKIP_RETURN_CODE 77
-        LABELS "privileged;e2e;namespace;overlayfs;cgroup;xfs"
-)
+if(WSPCTL_BUILD_HOST_RUNTIME)
+    # 这是唯一真正启动 broker、namespace PID 1、OverlayFS 与 XFS quota 的验收路径。它从不把
+    # 普通开发机的 skip 当作通过；operator/CI 必须显式提供 disposable 的特权环境。
+    # This is the sole acceptance path that actually starts the broker, namespace PID 1, OverlayFS,
+    # and XFS quota. A normal-development skip is never treated as success; operator/CI must provide
+    # an explicit disposable privileged environment.
+    add_executable(wspctl_privileged_e2e_tests cpp/wspctl_privileged_e2e_tests.cpp)
+    target_link_libraries(wspctl_privileged_e2e_tests PRIVATE wspctl_presentation)
+    target_compile_options(wspctl_privileged_e2e_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2 -Werror=return-type)
+    add_dependencies(wspctl_privileged_e2e_tests wspctld)
+    add_test(
+        NAME wspctl.privileged_e2e
+        COMMAND wspctl_privileged_e2e_tests $<TARGET_FILE:wspctld>
+    )
+    set_tests_properties(
+        wspctl.privileged_e2e
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            LABELS "privileged;e2e;namespace;overlayfs;cgroup;xfs"
+    )
+endif()
 
 # XFS project quota has no meaningful unprivileged mock: its acceptance criterion is the
 # kernel returning EDQUOT for both inode and block hard limits on a disposable dedicated XFS mount.
@@ -73,10 +75,12 @@ target_link_libraries(wspctl_operator_tests PRIVATE wspctl_presentation)
 target_compile_options(wspctl_operator_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2 -Werror=return-type)
 add_test(NAME wspctl.operator COMMAND wspctl_operator_tests)
 
-add_executable(wspctl_operator_cli_tests cpp/wspctl_operator_cli_tests.cpp)
-target_compile_options(wspctl_operator_cli_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2 -Werror=return-type)
-add_dependencies(wspctl_operator_cli_tests wspctl)
-add_test(NAME wspctl.operator_cli COMMAND wspctl_operator_cli_tests $<TARGET_FILE:wspctl>)
+if(WSPCTL_BUILD_HOST_RUNTIME)
+    add_executable(wspctl_operator_cli_tests cpp/wspctl_operator_cli_tests.cpp)
+    target_compile_options(wspctl_operator_cli_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2 -Werror=return-type)
+    add_dependencies(wspctl_operator_cli_tests wspctl)
+    add_test(NAME wspctl.operator_cli COMMAND wspctl_operator_cli_tests $<TARGET_FILE:wspctl>)
+endif()
 
 file(GLOB WSPCTL_PYTHON_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/python/test_*.py")
 foreach(WSPCTL_PYTHON_TEST IN LISTS WSPCTL_PYTHON_TESTS)

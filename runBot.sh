@@ -8,11 +8,17 @@ STATE_DIR="$BOT_DIR/.runtime"
 PID_FILE="$STATE_DIR/fogmoe-bot.pid"
 CONTROL_LOCK_FILE="$STATE_DIR/control.lock"
 VENV_DIR="$BOT_DIR/.venv"
+# @brief 用于创建 Python 3.14+ 虚拟环境的解释器 / Interpreter used to create the Python 3.14+ virtual environment.
+# @note 避免让 C++ 扩展绑定到发行版的旧 ``python3`` ABI。/
+#       Avoid binding the C++ extension to an older distribution ``python3`` ABI.
+PYTHON_EXECUTABLE="${PYTHON:-python}"
 PYPROJECT_FILE="$BOT_DIR/pyproject.toml"
 CONFIG_FILE="$BOT_DIR/config.json"
 EXAMPLE_CONFIG_FILE="$BOT_DIR/example.config.json"
 WSPCTLD_SERVICE_NAME="wspctld.service"
-WSPCTL_INSTALL_SCRIPT="$BOT_DIR/installWspctl.sh"
+WSPCTL_INSTALL_SCRIPT="$BOT_DIR/install.sh"
+# @brief 普通 wspctl wheel 的唯一 reconciler / Sole reconciler for the regular wspctl wheel.
+WSPCTL_CLIENT_RECONCILER="$BOT_DIR/scripts/ensure-wspctl-client.sh"
 # 外层进程管理器必须晚于应用的排空截止时间才可升级为 SIGKILL。
 STOP_TIMEOUT_SECONDS="${BOT_STOP_TIMEOUT_SECONDS:-200}"
 
@@ -223,17 +229,28 @@ get_latest_log_file() {
 setup_venv() {
     if [ ! -d "$VENV_DIR" ]; then
         echo -e "${YELLOW}虚拟环境不存在，正在创建...${NC}"
-        python3 -m venv "$VENV_DIR"
+        if ! command -v "$PYTHON_EXECUTABLE" >/dev/null 2>&1; then
+            echo -e "${RED}✗ 找不到 Python 解释器: $PYTHON_EXECUTABLE${NC}"
+            exit 1
+        fi
+        "$PYTHON_EXECUTABLE" -c 'import sys; raise SystemExit(sys.version_info < (3, 14))'
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}✗ 项目需要 Python 3.14 或更新版本${NC}"
+            exit 1
+        fi
+        "$PYTHON_EXECUTABLE" -m venv "$VENV_DIR"
 
         if [ $? -ne 0 ]; then
             echo -e "${RED}✗ 创建虚拟环境失败${NC}"
-            echo "请确保已安装 python3-venv:"
-            echo "  Ubuntu/Debian: sudo apt install python3-venv"
-            echo "  CentOS/RHEL: sudo yum install python3-venv"
+            echo "请确保 Python 3.14 的 venv 模块可用。"
             exit 1
         fi
 
         echo -e "${GREEN}✓ 虚拟环境创建成功${NC}"
+    fi
+    if ! "$VENV_DIR/bin/python" -c 'import sys; raise SystemExit(sys.version_info < (3, 14))'; then
+        echo -e "${RED}✗ $VENV_DIR 不是 Python 3.14+ 虚拟环境；请在确认后重建它${NC}"
+        exit 1
     fi
 }
 
@@ -241,46 +258,30 @@ setup_venv() {
 install_dependencies() {
     echo -e "${YELLOW}正在检查并安装依赖...${NC}"
 
-    # 激活虚拟环境
-    source "$VENV_DIR/bin/activate"
-
-    # 升级 pip
-    echo "升级 pip..."
-    pip install --upgrade pip -q
-
-    # 安装项目和依赖
-    if [ -f "$PYPROJECT_FILE" ]; then
-        echo "按 pyproject.toml 构建并安装非 editable wheel..."
-        if python -m pip install "$BOT_DIR"; then
-            if ! deployment_install_is_regular; then
-                echo -e "${RED}✗ 部署拒绝 editable 安装${NC}"
-                exit 1
-            fi
-            echo -e "${GREEN}✓ 依赖与普通 wheel 安装成功${NC}"
-        else
-            echo -e "${RED}✗ 依赖安装失败${NC}"
-            exit 1
-        fi
-    else
-        echo -e "${RED}错误: pyproject.toml 文件不存在${NC}"
+    [[ -f "$PYPROJECT_FILE" ]] \
+        || { echo -e "${RED}错误: pyproject.toml 文件不存在${NC}"; exit 1; }
+    [[ -x "$WSPCTL_CLIENT_RECONCILER" ]] \
+        || { echo -e "${RED}错误: 缺少 wspctl client reconciler: $WSPCTL_CLIENT_RECONCILER${NC}"; exit 1; }
+    if ! command -v uv >/dev/null 2>&1; then
+        echo -e "${RED}✗ 缺少 uv；依赖锁文件是唯一权威来源，请安装 uv 后重试${NC}"
         exit 1
     fi
-}
 
-# @brief 验证 Bot 部署不是 editable install / Verify that the Bot deployment is not an editable install.
-# @return 普通安装返回零，editable 或元数据损坏返回非零 / Zero for a regular install; nonzero for editable or invalid metadata.
-deployment_install_is_regular() {
-    "$VENV_DIR/bin/python" - <<'PY'
-import importlib.metadata
-import json
+    # uv 只同步已锁定的 runtime dependencies；--no-install-project 确保这里绝不触发本地
+    # C++ extension 构建。--inexact 保留随后由专用 reconciler 安装的普通项目 wheel。
+    echo "按 uv.lock 同步 runtime dependencies（不安装根项目）..."
+    if ! VIRTUAL_ENV="$VENV_DIR" uv --directory "$BOT_DIR" sync \
+        --active --locked --no-dev --no-install-project --inexact; then
+        echo -e "${RED}✗ runtime dependency 同步失败${NC}"
+        exit 1
+    fi
+    "$VENV_DIR/bin/python" -I -m pip check \
+        || { echo -e "${RED}✗ runtime dependency 一致性检查失败${NC}"; exit 1; }
 
-distribution = importlib.metadata.distribution("fogmoe-telegram-bot")
-direct_url_text = distribution.read_text("direct_url.json")
-if direct_url_text is None:
-    raise SystemExit(0)
-direct_url = json.loads(direct_url_text)
-raise SystemExit(direct_url.get("dir_info", {}).get("editable") is True)
-PY
+    echo "验证或按需构建普通 wspctl wheel..."
+    "$WSPCTL_CLIENT_RECONCILER" --venv "$VENV_DIR" \
+        || { echo -e "${RED}✗ wspctl client wheel 准备失败${NC}"; exit 1; }
+    echo -e "${GREEN}✓ runtime dependencies 与普通 wspctl wheel 已就绪${NC}"
 }
 
 # 初始化环境（首次设置）

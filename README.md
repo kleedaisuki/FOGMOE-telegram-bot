@@ -69,7 +69,7 @@ git clone https://github.com/kleedaisuki/FOGMOE-telegram-bot.git
 cd FOGMOE-telegram-bot
 
 # 安装 Python 依赖和命令行入口
-python -m pip install -e .
+python -m pip install .
 ```
 
 ### 配置文件（JSONC）
@@ -233,7 +233,7 @@ fogmoe-dashboard --format json --window 1h errors | jq '.data'
 跨 logs/traces drill-down。GUI 是可选依赖，不会把 Qt runtime 带进 bot 的服务器部署：
 
 ~~~bash
-pip install -e '.[dashboard-gui]'
+python -m pip install '.[dashboard-gui]'
 fogmoe-dashboard-gui --config ./config.json --window 6h --auto-refresh 10
 ~~~
 
@@ -253,13 +253,14 @@ Python 异步 API、全部视图参数和生产安全边界见 [Dashboard 文档
 首次部署或更新 workspace host control plane：
 
 ```bash
-./installWspctl.sh
+./install.sh
 ```
 
 该命令显式构建并发布 workspace OCI image、安装并启用 `wspctld.service`。日常
 `runBot.sh` 只检查已安装 broker 的 service/socket readiness，绝不执行 sudo、构建或安装。
-部署入口以及 `runBot.sh init/update` 只安装普通 wheel；editable install 仅供开发者手工使用，
-不会进入部署环境。
+部署入口以及 `runBot.sh init/update` 只安装普通 wheel；由于 `wspctl._native` 是 C++ 扩展，
+本项目不支持 editable install。安装器以源码身份、版本、Python ABI 与 native import 验证已经
+正确的 wheel，并在全部匹配时跳过 pip/CMake 重建。
 完整安装输出会同时实时显示并写入 owner-only 的
 `logs/wspctl_install_<timestamp>_<pid>.log`；`./statusWspctl.sh` 会指出最近一次日志。
 需要代理时，安装器直接读取当前环境已有的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 与
@@ -380,7 +381,7 @@ development opt-in 下使用；它不是 production 的特权 host root。
    如果服务器上的 Docker 需要 root 权限，把 `docker` 改成 `sudo docker` 即可。
 
 > 默认镜像基于 `python:3.14-slim-bookworm`，在 builder stage 编译 scikit-build/pybind11 client
-> wheel，并显式关闭 `WSPCTL_INSTALL_HOST_TOOLS`；最终 Bot image 不含 `wspctld`、`wsp-systemd`
+> wheel，并显式关闭 host publisher/runtime 构建选项；最终 Bot image 不含 `wspctld`、`wsp-systemd`
 > 或 `wspctl-image` host executable，入口为 `fogmoe-bot --config /app/config.json`。
 
 
@@ -420,7 +421,7 @@ Memory 与 Context Window 的显式边界、数据所有权和迁移策略详见
 开发依赖与本地门禁：
 
 ```bash
-python -m pip install -e '.[dev]'
+python -m pip install '.[dev]'
 python -m compileall -q src tests
 ruff check .
 pyright

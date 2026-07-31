@@ -19,14 +19,16 @@ SOURCE_REFERENCE="${WSPCTL_IMAGE_REFERENCE:-wspctl-runtime}"
 REQUESTED_WORK_ROOT="${WSPCTL_WORK_ROOT:-$REPOSITORY_ROOT/.wspctl}"
 # @brief root-owned canonical image work root / Root-owned canonical image work root.
 WORK_ROOT="$(realpath --canonicalize-missing -- "$REQUESTED_WORK_ROOT")"
+# @brief 唯一受控的 checkout-local image/control-plane 根 / Sole managed checkout-local image/control-plane root.
+MANAGED_WORK_ROOT="$REPOSITORY_ROOT/.wspctl"
 # @brief root-owned materialized artifact store / Root-owned materialized artifact store.
 ARTIFACT_STORE="$WORK_ROOT/artifacts"
 # @brief readonly image publication root / Readonly image publication root.
 IMAGES_ROOT="$WORK_ROOT/images"
 # @brief 当前选择的 OCI digest 文件 / Currently selected OCI-digest file.
 CURRENT_IMAGE_FILE="$WORK_ROOT/current-image-digest"
-# @brief 独立 host publisher build 目录 / Independent host-publisher build directory.
-BUILD_DIRECTORY="$REPOSITORY_ROOT/build/wspctl-image-publish"
+# @brief 只准备 publisher/verifier host tools 的窄入口 / Narrow entrypoint preparing only publisher/verifier host tools.
+PREPARE_HOST_TOOLS_SCRIPT="$REPOSITORY_ROOT/scripts/start-wspctld.sh"
 # @brief root-owned installed native sealer/verifier / Root-owned installed native sealer/verifier.
 SEALER="/usr/local/bin/wspctl-image"
 # @brief root-owned installed typed publisher / Root-owned installed typed publisher.
@@ -50,13 +52,13 @@ die() {
     exit 1
 }
 
-command -v cmake >/dev/null 2>&1 \
-    || die "缺少 cmake，无法构建 root-owned host publisher"
 command -v sudo >/dev/null 2>&1 \
     || die "缺少 sudo，显式 image publication 必须由 root 完成"
-[[ "$WORK_ROOT" = /* ]] || die "WSPCTL_WORK_ROOT 必须是绝对路径"
-[[ "$WORK_ROOT" =~ ^/[A-Za-z0-9._/-]+$ ]] \
-    || die "WSPCTL_WORK_ROOT 只允许绝对路径中的字母、数字、点、下划线和连字符"
+[[ -x "$PREPARE_HOST_TOOLS_SCRIPT" ]] \
+    || die "缺少 host tool 准备入口: $PREPARE_HOST_TOOLS_SCRIPT"
+[[ "$REQUESTED_WORK_ROOT" == "$MANAGED_WORK_ROOT" \
+    && "$WORK_ROOT" == "$MANAGED_WORK_ROOT" ]] \
+    || die "不支持自定义 WSPCTL_WORK_ROOT；root-owned publication 固定使用 $MANAGED_WORK_ROOT"
 [[ "$(uname -m)" == "x86_64" ]] \
     || die "当前发布契约只支持 linux/amd64，host 为 $(uname -m)"
 
@@ -79,22 +81,8 @@ fi
 [[ "$SOURCE_LAYOUT" = /* ]] || SOURCE_LAYOUT="$PWD/$SOURCE_LAYOUT"
 [[ -d "$SOURCE_LAYOUT" ]] || die "OCI layout 不存在: $SOURCE_LAYOUT"
 
-printf 'wspctl image: 构建并安装 root-owned publisher/verifier\n'
-CMAKE_SECURITY_ARGUMENTS=("-DWSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT=OFF")
-if [[ "$WORK_ROOT" == "$REPOSITORY_ROOT/.wspctl" ]]; then
-    CMAKE_SECURITY_ARGUMENTS=("-DWSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT=ON")
-fi
-cmake -S "$REPOSITORY_ROOT" -B "$BUILD_DIRECTORY" \
-    -DBUILD_TESTING=OFF \
-    -DWSPCTL_BUILD_TESTING=OFF \
-    -DWSPCTL_BUILD_PYTHON_BINDINGS=OFF \
-    -DWSPCTL_INSTALL_HOST_TOOLS=ON \
-    -DWSPCTL_HOST_WORKDIR="$WORK_ROOT" \
-    -DCMAKE_INSTALL_PREFIX=/usr/local \
-    -DCMAKE_BUILD_TYPE=Release \
-    "${CMAKE_SECURITY_ARGUMENTS[@]}"
-cmake --build "$BUILD_DIRECTORY" --target wspctl-image --parallel
-sudo cmake --install "$BUILD_DIRECTORY" --component WspctlPublisher
+printf 'wspctl image: 验证或按需准备 root-owned publisher/verifier\n'
+"$PREPARE_HOST_TOOLS_SCRIPT" prepare-host-tools
 
 for trusted_tool in \
     "$PYTHON_EXECUTABLE" "$PUBLISHER" "$SEALER" "$SKOPEO" "$UMOCI" \

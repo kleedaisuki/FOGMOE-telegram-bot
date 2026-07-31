@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -20,7 +23,7 @@ UNINSTALL_SCRIPT = REPOSITORY_ROOT / "uninstallWspctl.sh"
 #: @brief 仓库根目录的只读观测脚本 / Repository-root readonly observability script.
 STATUS_SCRIPT = REPOSITORY_ROOT / "statusWspctl.sh"
 #: @brief 仓库根目录的完整安装入口 / Repository-root complete installation entrypoint.
-INSTALL_SCRIPT = REPOSITORY_ROOT / "installWspctl.sh"
+INSTALL_SCRIPT = REPOSITORY_ROOT / "install.sh"
 
 
 def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> None:
@@ -40,13 +43,34 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
     if checked.returncode != 0:
         raise AssertionError(f"invalid bash:\n{checked.stderr}")
     script = START_SCRIPT.read_text(encoding="utf-8")
-    assert 'pip install --no-deps "$REPOSITORY_ROOT"' in script
-    assert "pip install --editable" not in script
-    assert "editable_input_fingerprint" not in script
-    assert "deployed_client_is_regular_install" in script
-    assert 'get("editable") is True' in script
-    assert "import wspctl._native" in script
-    assert "-DWSPCTL_INSTALL_HOST_TOOLS=ON" in script
+    assert "wspctl_build_identity.py" in script
+    assert "ensure-wspctl-client.sh" in script
+    assert '"$CLIENT_RECONCILER" --venv "$VENV_DIR"' in script
+    assert "deployed_client_is_current" not in script
+    assert "write_client_deployment_receipt" not in script
+    assert "pip wheel" not in script
+    assert "HOST_IDENTITY_PYTHON" in script
+    assert "project_version" in script
+    assert "PUBLISHER_DEPLOYMENT_RECEIPT_FILE" in script
+    assert "RUNTIME_DEPLOYMENT_RECEIPT_FILE" in script
+    assert "host_artifacts_are_current" in script
+    assert "write_host_deployment_receipt" in script
+    assert "host_path_is_trusted" in script
+    assert "host_artifact_parent_directories_are_trusted" in script
+    assert "stat --format='%u:%g:%f'" in script
+    assert "(mode_value & 8#022) == 0" in script
+    assert "/usr/local/libexec/wspctl" in script
+    assert "/usr/local/share/fogmoe-wspctl/systemd" in script
+    assert "-DWSPCTL_BUILD_HOST_PUBLISHER=ON" in script
+    assert "-DWSPCTL_BUILD_HOST_RUNTIME=ON" in script
+    assert "-DBUILD_TESTING=OFF" in script
+    assert "-DWSPCTL_BUILD_TESTING=OFF" in script
+    assert "-DWSPCTL_BUILD_PYTHON_BINDINGS=OFF" in script
+    assert "--target wspctl-image" in script
+    assert "--target wspctld wspctl" in script
+    assert "--component WspctlHost" in script
+    assert "--component WspctlPublisher" in script
+    assert "host_development_root_policy" not in script
     assert "-DWSPCTL_ALLOW_INSECURE_DEVELOPMENT_ROOT=ON" in script
     assert "WSPCTL_LOOP_SIZE" in script
     assert "WSPCTL_IO_WEIGHT" in script
@@ -83,13 +107,13 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
     assert "select_published_image" in script
     assert "WSPCTL_IMAGE_DIGEST" in script
     assert '"$IMAGES_ROOT/sha256/$IMAGE_DIGEST_HEX/rootfs"' in script
-    assert "installWspctl.sh" in script
+    assert "installWspctl.sh" not in script
+    assert "install.sh" in script
     for forbidden in (
         "default_generation_name",
         "build_wspctl_image.py",
         "workspace_venv",
         "uv venv",
-        "--venv",
         "--stdlib-only",
         "--python-source",
         "readelf",
@@ -105,7 +129,8 @@ def test_start_script_is_bash_syntax_valid_and_declares_critical_contracts() -> 
     assert 'LXCFS_SERVICE_NAME="wspctl-lxcfs.service"' in script
     assert 'LXCFS_ROOT="/run/fogmoe-wspctl-lxcfs/root"' in script
     assert "lxcfs fusermount3" in script
-    assert "/usr/local/share/fogmoe-wspctl/systemd/wspctl-lxcfs.service" in script
+    assert 'HOST_SYSTEMD_ASSET_DIRECTORY="/usr/local/share/fogmoe-wspctl/systemd"' in script
+    assert 'HOST_LXCFS_UNIT_SOURCE="$HOST_SYSTEMD_ASSET_DIRECTORY/wspctl-lxcfs.service"' in script
     assert 'systemctl is-active --quiet "$LXCFS_SERVICE_NAME"' in script
     assert '"fuse.lxcfs"' in script
     assert "WSPCTL_SANDBOX_UID=$AGENT_UID" in script
@@ -164,6 +189,202 @@ resolve_io_weight
     )
     assert checked.returncode == 0, checked.stderr
     assert "禁用相对 I/O 权重" in checked.stdout
+
+
+def test_prepare_host_tools_is_narrow_and_does_not_touch_client_or_runtime_state(
+    tmp_path: Path,
+) -> None:
+    """@brief publisher 窄准备不得触碰 client 或 runtime state / Narrow publisher preparation must not touch the client or runtime state.
+
+    @param tmp_path pytest 临时目录 / Pytest temporary directory.
+    @return None / None.
+    """
+
+    lock_file = tmp_path / "prepare.lock"
+    script = f"""
+set -euo pipefail
+source {START_SCRIPT!s}
+LOCK_FILE={lock_file!s}
+require_work_root() {{ printf 'work-root\\n'; }}
+require_receipt_commands() {{ printf 'receipt-commands\\n'; }}
+acquire_control_lock() {{ printf 'control-lock\\n'; }}
+acquire_host_install_lock() {{ printf 'host-install-lock\\n'; }}
+ensure_publisher_host_artifacts() {{ printf 'publisher\\n'; }}
+ensure_runtime_host_artifacts() {{ exit 97; }}
+prepare_control_plane_directories() {{ exit 96; }}
+CLIENT_RECONCILER=unexpected_client
+unexpected_client() {{ exit 95; }}
+ensure_loopback_state_mount() {{ exit 96; }}
+require_state_mount() {{ exit 95; }}
+select_published_image() {{ exit 94; }}
+install_service_configuration() {{ exit 92; }}
+start_service() {{ exit 93; }}
+prepare_host_tools
+"""
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == [
+        "work-root",
+        "receipt-commands",
+        "control-lock",
+        "host-install-lock",
+        "publisher",
+    ]
+
+
+def test_work_root_rejects_custom_or_symlinked_privileged_paths(tmp_path: Path) -> None:
+    """@brief 特权工作根只能是受控 checkout 路径 / Privileged work root must be the managed checkout path.
+
+    @param tmp_path pytest 临时目录 / Pytest temporary directory.
+    @return None / None.
+    """
+
+    foreign_root = tmp_path / "foreign-root"
+    script = f"""
+set -euo pipefail
+source {START_SCRIPT!s}
+REQUESTED_WORK_ROOT={foreign_root!s}
+WORK_ROOT={foreign_root!s}
+require_work_root
+"""
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode != 0
+    assert "不支持自定义 WSPCTL_WORK_ROOT" in completed.stderr
+
+
+def test_verified_publisher_receipt_skips_cmake_and_cpp_tools(tmp_path: Path) -> None:
+    """@brief publisher receipt 命中时不能探测 CMake/C++ / A publisher receipt hit must not probe CMake/C++.
+
+    @param tmp_path pytest 临时目录 / Pytest temporary directory.
+    @return None / None.
+    """
+
+    verifier = tmp_path / "wspctl-image"
+    publisher = tmp_path / "publish_wspctl_image.py"
+    receipt = tmp_path / "publisher-receipt"
+    verifier.write_text("verified image tool\n", encoding="utf-8")
+    publisher.write_text("verified publisher\n", encoding="utf-8")
+    verifier.chmod(0o755)
+    publisher.chmod(0o755)
+    script = f"""
+set -euo pipefail
+source {START_SCRIPT!s}
+sudo() {{ "$@"; }}
+cmake() {{ exit 97; }}
+c++() {{ exit 98; }}
+host_path_is_trusted() {{ return 0; }}
+host_artifact_parent_directories_are_trusted() {{ return 0; }}
+HOST_IMAGE_VERIFIER={verifier!s}
+HOST_PUBLISHER={publisher!s}
+PUBLISHER_DEPLOYMENT_RECEIPT_FILE={receipt!s}
+WORK_ROOT={tmp_path!s}
+expected_version="$(project_version)"
+expected_identity="$(host_build_identity)"
+printf 'schema=2\\nrole=publisher\\nsource_identity=%s\\nproject_version=%s\\nplatform=%s\\ntoolchain_identity=%064d\\n' \\
+    "$expected_identity" "$expected_version" "$(uname -m)" 0 > "$PUBLISHER_DEPLOYMENT_RECEIPT_FILE"
+printf 'artifact %s %s\\n' "$HOST_IMAGE_VERIFIER" "$(sha256sum "$HOST_IMAGE_VERIFIER" | awk '{{print $1}}')" >> "$PUBLISHER_DEPLOYMENT_RECEIPT_FILE"
+printf 'artifact %s %s\\n' "$HOST_PUBLISHER" "$(sha256sum "$HOST_PUBLISHER" | awk '{{print $1}}')" >> "$PUBLISHER_DEPLOYMENT_RECEIPT_FILE"
+ensure_publisher_host_artifacts
+"""
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=20,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "跳过 CMake 构建" in completed.stdout
+
+
+def test_host_receipt_rejects_untrusted_artifact_or_parent_directory(
+    tmp_path: Path,
+) -> None:
+    """@brief host receipt 不得信任可写或非 root-owned 执行路径 / A host receipt must not trust writable or non-root-owned execution paths.
+
+    @param tmp_path pytest 临时目录 / Pytest temporary directory.
+    @return None / None.
+    """
+
+    artifact = tmp_path / "wspctld"
+    receipt = tmp_path / "runtime-receipt"
+    trusted_parent = tmp_path / "trusted-parent"
+    artifact.write_text("trusted host binary\n", encoding="utf-8")
+    artifact.chmod(0o755)
+    trusted_parent.mkdir()
+    checksum = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    script = f"""
+set -euo pipefail
+source {START_SCRIPT!s}
+sudo() {{ "$@"; }}
+WORK_ROOT={tmp_path!s}
+HOST_WSPCTLD={artifact!s}
+RECEIPT={receipt!s}
+TRUSTED_PARENT={trusted_parent!s}
+host_artifact_parent_directories() {{ printf '%s\\n' "$TRUSTED_PARENT"; }}
+stat() {{
+    local requested_path="${{@: -1}}"
+    [[ "$1" == "--format=%u:%g:%f" ]] || command stat "$@"
+    case "$requested_path" in
+        "$WORK_ROOT") printf '0:0:41ed\\n' ;;
+        "$RECEIPT") printf '0:0:81a4\\n' ;;
+        "$TRUSTED_PARENT") printf '%s\\n' "$PARENT_METADATA" ;;
+        "$HOST_WSPCTLD") printf '%s\\n' "$ARTIFACT_METADATA" ;;
+        *) return 1 ;;
+    esac
+}}
+provider() {{ printf '%s\\n' "$HOST_WSPCTLD"; }}
+printf 'schema=2\\nrole=runtime\\nsource_identity=source\\nproject_version=version\\nplatform=%s\\ntoolchain_identity=%064d\\nartifact %s %s\\n' \\
+    "$(uname -m)" 0 "$HOST_WSPCTLD" {checksum!s} > "$RECEIPT"
+
+ARTIFACT_METADATA=0:0:81ed
+PARENT_METADATA=0:0:41ed
+host_artifacts_are_current "$RECEIPT" runtime source version provider 1
+
+ARTIFACT_METADATA=1000:0:81ed
+if host_artifacts_are_current "$RECEIPT" runtime source version provider 1; then
+    exit 91
+fi
+
+ARTIFACT_METADATA=0:0:81fd
+if host_artifacts_are_current "$RECEIPT" runtime source version provider 1; then
+    exit 92
+fi
+
+ARTIFACT_METADATA=0:0:81ed
+PARENT_METADATA=0:0:41fd
+if host_artifacts_are_current "$RECEIPT" runtime source version provider 1; then
+    exit 93
+fi
+"""
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_broker_health_wait_is_bounded_during_generation_rollover() -> None:
@@ -480,9 +701,13 @@ def test_image_build_and_publication_are_explicit_separate_commands() -> None:
     assert "--http-proxy=true" in build_script
     assert "--format oci" in build_script
     assert "buildah push" in build_script
+    assert "wspctl_build_identity.py" in build_script
+    assert "BUILD_RECEIPT_FILE" in build_script
+    assert "rootfs_artifact_is_current" in build_script
+    assert "已验证源码身份相同的 OCI artifact；跳过 Buildah 构建" in build_script
     assert 'OUTPUT_ROOT="${1:-$REPOSITORY_ROOT/.runtime/wspctl-rootfs}"' in build_script
     assert 'DESTINATION="$OUTPUT_ROOT/sha256/$DIGEST_HEX"' in build_script
-    assert 'CURRENT_BUILD_FILE="$OUTPUT_ROOT/current-image-digest"' in build_script
+    assert "record_current_build_digest" in build_script
     assert "--timestamp" in build_script
     assert "--layers" in build_script
     assert "--build-context" in build_script
@@ -494,9 +719,10 @@ def test_image_build_and_publication_are_explicit_separate_commands() -> None:
     assert "skopeo" in publish_script
     assert "umoci" in publish_script
     assert "publish_wspctl_image.py" in publish_script
-    assert "WSPCTL_BUILD_PYTHON_BINDINGS=OFF" in publish_script
-    assert "cmake --build" in publish_script
-    assert "wspctl-image --parallel" in publish_script
+    assert "PREPARE_HOST_TOOLS_SCRIPT" in publish_script
+    assert '"$PREPARE_HOST_TOOLS_SCRIPT" prepare-host-tools' in publish_script
+    assert "cmake --build" not in publish_script
+    assert "WSPCTL_BUILD_PYTHON_BINDINGS=OFF" not in publish_script
     assert (
         'BUILD_OUTPUT_ROOT="$REPOSITORY_ROOT/.runtime/wspctl-rootfs"' in publish_script
     )
@@ -516,6 +742,213 @@ def test_image_build_and_publication_are_explicit_separate_commands() -> None:
     assert "mount --bind" not in publish_script
     assert "systemctl start" not in build_script
     assert "systemctl start" not in publish_script
+
+
+def write_verified_synthetic_oci_receipt(
+    output_root: Path,
+    source_identity: str,
+    reference: str,
+) -> str:
+    """@brief 写入完整 SHA-256 descriptor 图的合成 OCI receipt / Write a synthetic OCI receipt with a complete SHA-256 descriptor graph.
+
+    @param output_root content-addressed artifact 根 / Content-addressed artifact root.
+    @param source_identity receipt 中的源码身份 / Source identity recorded in the receipt.
+    @param reference index descriptor 的 OCI reference / OCI reference in the index descriptor.
+    @return 规范 OCI manifest digest / Canonical OCI manifest digest.
+    """
+
+    def descriptor_for(payload: bytes) -> tuple[str, int]:
+        """@brief 为真实 OCI blob 计算 descriptor / Compute a descriptor for a real OCI blob.
+
+        @param payload 将写入的 blob 字节 / Blob bytes that will be written.
+        @return 规范 digest 与字节数 / Canonical digest and byte count.
+        """
+
+        digest = hashlib.sha256(payload).hexdigest()
+        return f"sha256:{digest}", len(payload)
+
+    config_payload = json.dumps(
+        {"architecture": "amd64", "os": "linux"}, sort_keys=True
+    ).encode("utf-8")
+    layer_payload = b"verified synthetic OCI layer\n"
+    config_digest, config_size = descriptor_for(config_payload)
+    layer_digest, layer_size = descriptor_for(layer_payload)
+    manifest_payload = json.dumps(
+        {
+            "schemaVersion": 2,
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": config_digest,
+                "size": config_size,
+            },
+            "layers": [
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "digest": layer_digest,
+                    "size": layer_size,
+                }
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    manifest_digest, manifest_size = descriptor_for(manifest_payload)
+    output_layout = (
+        output_root / "sha256" / manifest_digest.removeprefix("sha256:") / "oci-layout"
+    )
+    blob_directory = output_layout / "blobs" / "sha256"
+    blob_directory.mkdir(parents=True)
+    for digest, payload in (
+        (config_digest, config_payload),
+        (layer_digest, layer_payload),
+        (manifest_digest, manifest_payload),
+    ):
+        (blob_directory / digest.removeprefix("sha256:")).write_bytes(payload)
+    (output_layout / "oci-layout").write_text(
+        json.dumps({"imageLayoutVersion": "1.0.0"}), encoding="utf-8"
+    )
+    (output_layout / "index.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "manifests": [
+                    {
+                        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "digest": manifest_digest,
+                        "size": manifest_size,
+                        "annotations": {
+                            "org.opencontainers.image.ref.name": reference
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (output_layout / "wspctl-manifest-digest").write_text(
+        f"{manifest_digest}\n", encoding="utf-8"
+    )
+    (output_root / "build-receipt").write_text(
+        "\n".join(
+            (
+                "schema=1",
+                f"image_source_identity={source_identity}",
+                f"manifest_digest={manifest_digest}",
+                "built_source_date_epoch=1",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    return manifest_digest
+
+
+def current_oci_image_source_identity() -> str:
+    """@brief 计算当前 checkout 的 OCI image source identity / Compute the OCI-image source identity for the current checkout.
+
+    @return 规范源码身份 / Canonical source identity.
+    """
+
+    identity_tool = REPOSITORY_ROOT / "tools" / "wspctl_build_identity.py"
+    identity_result = subprocess.run(
+        [
+            sys.executable,
+            str(identity_tool),
+            "--source-root",
+            str(REPOSITORY_ROOT),
+            "--component",
+            "image",
+            "--attribute",
+            "platform=linux/amd64",
+            "--attribute",
+            "rootfs_format=oci-v1",
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    if identity_result.returncode != 0:
+        raise AssertionError(identity_result.stderr)
+    return identity_result.stdout.strip()
+
+
+def test_verified_oci_receipt_skips_buildah_when_the_tool_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    """@brief 已验证 OCI 收据必须在 Buildah 检查前短路 / A verified OCI receipt must short-circuit before Buildah is checked.
+
+    @param tmp_path pytest 临时目录 / Pytest temporary directory.
+    @return None / None.
+    """
+
+    source_identity = current_oci_image_source_identity()
+    output_root = tmp_path / "rootfs"
+    manifest_digest = write_verified_synthetic_oci_receipt(
+        output_root,
+        source_identity,
+        "wspctl-runtime",
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_buildah = fake_bin / "buildah"
+    fake_buildah.write_text("#!/usr/bin/env bash\nexit 99\n", encoding="utf-8")
+    fake_buildah.chmod(0o755)
+    fake_git = fake_bin / "git"
+    fake_git.write_text("#!/usr/bin/env bash\nexit 98\n", encoding="utf-8")
+    fake_git.chmod(0o755)
+    environment = os.environ | {
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+    }
+
+    completed = subprocess.run(
+        ["bash", str(BUILD_IMAGE_SCRIPT), str(output_root)],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+        timeout=20,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "跳过 Buildah 构建" in completed.stdout
+    assert (output_root / "current-image-digest").read_text(encoding="utf-8") == (
+        f"{manifest_digest}\n"
+    )
+
+
+def test_oci_receipt_with_wrong_reference_does_not_skip_the_build(
+    tmp_path: Path,
+) -> None:
+    """@brief OCI index 的错误 reference annotation 必须使 receipt 失效 / An OCI index descriptor with a wrong reference annotation must invalidate the receipt.
+
+    @param tmp_path pytest 临时目录 / Pytest temporary directory.
+    @return None / None.
+    """
+
+    output_root = tmp_path / "rootfs"
+    write_verified_synthetic_oci_receipt(
+        output_root,
+        current_oci_image_source_identity(),
+        "different-reference",
+    )
+    environment = os.environ | {"SOURCE_DATE_EPOCH": "not-a-timestamp"}
+
+    completed = subprocess.run(
+        ["bash", str(BUILD_IMAGE_SCRIPT), str(output_root)],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+        timeout=20,
+    )
+
+    assert completed.returncode != 0
+    assert "跳过 Buildah 构建" not in completed.stdout
+    assert "SOURCE_DATE_EPOCH 必须是十进制 Unix 时间" in completed.stderr
 
 
 def test_root_uninstaller_is_syntax_valid_and_requires_explicit_purge() -> None:
@@ -637,7 +1070,7 @@ report_install_log
 
 
 def test_install_entrypoint_owns_complete_control_plane_deployment() -> None:
-    """@brief installWspctl 必须独占完整 control-plane 部署 / installWspctl must own the complete control-plane deployment.
+    """@brief install.sh 必须独占完整 control-plane 部署 / install.sh must own the complete control-plane deployment.
 
     @return None / None.
     """
@@ -656,8 +1089,9 @@ def test_install_entrypoint_owns_complete_control_plane_deployment() -> None:
     publish_call = '"$PUBLISH_IMAGE_SCRIPT"'
     broker_call = '"$INSTALL_BROKER_SCRIPT" start'
     assert "sudo -v" in script
-    assert "sudo buildah skopeo umoci cmake" in script
-    assert "缺少 host 安装工具" in script
+    assert "for command_name in sudo tee date" in script
+    assert "Buildah/CMake are deliberately checked by their receipt-miss branches" in script
+    assert "sudo buildah skopeo umoci cmake" not in script
     assert 'scripts/build-wspctl-rootfs.sh"' in script
     assert 'scripts/publish-wspctl-rootfs.sh"' in script
     assert 'scripts/start-wspctld.sh"' in script
@@ -673,6 +1107,7 @@ def test_install_entrypoint_owns_complete_control_plane_deployment() -> None:
     assert '完整日志: %s\\n' in script
     assert '"${BASH_SOURCE[0]}" == "$0"' in script
     assert "runBot.sh" in script
+    assert "installWspctl.sh" not in script
 
 
 def test_install_log_captures_failure_and_preserves_exit_status(
@@ -750,6 +1185,7 @@ def test_runbot_only_checks_installed_broker_readiness() -> None:
     assert "init|setup|install)" not in script
     assert "安装与 Bot 运行已分离" in script
     assert '1. $WSPCTL_INSTALL_SCRIPT' in script
+    assert 'WSPCTL_INSTALL_SCRIPT="$BOT_DIR/install.sh"' in script
 
 
 if __name__ == "__main__":
