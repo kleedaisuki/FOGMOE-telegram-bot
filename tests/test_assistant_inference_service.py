@@ -135,7 +135,7 @@ def _context(
     @return 可供推理的上下文 / Context ready for inference.
     """
 
-    return ContextState(
+    return ContextState.create(
         context_id=uuid4(),
         scope=ConversationScope(user_id=123),
         user_state=UserState(coins=10, plan="free", permission=0, profile=None),
@@ -195,8 +195,8 @@ def test_inference_retries_image_messages_as_text_after_all_routes_fail() -> Non
     assert response.text == "text fallback response"
     assert response.events == []
     assert calls == [
-        image_messages,
-        [_user_message(TextPart("describe this image"))],
+        tuple(image_messages),
+        (_user_message(TextPart("describe this image")),),
     ]
 
 
@@ -244,7 +244,7 @@ def test_text_only_route_uses_vision_text_fallback_messages() -> None:
     )
     assert response.text == "ok"
     assert response.events == []
-    assert calls == [text_fallback_messages]
+    assert calls == [tuple(text_fallback_messages)]
 
 
 def test_vision_capable_route_keeps_multimodal_messages() -> None:
@@ -283,7 +283,7 @@ def test_vision_capable_route_keeps_multimodal_messages() -> None:
     response = asyncio.run(service.infer(_context(image_messages)))
     assert response.text == "ok"
     assert response.events == []
-    assert calls == [image_messages]
+    assert calls == [tuple(image_messages)]
 
 
 def test_image_messages_prioritize_the_image_capable_model_within_one_route() -> None:
@@ -325,7 +325,7 @@ def test_image_messages_prioritize_the_image_capable_model_within_one_route() ->
     response = asyncio.run(service.infer(_context(image_messages)))
 
     assert response.text == "ok"
-    assert calls == [("qwen-vision", image_messages)]
+    assert calls == [("qwen-vision", tuple(image_messages))]
 
 
 def test_resumable_partial_stream_failure_does_not_run_model_b_in_generation() -> None:

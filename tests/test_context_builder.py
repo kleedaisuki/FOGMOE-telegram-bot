@@ -8,6 +8,7 @@ from fogmoe_bot.application.conversation.assistant_ingress import (
 )
 from fogmoe_bot.domain.context import (
     ChatMessageContext,
+    ContextState,
     ConversationScope,
     RuntimeMessageReplacement,
     ScheduledTaskContext,
@@ -194,7 +195,7 @@ def test_context_state_builds_model_messages_with_runtime_replacements() -> None
         text_fallback_messages=history,
     )
 
-    assert context_state.messages == [
+    assert context_state.messages == (
         text_message(
             MessageRole.SYSTEM,
             "base system policy\n\n"
@@ -207,11 +208,11 @@ def test_context_state_builds_model_messages_with_runtime_replacements() -> None
         ),
         text_message(MessageRole.USER, "older"),
         runtime_message,
-    ]
-    assert context_state.text_fallback_messages == [
+    )
+    assert context_state.text_fallback_messages == (
         context_state.messages[0],
         *history,
-    ]
+    )
     assert context_state.tool_context == {
         "is_group": True,
         "group_id": -100,
@@ -239,6 +240,52 @@ def test_group_context_rejects_private_profile_state() -> None:
                 profile=_profile(),
             ),
         )
+
+
+def test_context_state_exposes_immutable_views_and_named_history_transitions() -> None:
+    """@brief Context 聚合封闭可变状态并以具名动作演进 /
+    The Context aggregate closes mutable state and evolves through named operations.
+
+    @return None / None.
+    """
+
+    with pytest.raises(TypeError, match=r"ContextState\.create"):
+        ContextState()
+
+    original = build_context_state(
+        context_id=UUID("00000000-0000-4000-8000-000000000044"),
+        system_prompt="base",
+        history_messages=(text_message(MessageRole.USER, "question"),),
+        scope=ConversationScope(user_id=42),
+        user_state=UserState(coins=7, plan="paid", permission=2),
+    )
+    original.define_stable_prefix(1)
+    branch = original.fork_for_route()
+    branch.record_agent_history(
+        (*branch.messages, text_message(MessageRole.ASSISTANT, "answer"))
+    )
+
+    assert isinstance(original.messages, tuple)
+    assert len(original.messages) == 2
+    assert len(branch.messages) == 3
+    with pytest.raises(TypeError):
+        original.tool_context["user_id"] = 7  # type: ignore[index]
+    with pytest.raises(ValueError, match="within messages"):
+        original.select_model_messages(())
+    assert len(original.messages) == 2
+
+    original.adopt_route_history(branch)
+    assert original.messages[-1].text == "answer"
+
+    another = build_context_state(
+        context_id=UUID("00000000-0000-4000-8000-000000000045"),
+        system_prompt="base",
+        history_messages=(),
+        scope=ConversationScope(user_id=42),
+        user_state=original.user_state,
+    )
+    with pytest.raises(ValueError, match="another ContextState"):
+        original.adopt_route_history(another)
 
 
 def test_context_tools_ignore_empty_runtime_replacement() -> None:

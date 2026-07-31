@@ -553,7 +553,7 @@ def _context() -> ContextState:
     @return 含一条 canonical user message 的上下文 / Context with one canonical user message.
     """
 
-    return ContextState(
+    return ContextState.create(
         context_id=uuid4(),
         scope=ConversationScope(user_id=42),
         user_state=UserState(coins=10, plan="free", permission=0, profile=None),
@@ -935,10 +935,10 @@ def test_memory_tool_result_never_enters_context_state_or_history() -> None:
         assert response.history_messages == (
             text_message(MessageRole.ASSISTANT, "answer"),
         )
-        assert context.messages == [
+        assert context.messages == (
             text_message(MessageRole.USER, "remember me"),
             text_message(MessageRole.ASSISTANT, "answer"),
-        ]
+        )
         assert all(event.get("ephemeral") is True for event in response.events)
         transient_messages = cast(
             tuple[CanonicalMessage, ...], completion.requests[1]["messages"]

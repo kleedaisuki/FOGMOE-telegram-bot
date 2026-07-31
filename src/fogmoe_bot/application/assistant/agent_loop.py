@@ -1277,10 +1277,12 @@ def _final_response(
 
     state.messages.append(completion.message)
     state.persistable_messages.append(completion.message)
-    state.context.messages = [
-        *state.base_messages,
-        *state.persistable_messages,
-    ]
+    state.context.record_agent_history(
+        [
+            *state.base_messages,
+            *state.persistable_messages,
+        ]
+    )
     return AgentResponse(
         completion.content,
         tuple(state.events),

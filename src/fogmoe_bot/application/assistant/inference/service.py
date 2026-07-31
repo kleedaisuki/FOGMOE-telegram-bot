@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Protocol
 
 from fogmoe_bot.application.runtime import FailureCircuit
@@ -193,16 +193,7 @@ class AssistantInferenceService:
             if permit is None:
                 continue
             selected_messages = context_state.messages if messages is None else messages
-            route_context = ContextState(
-                context_id=context_state.context_id,
-                scope=context_state.scope,
-                user_state=context_state.user_state,
-                messages=list(selected_messages),
-                tool_context=context_state.tool_context,
-                text_fallback_messages=context_state.text_fallback_messages,
-                current_user_text=context_state.current_user_text,
-                stable_prefix_message_count=(context_state.stable_prefix_message_count),
-            )
+            route_context = context_state.fork_for_route(selected_messages)
             outcome_recorded = False
             try:
                 response = await self._run_route(
@@ -236,10 +227,7 @@ class AssistantInferenceService:
                 if not outcome_recorded:
                     self._circuit.abandon(permit)
             if response.context_state is not None:
-                context_state.messages = response.context_state.messages
-                context_state.text_fallback_messages = (
-                    response.context_state.text_fallback_messages
-                )
+                context_state.adopt_route_history(response.context_state)
                 response = AgentResponse(
                     response.text,
                     response.events,
@@ -280,10 +268,12 @@ class AssistantInferenceService:
         if messages_have_images(original_messages):
             models.sort(key=lambda model: not model.accepts_images)
         for model in models:
-            context_state.messages = self._messages_for_model(
-                model,
-                original_messages,
-                context_state.text_fallback_messages,
+            context_state.select_model_messages(
+                self._messages_for_model(
+                    model,
+                    original_messages,
+                    context_state.text_fallback_messages,
+                )
             )
             try:
                 config = AgentExecutionConfig(
@@ -328,8 +318,8 @@ class AssistantInferenceService:
     def _messages_for_model(
         self,
         model: RouteModel,
-        messages: list[CanonicalMessage],
-        text_fallback_messages: list[CanonicalMessage] | None,
+        messages: Sequence[CanonicalMessage],
+        text_fallback_messages: Sequence[CanonicalMessage] | None,
     ) -> list[CanonicalMessage]:
         """@brief 为模型选择多模态或文本消息 / Select multimodal or text messages for a model.
 

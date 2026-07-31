@@ -329,8 +329,9 @@ class _Inference:
             await stream.append("streamed ", emitted_at=NOW)
         if isinstance(self.result, Exception):
             raise self.result
-        context_state.messages.extend(
+        context_state.record_agent_history(
             [
+                *context_state.messages,
                 CanonicalMessage(
                     MessageRole.ASSISTANT,
                     (ToolCallPart("call-1", "search", {}),),
@@ -547,10 +548,10 @@ def test_adapter_reads_cutoff_history_and_returns_ordered_durable_outbox_intents
             '<user_identity trust="trusted_platform_metadata" display_name="Klee" '
             'username="klee" user_id="7" />'
         ) in system_message.text
-        assert inference.context.messages[1:3] == [
+        assert inference.context.messages[1:3] == (
             text_message(MessageRole.ASSISTANT, "previous"),
             text_message(MessageRole.USER, "hello"),
-        ]
+        )
         assert inference.kwargs == {
             "allow_tools": True,
             "request_timeout": 20.0,
@@ -651,10 +652,10 @@ def test_translation_uses_dedicated_prompt_without_tools_and_marks_output_exclud
         assert len(history.calls) == 1
         assert history.calls[0].include_history is False
         assert translation_inference.context is not None
-        assert translation_inference.context.messages[:2] == [
+        assert translation_inference.context.messages[:2] == (
             text_message(MessageRole.SYSTEM, TRANSLATION_SYSTEM_PROMPT),
             text_message(MessageRole.USER, "你好"),
-        ]
+        )
         translation_tool_context = translation_inference.kwargs["tool_context"]
         assert isinstance(translation_tool_context, ToolExecutionContext)
         assert translation_tool_context.allowed_tools == frozenset()
@@ -781,10 +782,10 @@ def test_future_assistant_projection_ignores_translation_input_and_output() -> N
         await _adapter(history, inference).infer(_request(current_turn))
 
         assert inference.context is not None
-        assert inference.context.messages[1:3] == [
+        assert inference.context.messages[1:3] == (
             text_message(MessageRole.ASSISTANT, "ordinary"),
             text_message(MessageRole.USER, "current"),
-        ]
+        )
         assert "secret" not in str(inference.context.messages)
 
     asyncio.run(scenario())

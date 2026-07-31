@@ -206,7 +206,7 @@ def build_context_state(
     if text_fallback_messages is not None:
         fallback = [system_message, *text_fallback_messages]
 
-    return ContextState(
+    return ContextState.create(
         context_id=context_id,
         scope=scope,
         user_state=user_state,

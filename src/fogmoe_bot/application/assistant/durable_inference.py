@@ -546,7 +546,7 @@ class DurableAssistantInferenceAdapter:
                     "Translation activity is missing its isolated input",
                     category=InferenceErrorCategory.INVALID_REQUEST,
                 )
-            return ContextState(
+            return ContextState.create(
                 context_id=command.typed_turn_id.value,
                 scope=scope,
                 user_state=user_state,
@@ -595,7 +595,7 @@ class DurableAssistantInferenceAdapter:
         )
         current_user_text = _anchor_user_text(projection)
         if command.task_kind == "translation":
-            base_context.current_user_text = current_user_text
+            base_context.identify_current_user_text(current_user_text)
             return base_context
         history: list[CanonicalMessage] = []
         if projection.checkpoint_summary is not None:
@@ -629,7 +629,7 @@ class DurableAssistantInferenceAdapter:
                 "Current Turn history cannot establish a stable prompt prefix",
                 category=InferenceErrorCategory.INTERNAL,
             )
-        context_state.stable_prefix_message_count = stable_prefix_count
+        context_state.define_stable_prefix(stable_prefix_count)
         # 附件 Turn 不得将持久化 caption/原始文本作为 Working Memory 查询：检索结果会随后
         # 渲染进模型提示。durable ingress 已持久化同一占位符；这个赋值也保证早期尚未写入
         # 占位符的 activity 在首次执行时不泄漏。/ An attachment Turn must not use its
@@ -638,7 +638,7 @@ class DurableAssistantInferenceAdapter:
         # keeps an early pre-placeholder activity non-leaky on its first execution.
         if current_attachment_message is not None:
             current_user_text = current_attachment_message.text
-        context_state.current_user_text = current_user_text
+        context_state.identify_current_user_text(current_user_text)
         if (
             current_attachment_message is not None
             and current_attachment_message not in context_state.messages
