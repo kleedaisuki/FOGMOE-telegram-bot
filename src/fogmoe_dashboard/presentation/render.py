@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import Enum
@@ -203,7 +204,7 @@ def to_jsonable(value: object) -> object:
         return value.isoformat()
     if isinstance(value, UUID | Enum):
         return str(value)
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {str(key): to_jsonable(item) for key, item in value.items()}
     if isinstance(value, tuple | list):
         return [to_jsonable(item) for item in value]
@@ -302,6 +303,13 @@ def _format_cell(name: str, value: object) -> str:
         return value.strftime("%Y-%m-%d %H:%M:%S")
     if isinstance(value, tuple):
         return ", ".join(str(item) for item in value) or "—"
+    if isinstance(value, Mapping):
+        return json.dumps(
+            to_jsonable(value),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
     if isinstance(value, bool):
         return "[green]yes[/green]" if value else "[dim]no[/dim]"
     if name == "error_rate" and isinstance(value, float):

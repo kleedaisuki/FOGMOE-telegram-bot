@@ -71,6 +71,7 @@ from fogmoe_dashboard.presentation.gui.charts import (
     TraceWaterfallChart,
     TurnLatencyChart,
 )
+from fogmoe_dashboard.presentation.render import to_jsonable
 from fogmoe_dashboard.presentation.gui.table import (
     ObjectTableModel,
     TableColumn,
@@ -428,7 +429,8 @@ class TracesPage(QueryPage):
             self._waterfall.plot_trace(value)
             self._log_model.replace(value.logs)
             attributes = {
-                f"{span.name} · {span.span_id}": span.attributes for span in value.spans
+                f"{span.name} · {span.span_id}": to_jsonable(span.attributes)
+                for span in value.spans
             }
             self._attributes.setPlainText(
                 json.dumps(attributes, ensure_ascii=False, indent=2, sort_keys=True)

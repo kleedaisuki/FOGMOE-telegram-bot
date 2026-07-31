@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -30,6 +31,7 @@ from fogmoe_dashboard.domain.models import (
     RetrievalSnapshot,
     SpanStats,
     TimeWindow,
+    freeze_json_object,
 )
 from fogmoe_dashboard.infrastructure.postgres import PostgresDashboardRepository
 from fogmoe_dashboard.presentation import cli
@@ -150,6 +152,7 @@ def test_resource_view_renders_explicit_state_and_last_heartbeat() -> None:
     """@brief 资源视图明示状态与最后心跳 / The resource view exposes state and the latest heartbeat."""
 
     observed_at = datetime(2026, 7, 22, 8, tzinfo=UTC)
+    source_attributes: dict[str, object] = {"roles": ["worker"]}
     resource = ResourceInstance(
         resource_id=uuid4(),
         service_name="fogmoe-bot",
@@ -160,8 +163,9 @@ def test_resource_view_renders_explicit_state_and_last_heartbeat() -> None:
         last_seen_at=observed_at - timedelta(minutes=2),
         stopped_at=None,
         state=ResourceState.STALE,
-        attributes={},
+        attributes=source_attributes,
     )
+    source_attributes["roles"] = ["mutated"]
     console = Console(record=True, width=160, color_system=None)
 
     console.print(render(DashboardView.RESOURCES, (resource,)))
@@ -170,6 +174,37 @@ def test_resource_view_renders_explicit_state_and_last_heartbeat() -> None:
     assert "State" in rendered
     assert "Last seen" in rendered
     assert "stale" in rendered
+    assert to_jsonable(resource.attributes) == {"roles": ["worker"]}
+
+
+def test_dashboard_json_snapshots_are_deeply_immutable_and_renderable() -> None:
+    """@brief JSON 快照隔离来源并保持稳定输出 / JSON snapshots isolate their source and retain stable output.
+
+    @return None / None.
+    """
+
+    leaf = {"healthy": True}
+    items: list[object] = [1, leaf]
+    source: dict[str, object] = {"service": {"items": items}}
+
+    frozen = freeze_json_object(source)
+    leaf["healthy"] = False
+    items.append("late mutation")
+
+    service = frozen["service"]
+    assert isinstance(service, Mapping)
+    frozen_items = service["items"]
+    assert isinstance(frozen_items, tuple)
+    assert to_jsonable(frozen) == {
+        "service": {"items": [1, {"healthy": True}]}
+    }
+    assert json.loads(json.dumps(to_jsonable(frozen))) == {
+        "service": {"items": [1, {"healthy": True}]}
+    }
+    with pytest.raises(TypeError):
+        frozen["later"] = None  # type: ignore[index]
+    with pytest.raises(TypeError):
+        service["later"] = None  # type: ignore[index]
 
 
 def test_dashboard_reads_its_jsonc_projection_and_builds_typed_client(

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import json
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Generic, TypeVar
@@ -10,6 +11,8 @@ from uuid import UUID
 
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt
 from PyQt6.QtGui import QColor
+
+from fogmoe_dashboard.presentation.render import to_jsonable
 
 RowT = TypeVar("RowT")
 """@brief 表格行领域类型 / Domain type represented by a table row."""
@@ -147,6 +150,13 @@ def format_value(value: object) -> str:
         return str(value)
     if isinstance(value, tuple):
         return ", ".join(str(item) for item in value) or "—"
+    if isinstance(value, Mapping):
+        return json.dumps(
+            to_jsonable(value),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
     if isinstance(value, float):
         return f"{value:,.2f}"
     return str(value)

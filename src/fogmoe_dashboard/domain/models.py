@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from types import MappingProxyType
 from typing import TypeAlias
 from uuid import UUID
 
 JsonScalar: TypeAlias = str | bool | int | float | None
-JsonObject: TypeAlias = dict[str, "JsonValue"]
-JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | JsonObject
+JsonObject: TypeAlias = Mapping[str, "JsonValue"]
+JsonValue: TypeAlias = JsonScalar | tuple["JsonValue", ...] | JsonObject
 
 RESOURCE_STALE_AFTER = timedelta(seconds=90)
 """@brief 资源心跳失联阈值 / Resource-heartbeat staleness threshold."""
@@ -269,6 +271,14 @@ class TraceSpan:
     status_message: str | None
     attributes: JsonObject
 
+    def __post_init__(self) -> None:
+        """@brief 隔离并深度冻结 span 属性 / Isolate and deeply freeze span attributes.
+
+        @return None / None.
+        """
+
+        object.__setattr__(self, "attributes", freeze_json_object(self.attributes))
+
 
 @dataclass(frozen=True, slots=True)
 class TraceLog:
@@ -307,6 +317,14 @@ class MetricStats:
     average: float
     total: float | None
     rate_per_second: float | None
+
+    def __post_init__(self) -> None:
+        """@brief 隔离并深度冻结 metric 属性 / Isolate and deeply freeze metric attributes.
+
+        @return None / None.
+        """
+
+        object.__setattr__(self, "attributes", freeze_json_object(self.attributes))
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,29 +461,41 @@ class ResourceInstance:
         object.__setattr__(self, "started_at", started_at)
         object.__setattr__(self, "last_seen_at", last_seen_at)
         object.__setattr__(self, "stopped_at", stopped_at)
+        object.__setattr__(self, "attributes", freeze_json_object(self.attributes))
 
 
 def freeze_json_object(value: object) -> JsonObject:
-    """@brief 校验 JSON object 顶层形状 / Validate a top-level JSON-object shape.
+    """@brief 校验并深度冻结 JSON object / Validate and deeply freeze a JSON object.
 
     @param value asyncpg 解码值 / Value decoded by asyncpg.
-    @return 与外部对象隔离的 JSON object / JSON object isolated from the source value.
+    @return 与来源隔离且递归不可变的 JSON object /
+        JSON object isolated from its source and recursively immutable.
     """
 
-    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+    if not isinstance(value, Mapping) or not all(
+        isinstance(key, str) for key in value
+    ):
         raise TypeError("Expected a JSON object")
-    return {key: _json_value(item) for key, item in value.items()}
+    return MappingProxyType(
+        {key: _freeze_json_value(item) for key, item in value.items()}
+    )
 
 
-def _json_value(value: object) -> JsonValue:
-    """@brief 深复制并校验 JSON value / Deep-copy and validate a JSON value."""
+def _freeze_json_value(value: object) -> JsonValue:
+    """@brief 校验并深度冻结 JSON value / Validate and deeply freeze a JSON value.
+
+    @param value 待冻结的 JSON 兼容值 / JSON-compatible value to freeze.
+    @return 递归不可变值 / Recursively immutable value.
+    """
 
     if value is None or isinstance(value, str | bool | int | float):
         return value
-    if isinstance(value, list):
-        return [_json_value(item) for item in value]
-    if isinstance(value, dict) and all(isinstance(key, str) for key in value):
-        return {key: _json_value(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return tuple(_freeze_json_value(item) for item in value)
+    if isinstance(value, Mapping) and all(isinstance(key, str) for key in value):
+        return MappingProxyType(
+            {key: _freeze_json_value(item) for key, item in value.items()}
+        )
     raise TypeError("Expected a JSON-compatible value")
 
 
