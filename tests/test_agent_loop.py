@@ -21,11 +21,20 @@ from fogmoe_bot.application.assistant.completion import (
     PromptCacheDirective,
 )
 from fogmoe_bot.application.assistant.errors import (
+    ProviderFailure,
+    ProviderFailureKind,
     ResumableAgentInterruptedError,
 )
+from fogmoe_bot.application.assistant.progress import (
+    AssistantProgressItem,
+    AssistantProgressKind,
+)
 from fogmoe_bot.application.assistant.streaming import (
+    AssistantActivityKind,
+    AssistantActivityStatus,
     AssistantStreamAddress,
     AssistantStreamFrame,
+    AssistantStreamKind,
     AssistantStreamSession,
     AssistantStreamState,
 )
@@ -124,10 +133,15 @@ class _Checkpoints:
 class _Completion:
     """@brief 队列 completion port / Queue-backed completion port."""
 
-    def __init__(self, values: list[AssistantCompletion], order: list[str]) -> None:
+    def __init__(
+        self,
+        values: list[AssistantCompletion | Exception],
+        order: list[str],
+    ) -> None:
         """@brief 保存 responses / Store responses.
 
-        @param values 按调用顺序返回的 completion / Completions returned in call order.
+        @param values 按调用顺序返回的 completion 或异常 /
+            Completions or failures returned in call order.
         @param order 供断言的事件顺序 / Event ordering used by assertions.
         """
 
@@ -180,7 +194,10 @@ class _Completion:
         self.calls += 1
         if not self.values:
             raise AssertionError("checkpoint replay called provider")
-        return self.values.pop(0)
+        value = self.values.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
 
 
 class _VisibleThenFailingCompletion:
@@ -245,6 +262,46 @@ class _SteeredStreamingCompletion:
             self.closed = True
 
 
+class _ContextBoundStreamingCompletion:
+    """@brief 要求整个异步 generator 由同一 Task 推进的 completion /
+    Completion requiring one Task to advance the complete async generator.
+    """
+
+    def __init__(self) -> None:
+        """@brief 初始化观察到的消费任务 / Initialize observed consumer tasks."""
+
+        self.consumer_tasks: list[asyncio.Task[object] | None] = []
+
+    async def complete(self, **kwargs: object) -> AssistantCompletion:
+        """@brief 非流路径不可达 / The non-stream path is unreachable."""
+
+        del kwargs
+        raise AssertionError("context-bound test used non-stream completion")
+
+    async def stream(
+        self,
+        **kwargs: object,
+    ) -> AsyncIterator[CompletionTextDelta | CompletionFinished]:
+        """@brief 在 yield 两侧断言 Task identity 稳定 / Assert stable Task identity across yields.
+
+        @return provider-neutral 异步事件流 / Provider-neutral asynchronous event stream.
+        """
+
+        del kwargs
+        owner = asyncio.current_task()
+        self.consumer_tasks.append(owner)
+        yield CompletionTextDelta("stable")
+        self.consumer_tasks.append(asyncio.current_task())
+        if asyncio.current_task() is not owner:
+            raise RuntimeError("provider generator crossed asyncio Task contexts")
+        yield CompletionFinished(_assistant_text("stable"))
+        self.consumer_tasks.append(asyncio.current_task())
+        if asyncio.current_task() is not owner:
+            raise RuntimeError(
+                "provider generator closed in another asyncio Task context"
+            )
+
+
 class _StaleOnSecondFence:
     """@brief 第二次读取时模拟 steer 的 generation fence / Generation fence simulating a steer on its second read."""
 
@@ -270,6 +327,35 @@ class _StaleOnSecondFence:
             raise StaleClaimError("steered")
 
 
+class _StaleAtFenceCall:
+    """@brief 在指定 generation-fence 读取处模拟 steer / Simulate steering at a selected generation-fence read."""
+
+    def __init__(self, call: int) -> None:
+        """@brief 保存触发读取序号 / Store the triggering read ordinal.
+
+        @param call 从一开始的触发序号 / One-based triggering ordinal.
+        """
+
+        self.calls = 0
+        self.call = call
+
+    async def assert_current_generation(
+        self,
+        fence: InferenceGenerationFence,
+    ) -> None:
+        """@brief 到达指定序号后拒绝旧 generation / Reject the old generation at the selected ordinal.
+
+        @param fence 当前 claim fence / Current claim fence.
+        @return 触发前为 None / None before the trigger.
+        @raise StaleClaimError 到达触发序号时抛出 / Raised at the trigger ordinal.
+        """
+
+        del fence
+        self.calls += 1
+        if self.calls >= self.call:
+            raise StaleClaimError("steered before tool start")
+
+
 class _StreamProjection:
     """@brief 记录 AgentLoop 用户可见 frames / Record AgentLoop user-visible frames."""
 
@@ -286,6 +372,29 @@ class _StreamProjection:
         """
 
         self.frames.append(frame)
+
+
+class _ProgressPersistence:
+    """@brief 记录 durable Agent 过程项 / Record durable Agent progress items."""
+
+    def __init__(self) -> None:
+        """@brief 初始化过程项日志 / Initialize the progress-item log."""
+
+        self.items: list[tuple[ToolExecutionContext, AssistantProgressItem]] = []
+
+    async def publish_progress(
+        self,
+        context: ToolExecutionContext,
+        item: AssistantProgressItem,
+    ) -> None:
+        """@brief 记录一个稳定过程项 / Record one stable progress item.
+
+        @param context 当前工具执行上下文 / Current tool execution context.
+        @param item 已稳定过程项 / Stable progress item.
+        @return None / None.
+        """
+
+        self.items.append((context, item))
 
 
 class _Memory:
@@ -512,6 +621,100 @@ def test_turn_capability_filters_provider_tool_definitions() -> None:
     asyncio.run(scenario())
 
 
+def test_agent_loop_appends_checkpoint_commentary_and_receipt_backed_tool_progress() -> (
+    None
+):
+    """@brief Agent loop 追加 checkpoint commentary 与 receipt 工具终态 /
+    The Agent loop appends checkpoint commentary and receipt-backed tool progress.
+    """
+
+    async def scenario() -> None:
+        """@brief 执行一个单工具回合并检查活动顺序 / Run one tool turn and inspect activity ordering."""
+
+        order: list[str] = []
+        turn_id = TurnId.new()
+        projection = _StreamProjection()
+        progress = _ProgressPersistence()
+        session = AssistantStreamSession(
+            state=AssistantStreamState.begin(
+                turn_id=turn_id,
+                address=AssistantStreamAddress(42, False, None),
+                generation=1,
+                revision=0,
+                emitted_at=datetime.now(UTC),
+            ),
+            projection=projection,
+        )
+        await session.start()
+        completion = _Completion(
+            [
+                _assistant_tool_call(
+                    "我先确认一下当前时间，再给你准确回答。",
+                    call_id="provider-time-call",
+                    name="get_current_time",
+                    arguments={},
+                ),
+                _assistant_text("现在告诉你答案"),
+            ],
+            order,
+        )
+        response = await AgentLoop(
+            runtime=AgentRuntime(
+                catalog=DEFAULT_TOOL_CATALOG,
+                persistence=_Receipts(order),
+            ),
+            completion=completion,
+            checkpoints=_Checkpoints(order),
+            memory=_Memory(),
+            telemetry=make_telemetry(),
+            progress=progress,
+        ).run(
+            _context(),
+            AgentExecutionConfig(route=_route(), model="model", allow_tools=True),
+            tool_context=_tool_context(turn_id),
+            stream=session,
+        )
+
+        assert response.text == "现在告诉你答案"
+        activity_frames = [
+            frame
+            for frame in projection.frames
+            if frame.kind is AssistantStreamKind.ACTIVITY
+        ]
+        assert len(activity_frames) == 3
+        commentary = activity_frames[0].activities[-1]
+        tool_started = activity_frames[1].activities[-1]
+        tool_finished = activity_frames[2].activities[-1]
+        assert commentary.kind is AssistantActivityKind.COMMENTARY
+        assert commentary.label == "我先确认一下当前时间，再给你准确回答。"
+        assert commentary.status is AssistantActivityStatus.COMPLETED
+        assert tool_started.kind is AssistantActivityKind.TOOL
+        assert tool_started.label == "get_current_time"
+        assert tool_started.status is AssistantActivityStatus.ACTIVE
+        assert tool_finished.key == tool_started.key == "tool:step:0:call:0"
+        assert tool_finished.status is AssistantActivityStatus.COMPLETED
+        assert all(
+            "现在告诉你答案" not in frame.cumulative_text for frame in activity_frames
+        )
+        assert [item.kind for _, item in progress.items] == [
+            AssistantProgressKind.COMMENTARY,
+            AssistantProgressKind.TOOL,
+            AssistantProgressKind.TOOL,
+        ]
+        assert [item.item_id for _, item in progress.items] == [
+            "step:0:commentary",
+            "tool:step:0:call:0:started",
+            "tool:step:0:call:0",
+        ]
+        assert progress.items[0][1].text == ("我先确认一下当前时间，再给你准确回答。")
+        assert progress.items[1][1].text == (
+            "✦ 我确认一下现在的时间…\n  能力：get_current_time"
+        )
+        assert progress.items[2][1].text == ("✓ 时间确认好啦\n  能力：get_current_time")
+
+    asyncio.run(scenario())
+
+
 def test_checkpoint_precedes_effect_and_restart_replays_without_provider_or_mutation() -> (
     None
 ):
@@ -567,9 +770,7 @@ def test_checkpoint_precedes_effect_and_restart_replays_without_provider_or_muta
         assert all(
             sum(
                 "<working_memory" in message.text
-                for message in cast(
-                    tuple[CanonicalMessage, ...], request["messages"]
-                )
+                for message in cast(tuple[CanonicalMessage, ...], request["messages"])
             )
             == 1
             for request in first_completion.requests
@@ -595,7 +796,9 @@ def test_checkpoint_precedes_effect_and_restart_replays_without_provider_or_muta
             tuple[CanonicalMessage, ...], first_completion.requests[1]["messages"]
         )
         tool_messages = [
-            message for message in post_tool_messages if message.role is MessageRole.TOOL
+            message
+            for message in post_tool_messages
+            if message.role is MessageRole.TOOL
         ]
         assert len(tool_messages) == 1
         tool_part = tool_messages[0].parts[0]
@@ -624,6 +827,59 @@ def test_checkpoint_precedes_effect_and_restart_replays_without_provider_or_muta
         assert receipts.mutation_count == 1
         results = [event for event in replay.events if event["type"] == "tool_result"]
         assert results[0]["replayed"] is True
+
+    asyncio.run(scenario())
+
+
+def test_contract_failure_after_tool_checkpoint_is_not_wrapped_as_resumable() -> None:
+    """@brief 工具 checkpoint 后的 contract 失败不会伪装成暂态重试 /
+    A contract failure after a tool checkpoint is not disguised as a transient retry.
+    """
+
+    async def scenario() -> None:
+        """@brief 执行一项工具后让下一模型步骤返回 contract /
+        Return a contract failure on the model step after one tool.
+        """
+
+        order: list[str] = []
+        failure = ProviderFailure(
+            kind=ProviderFailureKind.CONTRACT,
+            status=400,
+            message="invalid response contract",
+        )
+        loop = AgentLoop(
+            runtime=AgentRuntime(
+                catalog=DEFAULT_TOOL_CATALOG,
+                persistence=_Receipts(order),
+            ),
+            completion=_Completion(
+                [
+                    _assistant_tool_call(
+                        "",
+                        call_id="provider-time-call",
+                        name="get_current_time",
+                        arguments={},
+                    ),
+                    failure,
+                ],
+                order,
+            ),
+            checkpoints=_Checkpoints(order),
+            memory=_Memory(),
+            telemetry=make_telemetry(),
+        )
+
+        with pytest.raises(ProviderFailure) as captured:
+            await loop.run(
+                _context(),
+                AgentExecutionConfig(route=_route(), model="model"),
+                tool_context=_tool_context(TurnId.new()),
+            )
+
+        assert captured.value is failure
+        assert order.count("provider:0") == 1
+        assert order.count("provider:1") == 1
+        assert len([entry for entry in order if entry.startswith("effect:")]) == 1
 
     asyncio.run(scenario())
 
@@ -664,7 +920,9 @@ def test_memory_tool_result_never_enters_context_state_or_history() -> None:
             tool_context=_tool_context(TurnId.new()),
         )
 
-        assert response.history_messages == (text_message(MessageRole.ASSISTANT, "answer"),)
+        assert response.history_messages == (
+            text_message(MessageRole.ASSISTANT, "answer"),
+        )
         assert context.messages == [
             text_message(MessageRole.USER, "remember me"),
             text_message(MessageRole.ASSISTANT, "answer"),
@@ -675,7 +933,8 @@ def test_memory_tool_result_never_enters_context_state_or_history() -> None:
         )
         assert any(
             isinstance(part, ToolResultPart)
-            and part.to_json()["result"] == {"results": [{"content": "private recalled text"}]}
+            and part.to_json()["result"]
+            == {"results": [{"content": "private recalled text"}]}
             for message in transient_messages
             for part in message.parts
         )
@@ -866,9 +1125,7 @@ def test_checkpoint_hash_binds_route_and_explicit_request_meta() -> None:
         request = initial_completion.requests[0]
         assert request["route"] is initial_route
         assert request["timeout_seconds"] == 12.0
-        assert dict(cast(RequestMeta, request["request_meta"])) == {
-            "trace_id": "first"
-        }
+        assert dict(cast(RequestMeta, request["request_meta"])) == {"trace_id": "first"}
 
         for conflicting_config in (
             AgentExecutionConfig(
@@ -969,6 +1226,57 @@ def test_visible_stream_delta_failure_interrupts_generation_before_checkpoint() 
     asyncio.run(scenario())
 
 
+def test_provider_stream_generator_stays_in_one_asyncio_task_context() -> None:
+    """@brief provider generator 的 enter、逐块推进与 close 保持在同一 Task /
+    Provider generator entry, iteration, and close remain in one Task.
+    """
+
+    async def scenario() -> None:
+        """@brief 执行两事件流并检查 Task identity / Run a two-event stream and inspect Task identity."""
+
+        order: list[str] = []
+        completion = _ContextBoundStreamingCompletion()
+        projection = _StreamProjection()
+        turn_id = TurnId.new()
+        session = AssistantStreamSession(
+            state=AssistantStreamState.begin(
+                turn_id=turn_id,
+                address=AssistantStreamAddress(42, False, None),
+                generation=1,
+                revision=0,
+                emitted_at=datetime.now(UTC),
+            ),
+            projection=projection,
+        )
+        await session.start()
+
+        response = await AgentLoop(
+            runtime=AgentRuntime(
+                catalog=DEFAULT_TOOL_CATALOG,
+                persistence=_Receipts(order),
+            ),
+            completion=completion,
+            checkpoints=_Checkpoints(order),
+            memory=_Memory(),
+            telemetry=make_telemetry(),
+        ).run(
+            _context(),
+            AgentExecutionConfig(
+                route=_route(),
+                model="model",
+                allow_tools=False,
+                working_memory_enabled=False,
+            ),
+            stream=session,
+        )
+
+        assert response.text == "stable"
+        assert len(completion.consumer_tasks) == 3
+        assert len({id(task) for task in completion.consumer_tasks}) == 1
+
+    asyncio.run(scenario())
+
+
 def test_steer_fence_closes_the_old_provider_stream_within_one_poll_interval() -> None:
     """@brief steer 在流中 fence 周期内关闭旧 provider generator 且不投影迟到 delta /
     A steer closes the old provider generator within one in-stream fence interval and drops late deltas.
@@ -1037,5 +1345,79 @@ def test_steer_fence_closes_the_old_provider_stream_within_one_poll_interval() -
         assert projection.frames[-1].cumulative_text == "old"
         assert all(frame.cumulative_text != "oldlate" for frame in projection.frames)
         assert order == []
+
+    asyncio.run(scenario())
+
+
+def test_steer_before_tool_start_emits_no_false_failed_tool_activity() -> None:
+    """@brief tool 开始边界的 steer 不生成旧代失败卡片 /
+    Steering at the tool-start boundary emits no false failed-tool activity.
+    """
+
+    async def scenario() -> None:
+        """@brief 在 checkpoint 后、tool started 前使 fence 失效 /
+        Invalidate the fence after checkpointing and before tool started.
+        """
+
+        order: list[str] = []
+        turn_id = TurnId.new()
+        fence = InferenceGenerationFence(
+            activity_id=InferenceActivityId.for_turn(turn_id),
+            turn_id=turn_id,
+            claim_token=LeaseToken.new(),
+            attempt=1,
+            input_revision=TurnRevision.initial(),
+            cause=InferenceGenerationCause.INITIAL,
+        )
+        projection = _StreamProjection()
+        progress = _ProgressPersistence()
+        session = AssistantStreamSession(
+            state=AssistantStreamState.begin(
+                turn_id=turn_id,
+                address=AssistantStreamAddress(42, False, None),
+                generation=1,
+                revision=0,
+                emitted_at=datetime.now(UTC),
+            ),
+            projection=projection,
+        )
+        await session.start()
+        loop = AgentLoop(
+            runtime=AgentRuntime(
+                catalog=DEFAULT_TOOL_CATALOG,
+                persistence=_Receipts(order),
+            ),
+            completion=_Completion(
+                [
+                    _assistant_tool_call(
+                        "",
+                        call_id="provider-time-call",
+                        name="get_current_time",
+                        arguments={},
+                    )
+                ],
+                order,
+            ),
+            checkpoints=_Checkpoints(order),
+            memory=_Memory(),
+            telemetry=make_telemetry(),
+            generation_fence=_StaleAtFenceCall(4),
+            progress=progress,
+        )
+
+        with pytest.raises(StaleClaimError, match="before tool start"):
+            await loop.run(
+                _context(),
+                AgentExecutionConfig(route=_route(), model="model"),
+                tool_context=_tool_context(turn_id, generation_fence=fence),
+                stream=session,
+            )
+
+        assert all(
+            frame.kind is not AssistantStreamKind.ACTIVITY
+            for frame in projection.frames
+        )
+        assert progress.items == []
+        assert all(not entry.startswith("effect:") for entry in order)
 
     asyncio.run(scenario())

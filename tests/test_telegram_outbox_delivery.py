@@ -32,6 +32,7 @@ from fogmoe_bot.domain.conversation.identity import (
 )
 from fogmoe_bot.domain.conversation.outbox import (
     EDIT_TELEGRAM_MESSAGE,
+    SEND_TELEGRAM_ASSISTANT_PROGRESS,
     SEND_TELEGRAM_ARTIFACT,
     SEND_TELEGRAM_MESSAGE,
     SEND_TELEGRAM_PHOTO,
@@ -343,6 +344,34 @@ def test_send_message_returns_external_message_id() -> None:
     assert reply_parameters.allow_sending_without_reply is True
     assert isinstance(preview_options, LinkPreviewOptions)
     assert preview_options.is_disabled is True
+
+
+def test_assistant_progress_uses_append_only_send_message_delivery() -> None:
+    """@brief durable progress 追加真实消息而非编辑或删除历史 /
+    Durable progress appends a real message instead of editing or deleting history.
+    """
+
+    bot = _Bot()
+    receipt = asyncio.run(
+        _adapter(bot).deliver(
+            _message(
+                {
+                    "chat_id": 42,
+                    "text": "✓ 网上资料查完啦\n  能力：google_search",
+                    "disable_notification": True,
+                    "protect_content": False,
+                    "disable_web_page_preview": True,
+                },
+                kind=SEND_TELEGRAM_ASSISTANT_PROGRESS,
+            )
+        )
+    )
+
+    assert receipt.external_message_id == "42"
+    assert [call["text"] for call in bot.send_calls] == [
+        "✓ 网上资料查完啦\n  能力：google_search"
+    ]
+    assert bot.edit_calls == []
 
 
 def test_message_entity_parse_error_falls_back_to_plain_text() -> None:

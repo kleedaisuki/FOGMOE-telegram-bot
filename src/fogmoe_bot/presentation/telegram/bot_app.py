@@ -516,9 +516,10 @@ def _compose_services(
     )
     assistant_stream_projection = TelegramAssistantStreamProjection(
         application.bot,
+        native_drafts_enabled=False,
         terminal_cursor_ttl_seconds=float(runtime.inference.lease_seconds * 2),
     )
-    """@brief Telegram typing 与私聊 draft 的易失投影 / Ephemeral Telegram typing and private-draft projection."""
+    """@brief 仅 typing、无草稿重绘的易失投影 / Typing-only ephemeral projection without draft redraw."""
     assistant = build_durable_assistant(
         settings=settings,
         resources=resources,

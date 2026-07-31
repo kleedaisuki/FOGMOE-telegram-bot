@@ -39,6 +39,7 @@ from fogmoe_bot.infrastructure.llm.openai_codec import (
     encode_openai_request,
 )
 from fogmoe_bot.infrastructure.llm.provider_completion import ProviderCompletionClient
+from fogmoe_bot.infrastructure.llm.provider_response import OpenAIChatStreamAccumulator
 
 
 def _message(role: str, text: str) -> CanonicalMessage:
@@ -156,9 +157,7 @@ def _route(
             models=(
                 RouteModel(
                     "gpt-test",
-                    prompt_cache_policy=(
-                        "explicit" if explicit_cache else "automatic"
-                    ),
+                    prompt_cache_policy=("explicit" if explicit_cache else "automatic"),
                     prompt_cache_retention="30m" if explicit_cache else None,
                 ),
             ),
@@ -174,9 +173,7 @@ def _route(
         models=(
             RouteModel(
                 "claude-test",
-                prompt_cache_policy=(
-                    "explicit" if explicit_cache else "automatic"
-                ),
+                prompt_cache_policy=("explicit" if explicit_cache else "automatic"),
                 prompt_cache_retention="1h" if explicit_cache else None,
             ),
         ),
@@ -237,15 +234,18 @@ def test_openai_explicit_cache_keeps_dynamic_suffix_outside_breakpoint() -> None
     assert isinstance(first_messages, list)
     assert isinstance(second_messages, list)
     assert first_messages[:2] == second_messages[:2]
-    assert json.dumps(
-        first_messages[:2],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode() == json.dumps(
-        second_messages[:2],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode()
+    assert (
+        json.dumps(
+            first_messages[:2],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        == json.dumps(
+            second_messages[:2],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    )
     assert first_messages[2:] != second_messages[2:]
     target_content = first_messages[1]["content"]
     assert target_content[-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
@@ -364,7 +364,9 @@ def test_client_rejects_explicit_fields_without_route_model_capability() -> None
     asyncio.run(scenario())
 
 
-def test_anthropic_explicit_cache_preserves_tools_system_messages_prefix_order() -> None:
+def test_anthropic_explicit_cache_preserves_tools_system_messages_prefix_order() -> (
+    None
+):
     """@brief Anthropic 断点留在 tools→system→messages 的稳定部分 / The Anthropic breakpoint stays in the stable tools→system→messages portion."""
 
     stable = (
@@ -392,21 +394,24 @@ def test_anthropic_explicit_cache_preserves_tools_system_messages_prefix_order()
     assert isinstance(first_messages, list)
     assert isinstance(second_messages, list)
     assert first_messages[:2] == second_messages[:2]
-    assert json.dumps(
-        {
-            "system": first["system"],
-            "messages": first_messages[:2],
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode() == json.dumps(
-        {
-            "system": second["system"],
-            "messages": second_messages[:2],
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode()
+    assert (
+        json.dumps(
+            {
+                "system": first["system"],
+                "messages": first_messages[:2],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        == json.dumps(
+            {
+                "system": second["system"],
+                "messages": second_messages[:2],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    )
     assert first_messages[2:] != second_messages[2:]
     target = first_messages[1]["content"][-1]
     assert target["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
@@ -447,7 +452,23 @@ def test_cache_usage_decoders_expose_reads_and_writes() -> None:
     )
 
 
-def test_openai_chat_sse_streams_text_and_finishes_with_tools_and_usage() -> None:
+@pytest.mark.parametrize(
+    "usage_choices",
+    [
+        [],
+        [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": ""},
+                "finish_reason": "tool_calls",
+            }
+        ],
+    ],
+    ids=["openai-usage-only", "openrouter-terminal-echo"],
+)
+def test_openai_chat_sse_streams_text_and_finishes_with_tools_and_usage(
+    usage_choices: list[object],
+) -> None:
     """@brief OpenAI Chat SSE 增量、工具 JSON 与 usage 被完整聚合 / OpenAI Chat SSE deltas, tool JSON, and usage are fully aggregated."""
 
     async def scenario() -> None:
@@ -466,16 +487,66 @@ def test_openai_chat_sse_streams_text_and_finishes_with_tools_and_usage() -> Non
             """
 
             captured.append(await request.json())
-            response = web.StreamResponse(
-                headers={"Content-Type": "text/event-stream"}
-            )
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
             await response.prepare(request)
             payloads = (
-                {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hel"}, "finish_reason": None}]},
-                {"choices": [{"index": 0, "delta": {"content": "lo ", "tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "weather", "arguments": "{\"city\":"}}]}, "finish_reason": None}]},
-                {"choices": [{"index": 0, "delta": {"content": "world", "tool_calls": [{"index": 0, "function": {"arguments": "\"SG\"}"}}]}, "finish_reason": None}]},
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": "Hel"},
+                            "finish_reason": None,
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "content": "lo ",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "weather",
+                                            "arguments": '{"city":',
+                                        },
+                                    }
+                                ],
+                            },
+                            "finish_reason": None,
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "content": "world",
+                                "tool_calls": [
+                                    {"index": 0, "function": {"arguments": '"SG"}'}}
+                                ],
+                            },
+                            "finish_reason": None,
+                        }
+                    ]
+                },
                 {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
-                {"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 7, "prompt_tokens_details": {"cached_tokens": 80, "cache_write_tokens": 20}}},
+                {
+                    "choices": usage_choices,
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 7,
+                        "prompt_tokens_details": {
+                            "cached_tokens": 80,
+                            "cache_write_tokens": 20,
+                        },
+                    },
+                },
             )
             for payload in payloads:
                 await response.write(f"data: {json.dumps(payload)}\n\n".encode())
@@ -564,14 +635,48 @@ def test_openai_chat_sse_streams_text_and_finishes_with_tools_and_usage() -> Non
         assert captured[0]["stream"] is True
         assert captured[0]["stream_options"] == {"include_usage": True}
         span = next(
-            signal
-            for signal in buffer.drain(64)
-            if isinstance(signal, SpanSignal)
+            signal for signal in buffer.drain(64) if isinstance(signal, SpanSignal)
         )
         assert span.attributes["gen_ai.usage.cached_input_tokens"] == 80
         assert span.attributes["gen_ai.usage.cache_write_input_tokens"] == 20
 
     asyncio.run(scenario())
+
+
+def test_openrouter_usage_terminal_echo_cannot_smuggle_post_finish_output() -> None:
+    """@brief usage 终块只能幂等重复终止 choice，不能夹带新输出 /
+    A usage chunk may echo the terminal choice idempotently but cannot carry new output.
+    """
+
+    accumulator = OpenAIChatStreamAccumulator()
+    accumulator.consume(
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": "done"},
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(
+        MessageContractError,
+        match="carried content after finish_reason",
+    ):
+        accumulator.consume(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": "late"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            }
+        )
 
 
 def test_anthropic_messages_sse_streams_text_and_tool_input() -> None:
@@ -593,19 +698,75 @@ def test_anthropic_messages_sse_streams_text_and_tool_input() -> None:
             """
 
             captured.append(await request.json())
-            response = web.StreamResponse(
-                headers={"Content-Type": "text/event-stream"}
-            )
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
             await response.prepare(request)
             events = (
-                ("message_start", {"type": "message_start", "message": {"role": "assistant", "content": [], "usage": {"input_tokens": 90, "output_tokens": 1, "cache_read_input_tokens": 60, "cache_creation_input_tokens": 30}}}),
-                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
-                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hi"}}),
+                (
+                    "message_start",
+                    {
+                        "type": "message_start",
+                        "message": {
+                            "role": "assistant",
+                            "content": [],
+                            "usage": {
+                                "input_tokens": 90,
+                                "output_tokens": 1,
+                                "cache_read_input_tokens": 60,
+                                "cache_creation_input_tokens": 30,
+                            },
+                        },
+                    },
+                ),
+                (
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": "text", "text": ""},
+                    },
+                ),
+                (
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": "Hi"},
+                    },
+                ),
                 ("content_block_stop", {"type": "content_block_stop", "index": 0}),
-                ("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "tool_1", "name": "weather", "input": {}}}),
-                ("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"city\":\"SG\"}"}}),
+                (
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 1,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": "tool_1",
+                            "name": "weather",
+                            "input": {},
+                        },
+                    },
+                ),
+                (
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": 1,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": '{"city":"SG"}',
+                        },
+                    },
+                ),
                 ("content_block_stop", {"type": "content_block_stop", "index": 1}),
-                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 8}}),
+                (
+                    "message_delta",
+                    {
+                        "type": "message_delta",
+                        "delta": {"stop_reason": "tool_use"},
+                        "usage": {"output_tokens": 8},
+                    },
+                ),
                 ("message_stop", {"type": "message_stop"}),
             )
             for event_name, payload in events:
@@ -685,9 +846,7 @@ def test_anthropic_messages_sse_streams_text_and_tool_input() -> None:
             "ttl": "1h",
         }
         span = next(
-            signal
-            for signal in buffer.drain(64)
-            if isinstance(signal, SpanSignal)
+            signal for signal in buffer.drain(64) if isinstance(signal, SpanSignal)
         )
         assert span.attributes["gen_ai.usage.cached_input_tokens"] == 60
         assert span.attributes["gen_ai.usage.cache_write_input_tokens"] == 30
@@ -713,9 +872,7 @@ def test_stream_size_limit_and_in_stream_errors_are_safe() -> None:
             @return streamed response / Streamed response.
             """
 
-            response = web.StreamResponse(
-                headers={"Content-Type": "text/event-stream"}
-            )
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
             await response.prepare(request)
             await response.write(b"data: " + b"x" * 256 + b"\n\n")
             return response
@@ -727,9 +884,7 @@ def test_stream_size_limit_and_in_stream_errors_are_safe() -> None:
             @return streamed response / Streamed response.
             """
 
-            response = web.StreamResponse(
-                headers={"Content-Type": "text/event-stream"}
-            )
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
             await response.prepare(request)
             await response.write(
                 f'data: {{"error":{{"message":"{secret}"}}}}\n\n'.encode()
@@ -789,9 +944,7 @@ def test_visible_delta_followed_by_error_has_no_terminal_completion() -> None:
             @return streamed response / Streamed response.
             """
 
-            response = web.StreamResponse(
-                headers={"Content-Type": "text/event-stream"}
-            )
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
             await response.prepare(request)
             await response.write(
                 b'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"old"},"finish_reason":null}]}\n\n'
@@ -824,9 +977,9 @@ def test_visible_delta_followed_by_error_has_no_terminal_completion() -> None:
             await client.aclose()
             await runner.cleanup()
         assert captured.value.kind is ProviderFailureKind.SERVER
-        assert [event.text for event in seen if isinstance(event, CompletionTextDelta)] == [
-            "old"
-        ]
+        assert [
+            event.text for event in seen if isinstance(event, CompletionTextDelta)
+        ] == ["old"]
         assert not any(isinstance(event, CompletionFinished) for event in seen)
 
     asyncio.run(scenario())
@@ -850,9 +1003,7 @@ def test_stream_cancellation_propagates_without_terminal_event() -> None:
             @return streamed response / Streamed response.
             """
 
-            response = web.StreamResponse(
-                headers={"Content-Type": "text/event-stream"}
-            )
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
             await response.prepare(request)
             await response.write(
                 b'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"first"},"finish_reason":null}]}\n\n'

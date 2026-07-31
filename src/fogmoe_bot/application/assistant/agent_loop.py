@@ -16,7 +16,7 @@ import hashlib
 import json
 import logging
 import math
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import cast
@@ -71,15 +71,23 @@ from .completion import (
     PromptCacheDirective,
     PromptCacheKey,
 )
-from .errors import ResumableAgentInterruptedError
+from .errors import ProviderFailure, ResumableAgentInterruptedError
+from .progress import (
+    AssistantProgressPersistence,
+    commentary_progress_item,
+    tool_progress_item,
+    tool_started_progress_item,
+)
 from .streaming import AssistantStreamSession
 from .tool_runtime import (
     AgentRuntime,
     AssistantToolCallEvent,
     RuntimeEvent,
+    ToolEffectConflictError,
     ToolExecutionContext,
     ToolResultEvent,
     ToolRuntimeResult,
+    tool_invocation_id,
 )
 from .tools.catalog import ToolDefinition, ToolResultResidency
 
@@ -101,24 +109,11 @@ async def _close_completion_stream(events: object) -> None:
     if not callable(close):
         return
     try:
-        await close()
+        await cast(Awaitable[object], close())
     except asyncio.CancelledError:
         raise
     except Exception:
         logging.warning("Provider completion stream close failed", exc_info=True)
-
-
-async def _next_completion_stream_event(
-    events: AsyncIterator[AssistantCompletionStreamEvent],
-) -> AssistantCompletionStreamEvent:
-    """@brief 读取一个 provider 流事件 / Read one provider stream event.
-
-    @param events provider 异步流 / Provider async stream.
-    @return 下一个 provider-neutral 事件 / Next provider-neutral event.
-    @raise StopAsyncIteration 流正常结束 / Raised when the stream ends normally.
-    """
-
-    return await anext(events)
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,7 +162,9 @@ class AgentExecutionConfig:
     skip_tools: frozenset[str] = field(default_factory=frozenset)
     allow_tools: bool = True
     timeout_seconds: float | None = None
-    request_meta: RequestMeta = field(default_factory=lambda: normalize_request_meta({}))
+    request_meta: RequestMeta = field(
+        default_factory=lambda: normalize_request_meta({})
+    )
     working_memory_limit: int = 64
     working_memory_max_tokens: int = 16_384
     working_memory_enabled: bool = True
@@ -214,7 +211,9 @@ class AgentExecutionConfig:
                 "prompt_cache_retention requires explicit prompt_cache_policy"
             )
         object.__setattr__(self, "model", self.model.strip())
-        object.__setattr__(self, "request_meta", normalize_request_meta(self.request_meta))
+        object.__setattr__(
+            self, "request_meta", normalize_request_meta(self.request_meta)
+        )
 
 
 @dataclass(slots=True)
@@ -283,6 +282,7 @@ class AgentLoop:
         memory: WorkingMemoryReader,
         telemetry: Telemetry,
         generation_fence: InferenceGenerationFencePort | None = None,
+        progress: AssistantProgressPersistence | None = None,
     ) -> None:
         """@brief 注入全部外部端口 / Inject every external port.
 
@@ -294,6 +294,8 @@ class AgentLoop:
         @param telemetry 进程 typed telemetry / Process typed telemetry.
         @param generation_fence checkpoint 与工具副作用前的跨进程 revision fence /
             Cross-process revision fence before checkpoints and tool effects.
+        @param progress checkpoint/receipt 后追加稳定过程消息的 durable outbox port /
+            Durable outbox port appending stable progress messages after checkpoints/receipts.
         @return None / None.
         """
 
@@ -303,6 +305,8 @@ class AgentLoop:
         self._memory = memory
         self._telemetry = telemetry
         self._generation_fence = generation_fence
+        self._progress = progress
+        """@brief append-only Agent 过程项持久化端口 / Append-only Agent progress-item persistence."""
 
     async def run(
         self,
@@ -338,17 +342,54 @@ class AgentLoop:
                 expose_tools=config.allow_tools,
                 stream=stream,
             )
+            if completion.tool_calls:
+                try:
+                    await self._publish_commentary_progress(
+                        step=current.step,
+                        completion=completion,
+                        tool_context=tool_context,
+                        stream=stream,
+                    )
+                except (
+                    ResumableAgentInterruptedError,
+                    StaleClaimError,
+                    ValueError,
+                    TypeError,
+                    AssertionError,
+                ):
+                    raise
+                except Exception as error:
+                    raise ResumableAgentInterruptedError(
+                        str(error) or error.__class__.__name__
+                    ) from error
             if not completion.tool_calls:
                 await self._assert_current_generation(tool_context)
                 return _final_response(current, completion)
             if not config.allow_tools:
-                raise ValueError("provider returned tool calls while tools were disabled")
+                raise ValueError(
+                    "provider returned tool calls while tools were disabled"
+                )
             current.messages.append(completion.message)
-            await self._execute_calls(
-                current,
-                completion=completion,
-                tool_context=cast(ToolExecutionContext, tool_context),
-            )
+            try:
+                await self._execute_calls(
+                    current,
+                    completion=completion,
+                    tool_context=cast(ToolExecutionContext, tool_context),
+                    stream=stream,
+                )
+            except (
+                ResumableAgentInterruptedError,
+                StaleClaimError,
+                ToolEffectConflictError,
+                ValueError,
+                TypeError,
+                AssertionError,
+            ):
+                raise
+            except Exception as error:
+                raise ResumableAgentInterruptedError(
+                    str(error) or error.__class__.__name__
+                ) from error
             current.step += 1
 
         completion = await self._complete_step(
@@ -358,7 +399,9 @@ class AgentLoop:
             stream=stream,
         )
         if completion.tool_calls:
-            raise ValueError("provider returned tool calls after the tool iteration limit")
+            raise ValueError(
+                "provider returned tool calls after the tool iteration limit"
+            )
         await self._assert_current_generation(tool_context)
         return _final_response(current, completion)
 
@@ -438,9 +481,7 @@ class AgentLoop:
                 state.messages,
                 working_memory,
                 maximum_tokens=state.config.working_memory_max_tokens,
-                stable_prefix_message_count=(
-                    state.context.stable_prefix_message_count
-                ),
+                stable_prefix_message_count=(state.context.stable_prefix_message_count),
             )
 
         definitions = (
@@ -470,6 +511,8 @@ class AgentLoop:
         except StaleClaimError:
             raise
         except Exception as error:
+            if _is_deterministic_agent_failure(error):
+                raise
             if state.step > 0 or state.events:
                 raise ResumableAgentInterruptedError(
                     str(error) or error.__class__.__name__
@@ -544,8 +587,6 @@ class AgentLoop:
             )
 
         streaming = cast(AssistantStreamingCompletionPort, self._completion)
-        emitted_visible_delta = False
-        finished: AssistantCompletion | None = None
         events = streaming.stream(
             route=state.config.route,
             model=state.config.model,
@@ -570,33 +611,62 @@ class AgentLoop:
             else None
         )
         """@brief 在 provider 静默输出时仍按上限周期检查 steer / Check steering at a bounded cadence even while the provider is silent."""
-        next_event_task: asyncio.Task[AssistantCompletionStreamEvent] | None = None
-        """@brief 当前等待中的单个 ``anext`` / The single currently pending ``anext``."""
+        consume_task: asyncio.Task[AssistantCompletion] | None = None
+        """@brief 在同一 Task/Context 中拥有 provider generator 全生命周期的消费任务 /
+        Consumption task owning the provider generator's complete lifetime in one Task/Context.
+        """
         try:
-            while True:
-                next_event_task = asyncio.create_task(
-                    _next_completion_stream_event(events),
-                    name=f"assistant-stream-next-event-{state.step}",
+            if generation_watch is None:
+                return await self._consume_completion_stream(events, stream=stream)
+            consume_task = asyncio.create_task(
+                self._consume_completion_stream(events, stream=stream),
+                name=f"assistant-stream-consume-{state.step}",
+            )
+            done, _ = await asyncio.wait(
+                (consume_task, generation_watch),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if generation_watch in done:
+                consume_task.cancel()
+                await asyncio.gather(consume_task, return_exceptions=True)
+                consume_task = None
+                await generation_watch
+                raise RuntimeError(
+                    "generation watch stopped without invalidating the stream"
                 )
-                if generation_watch is not None:
-                    done, _ = await asyncio.wait(
-                        (next_event_task, generation_watch),
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if generation_watch in done:
-                        next_event_task.cancel()
-                        await asyncio.gather(next_event_task, return_exceptions=True)
-                        next_event_task = None
-                        await generation_watch
-                        raise RuntimeError(
-                            "generation watch stopped without invalidating the stream"
-                        )
-                try:
-                    event = await next_event_task
-                except StopAsyncIteration:
-                    next_event_task = None
-                    break
-                next_event_task = None
+            return await consume_task
+        finally:
+            if consume_task is not None and not consume_task.done():
+                consume_task.cancel()
+                await asyncio.gather(consume_task, return_exceptions=True)
+            if generation_watch is not None:
+                generation_watch.cancel()
+                await asyncio.gather(generation_watch, return_exceptions=True)
+
+    async def _consume_completion_stream(
+        self,
+        events: AsyncIterator[AssistantCompletionStreamEvent],
+        *,
+        stream: AssistantStreamSession,
+    ) -> AssistantCompletion:
+        """@brief 在单一 asyncio Task 中消费并关闭 provider 流 /
+        Consume and close a provider stream within one asyncio Task.
+
+        @param events provider-neutral 异步事件流 / Provider-neutral asynchronous event stream.
+        @param stream 用户可见流投影会话 / User-visible stream projection session.
+        @return 唯一完整 completion / The single completed completion.
+        @raise ResumableAgentInterruptedError 可见 delta 后 provider 中断时抛出 /
+            Raised when the provider fails after a visible delta.
+        @note ``ContextVar.Token`` 只能在创建它的 Context 中 reset。异步 generator
+            不得用“每个 ``anext`` 新建一个 Task”的方式逐块推进。/
+            A ``ContextVar.Token`` can only be reset in the Context that created it. An async
+            generator must not be advanced by creating a fresh Task for every ``anext`` call.
+        """
+
+        emitted_visible_delta = False
+        finished: AssistantCompletion | None = None
+        try:
+            async for event in events:
                 if isinstance(event, CompletionTextDelta):
                     if finished is not None:
                         raise ValueError(
@@ -617,18 +687,14 @@ class AgentLoop:
         except StaleClaimError:
             raise
         except Exception as error:
+            if _is_deterministic_agent_failure(error):
+                raise
             if emitted_visible_delta:
                 raise ResumableAgentInterruptedError(
                     str(error) or error.__class__.__name__
                 ) from error
             raise
         finally:
-            if next_event_task is not None:
-                next_event_task.cancel()
-                await asyncio.gather(next_event_task, return_exceptions=True)
-            if generation_watch is not None:
-                generation_watch.cancel()
-                await asyncio.gather(generation_watch, return_exceptions=True)
             await _close_completion_stream(events)
         if finished is None:
             missing_terminal = ValueError(
@@ -662,12 +728,14 @@ class AgentLoop:
         *,
         completion: AssistantCompletion,
         tool_context: ToolExecutionContext,
+        stream: AssistantStreamSession | None,
     ) -> None:
         """@brief 顺序执行一个 checkpoint 中的工具调用 / Sequentially execute calls from one checkpoint.
 
         @param state 当前状态 / Current state.
         @param completion 已持久化完成 / Persisted completion.
         @param tool_context durable identity / Durable identity.
+        @param stream 可选高层活动投影 / Optional high-level activity projection.
         @return None / None.
         """
 
@@ -675,6 +743,11 @@ class AgentLoop:
         for ordinal, call in enumerate(completion.tool_calls):
             if call.name in state.config.skip_tools:
                 raise ValueError(f"provider called a route-disabled tool: {call.name}")
+            invocation_id = tool_invocation_id(
+                tool_context,
+                step=state.step,
+                ordinal=ordinal,
+            )
             with self._telemetry.span(
                 "agent.tool.execute",
                 kind=SpanKind.INTERNAL,
@@ -685,8 +758,19 @@ class AgentLoop:
                     "gen_ai.tool.ordinal": ordinal,
                 },
             ) as span:
+                await self._assert_current_generation(tool_context)
+                await self._publish_tool_started_progress(
+                    tool_context,
+                    invocation_id=invocation_id,
+                    tool_name=call.name,
+                )
                 try:
-                    await self._assert_current_generation(tool_context)
+                    if stream is not None:
+                        await stream.tool_started(
+                            invocation_id,
+                            call.name,
+                            emitted_at=datetime.now(UTC),
+                        )
                     result = await self._runtime.execute(
                         context=tool_context,
                         step=state.step,
@@ -695,7 +779,22 @@ class AgentLoop:
                         tool_name=call.name,
                         raw_arguments=call.arguments,
                     )
+                except StaleClaimError:
+                    raise
                 except Exception as error:
+                    if stream is not None:
+                        await stream.tool_finished(
+                            invocation_id,
+                            call.name,
+                            succeeded=False,
+                            emitted_at=datetime.now(UTC),
+                        )
+                    await self._publish_failed_tool_progress(
+                        tool_context,
+                        invocation_id=invocation_id,
+                        tool_name=call.name,
+                        error=error,
+                    )
                     _annotate_workspace_failure(span, error)
                     _LOGGER.exception(
                         "Assistant tool execution failed tool_name=%s step=%s ordinal=%s",
@@ -711,6 +810,20 @@ class AgentLoop:
                         },
                     )
                     raise
+                succeeded = _tool_result_succeeded(result)
+                await self._publish_tool_progress(
+                    tool_context,
+                    invocation_id=invocation_id,
+                    tool_name=call.name,
+                    succeeded=succeeded,
+                )
+                if stream is not None:
+                    await stream.tool_finished(
+                        invocation_id,
+                        call.name,
+                        succeeded=succeeded,
+                        emitted_at=datetime.now(UTC),
+                    )
                 span.set_attribute("fogmoe.tool.replayed", result.replayed)
                 self._telemetry.counter(
                     MetricName.TOOL_OUTCOMES,
@@ -732,6 +845,147 @@ class AgentLoop:
             completion=completion,
             results=tuple(results),
         )
+
+    async def _publish_commentary_progress(
+        self,
+        *,
+        step: int,
+        completion: AssistantCompletion,
+        tool_context: ToolExecutionContext | None,
+        stream: AssistantStreamSession | None,
+    ) -> None:
+        """@brief checkpoint 后追加自然 commentary 稳定块 / Append a natural commentary block after checkpointing.
+
+        @param step 当前 Agent 模型步骤 / Current Agent model step.
+        @param completion 已 checkpoint 且包含工具调用的完成 /
+            Checkpointed completion containing tool calls.
+        @param tool_context durable Turn 与 generation 身份 / Durable Turn and generation identity.
+        @param stream 可选瞬时当前动作投影 / Optional ephemeral current-action projection.
+        @return None / None.
+        @note 只有模型在工具调用前实际给出的文本才成为 commentary；绝不根据固定 workflow
+            阶段伪造“正在分析”等台词。/ Only text actually emitted by the model before its tool
+            call becomes commentary; fixed workflow phases never fabricate narration.
+        """
+
+        text = completion.content.strip()
+        if not text:
+            return
+        emitted_at = datetime.now(UTC)
+        item = commentary_progress_item(
+            step=step,
+            text=text,
+            created_at=emitted_at,
+        )
+        if self._progress is not None:
+            if tool_context is None:
+                raise ValueError("Durable commentary requires tool_context")
+            await self._progress.publish_progress(tool_context, item)
+        if stream is not None:
+            await stream.commentary(
+                item.item_id,
+                item.text,
+                emitted_at=emitted_at,
+            )
+
+    async def _publish_tool_progress(
+        self,
+        tool_context: ToolExecutionContext,
+        *,
+        invocation_id: str,
+        tool_name: str,
+        succeeded: bool,
+    ) -> None:
+        """@brief receipt 后追加工具终态稳定块 / Append a stable tool terminal block after its receipt.
+
+        @param tool_context durable Turn 与 generation 身份 / Durable Turn and generation identity.
+        @param invocation_id 稳定工具调用 ID / Stable tool invocation ID.
+        @param tool_name 目录工具名 / Catalog tool name.
+        @param succeeded 是否形成可用结果 / Whether the call produced a usable result.
+        @return None / None.
+        """
+
+        if self._progress is None:
+            return
+        await self._progress.publish_progress(
+            tool_context,
+            tool_progress_item(
+                invocation_id=invocation_id,
+                tool_name=tool_name,
+                succeeded=succeeded,
+                created_at=datetime.now(UTC),
+            ),
+        )
+
+    async def _publish_tool_started_progress(
+        self,
+        tool_context: ToolExecutionContext,
+        *,
+        invocation_id: str,
+        tool_name: str,
+    ) -> None:
+        """@brief 工具执行前追加不可变开始块 / Append an immutable start block before tool execution.
+
+        @param tool_context durable Turn 与 generation 身份 / Durable Turn and generation identity.
+        @param invocation_id 稳定工具调用 ID / Stable tool invocation ID.
+        @param tool_name 目录工具名 / Catalog tool name.
+        @return None / None.
+        @note 开始块是独立真实消息，完成时追加新块而不编辑它，避免客户端重绘。/
+            The start block is an independent real message. Completion appends another block
+            instead of editing it, avoiding client-side redraw.
+        """
+
+        if self._progress is None:
+            return
+        await self._progress.publish_progress(
+            tool_context,
+            tool_started_progress_item(
+                invocation_id=invocation_id,
+                tool_name=tool_name,
+                created_at=datetime.now(UTC),
+            ),
+        )
+
+    async def _publish_failed_tool_progress(
+        self,
+        tool_context: ToolExecutionContext,
+        *,
+        invocation_id: str,
+        tool_name: str,
+        error: Exception,
+    ) -> None:
+        """@brief 不掩盖原始工具异常地尝试固化失败块 /
+        Try to persist a failed tool block without masking the original tool exception.
+
+        @param tool_context durable Turn 与 generation 身份 / Durable Turn and generation identity.
+        @param invocation_id 稳定工具调用 ID / Stable tool invocation ID.
+        @param tool_name 目录工具名 / Catalog tool name.
+        @param error 即将传播的原始工具异常 / Original tool exception about to propagate.
+        @return None / None.
+        @note StaleClaimError 必须正常传播以停止旧 generation；其他 progress 写失败只记录，
+            保留更有诊断价值的原始工具错误。/ StaleClaimError propagates to stop an old
+            generation. Other progress-write failures are logged while preserving the more useful
+            original tool failure.
+        """
+
+        if self._progress is None:
+            return
+        try:
+            await self._publish_tool_progress(
+                tool_context,
+                invocation_id=invocation_id,
+                tool_name=tool_name,
+                succeeded=False,
+            )
+        except StaleClaimError:
+            raise
+        except Exception:
+            _LOGGER.warning(
+                "Could not persist failed Assistant tool progress "
+                "tool_name=%s original_error=%s",
+                tool_name,
+                error.__class__.__name__,
+                exc_info=True,
+            )
 
     async def _assert_current_generation(
         self,
@@ -847,9 +1101,7 @@ def _completion_request_hash(
         ),
         "prompt_cache_policy": state.config.prompt_cache_policy,
         "prompt_cache_retention": state.config.prompt_cache_retention,
-        "stable_prefix_message_count": (
-            state.context.stable_prefix_message_count
-        ),
+        "stable_prefix_message_count": (state.context.stable_prefix_message_count),
     }
     canonical = json.dumps(
         payload,
@@ -858,6 +1110,35 @@ def _completion_request_hash(
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _tool_result_succeeded(result: ToolRuntimeResult) -> bool:
+    """@brief 判断工具结果是否适合显示为完成 / Decide whether a tool result is suitable for a completed activity state.
+
+    @param result 已规范化工具结果 / Normalized tool result.
+    @return 无校验错误且公共结果不含顶层 error 时为 True /
+        True when no validation error exists and the public result has no top-level error.
+    @note 只检查结构化错误信号，不读取或展示结果内容 / Only structured error signals are
+        inspected; result content is neither read for narration nor displayed.
+    """
+
+    return result.validation_error is None and not (
+        isinstance(result.public_result, dict) and "error" in result.public_result
+    )
+
+
+def _is_deterministic_agent_failure(error: Exception) -> bool:
+    """@brief 判断重放同一 checkpoint 不会自愈的确定性失败 /
+    Decide whether replaying the same checkpoint cannot heal a deterministic failure.
+
+    @param error 当前 Agent 或 completion-port 异常 / Current Agent or completion-port failure.
+    @return contract/rejected provider failure 或本地校验错误为 True /
+        True for contract/rejected provider failures or local validation errors.
+    """
+
+    if isinstance(error, ProviderFailure):
+        return not error.retryable
+    return isinstance(error, (ValueError, TypeError, KeyError, AssertionError))
 
 
 def _prompt_cache_directive(
@@ -901,7 +1182,9 @@ def _prompt_cache_directive(
             mode="automatic",
         )
     retention = state.config.prompt_cache_retention
-    if retention is None:  # AgentExecutionConfig validates this; retain fail-closed locality.
+    if (
+        retention is None
+    ):  # AgentExecutionConfig validates this; retain fail-closed locality.
         raise ValueError("explicit prompt caching lost its retention")
     return PromptCacheDirective(
         stable_prefix_message_count=boundary,

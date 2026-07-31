@@ -156,11 +156,15 @@ class PartialAgentResponseError(RuntimeError):
 
 
 class ResumableAgentInterruptedError(RuntimeError):
-    """@brief checkpoint 后 provider 中断，可安全重试 / Provider interruption after a checkpoint, safe to retry.
+    """@brief checkpoint 后暂态基础设施中断，可安全重试 /
+    Transient infrastructure interruption after a checkpoint, safe to retry.
 
-    已提交的 provider steps 与工具结果均由 checkpoint/receipt 拥有，因此该异常不是
-    ``partial effect`` 永久失败。/ Committed provider steps and tool results are owned by
-    checkpoints and receipts, so this is not a permanent partial-effect failure.
+    已提交的 provider steps 与工具结果均由 checkpoint/receipt 拥有，因此暂态 provider、
+    工具或 progress-outbox 中断可从同一 checkpoint 恢复。确定性的 contract、validation
+    与 receipt conflict 不得包装为此异常。/ Committed provider steps and tool results are
+    owned by checkpoints and receipts, so transient provider, tool, or progress-outbox
+    interruptions can resume from the same checkpoint. Deterministic contract, validation, and
+    receipt-conflict failures must not be wrapped in this exception.
     """
 
 

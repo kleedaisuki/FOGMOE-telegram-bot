@@ -92,9 +92,7 @@ class _OpenAIToolCallState:
         """
 
         if self.call_id is None or self.name is None:
-            raise MessageContractError(
-                f"OpenAI stream tool_call {index} is incomplete"
-            )
+            raise MessageContractError(f"OpenAI stream tool_call {index} is incomplete")
         return {
             "id": self.call_id,
             "type": "function",
@@ -114,6 +112,7 @@ class OpenAIChatStreamAccumulator:
     _usage: dict[str, object] | None = None
     _saw_choice: bool = False
     _choice_finished: bool = False
+    _finish_reason: str | None = None
     _done: bool = False
 
     def consume(self, payload: Mapping[str, object]) -> tuple[str, ...]:
@@ -142,25 +141,20 @@ class OpenAIChatStreamAccumulator:
                 )
             return ()
         if len(choices) != 1 or not isinstance(choices[0], Mapping):
-            raise MessageContractError(
-                "OpenAI stream must contain exactly one choice"
-            )
-        if self._choice_finished:
-            raise MessageContractError(
-                "OpenAI stream emitted a choice after finish_reason"
-            )
+            raise MessageContractError("OpenAI stream must contain exactly one choice")
         choice = cast(Mapping[str, object], choices[0])
         if choice.get("index") != 0:
             raise MessageContractError("OpenAI stream choice index must be zero")
+        if self._choice_finished:
+            self._consume_usage_terminal_echo(choice, usage=usage)
+            return ()
         delta = choice.get("delta")
         if not isinstance(delta, Mapping):
             raise MessageContractError("OpenAI stream choice.delta must be an object")
         raw_delta = cast(Mapping[str, object], delta)
         role = raw_delta.get("role")
         if role not in {None, "assistant"}:
-            raise MessageContractError(
-                "OpenAI stream delta role must be assistant"
-            )
+            raise MessageContractError("OpenAI stream delta role must be assistant")
         refusal = raw_delta.get("refusal")
         if refusal is not None and refusal != "":
             raise MessageContractError(
@@ -208,8 +202,59 @@ class OpenAIChatStreamAccumulator:
                     "OpenAI stream finish_reason must be a non-empty string or null"
                 )
             self._choice_finished = True
+            self._finish_reason = finish_reason
         self._saw_choice = True
         return tuple(emitted)
+
+    def _consume_usage_terminal_echo(
+        self,
+        choice: Mapping[str, object],
+        *,
+        usage: object,
+    ) -> None:
+        """@brief 接受 OpenRouter usage 终块中的幂等终止 choice /
+        Accept an idempotent terminal choice echoed by an OpenRouter usage chunk.
+
+        @param choice finish_reason 后重复发送的单一 choice /
+            The single choice repeated after finish_reason.
+        @param usage 当前 chunk 的 usage 对象 / Usage object carried by this chunk.
+        @return None / None.
+        @raise MessageContractError chunk 不含 usage、改变终止原因或夹带新内容时抛出 /
+            Raised when the chunk lacks usage, changes the finish reason, or carries new content.
+        @note OpenRouter 的 ``stream_options.include_usage`` 可能发送 ``usage`` 并重复
+            已完成 choice；这里只接受语义幂等的空 delta，真实的终止后输出仍被拒绝。/
+            OpenRouter may send usage together with the already completed choice when
+            ``stream_options.include_usage`` is enabled. Only a semantically idempotent empty
+            delta is accepted; actual output after termination remains rejected.
+        """
+
+        if usage is None:
+            raise MessageContractError(
+                "OpenAI stream emitted a choice after finish_reason"
+            )
+        if choice.get("finish_reason") != self._finish_reason:
+            raise MessageContractError(
+                "OpenAI stream usage chunk changed finish_reason"
+            )
+        delta = choice.get("delta")
+        if not isinstance(delta, Mapping):
+            raise MessageContractError("OpenAI stream choice.delta must be an object")
+        raw_delta = cast(Mapping[str, object], delta)
+        if raw_delta.get("role") not in {None, "assistant"}:
+            raise MessageContractError("OpenAI stream delta role must be assistant")
+        if raw_delta.get("content") not in {None, ""}:
+            raise MessageContractError(
+                "OpenAI stream usage chunk carried content after finish_reason"
+            )
+        if raw_delta.get("refusal") not in {None, ""}:
+            raise MessageContractError(
+                "OpenAI stream usage chunk carried refusal after finish_reason"
+            )
+        tool_calls = raw_delta.get("tool_calls")
+        if tool_calls is not None and tool_calls != []:
+            raise MessageContractError(
+                "OpenAI stream usage chunk carried tool calls after finish_reason"
+            )
 
     def consume_done(self) -> None:
         """@brief 消费唯一 ``data: [DONE]`` 终止标记 / Consume the sole ``data: [DONE]`` terminator.
@@ -248,8 +293,7 @@ class OpenAIChatStreamAccumulator:
         }
         if indices:
             message["tool_calls"] = [
-                self._tool_calls[index].wire_value(index=index)
-                for index in indices
+                self._tool_calls[index].wire_value(index=index) for index in indices
             ]
         payload: dict[str, object] = {
             "choices": [{"index": 0, "message": message}],
@@ -353,9 +397,7 @@ class AnthropicMessagesStreamAccumulator:
         if not isinstance(raw_type, str) or not raw_type:
             raise MessageContractError("Anthropic stream event.type must be a string")
         if event_name != raw_type:
-            raise MessageContractError(
-                "Anthropic SSE event name must match data.type"
-            )
+            raise MessageContractError("Anthropic SSE event name must match data.type")
         if raw_type == "ping":
             return ()
         if self._stopped:
@@ -366,9 +408,7 @@ class AnthropicMessagesStreamAccumulator:
             self._consume_message_start(payload)
             return ()
         if not self._started:
-            raise MessageContractError(
-                "Anthropic stream must begin with message_start"
-            )
+            raise MessageContractError("Anthropic stream must begin with message_start")
         if raw_type == "content_block_start":
             return self._consume_block_start(payload)
         if raw_type == "content_block_delta":
@@ -403,9 +443,7 @@ class AnthropicMessagesStreamAccumulator:
         """
 
         if not self._stopped:
-            raise MessageContractError(
-                "Anthropic stream ended without message_stop"
-            )
+            raise MessageContractError("Anthropic stream ended without message_stop")
         indices = sorted(self._blocks)
         if indices != list(range(len(indices))):
             raise MessageContractError(
@@ -442,9 +480,7 @@ class AnthropicMessagesStreamAccumulator:
             )
         content = raw_message.get("content")
         if content != []:
-            raise MessageContractError(
-                "Anthropic message_start content must be empty"
-            )
+            raise MessageContractError("Anthropic message_start content must be empty")
         self._merge_usage(raw_message.get("usage"))
         self._started = True
 
@@ -470,7 +506,7 @@ class AnthropicMessagesStreamAccumulator:
             )
         block = cast(Mapping[str, object], raw_block)
         kind = block.get("type")
-        if kind not in {
+        if not isinstance(kind, str) or kind not in {
             "text",
             "tool_use",
             "thinking",

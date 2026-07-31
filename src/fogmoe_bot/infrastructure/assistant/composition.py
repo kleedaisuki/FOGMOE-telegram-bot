@@ -333,6 +333,7 @@ def build_durable_assistant(
         memory=working_memory,
         telemetry=telemetry,
         generation_fence=store,
+        progress=store,
     )
     circuit = FailureCircuit[str](
         FailureCircuitPolicy(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 
 from fogmoe_bot.application.assistant.streaming import (
     AssistantStreamAddress,
@@ -123,6 +123,33 @@ class _BlockingTerminalBot(_RecordingBot):
         return acknowledged
 
 
+class _TransientDraftBot(_RecordingBot):
+    """@brief 首次草稿瞬时失败、随后恢复的网络替身 / Network double with one transient draft failure followed by recovery."""
+
+    async def send_message_draft(
+        self,
+        chat_id: int,
+        draft_id: int,
+        text: str | None = None,
+        message_thread_id: int | None = None,
+    ) -> bool:
+        """@brief 首次调用抛出瞬时 TelegramError / Raise a transient TelegramError on the first call.
+
+        @param chat_id 私聊 ID / Private-chat ID.
+        @param draft_id 稳定草稿 ID / Stable draft ID.
+        @param text 累计活动快照 / Cumulative activity snapshot.
+        @param message_thread_id 私聊无 Topic / No topic in private chats.
+        @return 第二次起确认 / Acknowledged from the second call onward.
+        @raise TelegramError 首次模拟抖动 / Simulated jitter on the first call.
+        """
+
+        self.draft_calls.append((chat_id, draft_id, text, message_thread_id))
+        self.draft_event.set()
+        if len(self.draft_calls) == 1:
+            raise TelegramError("transient network jitter")
+        return True
+
+
 def _state(
     *,
     chat_id: int = 42,
@@ -158,6 +185,7 @@ def test_private_stream_coalesces_deltas_and_stops_typing_at_completion() -> Non
         bot = _RecordingBot()
         projection = TelegramAssistantStreamProjection(
             bot,
+            native_drafts_enabled=True,
             draft_interval_seconds=0.05,
             typing_refresh_seconds=0.01,
         )
@@ -166,17 +194,14 @@ def test_private_stream_coalesces_deltas_and_stops_typing_at_completion() -> Non
         await asyncio.wait_for(bot.typing_event.wait(), timeout=1.0)
 
         for delta in ("流", "式", "回", "答"):
-            await projection.project(
-                state.append(delta, emitted_at=datetime.now(UTC))
-            )
+            await projection.project(state.append(delta, emitted_at=datetime.now(UTC)))
         await projection.project(state.complete(emitted_at=datetime.now(UTC)))
         await asyncio.wait_for(bot.draft_event.wait(), timeout=1.0)
         await asyncio.sleep(0.03)
 
-        assert bot.draft_calls[-1][2] == "流式回答"
-        assert {call[1] for call in bot.draft_calls} == {
-            state.current_frame.draft_id
-        }
+        assert bot.draft_calls[-1][2] == "最后的回答整理好了，正在接着发给你～"
+        assert all("流式回答" not in str(call[2]) for call in bot.draft_calls)
+        assert {call[1] for call in bot.draft_calls} == {state.current_frame.draft_id}
         typing_count = len(bot.typing_calls)
         await asyncio.sleep(0.03)
         assert len(bot.typing_calls) == typing_count
@@ -197,18 +222,57 @@ def test_group_stream_uses_topic_typing_without_native_drafts() -> None:
         bot = _RecordingBot()
         projection = TelegramAssistantStreamProjection(
             bot,
+            native_drafts_enabled=True,
             typing_refresh_seconds=0.02,
         )
         state = _state(chat_id=-100123, is_group=True, message_thread_id=77)
         await projection.project(state.current_frame)
-        await projection.project(
-            state.append("群聊回答", emitted_at=datetime.now(UTC))
-        )
+        await projection.project(state.append("群聊回答", emitted_at=datetime.now(UTC)))
         await asyncio.wait_for(bot.typing_event.wait(), timeout=1.0)
         await projection.project(state.complete(emitted_at=datetime.now(UTC)))
         await asyncio.sleep(0.03)
 
         assert bot.typing_calls[0] == (-100123, "typing", 77)
+        assert bot.draft_calls == []
+        await projection.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_native_drafts_are_opt_in_to_avoid_client_side_redraw() -> None:
+    """@brief 默认只发 typing，避免原生草稿重绘导致视口跳动 /
+    The default sends only typing to avoid viewport jumps caused by native-draft redraw.
+    """
+
+    async def scenario() -> None:
+        """@brief 投影完整私聊生命周期但不启用 draft / Project a full private lifecycle without enabling drafts."""
+
+        bot = _RecordingBot()
+        projection = TelegramAssistantStreamProjection(
+            bot,
+            typing_refresh_seconds=0.01,
+        )
+        state = _state()
+        await projection.project(state.current_frame)
+        await projection.project(
+            state.commentary(
+                "step:0:commentary",
+                "我先确认一下资料。",
+                emitted_at=datetime.now(UTC),
+            )
+        )
+        await projection.project(
+            state.start_tool(
+                "step:0:call:0",
+                "google_search",
+                emitted_at=datetime.now(UTC),
+            )
+        )
+        await asyncio.wait_for(bot.typing_event.wait(), timeout=1.0)
+        await projection.project(state.complete(emitted_at=datetime.now(UTC)))
+        await asyncio.sleep(0.03)
+
+        assert bot.typing_calls
         assert bot.draft_calls == []
         await projection.aclose()
 
@@ -227,6 +291,7 @@ def test_steer_reuses_draft_identity_and_discards_a_stale_generation_frame() -> 
         bot = _RecordingBot()
         projection = TelegramAssistantStreamProjection(
             bot,
+            native_drafts_enabled=True,
             draft_interval_seconds=0.0,
             typing_refresh_seconds=0.05,
         )
@@ -241,18 +306,14 @@ def test_steer_reuses_draft_identity_and_discards_a_stale_generation_frame() -> 
                 emitted_at=datetime.now(UTC),
             )
         )
-        await projection.project(
-            state.append("新答案", emitted_at=datetime.now(UTC))
-        )
+        await projection.project(state.append("新答案", emitted_at=datetime.now(UTC)))
         await projection.project(stale)
         await projection.project(state.complete(emitted_at=datetime.now(UTC)))
         await asyncio.wait_for(bot.draft_event.wait(), timeout=1.0)
         await asyncio.sleep(0.03)
 
-        assert bot.draft_calls[-1][2] == "新答案"
-        assert {call[1] for call in bot.draft_calls} == {
-            state.current_frame.draft_id
-        }
+        assert bot.draft_calls[-1][2] == "最后的回答整理好了，正在接着发给你～"
+        assert {call[1] for call in bot.draft_calls} == {state.current_frame.draft_id}
         await projection.aclose()
 
     asyncio.run(scenario())
@@ -270,6 +331,7 @@ def test_native_draft_rejection_degrades_to_typing_without_failing_projection() 
         bot = _RecordingBot(reject_first_draft=True)
         projection = TelegramAssistantStreamProjection(
             bot,
+            native_drafts_enabled=True,
             draft_interval_seconds=0.0,
             typing_refresh_seconds=0.02,
         )
@@ -279,9 +341,7 @@ def test_native_draft_rejection_degrades_to_typing_without_failing_projection() 
             state.append("不会中断推理", emitted_at=datetime.now(UTC))
         )
         await asyncio.wait_for(bot.draft_event.wait(), timeout=1.0)
-        await projection.project(
-            state.append("，只降级", emitted_at=datetime.now(UTC))
-        )
+        await projection.project(state.append("，只降级", emitted_at=datetime.now(UTC)))
         await projection.project(state.complete(emitted_at=datetime.now(UTC)))
         await asyncio.sleep(0.03)
 
@@ -292,7 +352,9 @@ def test_native_draft_rejection_degrades_to_typing_without_failing_projection() 
     asyncio.run(scenario())
 
 
-def test_suspended_actor_hands_off_the_next_generation_without_losing_its_start() -> None:
+def test_suspended_actor_hands_off_the_next_generation_without_losing_its_start() -> (
+    None
+):
     """@brief SUSPENDED 停止 typing 并以原子 handoff 保住下一代 STARTED /
     SUSPENDED stops typing and atomically hands off a racing next-generation STARTED.
     """
@@ -306,6 +368,7 @@ def test_suspended_actor_hands_off_the_next_generation_without_losing_its_start(
         bot = _RecordingBot()
         projection = TelegramAssistantStreamProjection(
             bot,
+            native_drafts_enabled=True,
             draft_interval_seconds=0.0,
             typing_refresh_seconds=0.01,
         )
@@ -329,10 +392,8 @@ def test_suspended_actor_hands_off_the_next_generation_without_losing_its_start(
         await asyncio.wait_for(bot.draft_event.wait(), timeout=1.0)
         await asyncio.sleep(0.03)
 
-        assert bot.draft_calls[-1][2] == "重试后的回答"
-        assert {call[1] for call in bot.draft_calls} == {
-            first.current_frame.draft_id
-        }
+        assert bot.draft_calls[-1][2] == "最后的回答整理好了，正在接着发给你～"
+        assert {call[1] for call in bot.draft_calls} == {first.current_frame.draft_id}
         await projection.aclose()
 
     asyncio.run(scenario())
@@ -349,6 +410,7 @@ def test_committed_retry_replaces_partial_text_with_an_explicit_status() -> None
         bot = _RecordingBot()
         projection = TelegramAssistantStreamProjection(
             bot,
+            native_drafts_enabled=True,
             draft_interval_seconds=0.0,
             typing_refresh_seconds=0.01,
         )
@@ -363,8 +425,7 @@ def test_committed_retry_replaces_partial_text_with_an_explicit_status() -> None
         async with asyncio.timeout(1.0):
             while (
                 not bot.draft_calls
-                or bot.draft_calls[-1][2]
-                != "处理暂时中断，系统会自动恢复…"
+                or bot.draft_calls[-1][2] != "唔，刚才暂时卡住了…我会自己接着处理的。"
             ):
                 await asyncio.sleep(0)
 
@@ -387,15 +448,14 @@ def test_terminal_actor_does_not_drop_a_racing_new_generation() -> None:
         bot = _BlockingTerminalBot()
         projection = TelegramAssistantStreamProjection(
             bot,
+            native_drafts_enabled=True,
             draft_interval_seconds=0.0,
             typing_refresh_seconds=0.05,
         )
         old = _state()
         await projection.project(old.current_frame)
         await asyncio.wait_for(bot.typing_event.wait(), timeout=1.0)
-        await projection.project(
-            old.append("旧答案", emitted_at=datetime.now(UTC))
-        )
+        await projection.project(old.append("旧答案", emitted_at=datetime.now(UTC)))
         await asyncio.wait_for(bot.draft_event.wait(), timeout=1.0)
 
         bot.block_next_draft = True
@@ -411,20 +471,19 @@ def test_terminal_actor_does_not_drop_a_racing_new_generation() -> None:
             emitted_at=datetime.now(UTC),
         )
         await projection.project(new.current_frame)
-        await projection.project(
-            new.append("新答案", emitted_at=datetime.now(UTC))
-        )
+        await projection.project(new.append("新答案", emitted_at=datetime.now(UTC)))
         await projection.project(new.complete(emitted_at=datetime.now(UTC)))
         bot.release_terminal.set()
 
         async with asyncio.timeout(1.0):
-            while not bot.draft_calls or bot.draft_calls[-1][2] != "新答案":
+            while (
+                not bot.draft_calls
+                or bot.draft_calls[-1][2] != "最后的回答整理好了，正在接着发给你～"
+            ):
                 await asyncio.sleep(0)
 
-        assert bot.draft_calls[-1][2] == "新答案"
-        assert {call[1] for call in bot.draft_calls} == {
-            old.current_frame.draft_id
-        }
+        assert bot.draft_calls[-1][2] == "最后的回答整理好了，正在接着发给你～"
+        assert {call[1] for call in bot.draft_calls} == {old.current_frame.draft_id}
         await projection.aclose()
 
     asyncio.run(scenario())
@@ -441,6 +500,7 @@ def test_terminal_high_water_rejects_an_old_generation_after_actor_exit() -> Non
         bot = _RecordingBot()
         projection = TelegramAssistantStreamProjection(
             bot,
+            native_drafts_enabled=True,
             draft_interval_seconds=0.0,
             typing_refresh_seconds=0.02,
             terminal_cursor_capacity=4,
@@ -457,13 +517,14 @@ def test_terminal_high_water_rejects_an_old_generation_after_actor_exit() -> Non
             emitted_at=datetime.now(UTC),
         )
         await projection.project(new.current_frame)
-        await projection.project(
-            new.append("新答案", emitted_at=datetime.now(UTC))
-        )
+        await projection.project(new.append("新答案", emitted_at=datetime.now(UTC)))
         await projection.project(new.complete(emitted_at=datetime.now(UTC)))
 
         async with asyncio.timeout(1.0):
-            while not bot.draft_calls or bot.draft_calls[-1][2] != "新答案":
+            while (
+                not bot.draft_calls
+                or bot.draft_calls[-1][2] != "最后的回答整理好了，正在接着发给你～"
+            ):
                 await asyncio.sleep(0)
         await asyncio.sleep(0)
         draft_count = len(bot.draft_calls)
@@ -475,7 +536,7 @@ def test_terminal_high_water_rejects_an_old_generation_after_actor_exit() -> Non
 
         assert len(bot.draft_calls) == draft_count
         assert len(bot.typing_calls) == typing_count
-        assert bot.draft_calls[-1][2] == "新答案"
+        assert bot.draft_calls[-1][2] == "最后的回答整理好了，正在接着发给你～"
         await projection.aclose()
 
     asyncio.run(scenario())
@@ -493,6 +554,7 @@ def test_failed_stream_exposes_only_the_stable_safe_code_and_stops_typing() -> N
         bot = _RecordingBot()
         projection = TelegramAssistantStreamProjection(
             bot,
+            native_drafts_enabled=True,
             typing_refresh_seconds=0.01,
         )
         state = _state()
@@ -504,11 +566,131 @@ def test_failed_stream_exposes_only_the_stable_safe_code_and_stops_typing() -> N
         await asyncio.sleep(0.02)
 
         assert bot.draft_calls[-1][2] == (
-            "这次处理没有完成（错误码：provider_unavailable）。你可以继续发消息。"
+            "呜，这次没能顺利做完（错误码：provider_unavailable）。你可以再叫我试一次。"
         )
         typing_count = len(bot.typing_calls)
         await asyncio.sleep(0.02)
         assert len(bot.typing_calls) == typing_count
+        await projection.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_transient_draft_failure_retries_latest_snapshot_without_a_new_model_frame() -> (
+    None
+):
+    """@brief 网络抖动后 actor 自行重试最新快照且不要求新模型 delta /
+    The actor retries its latest snapshot after network jitter without requiring a new model delta.
+    """
+
+    async def scenario() -> None:
+        """@brief 只投影 STARTED 并等待独立展示 actor 恢复 / Project only STARTED and wait for the independent presentation actor to recover."""
+
+        bot = _TransientDraftBot()
+        projection = TelegramAssistantStreamProjection(
+            bot,
+            native_drafts_enabled=True,
+            draft_interval_seconds=0.0,
+            typing_refresh_seconds=0.05,
+        )
+        state = _state()
+        await projection.project(state.current_frame)
+
+        async with asyncio.timeout(1.5):
+            while len(bot.draft_calls) < 2:
+                await asyncio.sleep(0.01)
+
+        assert bot.draft_calls[0][2] == bot.draft_calls[1][2]
+        assert bot.draft_calls[-1][2] == ("我在处理这件事，稳定进展会一条条发在下面～")
+        await projection.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_current_action_draft_is_fixed_height_deduplicated_and_hides_answer_tokens() -> (
+    None
+):
+    """@brief 当前动作草稿定高去重且不累计历史或答案 token /
+    The current-action draft is fixed-height, deduplicated, and excludes history and answer tokens.
+    """
+
+    async def scenario() -> None:
+        """@brief 投影 commentary、工具开始与完成 / Project commentary, tool start, and completion."""
+
+        bot = _RecordingBot()
+        projection = TelegramAssistantStreamProjection(
+            bot,
+            native_drafts_enabled=True,
+            draft_interval_seconds=0.0,
+            typing_refresh_seconds=0.05,
+        )
+
+        async def wait_for_text(text: str) -> None:
+            """@brief 等待指定草稿被确认 / Wait for the specified draft.
+
+            @param text 目标草稿文本 / Target draft text.
+            @return None / None.
+            """
+
+            async with asyncio.timeout(1.0):
+                while not bot.draft_calls or bot.draft_calls[-1][2] != text:
+                    await asyncio.sleep(0)
+
+        state = _state()
+        await projection.project(state.current_frame)
+        await wait_for_text("我在处理这件事，稳定进展会一条条发在下面～")
+        await projection.project(
+            state.commentary(
+                "step:0:commentary",
+                "我先查一下最新资料，再回来给你一个完整答案。",
+                emitted_at=datetime.now(UTC),
+            )
+        )
+        await wait_for_text("✓ 工作说明已经稳定记下，继续往下做～")
+        await projection.project(
+            state.start_tool(
+                "step:0:call:0",
+                "google_search",
+                emitted_at=datetime.now(UTC),
+            )
+        )
+        await wait_for_text("✦ 我去网上查查最新资料…\n  能力：google_search")
+        await projection.project(
+            state.append("不应该出现在状态卡片里的答案", emitted_at=datetime.now(UTC))
+        )
+        await projection.project(
+            state.finish_tool(
+                "step:0:call:0",
+                "google_search",
+                succeeded=True,
+                emitted_at=datetime.now(UTC),
+            )
+        )
+        await wait_for_text("✓ 这个步骤已经稳定记录，继续处理下一步～")
+        before_duplicate = len(bot.draft_calls)
+        await projection.project(
+            state.finish_tool(
+                "step:0:call:0",
+                "google_search",
+                succeeded=True,
+                emitted_at=datetime.now(UTC),
+            )
+        )
+        await asyncio.sleep(0.01)
+        assert len(bot.draft_calls) == before_duplicate
+        await projection.project(state.complete(emitted_at=datetime.now(UTC)))
+
+        await wait_for_text("最后的回答整理好了，正在接着发给你～")
+
+        draft_texts = [str(call[2]) for call in bot.draft_calls]
+        assert "✦ 我去网上查查最新资料…\n  能力：google_search" in draft_texts
+        assert draft_texts.count("✓ 这个步骤已经稳定记录，继续处理下一步～") == 1
+        assert all(
+            "我先查一下最新资料" not in text
+            and "不应该出现在状态卡片里的答案" not in text
+            and "google_search\n✓" not in text
+            for text in draft_texts
+        )
         await projection.aclose()
 
     asyncio.run(scenario())

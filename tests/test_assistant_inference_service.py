@@ -171,7 +171,9 @@ def test_inference_retries_image_messages_as_text_after_all_routes_fail() -> Non
     ]
     calls: list[object] = []
 
-    def runner(provider: str, model: str, messages: object, **_: object) -> AgentResponse:
+    def runner(
+        provider: str, model: str, messages: object, **_: object
+    ) -> AgentResponse:
         """@brief 首次调用失败、第二次成功 / Fail once, then succeed.
 
         @param provider provider ID / Provider ID.
@@ -210,7 +212,9 @@ def test_text_only_route_uses_vision_text_fallback_messages() -> None:
     text_fallback_messages = [_user_message(TextPart("a cat on a desk"))]
     calls: list[object] = []
 
-    def runner(provider: str, model: str, messages: object, **_: object) -> AgentResponse:
+    def runner(
+        provider: str, model: str, messages: object, **_: object
+    ) -> AgentResponse:
         """@brief 记录消息并成功 / Record messages and succeed.
 
         @param provider provider ID / Provider ID.
@@ -251,7 +255,9 @@ def test_vision_capable_route_keeps_multimodal_messages() -> None:
     ]
     calls: list[object] = []
 
-    def runner(provider: str, model: str, messages: object, **_: object) -> AgentResponse:
+    def runner(
+        provider: str, model: str, messages: object, **_: object
+    ) -> AgentResponse:
         """@brief 记录多模态消息并成功 / Record multimodal messages and succeed.
 
         @param provider provider ID / Provider ID.
@@ -288,7 +294,9 @@ def test_image_messages_prioritize_the_image_capable_model_within_one_route() ->
     ]
     calls: list[tuple[str, object]] = []
 
-    def runner(provider: str, model: str, messages: object, **_: object) -> AgentResponse:
+    def runner(
+        provider: str, model: str, messages: object, **_: object
+    ) -> AgentResponse:
         """@brief 记录候选模型并成功 / Record the candidate model and succeed.
 
         @param provider provider ID / Provider ID.
@@ -414,7 +422,9 @@ def test_open_circuit_skips_to_next_route(monkeypatch: pytest.MonkeyPatch) -> No
 
     calls: list[str] = []
 
-    def runner(provider: str, model: str, messages: object, **_: object) -> AgentResponse:
+    def runner(
+        provider: str, model: str, messages: object, **_: object
+    ) -> AgentResponse:
         """@brief 记录 provider 并成功 / Record the provider and succeed.
 
         @param provider provider ID / Provider ID.
@@ -449,7 +459,9 @@ def test_terminal_safety_block_does_not_bypass_to_a_later_route() -> None:
 
     calls: list[str] = []
 
-    def runner(provider: str, model: str, messages: object, **_: object) -> AgentResponse:
+    def runner(
+        provider: str, model: str, messages: object, **_: object
+    ) -> AgentResponse:
         """@brief 抛出 safety block / Raise a safety block.
 
         @param provider provider ID / Provider ID.
@@ -502,3 +514,93 @@ def test_service_preserves_typed_provider_failure_after_model_exhaustion() -> No
     with pytest.raises(AssistantInferenceUnavailableError) as captured:
         asyncio.run(service.infer(_context([])))
     assert captured.value.last_error is failure
+
+
+def test_contract_failure_short_circuits_models_routes_and_image_fallback() -> None:
+    """@brief contract 失败立即短路模型、路由和图像降级 /
+    A contract failure immediately short-circuits models, routes, and image fallback.
+    """
+
+    failure = ProviderFailure(
+        kind=ProviderFailureKind.CONTRACT,
+        status=400,
+        message="invalid model slug",
+    )
+    calls: list[tuple[str, str]] = []
+
+    def runner(
+        provider: str,
+        model: str,
+        messages: object,
+        **_: object,
+    ) -> AgentResponse:
+        """@brief 记录唯一请求并抛出 contract / Record the sole request and raise a contract failure."""
+
+        del messages
+        calls.append((provider, model))
+        raise failure
+
+    service = _service(
+        routes=(
+            _route(
+                "primary",
+                models=(RouteModel("bad-slug"), RouteModel("model-b")),
+            ),
+            _route("fallback"),
+        ),
+        runner=runner,
+    )
+    context = _context(
+        [
+            _user_message(
+                TextPart("describe"),
+                ImagePart(UrlImageSource("https://example.test/a.png")),
+            )
+        ]
+    )
+
+    with pytest.raises(AssistantInferenceUnavailableError) as captured:
+        asyncio.run(service.infer(context))
+
+    assert captured.value.last_error is failure
+    assert calls == [("primary", "bad-slug")]
+
+
+def test_transient_provider_failure_still_falls_back_to_the_next_model() -> None:
+    """@brief 暂态 provider 失败仍允许切换同 route 下一模型 /
+    A transient provider failure still permits the next model in the same route.
+    """
+
+    calls: list[str] = []
+
+    def runner(
+        provider: str,
+        model: str,
+        messages: object,
+        **_: object,
+    ) -> AgentResponse:
+        """@brief 首模型超时、次模型成功 / Time out the first model and succeed on the second."""
+
+        del provider, messages
+        calls.append(model)
+        if len(calls) == 1:
+            raise ProviderFailure(
+                kind=ProviderFailureKind.TIMEOUT,
+                message="provider timed out",
+            )
+        return AgentResponse("ok", [])
+
+    service = _service(
+        routes=(
+            _route(
+                "primary",
+                models=(RouteModel("model-a"), RouteModel("model-b")),
+            ),
+        ),
+        runner=runner,
+    )
+
+    response = asyncio.run(service.infer(_context([])))
+
+    assert response.text == "ok"
+    assert calls == ["model-a", "model-b"]

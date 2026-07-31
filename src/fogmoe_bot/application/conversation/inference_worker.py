@@ -366,7 +366,10 @@ def _build_failure_effects(
     activity = claim.activity
     target = _FailureDeliveryTarget.from_request(activity.request)
     code = _safe_failure_code(error)
-    text = f"这次处理没有完成（错误码：{code}）。你可以继续发送补充信息，或稍后重试。"
+    text = (
+        f"呜，这次没能顺利做完（错误码：{code}）。"
+        "你可以继续告诉我补充信息，或者晚一点再叫我试试。"
+    )
     history_message = text_message(MessageRole.ASSISTANT, text)
     assistant_content: JsonObject = {
         "schema_version": 2,

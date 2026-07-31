@@ -27,6 +27,7 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnId,
 )
 from fogmoe_bot.domain.conversation.outbox import (
+    SEND_TELEGRAM_ASSISTANT_PROGRESS,
     OutboundClaim,
     OutboundDraft,
     OutboundStatus,
@@ -105,7 +106,147 @@ def test_claim_outbound_uses_skip_locked_fencing_and_delivery_stream_head(
     assert "earlier.delivery_stream_id = candidate.delivery_stream_id" in sql
     assert "earlier.stream_sequence < candidate.stream_sequence" in sql
     assert used_connection is connection
-    assert UUID(str(params[3])) == claims[0].token.value
+    assert params[1] == SEND_TELEGRAM_ASSISTANT_PROGRESS.value
+    assert params[3] == SEND_TELEGRAM_ASSISTANT_PROGRESS.value
+    assert UUID(str(params[5])) == claims[0].token.value
+
+
+def test_progress_outbound_is_claimable_while_its_turn_is_processing(
+    monkeypatch: Any,
+) -> None:
+    """@brief progress outbound 可在推理中领取且不要求 waiting_delivery /
+    A progress outbound is claimable during inference without requiring waiting_delivery.
+
+    @param monkeypatch pytest 替换工具 / pytest replacement utility.
+    @return None / None.
+    """
+
+    connection = object()
+    repository = PostgresOutboxRepository()
+    progress_row = list(_outbound_claim_row(previous_status="pending"))
+    progress_row[5] = SEND_TELEGRAM_ASSISTANT_PROGRESS.value
+
+    async def fake_fetch_all(
+        sql: str,
+        params: tuple[object, ...],
+        *,
+        connection: object,
+    ) -> list[tuple[object, ...]]:
+        """@brief 返回 progress claim 并验证推理期例外 / Return a progress claim and verify the inference-time exception."""
+
+        assert "candidate.kind = %s" in sql
+        assert params[3] == SEND_TELEGRAM_ASSISTANT_PROGRESS.value
+        return [tuple(progress_row)]
+
+    async def unexpected_turn_load(*args: object, **kwargs: object) -> object:
+        """@brief progress claim 不应读取 Turn / A progress claim must not load its Turn."""
+
+        del args, kwargs
+        raise AssertionError("progress claim required waiting_delivery")
+
+    monkeypatch.setattr(db, "transaction", lambda: _TransactionContext(connection))
+    monkeypatch.setattr(db, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(
+        outbox_repository,
+        "_load_turn_for_mutation",
+        unexpected_turn_load,
+    )
+
+    claims = asyncio.run(
+        repository.claim_outbound(
+            now=NOW,
+            limit=1,
+            lease_for=timedelta(seconds=30),
+        )
+    )
+
+    assert len(claims) == 1
+    assert claims[0].message.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS
+    assert claims[0].message.status is OutboundStatus.PROCESSING
+
+
+def test_progress_delivery_and_final_failure_do_not_mutate_the_turn(
+    monkeypatch: Any,
+) -> None:
+    """@brief progress 成功或最终失败都不推进最终 Turn 投递状态 /
+    Progress success or final failure never mutates the final Turn delivery state.
+
+    @param monkeypatch pytest 替换工具 / pytest replacement utility.
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 分别确认两个 progress claims / Acknowledge two separate progress claims."""
+
+        connection = object()
+        repository = PostgresOutboxRepository()
+        execute_calls: list[str] = []
+
+        async def fake_execute(
+            sql: str,
+            params: tuple[object, ...],
+            *,
+            connection: object,
+        ) -> int:
+            """@brief 记录 outbox 自身状态更新 / Record the outbox-only state update."""
+
+            del params
+            assert connection is not None
+            execute_calls.append(sql)
+            return 1
+
+        async def unexpected_turn_load(*args: object, **kwargs: object) -> object:
+            """@brief progress 终态不应读取 Turn / Progress terminalization must not load a Turn."""
+
+            del args, kwargs
+            raise AssertionError("progress terminalization mutated its Turn")
+
+        async def unexpected_fetch(*args: object, **kwargs: object) -> object:
+            """@brief progress 成功不应扫描最终投递计划 / Progress success must not scan the final delivery plan."""
+
+            del args, kwargs
+            raise AssertionError("progress delivery inspected the final plan")
+
+        monkeypatch.setattr(
+            db,
+            "transaction",
+            lambda: _TransactionContext(connection),
+        )
+        monkeypatch.setattr(db, "execute", fake_execute)
+        monkeypatch.setattr(db, "fetch_one", unexpected_fetch)
+        monkeypatch.setattr(
+            outbox_repository,
+            "_load_turn_for_mutation",
+            unexpected_turn_load,
+        )
+
+        def progress_claim() -> OutboundClaim:
+            """@brief 构造 processing progress claim / Build a processing progress claim."""
+
+            row = list(_outbound_row(status="processing"))
+            row[5] = SEND_TELEGRAM_ASSISTANT_PROGRESS.value
+            return OutboundClaim(
+                message=outbox_repository._map_outbound(tuple(row)),
+                token=LeaseToken.new(),
+                lease_expires_at=NOW + timedelta(seconds=30),
+            )
+
+        await repository.mark_outbound_delivered(
+            progress_claim(),
+            delivered_at=NOW + timedelta(seconds=1),
+            external_message_id="101",
+        )
+        await repository.fail_outbound(
+            progress_claim(),
+            failed_at=NOW + timedelta(seconds=1),
+            error="permanent Telegram rejection",
+        )
+
+        assert len(execute_calls) == 2
+        assert "status = 'delivered'" in execute_calls[0]
+        assert "status = 'failed_final'" in execute_calls[1]
+
+    asyncio.run(scenario())
 
 
 def test_claim_standalone_outbound_does_not_load_or_transition_a_turn(
@@ -532,7 +673,8 @@ def test_delivered_outbound_atomically_completes_turn(monkeypatch: Any) -> None:
         """@brief 表示这是计划中最后一条 effect / Report this as the final effect in the plan."""
 
         assert "status <> 'delivered'" in sql
-        assert params
+        assert "kind <> %s" in sql
+        assert params[1] == SEND_TELEGRAM_ASSISTANT_PROGRESS.value
         assert connection is not None
         return (False,)
 

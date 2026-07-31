@@ -20,6 +20,7 @@ from fogmoe_bot.domain.memory.models import MAX_WORKING_MEMORY_MESSAGES
 from ..agent_loop import AgentExecutionConfig, AgentResponse
 from ..errors import (
     AssistantInferenceUnavailableError,
+    ProviderFailure,
     ResumableAgentInterruptedError,
     SafetyBlockError,
 )
@@ -139,7 +140,9 @@ class AssistantInferenceService:
         )
         if response is not None:
             return response
-        if messages_have_images(context_state.messages):
+        if messages_have_images(context_state.messages) and _allows_candidate_fallback(
+            last_error
+        ):
             fallback = (
                 list(context_state.text_fallback_messages)
                 if context_state.text_fallback_messages is not None
@@ -189,9 +192,7 @@ class AssistantInferenceService:
             permit = self._circuit.try_acquire(route.route_id)
             if permit is None:
                 continue
-            selected_messages = (
-                context_state.messages if messages is None else messages
-            )
+            selected_messages = context_state.messages if messages is None else messages
             route_context = ContextState(
                 context_id=context_state.context_id,
                 scope=context_state.scope,
@@ -200,9 +201,7 @@ class AssistantInferenceService:
                 tool_context=context_state.tool_context,
                 text_fallback_messages=context_state.text_fallback_messages,
                 current_user_text=context_state.current_user_text,
-                stable_prefix_message_count=(
-                    context_state.stable_prefix_message_count
-                ),
+                stable_prefix_message_count=(context_state.stable_prefix_message_count),
             )
             outcome_recorded = False
             try:
@@ -215,7 +214,7 @@ class AssistantInferenceService:
                     tool_context=tool_context,
                     stream=stream,
                 )
-            except (ResumableAgentInterruptedError, StaleClaimError):
+            except ResumableAgentInterruptedError, StaleClaimError:
                 raise
             except SafetyBlockError as error:
                 if route.safety_block_is_terminal:
@@ -227,6 +226,8 @@ class AssistantInferenceService:
                 self._circuit.record_failure(permit)
                 outcome_recorded = True
                 last_error = error
+                if not _allows_candidate_fallback(error):
+                    return None, error
                 continue
             else:
                 self._circuit.record_success(permit)
@@ -272,9 +273,7 @@ class AssistantInferenceService:
         """
 
         if not route.models:
-            raise RuntimeError(
-                f"No chat model configured for route: {route.route_id}"
-            )
+            raise RuntimeError(f"No chat model configured for route: {route.route_id}")
         last_error: Exception | None = None
         original_messages = list(context_state.messages)
         models = list(route.models)
@@ -312,14 +311,13 @@ class AssistantInferenceService:
                     tool_context=tool_context,
                     stream=stream,
                 )
-            except (ResumableAgentInterruptedError, StaleClaimError):
+            except ResumableAgentInterruptedError, StaleClaimError:
                 raise
             except Exception as error:
                 last_error = error
-        if (
-            "safety" in str(last_error).lower()
-            and "block" in str(last_error).lower()
-        ):
+                if not _allows_candidate_fallback(error):
+                    raise
+        if "safety" in str(last_error).lower() and "block" in str(last_error).lower():
             raise SafetyBlockError(str(last_error)) from last_error
         if last_error is not None:
             # Do not erase the completion-port failure contract here.  The durable adapter
@@ -348,6 +346,26 @@ class AssistantInferenceService:
             if text_fallback_messages is not None
             else strip_image_content(messages)
         )
+
+
+def _allows_candidate_fallback(error: Exception | None) -> bool:
+    """@brief 判断失败是否允许同 generation 切换模型、路由或图像降级 /
+    Decide whether a failure permits model, route, or image fallback in the same generation.
+
+    @param error 最近一次候选失败 / Most recent candidate failure.
+    @return 仅暂态 provider 或未分类 legacy 异常为 True /
+        True only for transient provider failures or unclassified legacy exceptions.
+    @note typed contract/rejected 与确定性本地校验必须立即短路；重复候选不会修复同一请求，
+        只会制造重复调用。/ Typed contract/rejected failures and deterministic local validation
+        must short-circuit immediately. Trying more candidates cannot repair the same request and
+        only creates duplicate calls.
+    """
+
+    if error is None:
+        return True
+    if isinstance(error, ProviderFailure):
+        return error.retryable
+    return not isinstance(error, (ValueError, TypeError, KeyError, AssertionError))
 
 
 __all__ = ["AgentRunner", "AssistantInferenceService"]

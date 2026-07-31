@@ -285,18 +285,7 @@ class AgentRuntime:
         @return 可回填模型的结果 / Result suitable for model feedback.
         """
 
-        if step < 0 or ordinal < 0:
-            raise ValueError("step and ordinal must be non-negative")
-        revision = (
-            0
-            if context.generation_fence is None
-            else int(context.generation_fence.input_revision)
-        )
-        invocation_id = (
-            f"step:{step}:call:{ordinal}"
-            if revision == 0
-            else f"generation:{revision}:step:{step}:call:{ordinal}"
-        )
+        invocation_id = tool_invocation_id(context, step=step, ordinal=ordinal)
         correlation_id = provider_call_id or invocation_id
         if context.allowed_tools is not None and tool_name not in context.allowed_tools:
             return ToolRuntimeResult(
@@ -380,6 +369,36 @@ class AgentRuntime:
             replayed=persisted.replayed,
             result_residency=validation.result_residency,
         )
+
+
+def tool_invocation_id(
+    context: ToolExecutionContext,
+    *,
+    step: int,
+    ordinal: int,
+) -> str:
+    """@brief 派生 Turn 内稳定工具调用身份 / Derive a stable tool invocation identity inside a Turn.
+
+    @param context durable Turn 与 generation 上下文 / Durable Turn and generation context.
+    @param step checkpoint 模型 step / Checkpointed model step.
+    @param ordinal step 内调用序号 / Call ordinal inside the step.
+    @return 可供 receipt 与易失活动投影共享的稳定 ID /
+        Stable ID shared by receipts and ephemeral activity projection.
+    @raise ValueError step 或 ordinal 为负数时抛出 / Raised when step or ordinal is negative.
+    """
+
+    if step < 0 or ordinal < 0:
+        raise ValueError("step and ordinal must be non-negative")
+    revision = (
+        0
+        if context.generation_fence is None
+        else int(context.generation_fence.input_revision)
+    )
+    return (
+        f"step:{step}:call:{ordinal}"
+        if revision == 0
+        else f"generation:{revision}:step:{step}:call:{ordinal}"
+    )
 
 
 def _validation_failure(
@@ -485,4 +504,5 @@ __all__ = [
     "ToolResultEvent",
     "ToolRuntimeResult",
     "ToolValidationFailure",
+    "tool_invocation_id",
 ]

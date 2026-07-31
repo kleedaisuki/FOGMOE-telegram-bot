@@ -18,11 +18,13 @@ from fogmoe_bot.application.assistant.completion import (
     AgentStepCheckpoint,
     AssistantCompletion,
 )
+from fogmoe_bot.application.assistant.progress import AssistantProgressItem
 from fogmoe_bot.application.assistant.tool_runtime import (
     PersistedToolResult,
     ToolEffectBusyError,
     ToolEffectConflictError,
     ToolEffectRequest,
+    ToolExecutionContext,
 )
 from fogmoe_bot.application.workspace.errors import WorkspaceRuntimeUnavailableError
 from fogmoe_bot.domain.assistant.messages import (
@@ -30,10 +32,18 @@ from fogmoe_bot.domain.assistant.messages import (
     CanonicalMessageError,
 )
 from fogmoe_bot.domain.conversation.errors import StaleClaimError
-from fogmoe_bot.domain.conversation.identity import TurnId
+from fogmoe_bot.domain.conversation.identity import OutboundMessageId, TurnId
 from fogmoe_bot.domain.conversation.inference import InferenceGenerationFence
+from fogmoe_bot.domain.conversation.outbox import (
+    SEND_TELEGRAM_ASSISTANT_PROGRESS,
+    OutboundDraft,
+    OutboundEnqueueResult,
+)
 from fogmoe_bot.domain.conversation.payloads import JsonObject, JsonValue
 from fogmoe_bot.infrastructure.database import db
+from fogmoe_bot.infrastructure.database.conversation_workflow.outbox import (
+    PostgresOutboxRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +103,26 @@ class AssistantToolOperations(Protocol):
         ...
 
 
+class AssistantProgressOutboxWriter(Protocol):
+    """@brief 同事务写入 Turn-owned progress outbound 的窄端口 /
+    Narrow port writing a Turn-owned progress outbound in the same transaction.
+    """
+
+    async def enqueue_outbound_in_transaction(
+        self,
+        connection: AsyncConnection,
+        draft: OutboundDraft,
+    ) -> OutboundEnqueueResult:
+        """@brief 幂等写入有序 progress outbound / Idempotently enqueue an ordered progress outbound.
+
+        @param connection 当前 generation-fenced 事务 / Current generation-fenced transaction.
+        @param draft 稳定过程消息 / Stable progress message.
+        @return 规范 outbox 行 / Canonical outbox row.
+        """
+
+        ...
+
+
 type UtcNow = Callable[[], datetime]
 """@brief 可注入 UTC 时钟 / Injectable UTC clock."""
 
@@ -127,6 +157,7 @@ class PostgresAssistantToolStore:
         self,
         *,
         operations: AssistantToolOperations,
+        progress_outbox: AssistantProgressOutboxWriter | None = None,
         lease_for: timedelta = timedelta(minutes=2),
         now: UtcNow = _utc_now,
         after_operation: AfterOperationHook = _noop_hook,
@@ -134,6 +165,8 @@ class PostgresAssistantToolStore:
         """@brief 创建 store / Create the store.
 
         @param operations 类型化 operation adapter / Typed operation adapter.
+        @param progress_outbox 稳定 Agent 过程项的 transactional outbox /
+            Transactional outbox for stable Agent progress items.
         @param lease_for kill-9 恢复租约 / Kill-9 recovery lease.
         @param now 可测试时钟 / Testable clock.
         @param after_operation mutation 与 receipt 之间的故障注入点 / Fault point between mutation and receipt.
@@ -142,6 +175,8 @@ class PostgresAssistantToolStore:
         if lease_for <= timedelta(0):
             raise ValueError("lease_for must be positive")
         self._operations = operations
+        self._progress_outbox = progress_outbox or PostgresOutboxRepository()
+        """@brief generation-fenced 稳定过程 outbox / Generation-fenced stable progress outbox."""
         self._lease_for = lease_for
         self._now = now
         self._after_operation = after_operation
@@ -169,11 +204,7 @@ class PostgresAssistantToolStore:
             "WHERE turn_id = CAST(%s AS UUID) AND generation = %s AND step_no = %s",
             (str(turn_id), generation, step_no),
         )
-        return (
-            None
-            if row is None
-            else _checkpoint(turn_id, generation, step_no, row)
-        )
+        return None if row is None else _checkpoint(turn_id, generation, step_no, row)
 
     async def save_step(self, checkpoint: AgentStepCheckpoint) -> AgentStepCheckpoint:
         """@brief 幂等保存 Agent step / Idempotently persist an Agent step.
@@ -248,6 +279,65 @@ class PostgresAssistantToolStore:
         """
 
         await _assert_current_generation(fence)
+
+    async def publish_progress(
+        self,
+        context: ToolExecutionContext,
+        item: AssistantProgressItem,
+    ) -> None:
+        """@brief 在 generation fence 下幂等追加稳定过程消息 /
+        Idempotently append a stable progress message behind the generation fence.
+
+        @param context 当前 Turn 与投递流上下文 / Current Turn and delivery-stream context.
+        @param item checkpoint 或 receipt 已稳定的过程项 / Progress item stabilized by a checkpoint or receipt.
+        @return None / None.
+        @raise ValueError 缺少 durable generation fence 时抛出 /
+            Raised when no durable generation fence is present.
+        @raise StaleClaimError generation 已被 steer、恢复或终结时抛出 /
+            Raised when the generation was steered, recovered, or finalized.
+        @note progress outbound 可在 inference 期间投递，不参与最终 Turn delivery plan 的
+            成败；最终回答只会排在它后面，不会覆盖或删除它。/
+            Progress outbounds may be delivered during inference and do not participate in the
+            final Turn delivery plan. The final answer is ordered after them and never overwrites
+            or deletes them.
+        """
+
+        fence = context.generation_fence
+        if fence is None:
+            raise ValueError("Durable Assistant progress requires a generation fence")
+        revision = int(fence.input_revision)
+        semantic_key = f"assistant.progress.generation.{revision}.{item.item_id}"
+        payload: JsonObject = {
+            "chat_id": context.chat_id,
+            "text": item.text,
+            "disable_notification": True,
+            "protect_content": False,
+            "disable_web_page_preview": True,
+        }
+        if context.message_thread_id is not None:
+            payload["message_thread_id"] = context.message_thread_id
+        if revision == 0 and item.item_id == "step:0:commentary":
+            if context.message_id is not None:
+                payload["reply_to_message_id"] = context.message_id
+        draft = OutboundDraft(
+            message_id=OutboundMessageId.for_turn(
+                context.turn_id,
+                semantic_key,
+            ),
+            conversation_id=context.conversation_id,
+            turn_id=context.turn_id,
+            delivery_stream_id=context.delivery_stream_id,
+            kind=SEND_TELEGRAM_ASSISTANT_PROGRESS,
+            payload=payload,
+            idempotency_key=f"turn:{context.turn_id}:{semantic_key}",
+            created_at=item.created_at,
+        )
+        async with db.transaction() as connection:
+            await _assert_current_generation(fence, connection=connection)
+            await self._progress_outbox.enqueue_outbound_in_transaction(
+                connection,
+                draft,
+            )
 
     async def execute(self, request: ToolEffectRequest) -> PersistedToolResult:
         """@brief 领取、执行并终结一个工具 receipt / Claim, execute, and finalize one tool receipt.
@@ -584,8 +674,7 @@ async def _assert_current_generation(
         "SELECT 1 FROM conversation.inference_activities "
         "WHERE activity_id = CAST(%s AS UUID) "
         "AND turn_id = CAST(%s AS UUID) AND status = 'processing' "
-        "AND claim_token = CAST(%s AS UUID) AND input_revision = %s"
-        + lock_clause,
+        "AND claim_token = CAST(%s AS UUID) AND input_revision = %s" + lock_clause,
         (
             str(fence.activity_id),
             str(fence.turn_id),
@@ -676,9 +765,7 @@ def _decode_completion(raw: object) -> AssistantCompletion:
     if not isinstance(raw_message, Mapping):
         raise RuntimeError("Tool checkpoint response message must be an object")
     try:
-        message = CanonicalMessage.from_json(
-            cast(Mapping[str, object], raw_message)
-        )
+        message = CanonicalMessage.from_json(cast(Mapping[str, object], raw_message))
     except CanonicalMessageError as error:
         raise RuntimeError("Tool checkpoint response message is invalid") from error
     try:

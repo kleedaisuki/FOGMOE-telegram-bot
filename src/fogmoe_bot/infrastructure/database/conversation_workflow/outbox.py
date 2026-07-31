@@ -20,6 +20,7 @@ from fogmoe_bot.domain.conversation.identity import (
     TurnId,
 )
 from fogmoe_bot.domain.conversation.outbox import (
+    SEND_TELEGRAM_ASSISTANT_PROGRESS,
     OutboundClaim,
     OutboundDraft,
     OutboundEnqueueResult,
@@ -366,13 +367,14 @@ class PostgresOutboxRepository:
                 "FROM conversation.conversation_turns AS turn "
                 "WHERE outbound.turn_id = turn.turn_id "
                 "AND turn.state = 'failed_final' "
+                "AND outbound.kind <> %s "
                 "AND outbound.status IN ('pending', 'retry_wait')"
                 "), candidates AS ("
                 "SELECT candidate.message_id, candidate.status AS previous_status "
                 "FROM conversation.outbound_messages AS candidate "
                 "WHERE candidate.status IN ('pending', 'retry_wait') "
                 "AND candidate.next_attempt_at <= %s "
-                "AND (candidate.turn_id IS NULL OR EXISTS ("
+                "AND (candidate.turn_id IS NULL OR candidate.kind = %s OR EXISTS ("
                 "SELECT 1 FROM conversation.conversation_turns AS turn "
                 "WHERE turn.turn_id = candidate.turn_id "
                 "AND turn.state = 'waiting_delivery'"
@@ -401,7 +403,9 @@ class PostgresOutboxRepository:
                 "outbound.last_error, outbound.traceparent, candidates.previous_status",
                 (
                     timestamp,
+                    SEND_TELEGRAM_ASSISTANT_PROGRESS.value,
                     timestamp,
+                    SEND_TELEGRAM_ASSISTANT_PROGRESS.value,
                     limit,
                     str(token),
                     lease_expires_at,
@@ -414,7 +418,10 @@ class PostgresOutboxRepository:
                 values = _row_values(row, 19)
                 message = _map_outbound(values[:18])
                 previous_status = OutboundStatus(_text(values[18]))
-                if message.turn_id is not None:
+                if (
+                    message.turn_id is not None
+                    and message.kind != SEND_TELEGRAM_ASSISTANT_PROGRESS
+                ):
                     turn = await _load_turn_for_mutation(
                         message.turn_id,
                         connection=connection,
@@ -614,14 +621,15 @@ class PostgresOutboxRepository:
         """
 
         turn_id = claim.message.turn_id
-        if turn_id is None:
+        if turn_id is None or claim.message.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS:
             return None
         remaining_row = await db.fetch_one(
             "SELECT EXISTS ("
             "SELECT 1 FROM conversation.outbound_messages "
-            "WHERE turn_id = CAST(%s AS UUID) AND status <> 'delivered'"
+            "WHERE turn_id = CAST(%s AS UUID) AND kind <> %s "
+            "AND status <> 'delivered'"
             ")",
-            (str(turn_id),),
+            (str(turn_id), SEND_TELEGRAM_ASSISTANT_PROGRESS.value),
             connection=connection,
         )
         if remaining_row is None:
@@ -668,7 +676,7 @@ class PostgresOutboxRepository:
         """
 
         turn_id = claim.message.turn_id
-        if turn_id is None:
+        if turn_id is None or claim.message.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS:
             return None
         turn = await _load_turn_for_mutation(turn_id, connection=connection)
         if turn.state is TurnState.FAILED_FINAL:
@@ -709,7 +717,7 @@ class PostgresOutboxRepository:
         """
 
         turn_id = claim.message.turn_id
-        if turn_id is None:
+        if turn_id is None or claim.message.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS:
             return
         await db.execute(
             "UPDATE conversation.outbound_messages "
@@ -719,11 +727,13 @@ class PostgresOutboxRepository:
             "last_error = 'delivery plan cancelled after permanent sibling failure' "
             "WHERE turn_id = CAST(%s AS UUID) "
             "AND message_id <> CAST(%s AS UUID) "
+            "AND kind <> %s "
             "AND status IN ('pending', 'retry_wait')",
             (
                 occurred_at,
                 str(turn_id),
                 str(claim.message.message_id),
+                SEND_TELEGRAM_ASSISTANT_PROGRESS.value,
             ),
             connection=connection,
         )

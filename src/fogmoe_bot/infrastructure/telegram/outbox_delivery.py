@@ -46,6 +46,7 @@ from fogmoe_bot.application.conversation.outbox_worker import (
 )
 from fogmoe_bot.domain.conversation.outbox import (
     EDIT_TELEGRAM_MESSAGE,
+    SEND_TELEGRAM_ASSISTANT_PROGRESS,
     SEND_TELEGRAM_ARTIFACT,
     SEND_TELEGRAM_MESSAGE,
     SEND_TELEGRAM_PHOTO,
@@ -253,7 +254,10 @@ class TelegramOutboxDeliveryAdapter:
         """
 
         try:
-            if message.kind == SEND_TELEGRAM_MESSAGE:
+            if message.kind in {
+                SEND_TELEGRAM_MESSAGE,
+                SEND_TELEGRAM_ASSISTANT_PROGRESS,
+            }:
                 return await self._deliver_message(message.payload)
             if message.kind == EDIT_TELEGRAM_MESSAGE:
                 return await self._deliver_edit(message.payload)

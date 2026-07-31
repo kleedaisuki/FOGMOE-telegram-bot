@@ -46,6 +46,11 @@ class OutboundKind:
 SEND_TELEGRAM_MESSAGE = OutboundKind("telegram.send_message")
 """@brief Telegram 发送消息动作 / Telegram send-message action."""
 
+SEND_TELEGRAM_ASSISTANT_PROGRESS = OutboundKind("telegram.send_assistant_progress")
+"""@brief 可在 Turn 推理期间追加且不参与最终投递成败的 Assistant 过程消息 /
+Assistant progress message appendable during inference and independent of final-delivery success.
+"""
+
 EDIT_TELEGRAM_MESSAGE = OutboundKind("telegram.edit_message")
 """@brief Telegram 编辑消息动作 / Telegram edit-message action."""
 

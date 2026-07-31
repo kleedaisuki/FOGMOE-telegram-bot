@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 import pytest
 
 from fogmoe_bot.application.assistant.streaming import (
+    AssistantActivityKind,
+    AssistantActivityStatus,
     AssistantStreamAddress,
     AssistantStreamFrame,
     AssistantStreamKind,
@@ -85,9 +87,9 @@ def test_stream_frames_are_cumulative_monotonic_and_keep_one_draft_id() -> None:
     assert first.delta_text == "Hel"
     assert second.delta_text == "lo"
     assert completed.cumulative_text == "Hello"
-    assert {
-        frame.draft_id for frame in (started, first, second, completed)
-    } == {stable_telegram_draft_id(turn_id)}
+    assert {frame.draft_id for frame in (started, first, second, completed)} == {
+        stable_telegram_draft_id(turn_id)
+    }
 
 
 def test_steer_revision_resets_preview_without_changing_draft_identity() -> None:
@@ -122,6 +124,60 @@ def test_steer_revision_resets_preview_without_changing_draft_identity() -> None
     assert fresh.draft_id == revised.draft_id
     assert fresh.message_thread_id == 9
     assert fresh.is_group is True
+
+
+def test_activity_frames_keep_model_commentary_and_tool_identity_without_payloads() -> (
+    None
+):
+    """@brief 活动帧只保存模型公开 commentary 与工具名 /
+    Activity frames retain only model-authored public commentary and the tool name.
+    """
+
+    state = AssistantStreamState.begin(
+        turn_id=TurnId.new(),
+        address=AssistantStreamAddress(42, False, None),
+        generation=1,
+        revision=0,
+        emitted_at=NOW,
+    )
+    commentary = state.commentary(
+        "step:0:commentary",
+        "我先确认一下现在的时间，再回答你。",
+        emitted_at=NOW,
+    )
+    started = state.start_tool(
+        "step:0:call:0",
+        "google_search",
+        emitted_at=NOW,
+    )
+    finished = state.finish_tool(
+        "step:0:call:0",
+        "google_search",
+        succeeded=True,
+        emitted_at=NOW,
+    )
+    completed = state.complete(emitted_at=NOW)
+
+    assert all(
+        frame.kind is AssistantStreamKind.ACTIVITY
+        for frame in (commentary, started, finished)
+    )
+    note = commentary.activities[-1]
+    assert note.kind is AssistantActivityKind.COMMENTARY
+    assert note.label == "我先确认一下现在的时间，再回答你。"
+    assert note.status is AssistantActivityStatus.COMPLETED
+    tool = next(
+        activity
+        for activity in completed.activities
+        if activity.kind is AssistantActivityKind.TOOL
+    )
+    assert tool.label == "google_search"
+    assert tool.status is AssistantActivityStatus.COMPLETED
+    assert "arguments" not in repr(completed.activities)
+    assert {activity.kind for activity in completed.activities} == {
+        AssistantActivityKind.COMMENTARY,
+        AssistantActivityKind.TOOL,
+    }
 
 
 def test_stream_failure_exposes_only_a_stable_safe_code() -> None:
