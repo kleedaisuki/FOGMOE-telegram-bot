@@ -151,7 +151,7 @@ def test_music_search_preserves_normalization_fallback_and_persistence_order() -
             ("alpha beta gamma delta", MusicPlatform.NETEASE, 20),
             ("alpha beta", MusicPlatform.NETEASE, 20),
         ]
-        assert result.session.query == "alpha beta gamma delta"
+        assert result.session.query.text == "alpha beta gamma delta"
         assert result.session.expires_at == now.replace(minute=30)
         assert sessions.values[result.session.search_id] == result.session
 

@@ -148,7 +148,7 @@ async def _send_music_page(
     session = page.session
     prefix = f"{html.escape(mention)} " if mention else ""
     lines = [
-        f"{prefix}搜索结果 - “{html.escape(session.query)}” ({session.platform.display_name})：",
+        f"{prefix}搜索结果 - “{html.escape(session.query.text)}” ({session.platform.display_name})：",
         "",
     ]
     start = (page.page - 1) * page.page_size + 1

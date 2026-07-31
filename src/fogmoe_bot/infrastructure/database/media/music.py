@@ -48,7 +48,7 @@ class PostgresMusicSessionRepository:
                 (
                     str(session.search_id),
                     int(session.requester_id),
-                    session.query,
+                    session.query.text,
                     session.platform.value,
                     payload,
                     utc(session.expires_at),

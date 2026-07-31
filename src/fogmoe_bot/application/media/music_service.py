@@ -160,7 +160,7 @@ class MusicService:
         current = await self._sessions.load(search_id, now=self._now())
         if current is None:
             return MusicSessionExpired()
-        tracks = await self._search_tracks(current.query, platform)
+        tracks = await self._search_tracks(current.query.text, platform)
         if not tracks:
             return MusicUnavailable()
         updated = current.replace_platform_results(

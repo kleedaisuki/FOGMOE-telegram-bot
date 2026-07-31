@@ -2,6 +2,7 @@
 
 import ast
 from collections.abc import Sequence
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -143,6 +144,23 @@ def test_history_preserves_restored_snapshot_and_trims_only_when_recording() -> 
     assert history.record(_picture("four")).source_ids == ("three", "four")
 
 
+def test_immutable_picture_collections_use_public_readonly_fields() -> None:
+    """@brief 不可变图片集合没有私有字段加转发 getter / Immutable picture collections avoid private fields plus forwarding getters."""
+
+    assert tuple(field.name for field in fields(RecentPictureHistory)) == (
+        "source_ids",
+        "record_limit",
+    )
+    assert tuple(field.name for field in fields(PictureGalleryBatch)) == (
+        "rating",
+        "pictures",
+    )
+    with pytest.raises(TypeError, match="restore"):
+        RecentPictureHistory()
+    with pytest.raises(TypeError, match="restore"):
+        PictureGalleryBatch()
+
+
 def test_gallery_restore_rejects_mixed_ratings() -> None:
     """@brief 缓存或上游不能恢复混合分级批次 / Cache or upstream cannot restore a mixed-rating batch."""
 
@@ -162,7 +180,7 @@ def test_public_picture_decisions_reject_forged_invalid_fields() -> None:
     with pytest.raises(TypeError, match="grant requires a PictureRating"):
         PicturePreviewGranted("safe")  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="permission must be an integer"):
-        PicturePermissionRequired(True)  # type: ignore[arg-type]
+        PicturePermissionRequired(True)
     with pytest.raises(ValueError, match="must not be negative"):
         PicturePermissionRequired(-1)
     with pytest.raises(TypeError, match="requires a PictureCandidate"):

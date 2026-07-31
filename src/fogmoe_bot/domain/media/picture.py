@@ -206,10 +206,19 @@ class RecentPictureHistory:
     configuration narrows.
     """
 
-    _source_ids: tuple[str, ...]
+    source_ids: tuple[str, ...]
     """@brief 按时间排列的图库标识 / Gallery identifiers ordered by observation time."""
-    _record_limit: int
+    record_limit: int
     """@brief 下次记录时应用的裁剪上限 / Trimming bound applied on the next record."""
+
+    def __init__(self) -> None:
+        """@brief 禁止绕过恢复入口创建缺字段历史 / Prevent history values that bypass restoration.
+
+        @return None / None.
+        @raise TypeError 始终抛出 / Always raised.
+        """
+
+        raise TypeError("Use RecentPictureHistory.restore()")
 
     @classmethod
     def restore(
@@ -241,18 +250,9 @@ class RecentPictureHistory:
         if any(not value.strip() for value in values):
             raise ValueError("recent-picture identifiers must not be blank")
         instance = object.__new__(cls)
-        object.__setattr__(instance, "_source_ids", values)
-        object.__setattr__(instance, "_record_limit", record_limit)
+        object.__setattr__(instance, "source_ids", values)
+        object.__setattr__(instance, "record_limit", record_limit)
         return instance
-
-    @property
-    def source_ids(self) -> tuple[str, ...]:
-        """@brief 返回不可变快照 / Return the immutable snapshot.
-
-        @return 按观测时间排列的标识 / Identifiers ordered by observation time.
-        """
-
-        return self._source_ids
 
     def contains(self, source_id: str) -> bool:
         """@brief 判断图片是否在近期窗口 / Test whether a picture is in the recent window.
@@ -261,7 +261,7 @@ class RecentPictureHistory:
         @return 历史中存在则为 True / True when present in history.
         """
 
-        return source_id in self._source_ids
+        return source_id in self.source_ids
 
     def record(self, candidate: PictureCandidate) -> Self:
         """@brief 追加已选图片并裁剪最旧项 / Append a selected picture and trim oldest entries.
@@ -273,8 +273,8 @@ class RecentPictureHistory:
         if not isinstance(candidate, PictureCandidate):
             raise TypeError("recent-picture history records PictureCandidate values")
         return self.restore(
-            (*self._source_ids, candidate.source_id)[-self._record_limit :],
-            record_limit=self._record_limit,
+            (*self.source_ids, candidate.source_id)[-self.record_limit :],
+            record_limit=self.record_limit,
         )
 
 
@@ -286,10 +286,19 @@ type PictureChoice = Callable[[Sequence[PictureCandidate]], PictureCandidate]
 class PictureGalleryBatch:
     """@brief 同一内容分级的非空图库批次 / Non-empty gallery batch for one content rating."""
 
-    _rating: PictureRating
+    rating: PictureRating
     """@brief 批次内容分级 / Content rating of the batch."""
-    _pictures: tuple[PictureCandidate, ...]
+    pictures: tuple[PictureCandidate, ...]
     """@brief 保留上游顺序的候选 / Candidates preserving upstream order."""
+
+    def __init__(self) -> None:
+        """@brief 禁止绕过恢复入口创建缺字段批次 / Prevent gallery batches that bypass restoration.
+
+        @return None / None.
+        @raise TypeError 始终抛出 / Always raised.
+        """
+
+        raise TypeError("Use PictureGalleryBatch.restore()")
 
     @classmethod
     def restore(
@@ -320,18 +329,9 @@ class PictureGalleryBatch:
         if any(picture.rating is not rating for picture in pictures):
             raise ValueError("picture gallery batch candidates must match its rating")
         instance = object.__new__(cls)
-        object.__setattr__(instance, "_rating", rating)
-        object.__setattr__(instance, "_pictures", pictures)
+        object.__setattr__(instance, "rating", rating)
+        object.__setattr__(instance, "pictures", pictures)
         return instance
-
-    @property
-    def pictures(self) -> tuple[PictureCandidate, ...]:
-        """@brief 返回已验证候选 / Return validated candidates.
-
-        @return 保留上游顺序的元组 / Tuple preserving upstream order.
-        """
-
-        return self._pictures
 
     def select(
         self,
@@ -355,11 +355,11 @@ class PictureGalleryBatch:
             raise TypeError("picture selection requires a callable choice strategy")
         unseen = tuple(
             picture
-            for picture in self._pictures
+            for picture in self.pictures
             if not recent.contains(picture.source_id)
         )
         exhausted = not unseen
-        pool = self._pictures if exhausted else unseen
+        pool = self.pictures if exhausted else unseen
         selected = choose(pool)
         if not isinstance(selected, PictureCandidate) or selected not in pool:
             raise ValueError(

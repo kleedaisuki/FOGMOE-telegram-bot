@@ -1,7 +1,7 @@
 """@brief 音乐查询领域生命周期与分层边界测试 / Music-search domain lifecycle and layering tests."""
 
 import ast
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,6 +13,7 @@ from fogmoe_bot.domain.media.music import (
     MusicPlatform,
     MusicSearchId,
     MusicSearchPolicy,
+    MusicSearchQuery,
     MusicSearchSession,
     MusicTrack,
 )
@@ -93,7 +94,7 @@ def test_query_preserves_truncation_before_a_word_separator() -> None:
         tracks=(_track(1),),
         expires_at=now + timedelta(minutes=30),
     )
-    assert restored.query == "ab "
+    assert restored.query.text == "ab "
 
 
 def test_session_owns_platform_transition_and_ttl_renewal() -> None:
@@ -121,6 +122,26 @@ def test_session_owns_platform_transition_and_ttl_renewal() -> None:
     assert switched.expires_at == switched_at + timedelta(minutes=30)
     assert original.platform is MusicPlatform.NETEASE
     assert original.expires_at == opened_at + timedelta(minutes=30)
+
+
+def test_immutable_music_values_use_public_readonly_fields() -> None:
+    """@brief 不可变音乐值直接暴露强类型只读字段 / Immutable music values expose typed readonly fields directly."""
+
+    assert tuple(field.name for field in fields(MusicSearchQuery)) == ("text",)
+    assert tuple(field.name for field in fields(MusicSearchSession)) == (
+        "search_id",
+        "requester_id",
+        "query",
+        "platform",
+        "tracks",
+        "expires_at",
+    )
+    with pytest.raises(TypeError, match="from_input"):
+        MusicSearchQuery()
+    with pytest.raises(TypeError, match="start"):
+        MusicSearchSession()
+    with pytest.raises(TypeError, match="page"):
+        MusicPage()
 
 
 def test_session_clamps_and_slices_pages_as_one_domain_operation() -> None:

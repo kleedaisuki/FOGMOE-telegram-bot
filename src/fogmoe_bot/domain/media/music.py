@@ -146,8 +146,17 @@ class MusicSearchQuery:
     half of the words only when a multi-word primary query has no results.
     """
 
-    _text: str
+    text: str
     """@brief 会话持久化的主查询 / Primary query persisted with the session."""
+
+    def __init__(self) -> None:
+        """@brief 禁止绕过查询工厂创建缺字段实例 / Prevent query instances that bypass the factories.
+
+        @return None / None.
+        @raise TypeError 始终抛出 / Always raised.
+        """
+
+        raise TypeError("Use MusicSearchQuery.from_input() or restore()")
 
     @classmethod
     def from_input(cls, value: str, *, character_limit: int) -> Self:
@@ -169,7 +178,7 @@ class MusicSearchQuery:
             raise ValueError("music query character limit must be positive")
         normalized = " ".join(value.split())[:character_limit]
         instance = object.__new__(cls)
-        object.__setattr__(instance, "_text", normalized)
+        object.__setattr__(instance, "text", normalized)
         return instance
 
     @classmethod
@@ -190,17 +199,8 @@ class MusicSearchQuery:
         if not value or (value != normalized and not truncated_after_separator):
             raise ValueError("persisted music query must be non-blank and normalized")
         instance = object.__new__(cls)
-        object.__setattr__(instance, "_text", value)
+        object.__setattr__(instance, "text", value)
         return instance
-
-    @property
-    def text(self) -> str:
-        """@brief 返回规范主查询 / Return the canonical primary query.
-
-        @return 用于上游与持久化的文本 / Text used for upstream calls and persistence.
-        """
-
-        return self._text
 
     @property
     def requests_help(self) -> bool:
@@ -210,7 +210,7 @@ class MusicSearchQuery:
             True for an empty query or case-insensitive ``help``.
         """
 
-        return not self._text or self._text.casefold() == "help"
+        return not self.text or self.text.casefold() == "help"
 
     @property
     def search_terms(self) -> tuple[str, ...]:
@@ -220,11 +220,11 @@ class MusicSearchQuery:
         @note 应用层应在首个非空结果处停止 / The application layer must stop at the first non-empty result.
         """
 
-        words = self._text.split()
+        words = self.text.split()
         if len(words) <= 1:
-            return (self._text,)
+            return (self.text,)
         fallback = " ".join(words[: max(1, len(words) // 2)])
-        return self._text, fallback
+        return self.text, fallback
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,18 +298,27 @@ class MusicSearchSession:
     setters.
     """
 
-    _search_id: MusicSearchId
+    search_id: MusicSearchId
     """@brief 聚合不透明身份 / Opaque aggregate identity."""
-    _requester_id: UserId
+    requester_id: UserId
     """@brief 原始请求用户 / Original requesting user."""
-    _query: MusicSearchQuery
+    query: MusicSearchQuery
     """@brief 会话的规范主查询 / Canonical primary query of the session."""
-    _platform: MusicPlatform
+    platform: MusicPlatform
     """@brief 当前结果平台 / Platform of the current results."""
-    _tracks: tuple[MusicTrack, ...]
+    tracks: tuple[MusicTrack, ...]
     """@brief 当前不可变搜索结果 / Current immutable search results."""
-    _expires_at: datetime
+    expires_at: datetime
     """@brief 当前会话版本的过期时刻 / Expiry instant of the current session version."""
+
+    def __init__(self) -> None:
+        """@brief 禁止绕过会话工厂创建缺字段聚合 / Prevent session aggregates that bypass the factories.
+
+        @return None / None.
+        @raise TypeError 始终抛出 / Always raised.
+        """
+
+        raise TypeError("Use MusicSearchSession.start() or restore()")
 
     @classmethod
     def start(
@@ -416,67 +425,13 @@ class MusicSearchSession:
         if any(track.platform is not platform for track in tracks):
             raise ValueError("music session tracks must match the session platform")
         instance = object.__new__(cls)
-        object.__setattr__(instance, "_search_id", search_id)
-        object.__setattr__(instance, "_requester_id", requester_id)
-        object.__setattr__(instance, "_query", query)
-        object.__setattr__(instance, "_platform", platform)
-        object.__setattr__(instance, "_tracks", tracks)
-        object.__setattr__(instance, "_expires_at", normalized_expiry)
+        object.__setattr__(instance, "search_id", search_id)
+        object.__setattr__(instance, "requester_id", requester_id)
+        object.__setattr__(instance, "query", query)
+        object.__setattr__(instance, "platform", platform)
+        object.__setattr__(instance, "tracks", tracks)
+        object.__setattr__(instance, "expires_at", normalized_expiry)
         return instance
-
-    @property
-    def search_id(self) -> MusicSearchId:
-        """@brief 返回会话标识 / Return the session identifier.
-
-        @return 不透明搜索标识 / Opaque search identifier.
-        """
-
-        return self._search_id
-
-    @property
-    def requester_id(self) -> UserId:
-        """@brief 返回原始请求用户 / Return the original requesting user.
-
-        @return Telegram 用户标识 / Telegram user identifier.
-        """
-
-        return self._requester_id
-
-    @property
-    def query(self) -> str:
-        """@brief 返回会话主查询 / Return the session primary query.
-
-        @return 规范查询文本 / Canonical query text.
-        """
-
-        return self._query.text
-
-    @property
-    def platform(self) -> MusicPlatform:
-        """@brief 返回当前平台 / Return the current platform.
-
-        @return 当前音乐平台 / Current music platform.
-        """
-
-        return self._platform
-
-    @property
-    def tracks(self) -> tuple[MusicTrack, ...]:
-        """@brief 返回当前不可变结果 / Return current immutable results.
-
-        @return 歌曲元组 / Track tuple.
-        """
-
-        return self._tracks
-
-    @property
-    def expires_at(self) -> datetime:
-        """@brief 返回会话过期时刻 / Return the session expiry instant.
-
-        @return 带时区的过期时刻 / Timezone-aware expiry instant.
-        """
-
-        return self._expires_at
 
     def replace_platform_results(
         self,
@@ -500,9 +455,9 @@ class MusicSearchSession:
         if not tracks:
             raise ValueError("music platform transition requires non-empty tracks")
         return self._create(
-            search_id=self._search_id,
-            requester_id=self._requester_id,
-            query=self._query,
+            search_id=self.search_id,
+            requester_id=self.requester_id,
+            query=self.query,
             platform=platform,
             tracks=tracks,
             expires_at=policy.expires_after(now),
@@ -522,7 +477,7 @@ class MusicSearchSession:
             raise TypeError("music pagination requires a MusicSearchPolicy")
         total_pages = max(
             1,
-            (len(self._tracks) + policy.page_size - 1) // policy.page_size,
+            (len(self.tracks) + policy.page_size - 1) // policy.page_size,
         )
         page = min(max(requested_page, 1), total_pages)
         start = (page - 1) * policy.page_size
@@ -531,7 +486,7 @@ class MusicSearchSession:
             page=page,
             total_pages=total_pages,
             page_size=policy.page_size,
-            tracks=self._tracks[start : start + policy.page_size],
+            tracks=self.tracks[start : start + policy.page_size],
         )
 
 
@@ -549,6 +504,15 @@ class MusicPage:
     """@brief 生成投影时的每页容量 / Page capacity used to produce the projection."""
     tracks: tuple[MusicTrack, ...]
     """@brief 当前页不可变歌曲结果 / Immutable track results on the current page."""
+
+    def __init__(self) -> None:
+        """@brief 禁止绕过会话分页行为创建投影 / Prevent page projections that bypass session behavior.
+
+        @return None / None.
+        @raise TypeError 始终抛出 / Always raised.
+        """
+
+        raise TypeError("Use MusicSearchSession.page()")
 
     @classmethod
     def _create(
