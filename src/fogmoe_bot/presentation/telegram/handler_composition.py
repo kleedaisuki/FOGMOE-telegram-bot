@@ -69,14 +69,17 @@ from fogmoe_bot.infrastructure.database.crypto_operations.chart import (
 from fogmoe_bot.infrastructure.database.economy.accounts import (
     PostgresAccountLookup,
 )
+from fogmoe_bot.infrastructure.database.economy.check_in import (
+    PostgresCheckInOperations,
+)
 from fogmoe_bot.infrastructure.database.economy.community import (
     PostgresCommunityOperations,
 )
+from fogmoe_bot.infrastructure.database.economy.lottery import (
+    PostgresLotteryOperations,
+)
 from fogmoe_bot.infrastructure.database.economy.referral import (
     PostgresReferralOperations,
-)
-from fogmoe_bot.infrastructure.database.economy.rewards import (
-    PostgresRewardOperations,
 )
 from fogmoe_bot.infrastructure.database.economy.web_password import (
     PostgresWebPasswordOperations,
@@ -185,7 +188,8 @@ def create_economy_service(identity: IdentitySettings) -> EconomyService:
 
     return EconomyService(
         accounts=PostgresAccountLookup(),
-        rewards=PostgresRewardOperations(),
+        check_ins=PostgresCheckInOperations(),
+        lotteries=PostgresLotteryOperations(),
         community=PostgresCommunityOperations(),
         referrals=PostgresReferralOperations(),
         web_passwords=PostgresWebPasswordOperations(),

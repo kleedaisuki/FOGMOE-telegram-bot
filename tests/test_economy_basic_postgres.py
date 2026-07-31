@@ -10,14 +10,16 @@ from uuid import uuid4
 import pytest
 from postgres_test_support import configure_bot_database
 
+from fogmoe_bot.application.economy.check_in import CheckInCommand
 from fogmoe_bot.application.economy.common import EconomyCode
 from fogmoe_bot.application.economy.community import (
     GiftCommand,
     LeaderboardCommand,
 )
-from fogmoe_bot.application.economy.rewards import LotteryCommand
+from fogmoe_bot.application.economy.lottery import LotteryCommand
 from fogmoe_bot.domain.banking.ledger import LedgerAccount, LedgerReason
 from fogmoe_bot.domain.banking.money import SystemAccountKind, TokenAmount, TokenBucket
+from fogmoe_bot.domain.economy.identity import EconomyAccountId
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.banking import (
     load_bank_overview,
@@ -26,8 +28,11 @@ from fogmoe_bot.infrastructure.database.banking import (
 from fogmoe_bot.infrastructure.database.economy.community import (
     PostgresCommunityOperations,
 )
-from fogmoe_bot.infrastructure.database.economy.rewards import (
-    PostgresRewardOperations,
+from fogmoe_bot.infrastructure.database.economy.check_in import (
+    PostgresCheckInOperations,
+)
+from fogmoe_bot.infrastructure.database.economy.lottery import (
+    PostgresLotteryOperations,
 )
 
 
@@ -76,7 +81,7 @@ def test_real_postgres_lottery_and_gift_replay_without_double_credit(
         lottery_key = f"pg-basic:lottery:{suffix}"
         gift_key = f"pg-basic:gift:{suffix}"
         now = datetime.now(UTC)
-        rewards = PostgresRewardOperations()
+        rewards = PostgresLotteryOperations()
         community = PostgresCommunityOperations()
         try:
             async with db.transaction() as connection:
@@ -200,6 +205,106 @@ def test_real_postgres_lottery_and_gift_replay_without_double_credit(
                 await db.execute(
                     "DELETE FROM identity.users WHERE id IN (%s, %s)",
                     (sender_id, recipient_id),
+                    connection=connection,
+                )
+            await db.dispose_current_engine()
+
+    asyncio.run(scenario())
+
+
+def test_real_postgres_check_in_maps_domain_lifecycle_once() -> None:
+    """@brief PostgreSQL 只映射领域签到决策且重放不重复发币 /
+    PostgreSQL only maps domain check-in decisions and replay never grants twice.
+
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 执行首次、连续、重复与断签状态转换 / Execute first, consecutive, repeated, and gap transitions.
+
+        @return None / None.
+        """
+
+        await db.dispose_current_engine()
+        configure_bot_database(_postgres_url())
+        user_id = _test_user_id()
+        suffix = uuid4().hex
+        account_id = EconomyAccountId(user_id)
+        operations = PostgresCheckInOperations()
+        first_day = date(2030, 1, 1)
+        try:
+            async with db.transaction() as connection:
+                await db.execute(
+                    "INSERT INTO identity.users (id, tg_uid, provider, name) "
+                    "VALUES (%s, %s, 'telegram', %s)",
+                    (user_id, user_id, f"checkin_{suffix}"),
+                    connection=connection,
+                )
+
+            first_command = CheckInCommand(
+                account_id=account_id,
+                day=first_day,
+                idempotency_key=f"pg-checkin:first:{suffix}",
+            )
+            first, replay = await asyncio.gather(
+                operations.check_in(first_command),
+                operations.check_in(first_command),
+            )
+            assert first.code is EconomyCode.SUCCESS
+            assert replay.code is EconomyCode.SUCCESS
+            assert {first.replayed, replay.replayed} == {False, True}
+            assert first.consecutive_days == replay.consecutive_days == 1
+            assert first.reward == replay.reward == 1
+
+            consecutive = await operations.check_in(
+                CheckInCommand(
+                    account_id=account_id,
+                    day=first_day + timedelta(days=1),
+                    idempotency_key=f"pg-checkin:second:{suffix}",
+                )
+            )
+            assert consecutive.code is EconomyCode.SUCCESS
+            assert consecutive.consecutive_days == 2
+            assert consecutive.reward == 1
+
+            after_gap = await operations.check_in(
+                CheckInCommand(
+                    account_id=account_id,
+                    day=first_day + timedelta(days=3),
+                    idempotency_key=f"pg-checkin:gap:{suffix}",
+                )
+            )
+            assert after_gap.code is EconomyCode.SUCCESS
+            assert after_gap.consecutive_days == 1
+            assert after_gap.reward == 1
+
+            async with db.connect() as connection:
+                row = await db.fetch_one(
+                    "SELECT last_checkin_date, consecutive_days "
+                    "FROM economy.user_checkin WHERE user_id = %s",
+                    (user_id,),
+                    connection=connection,
+                )
+                balance = await load_bank_overview(user_id, connection)
+            assert row is not None
+            assert row[0] == first_day + timedelta(days=3)
+            assert row[1] == 1
+            assert balance.free.value == 3
+        finally:
+            async with db.transaction() as connection:
+                await db.execute(
+                    "DELETE FROM economy.operation_receipts WHERE user_id = %s",
+                    (user_id,),
+                    connection=connection,
+                )
+                await db.execute(
+                    "DELETE FROM economy.user_checkin WHERE user_id = %s",
+                    (user_id,),
+                    connection=connection,
+                )
+                await db.execute(
+                    "DELETE FROM identity.users WHERE id = %s",
+                    (user_id,),
                     connection=connection,
                 )
             await db.dispose_current_engine()

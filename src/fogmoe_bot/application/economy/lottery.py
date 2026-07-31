@@ -1,43 +1,13 @@
-"""@brief 签到与抽奖应用模型及端口 / Check-in and lottery models and port."""
+"""@brief 每日抽奖应用消息与端口 / Daily-lottery application messages and port."""
 
 from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from .common import EconomyCode
-
-
-@dataclass(frozen=True, slots=True)
-class CheckInCommand:
-    """@brief 签到命令 / Check-in command.
-
-    @param user_id 用户 ID / User ID.
-    @param day 业务日期 / Business date.
-    @param idempotency_key 来源 Update 幂等键 / Source-Update idempotency key.
-    """
-
-    user_id: int
-    day: date
-    idempotency_key: str
-
-
-@dataclass(frozen=True, slots=True)
-class CheckInResult:
-    """@brief 签到结果 / Check-in result.
-
-    @param code 结果代码 / Result code.
-    @param consecutive_days 连续天数 / Consecutive days.
-    @param reward 奖励金币 / Reward coins.
-    @param replayed 是否幂等回放 / Whether replayed.
-    """
-
-    code: EconomyCode
-    consecutive_days: int = 0
-    reward: int = 0
-    replayed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,10 +22,19 @@ class LotteryCommand:
     """
 
     user_id: int
+    """@brief 用户 ID / User ID."""
+
     prize: int
+    """@brief 事务外抽取的奖励 / Prize drawn outside the transaction."""
+
     claimed_at: datetime
+    """@brief 领取时刻 / Claim instant."""
+
     cooldown: timedelta
+    """@brief 再次领取间隔 / Re-claim interval."""
+
     idempotency_key: str
+    """@brief 来源 Update 幂等键 / Source-Update idempotency key."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,22 +48,20 @@ class LotteryResult:
     """
 
     code: EconomyCode
+    """@brief 结果代码 / Result code."""
+
     prize: int = 0
+    """@brief 实际奖励 / Granted prize."""
+
     next_eligible_at: datetime | None = None
+    """@brief 下次可领取时刻 / Next eligible instant."""
+
     replayed: bool = False
+    """@brief 是否回放已提交结果 / Whether a committed result was replayed."""
 
 
-class RewardOperations(Protocol):
-    """@brief 签到与抽奖持久化能力端口 / Check-in and lottery persistence capability port."""
-
-    async def check_in(self, command: CheckInCommand) -> CheckInResult:
-        """@brief 原子签到 / Atomically check in.
-
-        @param command 签到命令 / Check-in command.
-        @return 签到结果 / Check-in result.
-        """
-
-        ...
+class LotteryOperations(Protocol):
+    """@brief 每日抽奖持久化能力端口 / Daily-lottery persistence capability port."""
 
     async def claim_lottery(self, command: LotteryCommand) -> LotteryResult:
         """@brief 原子领取每日抽奖 / Atomically claim a daily lottery prize.
@@ -94,18 +71,6 @@ class RewardOperations(Protocol):
         """
 
         ...
-
-
-def calculate_checkin_reward(consecutive_days: int) -> int:
-    """@brief 计算旧的阶梯签到奖励 / Calculate the legacy tiered check-in reward.
-
-    @param consecutive_days 连续天数 / Consecutive days.
-    @return 1 至 7 枚金币 / Between 1 and 7 coins.
-    """
-
-    if consecutive_days <= 0:
-        raise ValueError("Consecutive days must be positive")
-    return min(7, (consecutive_days - 1) // 5 + 1)
 
 
 def draw_lottery_prize() -> int:
@@ -123,11 +88,8 @@ def draw_lottery_prize() -> int:
 
 
 __all__ = [
-    "CheckInCommand",
-    "CheckInResult",
     "LotteryCommand",
+    "LotteryOperations",
     "LotteryResult",
-    "RewardOperations",
-    "calculate_checkin_reward",
     "draw_lottery_prize",
 ]

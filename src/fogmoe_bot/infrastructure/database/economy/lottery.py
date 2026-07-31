@@ -1,19 +1,16 @@
-"""@brief PostgreSQL 签到与抽奖适配器 / PostgreSQL check-in and lottery adapter."""
+"""@brief PostgreSQL 每日抽奖适配器 / PostgreSQL daily-lottery adapter."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from fogmoe_bot.application.economy.common import EconomyCode
-from fogmoe_bot.application.economy.rewards import (
-    CheckInCommand,
-    CheckInResult,
+from fogmoe_bot.application.economy.lottery import (
     LotteryCommand,
+    LotteryOperations,
     LotteryResult,
-    RewardOperations,
-    calculate_checkin_reward,
 )
 from fogmoe_bot.domain.banking.ledger import LedgerAccount, LedgerReason
 from fogmoe_bot.domain.banking.money import (
@@ -32,92 +29,8 @@ from .common import (
 )
 
 
-class PostgresRewardOperations(RewardOperations):
-    """@brief 以领域状态与银行账本串行化签到和抽奖 / Serialize check-in and lottery through domain state and the bank ledger."""
-
-    async def check_in(self, command: CheckInCommand) -> CheckInResult:
-        """@brief 以签到状态和账本原子串行化签到奖励 / Serialize a check-in reward through check-in state and the ledger.
-
-        @param command 签到命令 / Check-in command.
-        @return 签到结果 / Check-in result.
-        """
-
-        async with db.transaction() as connection:
-            await _lock_operation_key(command.idempotency_key, connection)
-            await _lock_operation_key(
-                f"checkin:{command.user_id}:{command.day.isoformat()}",
-                connection,
-            )
-            if not await _registered_user_exists(command.user_id, connection):
-                return CheckInResult(EconomyCode.NOT_REGISTERED)
-            replay = await _load_result(command.idempotency_key, connection)
-            if replay is not None:
-                return CheckInResult(
-                    EconomyCode(str(replay["code"])),
-                    consecutive_days=int(replay.get("consecutive_days", 0)),
-                    reward=int(replay.get("reward", 0)),
-                    replayed=True,
-                )
-            row = await db.fetch_one(
-                "SELECT last_checkin_date, consecutive_days "
-                "FROM economy.user_checkin WHERE user_id = %s FOR UPDATE",
-                (command.user_id,),
-                connection=connection,
-            )
-            if row is not None and cast(date, row[0]) == command.day:
-                result = CheckInResult(
-                    EconomyCode.ALREADY_CLAIMED,
-                    consecutive_days=cast(int, row[1]),
-                )
-                await _save_result(
-                    command.idempotency_key,
-                    "check_in",
-                    command.user_id,
-                    _checkin_mapping(result),
-                    connection,
-                )
-                return result
-            consecutive = 1
-            if row is not None and cast(date, row[0]) == command.day - timedelta(
-                days=1
-            ):
-                consecutive = cast(int, row[1]) + 1
-            reward = calculate_checkin_reward(consecutive)
-            await db.execute(
-                "INSERT INTO economy.user_checkin "
-                "(user_id, last_checkin_date, consecutive_days) VALUES (%s, %s, %s) "
-                "ON CONFLICT (user_id) DO UPDATE SET "
-                "last_checkin_date = EXCLUDED.last_checkin_date, "
-                "consecutive_days = EXCLUDED.consecutive_days, "
-                "updated_at = CURRENT_TIMESTAMP",
-                (command.user_id, command.day, consecutive),
-                connection=connection,
-            )
-            await post_bank_transfer(
-                namespace="economy-checkin-reward",
-                source_idempotency_key=command.idempotency_key,
-                reason=LedgerReason.BANK_ISSUANCE,
-                source=LedgerAccount.system(SystemAccountKind.ISSUANCE),
-                destination=LedgerAccount.user(command.user_id, TokenBucket.FREE),
-                amount=TokenAmount(reward),
-                created_at=datetime.combine(command.day, time.min, tzinfo=UTC),
-                actor_id=command.user_id,
-                connection=connection,
-                metadata={"grant_kind": "checkin", "consecutive_days": consecutive},
-            )
-            result = CheckInResult(
-                EconomyCode.SUCCESS,
-                consecutive_days=consecutive,
-                reward=reward,
-            )
-            await _save_result(
-                command.idempotency_key,
-                "check_in",
-                command.user_id,
-                _checkin_mapping(result),
-                connection,
-            )
-            return result
+class PostgresLotteryOperations(LotteryOperations):
+    """@brief 以抽奖状态和银行账本串行化每日领取 / Serialize daily claims through lottery state and the bank ledger."""
 
     async def claim_lottery(self, command: LotteryCommand) -> LotteryResult:
         """@brief 以抽奖状态和账本原子串行化领取 / Serialize a lottery claim through lottery state and the ledger.
@@ -198,20 +111,6 @@ class PostgresRewardOperations(RewardOperations):
             return result
 
 
-def _checkin_mapping(result: CheckInResult) -> dict[str, object]:
-    """@brief 序列化签到结果 / Serialize a check-in result.
-
-    @param result 签到结果 / Check-in result.
-    @return JSON mapping / JSON mapping.
-    """
-
-    return {
-        "code": result.code.value,
-        "consecutive_days": result.consecutive_days,
-        "reward": result.reward,
-    }
-
-
 def _lottery_mapping(result: LotteryResult) -> dict[str, object]:
     """@brief 序列化抽奖回执 / Serialize a lottery receipt.
 
@@ -264,3 +163,6 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+__all__ = ["PostgresLotteryOperations"]

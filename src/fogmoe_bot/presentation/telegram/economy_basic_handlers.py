@@ -10,7 +10,7 @@ from fogmoe_bot.application.economy.community import (
     GiftResult,
     LeaderboardResult,
 )
-from fogmoe_bot.application.economy.rewards import LotteryResult
+from fogmoe_bot.application.economy.lottery import LotteryResult
 from fogmoe_bot.application.economy.service import EconomyService
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 

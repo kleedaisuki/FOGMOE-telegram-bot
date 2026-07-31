@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from datetime import date, datetime, timedelta
 
+from .check_in import CheckInCommand, CheckInOperations, CheckInResult
 from .common import AccountLookup, EconomyCode
 from .community import (
     CommunityOperations,
@@ -22,12 +23,10 @@ from .referral import (
     ReferralResult,
     ReferralSummary,
 )
-from .rewards import (
-    CheckInCommand,
-    CheckInResult,
+from .lottery import (
     LotteryCommand,
+    LotteryOperations,
     LotteryResult,
-    RewardOperations,
     draw_lottery_prize,
 )
 from .web_password import (
@@ -48,7 +47,8 @@ class EconomyService:
         self,
         *,
         accounts: AccountLookup,
-        rewards: RewardOperations,
+        check_ins: CheckInOperations,
+        lotteries: LotteryOperations,
         community: CommunityOperations,
         referrals: ReferralOperations,
         web_passwords: WebPasswordOperations,
@@ -56,14 +56,16 @@ class EconomyService:
         """@brief 显式注入各项经济能力 / Explicitly inject each economy capability.
 
         @param accounts 账户查询能力 / Account-lookup capability.
-        @param rewards 签到与抽奖能力 / Check-in and lottery capability.
+        @param check_ins 签到事务能力 / Check-in transaction capability.
+        @param lotteries 每日抽奖能力 / Daily-lottery capability.
         @param community 社区经济能力 / Community-economy capability.
         @param referrals 推荐关系能力 / Referral capability.
         @param web_passwords Web 密码能力 / Web-password capability.
         """
 
         self._accounts = accounts
-        self._rewards = rewards
+        self._check_ins = check_ins
+        self._lotteries = lotteries
         self._community = community
         self._referrals = referrals
         self._web_passwords = web_passwords
@@ -84,8 +86,7 @@ class EconomyService:
         @return 签到结果 / Check-in result.
         """
 
-        _validate_identity(command.user_id, command.idempotency_key)
-        return await self._rewards.check_in(command)
+        return await self._check_ins.check_in(command)
 
     async def claim_lottery(
         self,
@@ -108,7 +109,7 @@ class EconomyService:
         drawn = draw_lottery_prize() if prize is None else prize
         if drawn <= 0:
             raise ValueError("Lottery prize must be positive")
-        return await self._rewards.claim_lottery(
+        return await self._lotteries.claim_lottery(
             LotteryCommand(
                 user_id=user_id,
                 prize=drawn,

@@ -9,14 +9,15 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
+from fogmoe_bot.application.economy.check_in import CheckInCommand
 from fogmoe_bot.application.economy.common import EconomyCode
 from fogmoe_bot.application.economy.community import TaskClaimCommand
 from fogmoe_bot.application.economy.referral import ReferralCommand, ReferralResult
-from fogmoe_bot.application.economy.rewards import CheckInCommand
 from fogmoe_bot.application.economy.service import (
     ECONOMY_SERVICE_DATA_KEY,
     EconomyService,
 )
+from fogmoe_bot.domain.economy.identity import EconomyAccountId
 
 from .runtime_settings import telegram_runtime_settings
 
@@ -97,9 +98,9 @@ async def checkin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     result = await _service(context).check_in(
         CheckInCommand(
-            user.id,
-            date.today(),
-            f"telegram:checkin:{update.update_id}:{user.id}",
+            account_id=EconomyAccountId(user.id),
+            day=date.today(),
+            idempotency_key=f"telegram:checkin:{update.update_id}:{user.id}",
         )
     )
     if result.code is EconomyCode.NOT_REGISTERED:

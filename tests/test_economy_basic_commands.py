@@ -9,6 +9,11 @@ from typing import cast
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCommand,
 )
+from fogmoe_bot.application.economy.check_in import (
+    CheckInCommand,
+    CheckInOperations,
+    CheckInResult,
+)
 from fogmoe_bot.application.economy.common import AccountLookup, EconomyCode
 from fogmoe_bot.application.economy.community import (
     CommunityOperations,
@@ -18,10 +23,10 @@ from fogmoe_bot.application.economy.community import (
     LeaderboardResult,
 )
 from fogmoe_bot.application.economy.referral import ReferralOperations
-from fogmoe_bot.application.economy.rewards import (
+from fogmoe_bot.application.economy.lottery import (
     LotteryCommand,
+    LotteryOperations,
     LotteryResult,
-    RewardOperations,
 )
 from fogmoe_bot.application.economy.service import EconomyService
 from fogmoe_bot.application.economy.web_password import WebPasswordOperations
@@ -30,6 +35,7 @@ from fogmoe_bot.domain.conversation.identity import (
     UpdateId,
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
+from fogmoe_bot.domain.economy.identity import EconomyAccountId
 from fogmoe_bot.presentation.telegram.command_cooldown_guard import (
     ParsedTelegramCommand,
 )
@@ -49,8 +55,24 @@ class RecordingOperations:
 
         self.lottery_commands: list[LotteryCommand] = []
         """@brief 抽奖 commands / Lottery commands."""
+        self.check_in_commands: list[CheckInCommand] = []
+        """@brief 签到 commands / Check-in commands."""
         self.gift_commands: list[GiftCommand] = []
         """@brief 赠送 commands / Gift commands."""
+
+    async def check_in(self, command: CheckInCommand) -> CheckInResult:
+        """@brief 记录签到 / Record a check-in.
+
+        @param command 签到命令 / Check-in command.
+        @return 固定成功结果 / Fixed successful result.
+        """
+
+        self.check_in_commands.append(command)
+        return CheckInResult(
+            code=EconomyCode.SUCCESS,
+            consecutive_days=6,
+            reward=2,
+        )
 
     async def claim_lottery(self, command: LotteryCommand) -> LotteryResult:
         """@brief 记录抽奖 / Record a lottery claim.
@@ -119,7 +141,8 @@ def _service(operations: RecordingOperations) -> EconomyService:
     """@brief 本测试不会触达的能力占位 / Capability placeholder unused by this test."""
     return EconomyService(
         accounts=cast(AccountLookup, unused),
-        rewards=cast(RewardOperations, operations),
+        check_ins=cast(CheckInOperations, operations),
+        lotteries=cast(LotteryOperations, operations),
         community=cast(CommunityOperations, operations),
         referrals=cast(ReferralOperations, unused),
         web_passwords=cast(WebPasswordOperations, unused),
@@ -192,6 +215,31 @@ def test_service_derives_fee_cooldown_and_idempotency_command() -> None:
     assert operations.gift_commands[0].target_name == "alice"
     assert operations.gift_commands[0].fee == 2
     assert operations.gift_commands[0].daily_limit == 5
+
+
+def test_service_orchestrates_a_validated_check_in_message() -> None:
+    """@brief 应用服务只把已验证命令交给签到事务端口 /
+    The application service only passes a validated command to the check-in transaction port.
+
+    @return None / None.
+    """
+
+    operations = RecordingOperations()
+    service = _service(operations)
+    command = CheckInCommand(
+        account_id=EconomyAccountId(42),
+        day=date(2030, 1, 2),
+        idempotency_key="telegram:checkin:1:42",
+    )
+
+    result = asyncio.run(service.check_in(command))
+
+    assert result == CheckInResult(
+        code=EconomyCode.SUCCESS,
+        consecutive_days=6,
+        reward=2,
+    )
+    assert operations.check_in_commands == [command]
 
 
 def test_handler_executes_gift_then_writes_deterministic_response() -> None:
