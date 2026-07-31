@@ -76,6 +76,53 @@ def test_check_in_lifecycle_has_one_domain_owner_and_no_reward_facade() -> None:
     assert offenders == []
 
 
+def test_daily_lottery_lifecycle_and_prize_policy_have_domain_ownership() -> None:
+    """@brief 抽奖资格与概率规则归领域，随机生成和 SQL 仅由外层适配 /
+    Lottery eligibility and prize policy belong to Domain while randomness and SQL stay outside.
+
+    @return None / None.
+    """
+
+    domain_path = SRC_ROOT / "domain" / "economy" / "lottery.py"
+    application_path = SRC_ROOT / "application" / "economy" / "lottery.py"
+    service_path = SRC_ROOT / "application" / "economy" / "service.py"
+    adapter_path = SRC_ROOT / "infrastructure" / "database" / "economy" / "lottery.py"
+    randomness_path = SRC_ROOT / "infrastructure" / "economy" / "randomness.py"
+
+    assert domain_path.is_file()
+    assert application_path.is_file()
+    assert adapter_path.is_file()
+    assert randomness_path.is_file()
+    domain_source = domain_path.read_text(encoding="utf-8")
+    application_source = application_path.read_text(encoding="utf-8")
+    service_source = service_path.read_text(encoding="utf-8")
+    adapter_source = adapter_path.read_text(encoding="utf-8")
+    randomness_source = randomness_path.read_text(encoding="utf-8")
+
+    for symbol in (
+        "class DailyLottery",
+        "class LotteryClaimInstant",
+        "class LotteryPrize",
+        "class LotteryRandomness",
+        "def draw_lottery_prize(",
+        "def claim(",
+    ):
+        assert symbol in domain_source
+    assert "timedelta(hours=24)" in domain_source
+    assert "class LotteryClaimTransaction" in application_source
+    assert "class PostgresLotteryClaimTransaction" in adapter_source
+    assert "PostgresLotteryOperations" not in adapter_source
+    assert "lottery.claim(" in adapter_source
+    assert "timedelta" not in adapter_source
+    assert "command.cooldown" not in adapter_source
+    assert "import random" in randomness_source
+    assert "import random" not in domain_source
+    assert "import random" not in application_source
+    assert "import random" not in service_source
+    assert "cooldown:" not in application_source
+    assert "prize: int | None" not in service_source
+
+
 def test_economy_domain_and_application_do_not_depend_on_outer_adapters() -> None:
     """@brief Economy 核心只允许依赖内层代码 / Economy core may depend only on inner-layer code.
 

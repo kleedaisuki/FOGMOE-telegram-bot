@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
+
+from fogmoe_bot.domain.economy.identity import EconomyAccountId
+from fogmoe_bot.domain.economy.lottery import (
+    LotteryClaimInstant,
+    LotteryRandomness,
+    draw_lottery_prize,
+)
 
 from .check_in import CheckInCommand, CheckInOperations, CheckInResult
 from .common import AccountLookup, EconomyCode
@@ -17,17 +24,16 @@ from .community import (
     TaskClaimResult,
     calculate_gift_fee,
 )
+from .lottery import (
+    ClaimLotteryCommand,
+    LotteryClaimTransaction,
+    LotteryResult,
+)
 from .referral import (
     ReferralCommand,
     ReferralOperations,
     ReferralResult,
     ReferralSummary,
-)
-from .lottery import (
-    LotteryCommand,
-    LotteryOperations,
-    LotteryResult,
-    draw_lottery_prize,
 )
 from .web_password import (
     SetWebPassword,
@@ -48,7 +54,8 @@ class EconomyService:
         *,
         accounts: AccountLookup,
         check_ins: CheckInOperations,
-        lotteries: LotteryOperations,
+        lotteries: LotteryClaimTransaction,
+        lottery_randomness: LotteryRandomness,
         community: CommunityOperations,
         referrals: ReferralOperations,
         web_passwords: WebPasswordOperations,
@@ -58,6 +65,7 @@ class EconomyService:
         @param accounts 账户查询能力 / Account-lookup capability.
         @param check_ins 签到事务能力 / Check-in transaction capability.
         @param lotteries 每日抽奖能力 / Daily-lottery capability.
+        @param lottery_randomness 每日抽奖随机能力 / Daily-lottery randomness capability.
         @param community 社区经济能力 / Community-economy capability.
         @param referrals 推荐关系能力 / Referral capability.
         @param web_passwords Web 密码能力 / Web-password capability.
@@ -66,6 +74,7 @@ class EconomyService:
         self._accounts = accounts
         self._check_ins = check_ins
         self._lotteries = lotteries
+        self._lottery_randomness = lottery_randomness
         self._community = community
         self._referrals = referrals
         self._web_passwords = web_passwords
@@ -94,27 +103,23 @@ class EconomyService:
         *,
         claimed_at: datetime,
         idempotency_key: str,
-        prize: int | None = None,
     ) -> LotteryResult:
         """@brief 抽取并原子领取每日奖励 / Draw and atomically claim a daily prize.
 
         @param user_id 用户 ID / User ID.
         @param claimed_at 领取时刻 / Claim instant.
         @param idempotency_key 来源 Update 幂等键 / Source-Update idempotency key.
-        @param prize 测试或恢复注入的奖励 / Prize injected by tests or recovery.
         @return 抽奖结果 / Lottery result.
         """
 
         _validate_identity(user_id, idempotency_key)
-        drawn = draw_lottery_prize() if prize is None else prize
-        if drawn <= 0:
-            raise ValueError("Lottery prize must be positive")
+        account_id = EconomyAccountId(user_id)
+        proposed_prize = draw_lottery_prize(self._lottery_randomness)
         return await self._lotteries.claim_lottery(
-            LotteryCommand(
-                user_id=user_id,
-                prize=drawn,
-                claimed_at=claimed_at,
-                cooldown=timedelta(hours=24),
+            ClaimLotteryCommand(
+                account_id=account_id,
+                proposed_prize=proposed_prize,
+                claimed_at=LotteryClaimInstant(claimed_at),
                 idempotency_key=idempotency_key,
             )
         )

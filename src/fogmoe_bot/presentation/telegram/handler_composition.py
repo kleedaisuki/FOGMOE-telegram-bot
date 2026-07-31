@@ -56,6 +56,9 @@ from fogmoe_bot.infrastructure.billing.payment_events import (
     DenyUnconfiguredPaymentEventVerifier,
 )
 from fogmoe_bot.infrastructure.chance.randomness import SystemServerSeedSource
+from fogmoe_bot.infrastructure.economy.randomness import (
+    StandardLibraryLotteryRandomness,
+)
 from fogmoe_bot.infrastructure.database.account_operations import (
     PostgresAccountOperations,
 )
@@ -76,7 +79,7 @@ from fogmoe_bot.infrastructure.database.economy.community import (
     PostgresCommunityOperations,
 )
 from fogmoe_bot.infrastructure.database.economy.lottery import (
-    PostgresLotteryOperations,
+    PostgresLotteryClaimTransaction,
 )
 from fogmoe_bot.infrastructure.database.economy.referral import (
     PostgresReferralOperations,
@@ -189,7 +192,8 @@ def create_economy_service(identity: IdentitySettings) -> EconomyService:
     return EconomyService(
         accounts=PostgresAccountLookup(),
         check_ins=PostgresCheckInOperations(),
-        lotteries=PostgresLotteryOperations(),
+        lotteries=PostgresLotteryClaimTransaction(),
+        lottery_randomness=StandardLibraryLotteryRandomness(),
         community=PostgresCommunityOperations(),
         referrals=PostgresReferralOperations(),
         web_passwords=PostgresWebPasswordOperations(),

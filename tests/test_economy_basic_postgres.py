@@ -16,10 +16,16 @@ from fogmoe_bot.application.economy.community import (
     GiftCommand,
     LeaderboardCommand,
 )
-from fogmoe_bot.application.economy.lottery import LotteryCommand
+from fogmoe_bot.application.economy.lottery import (
+    ClaimLotteryCommand,
+    LotteryAlreadyClaimedResult,
+    LotteryGrantedResult,
+    LotteryNotRegisteredResult,
+)
 from fogmoe_bot.domain.banking.ledger import LedgerAccount, LedgerReason
 from fogmoe_bot.domain.banking.money import SystemAccountKind, TokenAmount, TokenBucket
 from fogmoe_bot.domain.economy.identity import EconomyAccountId
+from fogmoe_bot.domain.economy.lottery import LotteryClaimInstant, LotteryPrize
 from fogmoe_bot.infrastructure.database import db
 from fogmoe_bot.infrastructure.database.banking import (
     load_bank_overview,
@@ -32,7 +38,7 @@ from fogmoe_bot.infrastructure.database.economy.check_in import (
     PostgresCheckInOperations,
 )
 from fogmoe_bot.infrastructure.database.economy.lottery import (
-    PostgresLotteryOperations,
+    PostgresLotteryClaimTransaction,
 )
 
 
@@ -81,7 +87,7 @@ def test_real_postgres_lottery_and_gift_replay_without_double_credit(
         lottery_key = f"pg-basic:lottery:{suffix}"
         gift_key = f"pg-basic:gift:{suffix}"
         now = datetime.now(UTC)
-        rewards = PostgresLotteryOperations()
+        rewards = PostgresLotteryClaimTransaction()
         community = PostgresCommunityOperations()
         try:
             async with db.transaction() as connection:
@@ -112,20 +118,30 @@ def test_real_postgres_lottery_and_gift_replay_without_double_credit(
                     connection=connection,
                 )
 
-            lottery = LotteryCommand(
-                user_id=sender_id,
-                prize=7,
-                claimed_at=now,
-                cooldown=timedelta(hours=24),
+            lottery = ClaimLotteryCommand(
+                account_id=EconomyAccountId(sender_id),
+                proposed_prize=LotteryPrize(7),
+                claimed_at=LotteryClaimInstant(now),
                 idempotency_key=lottery_key,
             )
             first_lottery, second_lottery = await asyncio.gather(
                 rewards.claim_lottery(lottery),
                 rewards.claim_lottery(lottery),
             )
-            assert first_lottery.code is EconomyCode.SUCCESS
-            assert second_lottery.code is EconomyCode.SUCCESS
+            assert isinstance(first_lottery, LotteryGrantedResult)
+            assert isinstance(second_lottery, LotteryGrantedResult)
             assert {first_lottery.replayed, second_lottery.replayed} == {False, True}
+            changed_lottery = await rewards.claim_lottery(
+                ClaimLotteryCommand(
+                    account_id=EconomyAccountId(sender_id),
+                    proposed_prize=LotteryPrize(13),
+                    claimed_at=LotteryClaimInstant(now + timedelta(seconds=1)),
+                    idempotency_key=lottery_key,
+                )
+            )
+            assert isinstance(changed_lottery, LotteryGrantedResult)
+            assert changed_lottery.replayed
+            assert changed_lottery.prize == first_lottery.prize == LotteryPrize(7)
 
             gift = GiftCommand(
                 sender_id=sender_id,
@@ -205,6 +221,121 @@ def test_real_postgres_lottery_and_gift_replay_without_double_credit(
                 await db.execute(
                     "DELETE FROM identity.users WHERE id IN (%s, %s)",
                     (sender_id, recipient_id),
+                    connection=connection,
+                )
+            await db.dispose_current_engine()
+
+    asyncio.run(scenario())
+
+
+def test_real_postgres_lottery_maps_domain_cooldown_boundaries_once() -> None:
+    """@brief PostgreSQL 只映射领域的冷却边界且拒绝不发币 /
+    PostgreSQL only maps domain cooldown boundaries and a rejection grants no tokens.
+
+    @return None / None.
+    """
+
+    async def scenario() -> None:
+        """@brief 执行首次、边界前与恰好边界领取 / Execute first, just-before-boundary, and exact-boundary claims.
+
+        @return None / None.
+        """
+
+        await db.dispose_current_engine()
+        configure_bot_database(_postgres_url())
+        user_id = _test_user_id()
+        suffix = uuid4().hex
+        account_id = EconomyAccountId(user_id)
+        operations = PostgresLotteryClaimTransaction()
+        first_at = datetime.now(UTC)
+        first_command = ClaimLotteryCommand(
+            account_id=account_id,
+            proposed_prize=LotteryPrize(7),
+            claimed_at=LotteryClaimInstant(first_at),
+            idempotency_key=f"pg-lottery:first:{suffix}",
+        )
+        try:
+            missing = await operations.claim_lottery(first_command)
+            assert isinstance(missing, LotteryNotRegisteredResult)
+            async with db.connect() as connection:
+                missing_receipt = await db.fetch_one(
+                    "SELECT 1 FROM economy.operation_receipts "
+                    "WHERE idempotency_key = %s",
+                    (first_command.idempotency_key,),
+                    connection=connection,
+                )
+            assert missing_receipt is None
+
+            async with db.transaction() as connection:
+                await db.execute(
+                    "INSERT INTO identity.users (id, tg_uid, provider, name) "
+                    "VALUES (%s, %s, 'telegram', %s)",
+                    (user_id, user_id, f"lottery_{suffix}"),
+                    connection=connection,
+                )
+
+            first = await operations.claim_lottery(first_command)
+            early_command = ClaimLotteryCommand(
+                account_id=account_id,
+                proposed_prize=LotteryPrize(19),
+                claimed_at=LotteryClaimInstant(
+                    first_at + timedelta(hours=24) - timedelta(microseconds=1)
+                ),
+                idempotency_key=f"pg-lottery:early:{suffix}",
+            )
+            early = await operations.claim_lottery(early_command)
+            early_replay = await operations.claim_lottery(
+                ClaimLotteryCommand(
+                    account_id=account_id,
+                    proposed_prize=LotteryPrize(1),
+                    claimed_at=LotteryClaimInstant(first_at + timedelta(days=2)),
+                    idempotency_key=early_command.idempotency_key,
+                )
+            )
+            boundary_at = first_at + timedelta(hours=24)
+            boundary = await operations.claim_lottery(
+                ClaimLotteryCommand(
+                    account_id=account_id,
+                    proposed_prize=LotteryPrize(13),
+                    claimed_at=LotteryClaimInstant(boundary_at),
+                    idempotency_key=f"pg-lottery:boundary:{suffix}",
+                )
+            )
+
+            assert isinstance(first, LotteryGrantedResult)
+            assert isinstance(early, LotteryAlreadyClaimedResult)
+            assert early.next_eligible_at == LotteryClaimInstant(boundary_at)
+            assert isinstance(early_replay, LotteryAlreadyClaimedResult)
+            assert early_replay.replayed
+            assert early_replay.next_eligible_at == early.next_eligible_at
+            assert isinstance(boundary, LotteryGrantedResult)
+            assert boundary.prize == LotteryPrize(13)
+            async with db.connect() as connection:
+                row = await db.fetch_one(
+                    "SELECT last_lottery_date FROM economy.user_lottery "
+                    "WHERE user_id = %s",
+                    (user_id,),
+                    connection=connection,
+                )
+                balance = await load_bank_overview(user_id, connection)
+            assert row is not None
+            assert row[0] == boundary_at.replace(tzinfo=None)
+            assert balance.free.value == 20
+        finally:
+            async with db.transaction() as connection:
+                await db.execute(
+                    "DELETE FROM economy.operation_receipts WHERE user_id = %s",
+                    (user_id,),
+                    connection=connection,
+                )
+                await db.execute(
+                    "DELETE FROM economy.user_lottery WHERE user_id = %s",
+                    (user_id,),
+                    connection=connection,
+                )
+                await db.execute(
+                    "DELETE FROM identity.users WHERE id = %s",
+                    (user_id,),
                     connection=connection,
                 )
             await db.dispose_current_engine()

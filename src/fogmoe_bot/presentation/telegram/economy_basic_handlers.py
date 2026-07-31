@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import assert_never
+
 from fogmoe_bot.application.conversation.standalone_outbound import (
     StandaloneOutboundCapability,
 )
@@ -10,7 +12,12 @@ from fogmoe_bot.application.economy.community import (
     GiftResult,
     LeaderboardResult,
 )
-from fogmoe_bot.application.economy.lottery import LotteryResult
+from fogmoe_bot.application.economy.lottery import (
+    LotteryAlreadyClaimedResult,
+    LotteryGrantedResult,
+    LotteryNotRegisteredResult,
+    LotteryResult,
+)
 from fogmoe_bot.application.economy.service import EconomyService
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 
@@ -120,19 +127,25 @@ def _lottery_text(result: LotteryResult) -> str:
     @return 用户文本 / User-facing text.
     """
 
-    if result.code is EconomyCode.SUCCESS:
-        return (
-            f"恭喜！您赢得了 {result.prize} 枚硬币喵。\n"
-            f"Congratulations! You have won {result.prize} coins. Meow!"
-        )
-    if result.code is EconomyCode.ALREADY_CLAIMED:
-        return (
-            "每24小时您只能参加一次抽奖喵。下次再来吧！\n"
-            "You can only participate in the lottery once every 24 hours. Meow! Come back later!"
-        )
-    return (
-        "请先使用 /me 命令获取个人信息。\nPlease register first using the /me command."
-    )
+    match result:
+        case LotteryGrantedResult():
+            prize = int(result.prize)
+            return (
+                f"恭喜！您赢得了 {prize} 枚硬币喵。\n"
+                f"Congratulations! You have won {prize} coins. Meow!"
+            )
+        case LotteryAlreadyClaimedResult():
+            return (
+                "每24小时您只能参加一次抽奖喵。下次再来吧！\n"
+                "You can only participate in the lottery once every 24 hours. Meow! Come back later!"
+            )
+        case LotteryNotRegisteredResult():
+            return (
+                "请先使用 /me 命令获取个人信息。\n"
+                "Please register first using the /me command."
+            )
+        case unreachable:
+            assert_never(unreachable)
 
 
 def _gift_text(result: GiftResult, *, amount: int) -> str:

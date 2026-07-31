@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import cast
 
 from fogmoe_bot.application.conversation.standalone_outbound import (
@@ -24,8 +24,11 @@ from fogmoe_bot.application.economy.community import (
 )
 from fogmoe_bot.application.economy.referral import ReferralOperations
 from fogmoe_bot.application.economy.lottery import (
-    LotteryCommand,
-    LotteryOperations,
+    ClaimLotteryCommand,
+    LotteryAlreadyClaimedResult,
+    LotteryClaimTransaction,
+    LotteryGrantedResult,
+    LotteryNotRegisteredResult,
     LotteryResult,
 )
 from fogmoe_bot.application.economy.service import EconomyService
@@ -36,6 +39,13 @@ from fogmoe_bot.domain.conversation.identity import (
 )
 from fogmoe_bot.domain.conversation.inbox import InboundUpdate
 from fogmoe_bot.domain.economy.identity import EconomyAccountId
+from fogmoe_bot.domain.economy.lottery import (
+    PRIZE_BANDS,
+    PRIZE_BAND_WEIGHTS,
+    LotteryClaimInstant,
+    LotteryPrize,
+    LotteryPrizeBand,
+)
 from fogmoe_bot.presentation.telegram.command_cooldown_guard import (
     ParsedTelegramCommand,
 )
@@ -47,14 +57,59 @@ NOW = datetime(2030, 1, 2, 3, 4, tzinfo=UTC)
 """@brief 固定时刻 / Fixed instant."""
 
 
+class DeterministicLotteryRandomness:
+    """@brief 固定返回七枚金币并记录消费次数的随机替身 /
+    Randomness double returning seven tokens and recording consumption.
+    """
+
+    def __init__(self) -> None:
+        """@brief 初始化零次随机消费 / Initialize with zero random consumptions."""
+
+        self.band_draws = 0
+        """@brief 档位抽取次数 / Number of band draws."""
+        self.integer_draws = 0
+        """@brief 整数抽取次数 / Number of integer draws."""
+
+    def choose_prize_band(
+        self,
+        bands: tuple[LotteryPrizeBand, ...],
+        weights: tuple[float, ...],
+    ) -> LotteryPrizeBand:
+        """@brief 验证领域策略参数并固定选择 medium / Validate policy inputs and select medium.
+
+        @param bands 领域给出的档位 / Bands supplied by the domain.
+        @param weights 领域给出的权重 / Weights supplied by the domain.
+        @return medium 档位 / Medium band.
+        """
+
+        assert bands == PRIZE_BANDS
+        assert weights == PRIZE_BAND_WEIGHTS
+        self.band_draws += 1
+        return LotteryPrizeBand.MEDIUM
+
+    def integer_between(self, lower: int, upper: int) -> int:
+        """@brief 验证 medium 边界并固定返回七 / Validate medium bounds and return seven.
+
+        @param lower 闭区间下界 / Inclusive lower bound.
+        @param upper 闭区间上界 / Inclusive upper bound.
+        @return 七 / Seven.
+        """
+
+        assert (lower, upper) == (5, 10)
+        self.integer_draws += 1
+        return 7
+
+
 class RecordingOperations:
     """@brief 记录基础经济 commands 的窄替身 / Narrow double recording basic economy commands."""
 
     def __init__(self) -> None:
         """@brief 初始化默认成功结果 / Initialize default successful results."""
 
-        self.lottery_commands: list[LotteryCommand] = []
+        self.lottery_commands: list[ClaimLotteryCommand] = []
         """@brief 抽奖 commands / Lottery commands."""
+        self.lottery_result: LotteryResult | None = None
+        """@brief 可选的预设抽奖结果 / Optional configured lottery result."""
         self.check_in_commands: list[CheckInCommand] = []
         """@brief 签到 commands / Check-in commands."""
         self.gift_commands: list[GiftCommand] = []
@@ -74,7 +129,7 @@ class RecordingOperations:
             reward=2,
         )
 
-    async def claim_lottery(self, command: LotteryCommand) -> LotteryResult:
+    async def claim_lottery(self, command: ClaimLotteryCommand) -> LotteryResult:
         """@brief 记录抽奖 / Record a lottery claim.
 
         @param command lottery command / Lottery command.
@@ -82,7 +137,12 @@ class RecordingOperations:
         """
 
         self.lottery_commands.append(command)
-        return LotteryResult(EconomyCode.SUCCESS, prize=command.prize)
+        if self.lottery_result is not None:
+            return self.lottery_result
+        return LotteryGrantedResult(
+            prize=command.proposed_prize,
+            next_eligible_at=command.claimed_at.after_daily_cooldown(),
+        )
 
     async def give(self, command: GiftCommand) -> GiftResult:
         """@brief 记录赠送 / Record a gift.
@@ -130,10 +190,14 @@ class RecordingOutbound:
         self.commands.append(command)
 
 
-def _service(operations: RecordingOperations) -> EconomyService:
+def _service(
+    operations: RecordingOperations,
+    randomness: DeterministicLotteryRandomness | None = None,
+) -> EconomyService:
     """@brief 将窄测试替身注入 service / Inject the narrow test double into the service.
 
     @param operations recording operations / Recording operations.
+    @param randomness 可选固定随机替身 / Optional deterministic randomness double.
     @return Economy service / Economy service.
     """
 
@@ -142,7 +206,8 @@ def _service(operations: RecordingOperations) -> EconomyService:
     return EconomyService(
         accounts=cast(AccountLookup, unused),
         check_ins=cast(CheckInOperations, operations),
-        lotteries=cast(LotteryOperations, operations),
+        lotteries=cast(LotteryClaimTransaction, operations),
+        lottery_randomness=randomness or DeterministicLotteryRandomness(),
         community=cast(CommunityOperations, operations),
         referrals=cast(ReferralOperations, unused),
         web_passwords=cast(WebPasswordOperations, unused),
@@ -185,8 +250,8 @@ def _command(name: str, *arguments: str) -> ParsedTelegramCommand:
     )
 
 
-def test_service_derives_fee_cooldown_and_idempotency_command() -> None:
-    """@brief service 在 adapter 外计算稳定规则 / The service derives stable rules outside the adapter."""
+def test_service_builds_typed_lottery_and_gift_commands() -> None:
+    """@brief service 只编排类型化领域值与应用消息 / The service only orchestrates typed domain values and application messages."""
 
     operations = RecordingOperations()
     service = _service(operations)
@@ -196,7 +261,6 @@ def test_service_derives_fee_cooldown_and_idempotency_command() -> None:
             42,
             claimed_at=NOW,
             idempotency_key="telegram:lottery:1:42",
-            prize=7,
         )
     )
     gift = asyncio.run(
@@ -209,12 +273,53 @@ def test_service_derives_fee_cooldown_and_idempotency_command() -> None:
         )
     )
 
-    assert lottery.prize == 7
-    assert operations.lottery_commands[0].cooldown.total_seconds() == 86_400
+    assert isinstance(lottery, LotteryGrantedResult)
+    assert int(lottery.prize) == 7
+    lottery_command = operations.lottery_commands[0]
+    assert lottery_command.account_id == EconomyAccountId(42)
+    assert lottery_command.claimed_at == LotteryClaimInstant(NOW)
+    assert int(lottery_command.proposed_prize) == 7
+    assert not hasattr(lottery_command, "cooldown")
     assert gift.code is EconomyCode.SUCCESS
     assert operations.gift_commands[0].target_name == "alice"
     assert operations.gift_commands[0].fee == 2
     assert operations.gift_commands[0].daily_limit == 5
+
+
+def test_service_consumes_randomness_before_every_transaction_result() -> None:
+    """@brief 未注册、冷却与重放调用都先消费候选奖励 /
+    Missing-account, cooldown, and replay calls all consume a candidate prize first.
+
+    @return None / None.
+    """
+
+    operations = RecordingOperations()
+    randomness = DeterministicLotteryRandomness()
+    service = _service(operations, randomness)
+    next_eligible_at = LotteryClaimInstant(NOW + timedelta(hours=24))
+    results: tuple[LotteryResult, ...] = (
+        LotteryNotRegisteredResult(),
+        LotteryAlreadyClaimedResult(next_eligible_at=next_eligible_at),
+        LotteryGrantedResult(
+            prize=LotteryPrize(7),
+            next_eligible_at=next_eligible_at,
+            replayed=True,
+        ),
+    )
+    for ordinal, configured in enumerate(results, start=1):
+        operations.lottery_result = configured
+        actual = asyncio.run(
+            service.claim_lottery(
+                42,
+                claimed_at=NOW,
+                idempotency_key=f"telegram:lottery:{ordinal}:42",
+            )
+        )
+        assert actual is configured
+
+    assert randomness.band_draws == 3
+    assert randomness.integer_draws == 3
+    assert len(operations.lottery_commands) == 3
 
 
 def test_service_orchestrates_a_validated_check_in_message() -> None:
