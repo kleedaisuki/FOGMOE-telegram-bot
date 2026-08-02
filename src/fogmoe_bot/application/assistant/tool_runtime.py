@@ -483,12 +483,27 @@ def _public_result(tool_name: str, result: JsonValue) -> JsonValue:
         return {
             key: value
             for key, value in result.items()
-            if key in {"error", "status", "warnings", "retry_after_seconds"}
+            if key in _MEDIA_PUBLIC_ERROR_FIELDS
         }
     return {
         "status": result.get("status", "queued"),
         "message": "Generated media was durably queued for delivery.",
     }
+
+
+_MEDIA_PUBLIC_ERROR_FIELDS = frozenset(
+    {
+        "error",
+        "status",
+        "warnings",
+        "retry_after_seconds",
+        "provider_code",
+        "provider_message",
+        "provider_type",
+        "provider_response",
+    }
+)
+"""@brief 可安全回传模型的媒体错误字段 / Media error fields safe to return to the model."""
 
 
 __all__ = [

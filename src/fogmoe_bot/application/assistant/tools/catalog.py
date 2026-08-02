@@ -294,8 +294,24 @@ class GenerateImageArgs(ToolArguments):
     """@brief 图片生成参数 / Image-generation arguments."""
 
     prompt: str = Field(min_length=1, max_length=2000, description="Image prompt")
-    width: int = Field(default=1024, ge=64, le=4096, description="Image width")
-    height: int = Field(default=1024, ge=64, le=4096, description="Image height")
+    width: int | None = Field(
+        default=None,
+        ge=64,
+        le=4096,
+        description=(
+            "Optional image width in pixels; provide it together with height, or omit both "
+            "to use the deployment-safe default"
+        ),
+    )
+    height: int | None = Field(
+        default=None,
+        ge=64,
+        le=4096,
+        description=(
+            "Optional image height in pixels; provide it together with width, or omit both "
+            "to use the deployment-safe default"
+        ),
+    )
     steps: int = Field(default=9, ge=1, le=150, description="Generation steps")
     seed: int | None = Field(default=None, description="Optional deterministic seed")
     timeout_seconds: int | None = Field(
@@ -304,6 +320,18 @@ class GenerateImageArgs(ToolArguments):
         le=60,
         description="Optional request-timeout override; omit to use the deployment default",
     )
+
+    @model_validator(mode="after")
+    def _validate_dimension_pair(self) -> GenerateImageArgs:
+        """@brief 校验宽高必须成对出现 / Validate that width and height are supplied together.
+
+        @return 当前已校验参数 / The validated arguments.
+        @raise ValueError 只填写宽或高时抛出 / Raised when only width or height is supplied.
+        """
+
+        if (self.width is None) != (self.height is None):
+            raise ValueError("width and height must be provided together")
+        return self
 
 
 class GenerateVoiceArgs(ToolArguments):
@@ -1033,7 +1061,11 @@ DEFAULT_TOOL_CATALOG = ToolCatalog(
         ),
         define_tool(
             name="generate_image",
-            description="Generate one image and queue durable delivery",
+            description=(
+                "Generate one image and queue durable delivery. Width and height are optional "
+                "but must be supplied together when provided; the deployment validates the "
+                "selected model's size limits."
+            ),
             arguments_model=GenerateImageArgs,
             mutation_classifier=_always("media.generate_image"),
         ),

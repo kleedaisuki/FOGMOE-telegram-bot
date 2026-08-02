@@ -40,6 +40,17 @@ class _Persistence:
                 },
                 False,
             )
+        if request.tool_name == "generate_image":
+            return PersistedToolResult(
+                {
+                    "error": "Image generation failed (HTTP 400): use a larger resolution",
+                    "status": 400,
+                    "provider_code": 400,
+                    "provider_message": "use a larger resolution",
+                    "provider_response": '{"error":{"code":400}}',
+                },
+                False,
+            )
         return PersistedToolResult({"status": "updated"}, len(self.requests) > 1)
 
 
@@ -122,6 +133,33 @@ def test_runtime_hides_media_artifact_identity_from_model_feedback() -> None:
             "message": "Generated media was durably queued for delivery.",
         }
         assert "private-artifact" not in str(result.public_result)
+
+    asyncio.run(scenario())
+
+
+def test_runtime_preserves_safe_media_provider_error_details() -> None:
+    """@brief provider 错误详情可回传模型 / Preserve safe provider error details for the model."""
+
+    async def scenario() -> None:
+        """@brief 执行图片错误调用 / Execute a failed image invocation."""
+
+        runtime = AgentRuntime(catalog=DEFAULT_TOOL_CATALOG, persistence=_Persistence())
+        result = await runtime.execute(
+            context=_context(),
+            step=0,
+            ordinal=0,
+            provider_call_id=None,
+            tool_name="generate_image",
+            raw_arguments={"prompt": "hello"},
+        )
+
+        assert result.public_result == {
+            "error": "Image generation failed (HTTP 400): use a larger resolution",
+            "status": 400,
+            "provider_code": 400,
+            "provider_message": "use a larger resolution",
+            "provider_response": '{"error":{"code":400}}',
+        }
 
     asyncio.run(scenario())
 

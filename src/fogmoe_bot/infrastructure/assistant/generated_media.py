@@ -30,20 +30,26 @@ _MAX_IMAGE_BYTES = 16 * 1024 * 1024
 _MAX_AUDIO_BYTES = 24 * 1024 * 1024
 """@brief 单音频字节上限 / Per-audio byte limit."""
 
-_OPENROUTER_IMAGE_ASPECT_RATIOS = (
-    (1, 1),
-    (1, 2),
-    (2, 1),
-    (2, 3),
-    (3, 2),
-    (3, 4),
-    (4, 3),
-    (4, 5),
-    (5, 4),
-    (9, 16),
-    (16, 9),
-)
-"""@brief OpenRouter 图片 API 的通用宽高比候选 / Common aspect-ratio candidates for the OpenRouter Images API."""
+_MIN_IMAGE_DIMENSION = 64
+"""@brief 单边最小像素 / Minimum pixels on either image edge."""
+
+_MAX_IMAGE_DIMENSION = 4096
+"""@brief 单边最大像素 / Maximum pixels on either image edge."""
+
+_DEFAULT_IMAGE_DIMENSION = 1024
+"""@brief 通用图片默认单边像素 / Generic default pixels for one image edge."""
+
+_SEEDREAM_45_MODEL = "bytedance-seed/seedream-4.5"
+"""@brief Seedream 4.5 模型标识 / Seedream 4.5 model identifier."""
+
+_SEEDREAM_45_DEFAULT_DIMENSION = 2048
+"""@brief Seedream 4.5 的安全默认单边像素 / Safe default edge pixels for Seedream 4.5."""
+
+_SEEDREAM_45_MIN_OUTPUT_PIXELS = 3_686_400
+"""@brief Seedream 4.5 的最小输出像素 / Minimum output pixels accepted by Seedream 4.5."""
+
+_MAX_PROVIDER_ERROR_TEXT = 2_000
+"""@brief provider 错误文本上限 / Maximum provider-error text length."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,26 +180,38 @@ class RequestsGeneratedMediaTools:
         if not self._settings.image_url or not self._settings.image_token:
             return {"error": "Image generation is not configured"}
         prompt = str(request.arguments["prompt"])
-        width = int(cast(int, request.arguments.get("width", 1024)))
-        height = int(cast(int, request.arguments.get("height", 1024)))
+        dimensions = _validated_image_dimensions(
+            model=self._settings.image_model,
+            arguments=request.arguments,
+        )
+        if isinstance(dimensions, dict):
+            return dimensions
+        width, height = dimensions
         if isinstance(request.arguments.get("seed"), int):
             seed = cast(int, request.arguments["seed"])
         else:
             seed = None
+        requested_steps = request.arguments.get("steps")
         payload = _image_request_payload(
             model=self._settings.image_model,
             prompt=prompt,
             width=width,
             height=height,
-            steps=int(cast(int, request.arguments.get("steps", 9))),
+            steps=int(
+                cast(
+                    int,
+                    requested_steps if requested_steps is not None else 9,
+                )
+            ),
             seed=seed,
         )
+        requested_timeout = request.arguments.get("timeout_seconds")
         timeout = int(
             cast(
                 int,
-                request.arguments.get(
-                    "timeout_seconds", self._settings.image_timeout_seconds
-                ),
+                requested_timeout
+                if requested_timeout is not None
+                else self._settings.image_timeout_seconds,
             )
         )
         with create_requests_session() as session:
@@ -209,7 +227,7 @@ class RequestsGeneratedMediaTools:
             except (requests.RequestException, ValueError) as error:
                 return {"error": f"Image generation failed: {error}"}
         if response.status_code >= 400:
-            return {"error": "Image generation failed", "status": response.status_code}
+            return _image_provider_error(response.status_code, content)
         try:
             payload = json.loads(content)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -322,8 +340,7 @@ def _image_request_payload(
         payload: JsonObject = {
             "model": model,
             "prompt": prompt,
-            "resolution": _openrouter_image_resolution(width, height),
-            "aspect_ratio": _openrouter_image_aspect_ratio(width, height),
+            "size": f"{width}x{height}",
         }
         if seed is not None:
             payload["seed"] = seed
@@ -340,36 +357,79 @@ def _image_request_payload(
     return {"items": [item]}
 
 
-def _openrouter_image_resolution(width: int, height: int) -> str:
-    """@brief 将像素尺寸映射为 OpenRouter 分辨率档位 / Map pixel dimensions to an OpenRouter resolution tier.
+def _validated_image_dimensions(
+    *, model: str, arguments: JsonObject
+) -> tuple[int, int] | JsonObject:
+    """@brief 校验并解析图片尺寸 / Validate and resolve image dimensions.
 
-    @param width 目标宽度（像素） / Target width in pixels.
-    @param height 目标高度（像素） / Target height in pixels.
-    @return 1K、2K 或 4K 分辨率档位 / The 1K, 2K, or 4K resolution tier.
+    @param model 图片模型标识 / Image-model identifier.
+    @param arguments 已校验或待防御性校验的工具参数 / Validated or defensively checked tool arguments.
+    @return 宽高二元组或可回传的校验错误 / Width-height tuple or a model-safe validation error.
     """
 
-    longest_edge = max(width, height)
-    if longest_edge <= 1024:
-        return "1K"
-    if longest_edge <= 2048:
-        return "2K"
-    return "4K"
+    raw_width = arguments.get("width")
+    raw_height = arguments.get("height")
+    if raw_width is None and raw_height is None:
+        return _default_image_dimensions(model)
+    if type(raw_width) is not int or type(raw_height) is not int:
+        return _image_dimension_error("width and height must be provided together as integers")
+    width = raw_width
+    height = raw_height
+    if not (
+        _MIN_IMAGE_DIMENSION <= width <= _MAX_IMAGE_DIMENSION
+        and _MIN_IMAGE_DIMENSION <= height <= _MAX_IMAGE_DIMENSION
+    ):
+        return _image_dimension_error(
+            f"width and height must each be between {_MIN_IMAGE_DIMENSION} and "
+            f"{_MAX_IMAGE_DIMENSION} pixels"
+        )
+    minimum_pixels = _minimum_image_pixels(model)
+    output_pixels = width * height
+    if output_pixels < minimum_pixels:
+        return _image_dimension_error(
+            f"{model or 'the configured image model'} requires at least "
+            f"{minimum_pixels} output pixels; received {width}x{height} "
+            f"({output_pixels} pixels)"
+        )
+    return width, height
 
 
-def _openrouter_image_aspect_ratio(width: int, height: int) -> str:
-    """@brief 选择最接近的 OpenRouter 宽高比 / Select the closest OpenRouter aspect ratio.
+def _default_image_dimensions(model: str) -> tuple[int, int]:
+    """@brief 返回模型安全默认尺寸 / Return the model-safe default dimensions.
 
-    @param width 目标宽度（像素） / Target width in pixels.
-    @param height 目标高度（像素） / Target height in pixels.
-    @return n:m 格式的宽高比 / Aspect ratio in n:m form.
+    @param model 图片模型标识 / Image-model identifier.
+    @return 默认宽高 / Default width and height.
     """
 
-    requested_ratio = width / height
-    numerator, denominator = min(
-        _OPENROUTER_IMAGE_ASPECT_RATIOS,
-        key=lambda ratio: abs((ratio[0] / ratio[1]) - requested_ratio),
-    )
-    return f"{numerator}:{denominator}"
+    if model.strip().casefold() == _SEEDREAM_45_MODEL:
+        return _SEEDREAM_45_DEFAULT_DIMENSION, _SEEDREAM_45_DEFAULT_DIMENSION
+    return _DEFAULT_IMAGE_DIMENSION, _DEFAULT_IMAGE_DIMENSION
+
+
+def _minimum_image_pixels(model: str) -> int:
+    """@brief 返回模型最小输出像素数 / Return the model's minimum output-pixel count.
+
+    @param model 图片模型标识 / Image-model identifier.
+    @return 最小输出像素数 / Minimum output-pixel count.
+    """
+
+    if model.strip().casefold() == _SEEDREAM_45_MODEL:
+        return _SEEDREAM_45_MIN_OUTPUT_PIXELS
+    return _MIN_IMAGE_DIMENSION * _MIN_IMAGE_DIMENSION
+
+
+def _image_dimension_error(message: str) -> JsonObject:
+    """@brief 构造尺寸校验错误 / Build a model-safe dimension-validation error.
+
+    @param message 有界错误说明 / Bounded error explanation.
+    @return 可持久化且可回传模型的错误对象 / Persistable model-safe error object.
+    """
+
+    return {
+        "error": "Image dimensions are invalid",
+        "provider_code": "invalid_image_size",
+        "provider_message": message[:_MAX_PROVIDER_ERROR_TEXT],
+    }
 
 
 def _image_values(value: object) -> list[str]:
@@ -392,6 +452,98 @@ def _image_values(value: object) -> list[str]:
         elif key in {"items", "images", "data", "results", "outputs", "output"}:
             results.extend(_image_values(child))
     return results
+
+
+def _image_provider_error(status_code: int, content: bytes) -> JsonObject:
+    """@brief 保留图片 provider 错误详情 / Preserve image-provider error details.
+
+    @param status_code HTTP 状态码 / HTTP status code.
+    @param content provider 返回的有界响应体 / Bounded provider response body.
+    @return 包含状态、错误码和诊断文本的 JSON 错误 / JSON error with status, code, and diagnostics.
+    @note 只保留有界文本与标量字段，不把任意嵌套 provider payload 原样扩散到模型上下文。/
+        Only bounded text and scalar fields are retained; arbitrary nested provider payloads are
+        not copied into the model context.
+    """
+
+    result: JsonObject = {
+        "error": f"Image generation failed (HTTP {status_code})",
+        "status": status_code,
+    }
+    parsed: object | None = None
+    try:
+        parsed = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        pass
+
+    error_value: object = (
+        parsed.get("error") if isinstance(parsed, dict) else None
+    )
+    message = _provider_error_text(error_value)
+    if message is None and isinstance(error_value, dict):
+        message = _provider_error_text(error_value.get("message"))
+        if message is None:
+            message = _provider_error_text(error_value.get("detail"))
+    if message is None and isinstance(parsed, dict):
+        message = _provider_error_text(parsed.get("message"))
+    if message is not None:
+        result["provider_message"] = message
+        result["error"] = f"Image generation failed (HTTP {status_code}): {message}"
+
+    if isinstance(error_value, dict):
+        code = _provider_error_scalar(error_value.get("code"))
+        if code is not None:
+            result["provider_code"] = code
+        error_type = _provider_error_text(error_value.get("type"))
+        if error_type is not None:
+            result["provider_type"] = error_type
+
+    provider_response = _provider_response_preview(parsed, content)
+    if provider_response is not None:
+        result["provider_response"] = provider_response
+    return result
+
+
+def _provider_error_text(value: object) -> str | None:
+    """@brief 提取有界 provider 文本 / Extract bounded provider text.
+
+    @param value 候选字段 / Candidate field.
+    @return 清理后的文本或 None / Cleaned text or None.
+    """
+
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized[:_MAX_PROVIDER_ERROR_TEXT] or None
+
+
+def _provider_error_scalar(value: object) -> bool | float | int | str | None:
+    """@brief 提取 provider 标量错误码 / Extract a scalar provider error code.
+
+    @param value 候选错误码 / Candidate error code.
+    @return 可 JSON 编码的标量或 None / JSON-serializable scalar or None.
+    """
+
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return None
+
+
+def _provider_response_preview(parsed: object | None, content: bytes) -> str | None:
+    """@brief 生成有界 provider 响应预览 / Build a bounded provider-response preview.
+
+    @param parsed 已解析 JSON 或 None / Parsed JSON or None.
+    @param content 原始响应体 / Raw response body.
+    @return 有界预览或 None / Bounded preview or None.
+    """
+
+    if parsed is not None:
+        try:
+            serialized = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            serialized = ""
+        if serialized:
+            return serialized[:_MAX_PROVIDER_ERROR_TEXT]
+    return content.decode("utf-8", errors="replace").strip()[:_MAX_PROVIDER_ERROR_TEXT] or None
 
 
 def _strip_data_uri(value: str) -> str:

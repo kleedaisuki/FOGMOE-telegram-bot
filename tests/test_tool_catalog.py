@@ -162,7 +162,23 @@ def test_default_catalog_excludes_stateful_sandbox_and_classifies_action_tools()
     assert isinstance(media, ValidatedToolInvocation)
     assert media.mutating is True
     assert media.effect_kind == "media.generate_image"
+    assert media.arguments.width is None
+    assert media.arguments.height is None
     assert media.arguments.timeout_seconds is None
+
+    explicit_dimensions = DEFAULT_TOOL_CATALOG.validate(
+        "generate_image",
+        {"prompt": "Klee", "width": 2048, "height": 2048},
+    )
+    assert isinstance(explicit_dimensions, ValidatedToolInvocation)
+    assert explicit_dimensions.arguments.width == 2048
+    assert explicit_dimensions.arguments.height == 2048
+
+    incomplete_dimensions = DEFAULT_TOOL_CATALOG.validate(
+        "generate_image",
+        {"prompt": "Klee", "width": 2048},
+    )
+    assert isinstance(incomplete_dimensions, InvalidToolArguments)
 
 
 def test_send_sticker_is_a_bounded_mutation_without_file_id_escape_hatch() -> None:
