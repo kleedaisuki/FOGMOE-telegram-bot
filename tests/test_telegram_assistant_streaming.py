@@ -686,7 +686,7 @@ def test_current_action_draft_is_fixed_height_deduplicated_and_hides_answer_toke
                 emitted_at=datetime.now(UTC),
             ),
         )
-        await wait_for_text("✦ 我去网上查查最新资料…\n  能力：google_search")
+        await wait_for_text("✦ 我去网上查查最新资料…")
         await _project(
             projection,
             state.append("不应该出现在状态卡片里的答案", emitted_at=datetime.now(UTC)),
@@ -718,7 +718,7 @@ def test_current_action_draft_is_fixed_height_deduplicated_and_hides_answer_toke
         await wait_for_text("最后的回答整理好了，正在接着发给你～")
 
         draft_texts = [str(call[2]) for call in bot.draft_calls]
-        assert "✦ 我去网上查查最新资料…\n  能力：google_search" in draft_texts
+        assert "✦ 我去网上查查最新资料…" in draft_texts
         assert draft_texts.count("✓ 这个步骤已经稳定记录，继续处理下一步～") == 1
         assert all(
             "我先查一下最新资料" not in text

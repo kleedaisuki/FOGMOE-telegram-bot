@@ -1114,7 +1114,7 @@ class AgentLoop:
         tool_name: str,
         succeeded: bool,
     ) -> None:
-        """@brief receipt 后追加工具终态稳定块 / Append a stable tool terminal block after its receipt.
+        """@brief receipt 后回填工具终态稳定块 / Replace a stable tool-start block after its receipt.
 
         @param tool_context durable Turn 与 generation 身份 / Durable Turn and generation identity.
         @param invocation_id 稳定工具调用 ID / Stable tool invocation ID.
@@ -1142,15 +1142,15 @@ class AgentLoop:
         invocation_id: str,
         tool_name: str,
     ) -> None:
-        """@brief 工具执行前追加不可变开始块 / Append an immutable start block before tool execution.
+        """@brief 工具执行前追加开始块 / Append a tool-start block before tool execution.
 
         @param tool_context durable Turn 与 generation 身份 / Durable Turn and generation identity.
         @param invocation_id 稳定工具调用 ID / Stable tool invocation ID.
         @param tool_name 目录工具名 / Catalog tool name.
         @return None / None.
-        @note 开始块是独立真实消息，完成时追加新块而不编辑它，避免客户端重绘。/
-            The start block is an independent real message. Completion appends another block
-            instead of editing it, avoiding client-side redraw.
+        @note receipt 形成后会编辑这个开始块，因此同一工具在 Telegram 只占一条消息。/
+            The receipt terminal state edits this start block, so one tool occupies one Telegram
+            message.
         """
 
         if self._progress is None:

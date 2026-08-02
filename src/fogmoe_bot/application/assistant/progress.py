@@ -2,11 +2,12 @@
 
 进度项不是私有思维链，也不是 provider token 流。它们只在一个模型步骤已经形成
 durable checkpoint，或一个工具调用已经形成 receipt 后发布。每个完成项通过
-transactional outbox 成为独立 Telegram 消息，因此最终回答不会覆盖或删除先前过程。/
+transactional outbox 成为独立 Telegram 消息；工具完成项则会回填其开始消息，避免把同一
+工具展示两次。/
 Progress items are neither private chain-of-thought nor provider token streams. They are published
 only after a model step has a durable checkpoint or a tool call has a receipt. Every completed item
-becomes an independent Telegram message through the transactional outbox, so the final answer never
-overwrites or removes earlier work.
+uses the transactional outbox. Tool terminal items replace their corresponding start message, while
+the final answer remains a separate message.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ class AssistantProgressItem:
     @param kind 过程项类别 / Progress-item kind.
     @param text 用户可见的完整稳定文本 / Complete stable user-visible text.
     @param created_at 项形成时间 / Instant when the item became stable.
+    @param replaces_item_id 可选的被回填过程项 ID / Optional progress-item ID to replace.
     @note ``text`` 必须是可公开摘要，不能包含工具参数、原始结果、日志或私有推理。/
         ``text`` must be a public summary and cannot contain tool arguments, raw results, logs, or
         private reasoning.
@@ -52,6 +54,7 @@ class AssistantProgressItem:
     kind: AssistantProgressKind
     text: str
     created_at: datetime
+    replaces_item_id: str | None = None
 
     def __post_init__(self) -> None:
         """@brief 校验稳定身份、文本和时间 / Validate stable identity, text, and timestamp.
@@ -77,6 +80,11 @@ class AssistantProgressItem:
             )
         object.__setattr__(self, "text", self.text.strip())
         object.__setattr__(self, "created_at", ensure_utc(self.created_at))
+        if (
+            self.replaces_item_id is not None
+            and _ITEM_ID.fullmatch(self.replaces_item_id) is None
+        ):
+            raise ValueError("Assistant progress replaces_item_id has invalid syntax")
 
 
 class AssistantProgressPersistence(Protocol):
@@ -145,10 +153,11 @@ def tool_progress_item(
     state_text = _tool_state_text(normalized_name, succeeded=succeeded)
     marker = "✓" if succeeded else "×"
     return AssistantProgressItem(
-        item_id=f"tool:{invocation_id}",
+        item_id=f"tool:{invocation_id}:finished",
         kind=AssistantProgressKind.TOOL,
-        text=f"{marker} {state_text}\n  能力：{normalized_name}",
+        text=f"{marker} {state_text}",
         created_at=created_at,
+        replaces_item_id=f"tool:{invocation_id}:started",
     )
 
 
@@ -170,7 +179,7 @@ def tool_started_progress_item(
     return AssistantProgressItem(
         item_id=f"tool:{invocation_id}:started",
         kind=AssistantProgressKind.TOOL,
-        text=(f"✦ {_tool_action_text(normalized_name)}\n  能力：{normalized_name}"),
+        text=f"✦ {_tool_action_text(normalized_name)}",
         created_at=created_at,
     )
 

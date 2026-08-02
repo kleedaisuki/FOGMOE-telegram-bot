@@ -301,8 +301,8 @@ class PostgresAssistantToolStore:
         @note progress outbound 可在 inference 期间投递，不参与最终 Turn delivery plan 的
             成败；最终回答只会排在它后面，不会覆盖或删除它。/
             Progress outbounds may be delivered during inference and do not participate in the
-            final Turn delivery plan. The final answer is ordered after them and never overwrites
-            or deletes them.
+            final Turn delivery plan. Tool terminal items edit their corresponding start message;
+            the final answer is ordered after them.
         """
 
         fence = context.generation_fence
@@ -313,15 +313,23 @@ class PostgresAssistantToolStore:
         payload: JsonObject = {
             "chat_id": context.chat_id,
             "text": item.text,
-            "disable_notification": True,
-            "protect_content": False,
             "disable_web_page_preview": True,
         }
-        if context.message_thread_id is not None:
-            payload["message_thread_id"] = context.message_thread_id
-        if revision == 0 and item.item_id == "step:0:commentary":
-            if context.message_id is not None:
-                payload["reply_to_message_id"] = context.message_id
+        if item.replaces_item_id is not None:
+            source_semantic_key = (
+                f"assistant.progress.generation.{revision}.{item.replaces_item_id}"
+            )
+            payload["source_outbound_id"] = str(
+                OutboundMessageId.for_turn(context.turn_id, source_semantic_key)
+            )
+        else:
+            payload["disable_notification"] = True
+            payload["protect_content"] = False
+            if context.message_thread_id is not None:
+                payload["message_thread_id"] = context.message_thread_id
+            if revision == 0 and item.item_id == "step:0:commentary":
+                if context.message_id is not None:
+                    payload["reply_to_message_id"] = context.message_id
         draft = OutboundDraft(
             message_id=OutboundMessageId.for_turn(
                 context.turn_id,

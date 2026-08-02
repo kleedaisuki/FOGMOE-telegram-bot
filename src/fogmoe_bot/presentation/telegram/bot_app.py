@@ -547,6 +547,7 @@ def _compose_services(
         delivery=TelegramOutboxDeliveryAdapter(
             application.bot,
             artifacts=assistant.artifacts,
+            progress_source_lookup=primitives.outbox_repository,
         ),
         worker_count=runtime.outbox.worker_count,
         polling_policy=AdaptivePollingPolicy(

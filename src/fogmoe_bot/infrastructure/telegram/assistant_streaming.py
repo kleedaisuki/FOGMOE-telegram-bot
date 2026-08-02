@@ -771,7 +771,7 @@ def _render_activity_block(activity: AssistantStreamActivity) -> str:
     """@brief 渲染一个不泄露内部数据的活动块 / Render one activity block without leaking internal data.
 
     @param activity 已验证的 Assistant 活动项 / Validated Assistant activity item.
-    @return 雾萌角色一致的两行内纯文本 / FOGMOE-consistent plain text of at most two lines.
+    @return 雾萌角色一致的简短纯文本 / Short FOGMOE-consistent plain text.
     """
 
     if activity.kind is AssistantActivityKind.TOOL:
@@ -780,7 +780,7 @@ def _render_activity_block(activity: AssistantStreamActivity) -> str:
                 activity.label,
                 "我正在用一个能力帮你处理…",
             )
-            return f"✦ {active}\n  能力：{activity.label}"
+            return f"✦ {active}"
         if activity.status is AssistantActivityStatus.FAILED:
             return "× 这个能力暂时没处理好，我在收束现场…"
         return "✓ 这个步骤已经稳定记录，继续处理下一步～"

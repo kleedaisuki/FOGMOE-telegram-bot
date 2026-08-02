@@ -47,6 +47,7 @@ from fogmoe_bot.domain.media.artifact import ArtifactKind
 from fogmoe_bot.infrastructure.media.file_artifact_store import FileArtifactStore
 from fogmoe_bot.infrastructure.telegram.outbox_delivery import (
     TelegramOutboxDeliveryAdapter,
+    parse_assistant_progress_edit_payload,
     parse_send_artifact_payload,
     parse_send_message_payload,
     parse_send_photo_payload,
@@ -102,6 +103,31 @@ class _TelegramMessage:
         """
 
         self.message_id = message_id
+
+
+class _ProgressSourceLookup:
+    """@brief 工具开始消息的内存查找替身 / In-memory lookup double for tool-start messages."""
+
+    def __init__(self, source: OutboundMessage) -> None:
+        """@brief 保存已送达原消息 / Store the delivered source message.
+
+        @param source 已送达工具开始消息 / Delivered tool-start message.
+        @return None / None.
+        """
+
+        self._source = source
+
+    async def get_outbound(
+        self,
+        message_id: OutboundMessageId,
+    ) -> OutboundMessage | None:
+        """@brief 按 outbox ID 返回原消息 / Return the source by outbox ID.
+
+        @param message_id 待查 outbox ID / Outbox ID to look up.
+        @return 匹配的原消息或 None / Matching source message or None.
+        """
+
+        return self._source if message_id == self._source.draft.message_id else None
 
 
 def _sticker(file_id: str, emoji: str) -> Sticker:
@@ -374,9 +400,10 @@ def test_send_message_returns_external_message_id() -> None:
     assert preview_options.is_disabled is True
 
 
-def test_assistant_progress_uses_append_only_send_message_delivery() -> None:
-    """@brief durable progress 追加真实消息而非编辑或删除历史 /
-    Durable progress appends a real message instead of editing or deleting history.
+def test_assistant_progress_start_uses_send_message_delivery() -> None:
+    """@brief 工具开始进度发送真实消息 / Tool-start progress sends a real message.
+
+    A terminal tool state edits this message in a separate test.
     """
 
     bot = _Bot()
@@ -385,7 +412,7 @@ def test_assistant_progress_uses_append_only_send_message_delivery() -> None:
             _message(
                 {
                     "chat_id": 42,
-                    "text": "✓ 网上资料查完啦\n  能力：google_search",
+                    "text": "✦ 我去网上查查最新资料…",
                     "disable_notification": True,
                     "protect_content": False,
                     "disable_web_page_preview": True,
@@ -397,9 +424,67 @@ def test_assistant_progress_uses_append_only_send_message_delivery() -> None:
 
     assert receipt.external_message_id == "42"
     assert [call["text"] for call in bot.send_calls] == [
-        "✓ 网上资料查完啦\n  能力：google_search"
+        "✦ 我去网上查查最新资料…"
     ]
     assert bot.edit_calls == []
+
+
+def test_assistant_tool_terminal_edits_its_start_message() -> None:
+    """@brief 工具终态回填开始消息而非另发消息 / Tool terminal state edits its start message instead of sending another message.
+
+    @return None / None.
+    """
+
+    source = _message(
+        {
+            "chat_id": 42,
+            "text": "✦ 我去网上查查最新资料…",
+            "disable_notification": True,
+            "protect_content": False,
+            "disable_web_page_preview": True,
+        },
+        kind=SEND_TELEGRAM_ASSISTANT_PROGRESS,
+    )
+    delivered_source = OutboundMessage.restore(
+        draft=source.draft,
+        stream_sequence=source.stream_sequence,
+        status=OutboundStatus.DELIVERED,
+        version=2,
+        attempt_count=1,
+        next_attempt_at=None,
+        updated_at=NOW + timedelta(seconds=2),
+        delivered_at=NOW + timedelta(seconds=2),
+        external_message_id="77",
+        last_error=None,
+    )
+    bot = _Bot()
+    terminal = _message(
+        {
+            "chat_id": 42,
+            "text": "✓ 网上资料查完啦",
+            "source_outbound_id": str(source.draft.message_id),
+            "disable_web_page_preview": True,
+        },
+        kind=SEND_TELEGRAM_ASSISTANT_PROGRESS,
+    )
+
+    receipt = asyncio.run(
+        TelegramOutboxDeliveryAdapter(
+            cast(Bot, bot),
+            progress_source_lookup=_ProgressSourceLookup(delivered_source),
+        ).deliver(terminal)
+    )
+
+    assert receipt.external_message_id == "77"
+    assert bot.send_calls == []
+    assert bot.edit_calls[0]["message_id"] == 77
+    assert bot.edit_calls[0]["text"] == "✓ 网上资料查完啦"
+    assert (
+        parse_assistant_progress_edit_payload(
+            terminal.draft.payload
+        ).source_outbound_id
+        == source.draft.message_id
+    )
 
 
 def test_message_entity_parse_error_falls_back_to_plain_text() -> None:
@@ -446,6 +531,26 @@ def test_edit_message_returns_existing_external_id() -> None:
 
     assert receipt.external_message_id == "77"
     assert bot.edit_calls[0]["message_id"] == 77
+
+
+def test_edit_message_accepts_already_applied_retry() -> None:
+    """@brief 编辑重试发现目标文本已生效时确认成功 / A retry succeeds when Telegram reports the edit is already applied.
+
+    @return None / None.
+    """
+
+    bot = _Bot(error=BadRequest("Bad Request: message is not modified"))
+
+    receipt = asyncio.run(
+        _adapter(bot).deliver(
+            _message(
+                {"chat_id": -100, "message_id": 77, "text": "updated"},
+                kind=EDIT_TELEGRAM_MESSAGE,
+            )
+        )
+    )
+
+    assert receipt.external_message_id == "77"
 
 
 def test_artifact_delivery_claims_and_completes_only_through_outbox(

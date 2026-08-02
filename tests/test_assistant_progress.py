@@ -22,6 +22,7 @@ from fogmoe_bot.domain.conversation.identity import (
     DeliveryStreamId,
     InferenceActivityId,
     LeaseToken,
+    OutboundMessageId,
     TurnId,
     TurnRevision,
 )
@@ -133,10 +134,11 @@ def test_progress_items_are_bounded_public_and_stably_identified() -> None:
         text="我先核对两处资料，再回来汇总。",
         created_at=NOW,
     )
-    assert tool.item_id == "tool:generation:1:step:2:call:0"
-    assert tool.text == "✓ 网上资料查完啦\n  能力：google_search"
+    assert tool.item_id == "tool:generation:1:step:2:call:0:finished"
+    assert tool.replaces_item_id == "tool:generation:1:step:2:call:0:started"
+    assert tool.text == "✓ 网上资料查完啦"
     assert tool_started.item_id == "tool:generation:1:step:2:call:0:started"
-    assert tool_started.text == "✦ 我去网上查查最新资料…\n  能力：google_search"
+    assert tool_started.text == "✦ 我去网上查查最新资料…"
     assert "arguments" not in tool.text
     with pytest.raises(ValueError, match="item_id"):
         AssistantProgressItem(
@@ -189,16 +191,24 @@ def test_progress_publisher_fences_generation_and_replays_same_outbound_identity
         )
         context = _context()
         item = commentary_progress_item(step=0, text="我先查一下。", created_at=NOW)
+        terminal = tool_progress_item(
+            invocation_id="generation:1:step:0:call:0",
+            tool_name="google_search",
+            succeeded=True,
+            created_at=NOW,
+        )
 
         await store.publish_progress(context, item)
         await store.publish_progress(context, item)
+        await store.publish_progress(context, terminal)
 
         assert observed_fences == [
             context.generation_fence,
             context.generation_fence,
+            context.generation_fence,
         ]
-        assert len(outbox.drafts) == 2
-        first, replay = outbox.drafts
+        assert len(outbox.drafts) == 3
+        first, replay, terminal_draft = outbox.drafts
         assert first.message_id == replay.message_id
         assert first.idempotency_key == replay.idempotency_key
         assert first.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS
@@ -210,6 +220,18 @@ def test_progress_publisher_fences_generation_and_replays_same_outbound_identity
             "protect_content": False,
             "disable_web_page_preview": True,
             "reply_to_message_id": 9,
+        }
+        source_semantic_key = (
+            "assistant.progress.generation.0."
+            "tool:generation:1:step:0:call:0:started"
+        )
+        assert terminal_draft.payload == {
+            "chat_id": 42,
+            "text": "✓ 网上资料查完啦",
+            "disable_web_page_preview": True,
+            "source_outbound_id": str(
+                OutboundMessageId.for_turn(context.turn_id, source_semantic_key)
+            ),
         }
 
     asyncio.run(scenario())

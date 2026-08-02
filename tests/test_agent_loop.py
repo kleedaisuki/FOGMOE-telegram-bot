@@ -807,13 +807,17 @@ def test_agent_loop_appends_checkpoint_commentary_and_receipt_backed_tool_progre
         assert [item.item_id for _, item in progress.items] == [
             "step:0:commentary",
             "tool:step:0:call:0:started",
-            "tool:step:0:call:0",
+            "tool:step:0:call:0:finished",
         ]
         assert progress.items[0][1].text == ("我先确认一下当前时间，再给你准确回答。")
         assert progress.items[1][1].text == (
-            "✦ 我确认一下现在的时间…\n  能力：get_current_time"
+            "✦ 我确认一下现在的时间…"
         )
-        assert progress.items[2][1].text == ("✓ 时间确认好啦\n  能力：get_current_time")
+        assert progress.items[2][1].text == "✓ 时间确认好啦"
+        assert (
+            progress.items[2][1].replaces_item_id
+            == "tool:step:0:call:0:started"
+        )
 
     asyncio.run(scenario())
 

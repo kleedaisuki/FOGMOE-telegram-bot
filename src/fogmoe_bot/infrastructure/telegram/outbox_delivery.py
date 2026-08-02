@@ -15,6 +15,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Protocol
 from urllib.parse import urlsplit
 
 from telegram import (
@@ -44,6 +45,7 @@ from fogmoe_bot.application.conversation.outbox_worker import (
     PermanentDeliveryError,
     RetryableDeliveryError,
 )
+from fogmoe_bot.domain.conversation.identity import OutboundMessageId
 from fogmoe_bot.domain.conversation.outbox import (
     EDIT_TELEGRAM_MESSAGE,
     SEND_TELEGRAM_ASSISTANT_PROGRESS,
@@ -52,6 +54,7 @@ from fogmoe_bot.domain.conversation.outbox import (
     SEND_TELEGRAM_PHOTO,
     SEND_TELEGRAM_STICKER,
     OutboundMessage,
+    OutboundStatus,
 )
 from fogmoe_bot.domain.conversation.payloads import JsonObject
 from fogmoe_bot.domain.media.artifact import ArtifactKind
@@ -82,6 +85,16 @@ _EDIT_KEYS = frozenset(
     }
 )
 """@brief edit_message_text 允许的持久化字段 / Persisted fields allowed for edit_message_text."""
+
+_ASSISTANT_PROGRESS_EDIT_KEYS = frozenset(
+    {
+        "chat_id",
+        "text",
+        "source_outbound_id",
+        "disable_web_page_preview",
+    }
+)
+"""@brief 回填 Assistant 工具进度允许的持久化字段 / Persisted fields allowed for Assistant tool-progress replacement."""
 
 _PARSE_MODES = frozenset({"HTML", "Markdown", "MarkdownV2"})
 """@brief 支持的 Telegram parse_mode 值 / Supported Telegram parse_mode values."""
@@ -141,6 +154,19 @@ def _is_message_entity_parse_error(error: BadRequest) -> bool:
     return "can't parse entities" in str(error).casefold()
 
 
+def _is_message_not_modified_error(error: BadRequest) -> bool:
+    """@brief 判断编辑目标已处于所需文本 / Decide whether an edit target already has the requested text.
+
+    @param error Telegram 返回的请求错误 / Request error returned by Telegram.
+    @return Telegram 明确说明消息未变化时为 True / True when Telegram explicitly says the message was unchanged.
+    @note 这通常发生在编辑请求成功后回执丢失的重试中；用户可见状态已正确，因此可安全确认
+        本 outbox 项。/ This usually occurs after a successful edit lost its response and is retried;
+        the user-visible state is already correct, so the outbox item can be acknowledged safely.
+    """
+
+    return "message is not modified" in str(error).casefold()
+
+
 @dataclass(frozen=True, slots=True)
 class SendMessagePayload:
     """@brief 已校验的 Telegram send_message 载荷 / Validated Telegram send_message payload.
@@ -181,6 +207,38 @@ class EditMessagePayload:
     text: str
     parse_mode: str | None
     disable_web_page_preview: bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantProgressEditPayload:
+    """@brief 已校验的 Assistant 工具进度回填载荷 / Validated Assistant tool-progress replacement payload.
+
+    @param chat_id 目标 Telegram chat / Target Telegram chat.
+    @param source_outbound_id 原开始消息的 outbox 标识 / Outbox ID of the original start message.
+    @param text 回填后的终态文本 / Terminal text replacing the start message.
+    @param disable_web_page_preview 是否禁用链接预览 / Whether link previews are disabled.
+    """
+
+    chat_id: int | str
+    source_outbound_id: OutboundMessageId
+    text: str
+    disable_web_page_preview: bool | None
+
+
+class AssistantProgressSourceLookup(Protocol):
+    """@brief 解析已送达进度消息 Telegram ID 的只读端口 / Read-only port resolving a delivered progress message's Telegram ID."""
+
+    async def get_outbound(
+        self,
+        message_id: OutboundMessageId,
+    ) -> OutboundMessage | None:
+        """@brief 读取 outbox 消息 / Load an outbox message.
+
+        @param message_id 待解析的 outbox 标识 / Outbox message identifier to resolve.
+        @return 已持久化 outbox 消息或 None / Persisted outbound message or None.
+        """
+
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,15 +301,19 @@ class TelegramOutboxDeliveryAdapter:
         bot: Bot,
         *,
         artifacts: FileArtifactStore | None = None,
+        progress_source_lookup: AssistantProgressSourceLookup | None = None,
     ) -> None:
         """@brief 创建 Telegram 投递适配器 / Create a Telegram delivery adapter.
 
         @param bot 已初始化的 PTB Bot / Initialized PTB Bot.
         @param artifacts 可选 durable artifact store / Optional durable artifact store.
+        @param progress_source_lookup 回填工具消息时解析原 Telegram ID 的只读端口 /
+            Read-only port resolving original Telegram IDs for tool-message replacement.
         """
 
         self._bot = bot
         self._artifacts = artifacts
+        self._progress_source_lookup = progress_source_lookup
 
     async def deliver(self, message: OutboundMessage) -> DeliveryReceipt:
         """@brief 解析并投递一条 outbox 消息 / Parse and deliver one outbox message.
@@ -264,10 +326,13 @@ class TelegramOutboxDeliveryAdapter:
         """
 
         try:
-            if message.draft.kind in {
-                SEND_TELEGRAM_MESSAGE,
-                SEND_TELEGRAM_ASSISTANT_PROGRESS,
-            }:
+            if message.draft.kind == SEND_TELEGRAM_ASSISTANT_PROGRESS:
+                if "source_outbound_id" in message.draft.payload:
+                    return await self._deliver_assistant_progress_edit(
+                        message.draft.payload
+                    )
+                return await self._deliver_message(message.draft.payload)
+            if message.draft.kind == SEND_TELEGRAM_MESSAGE:
                 return await self._deliver_message(message.draft.payload)
             if message.draft.kind == EDIT_TELEGRAM_MESSAGE:
                 return await self._deliver_edit(message.draft.payload)
@@ -373,13 +438,20 @@ class TelegramOutboxDeliveryAdapter:
         """@brief 投递已校验消息编辑 / Deliver a validated message edit."""
 
         parsed = parse_edit_message_payload(payload)
-        edited = await self._bot.edit_message_text(
-            chat_id=parsed.chat_id,
-            message_id=parsed.message_id,
-            text=parsed.text,
-            parse_mode=parsed.parse_mode,
-            link_preview_options=_link_preview_options(parsed.disable_web_page_preview),
-        )
+        try:
+            edited = await self._bot.edit_message_text(
+                chat_id=parsed.chat_id,
+                message_id=parsed.message_id,
+                text=parsed.text,
+                parse_mode=parsed.parse_mode,
+                link_preview_options=_link_preview_options(
+                    parsed.disable_web_page_preview
+                ),
+            )
+        except BadRequest as error:
+            if _is_message_not_modified_error(error):
+                return DeliveryReceipt(str(parsed.message_id))
+            raise
         if edited is True:
             return DeliveryReceipt(str(parsed.message_id))
         if edited is False:
@@ -388,6 +460,57 @@ class TelegramOutboxDeliveryAdapter:
                 category=DeliveryErrorCategory.PROVIDER,
             )
         return DeliveryReceipt(str(edited.message_id))
+
+    async def _deliver_assistant_progress_edit(
+        self,
+        payload: JsonObject,
+    ) -> DeliveryReceipt:
+        """@brief 回填已送达工具开始消息 / Replace a delivered tool-start message.
+
+        @param payload 含原 outbox 身份的稳定回填载荷 / Stable replacement payload holding the source outbox identity.
+        @return 被编辑 Telegram 消息的外部 ID / External ID of the edited Telegram message.
+        @raise OutboundPayloadError 原消息尚未成功送达或身份不一致时抛出 /
+            Raised when the source message was not delivered successfully or its identity mismatches.
+        @note delivery-stream 顺序先送达开始消息再领取本项；此处查询把 Telegram ID 的解析
+            推迟到该顺序已经成立之后。/ Delivery-stream ordering delivers the start message
+            before claiming this item; this lookup defers Telegram-ID resolution until then.
+        """
+
+        parsed = parse_assistant_progress_edit_payload(payload)
+        lookup = self._progress_source_lookup
+        if lookup is None:
+            raise OutboundPayloadError(
+                "Assistant progress replacement requires a source lookup",
+            )
+        source = await lookup.get_outbound(parsed.source_outbound_id)
+        if (
+            source is None
+            or source.status is not OutboundStatus.DELIVERED
+            or source.external_message_id is None
+            or source.draft.kind != SEND_TELEGRAM_ASSISTANT_PROGRESS
+            or source.draft.payload.get("chat_id") != parsed.chat_id
+        ):
+            raise OutboundPayloadError(
+                "Assistant progress replacement source was not delivered",
+            )
+        try:
+            telegram_message_id = int(source.external_message_id)
+        except ValueError as error:
+            raise OutboundPayloadError(
+                "Assistant progress replacement source has an invalid Telegram message ID",
+            ) from error
+        if telegram_message_id < 1:
+            raise OutboundPayloadError(
+                "Assistant progress replacement source has an invalid Telegram message ID",
+            )
+        return await self._deliver_edit(
+            {
+                "chat_id": parsed.chat_id,
+                "message_id": telegram_message_id,
+                "text": parsed.text,
+                "disable_web_page_preview": parsed.disable_web_page_preview,
+            }
+        )
 
     async def _deliver_sticker(self, payload: JsonObject) -> DeliveryReceipt:
         """@brief 解析 pack/emoji 并投递贴纸 / Resolve pack/emoji and deliver a sticker."""
@@ -538,6 +661,40 @@ def parse_edit_message_payload(payload: JsonObject) -> EditMessagePayload:
         message_id=message_id,
         text=_text(payload),
         parse_mode=_parse_mode(payload),
+        disable_web_page_preview=_optional_bool(
+            payload,
+            "disable_web_page_preview",
+        ),
+    )
+
+
+def parse_assistant_progress_edit_payload(
+    payload: JsonObject,
+) -> AssistantProgressEditPayload:
+    """@brief 严格解析 Assistant 工具进度回填载荷 / Strictly parse an Assistant tool-progress replacement payload.
+
+    @param payload 持久化 JSON 对象 / Persisted JSON object.
+    @return 类型化回填载荷 / Typed replacement payload.
+    @raise OutboundPayloadError 字段或原 outbox 身份非法时抛出 /
+        Raised when fields or the source outbox identity are invalid.
+    """
+
+    _validate_keys(
+        payload,
+        allowed=_ASSISTANT_PROGRESS_EDIT_KEYS,
+        required=frozenset({"chat_id", "text", "source_outbound_id"}),
+    )
+    source = payload["source_outbound_id"]
+    if not isinstance(source, str):
+        raise _payload_error("source_outbound_id must be a UUID string")
+    try:
+        source_outbound_id = OutboundMessageId.parse(source)
+    except ValueError as error:
+        raise _payload_error("source_outbound_id must be a UUID string") from error
+    return AssistantProgressEditPayload(
+        chat_id=_chat_id(payload),
+        source_outbound_id=source_outbound_id,
+        text=_text(payload),
         disable_web_page_preview=_optional_bool(
             payload,
             "disable_web_page_preview",
@@ -869,12 +1026,15 @@ def _retry_after_delay(error: RetryAfter) -> timedelta:
 
 
 __all__ = [
+    "AssistantProgressEditPayload",
+    "AssistantProgressSourceLookup",
     "EditMessagePayload",
     "SendArtifactPayload",
     "SendMessagePayload",
     "SendPhotoPayload",
     "SendStickerPayload",
     "TelegramOutboxDeliveryAdapter",
+    "parse_assistant_progress_edit_payload",
     "parse_edit_message_payload",
     "parse_send_artifact_payload",
     "parse_send_message_payload",
