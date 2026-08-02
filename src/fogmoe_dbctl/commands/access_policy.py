@@ -161,6 +161,11 @@ DEFAULT_ACCESS_POLICY = DatabaseAccessPolicy(
             name="drop_partitions_before",
             argument_signature="DATE",
         ),
+        RuntimeFunctionGrant(
+            schema="workspace",
+            name="validate_attachment_import_binding",
+            argument_signature="UUID, TEXT, UUID, TEXT, BIGINT, TEXT",
+        ),
     ),
     reporting_relations=(
         ReportingRelationGrant(

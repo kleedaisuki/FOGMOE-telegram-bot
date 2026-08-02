@@ -523,6 +523,17 @@ def test_runtime_grants_include_every_new_bounded_context_schema() -> None:
             'TO "fogmoe-app";'
         ) in sql
 
+    attachment_binding = RuntimeFunctionGrant(
+        schema="workspace",
+        name="validate_attachment_import_binding",
+        argument_signature="UUID, TEXT, UUID, TEXT, BIGINT, TEXT",
+    )
+    assert attachment_binding in policy.runtime_functions
+    assert (
+        'GRANT EXECUTE ON FUNCTION "workspace"."validate_attachment_import_binding"'
+        '(UUID, TEXT, UUID, TEXT, BIGINT, TEXT) TO "fogmoe-app";'
+    ) in sql
+
 
 def test_reporting_grants_are_read_only_for_explicit_observability_models() -> None:
     """@brief 报表授权仅包含显式观测读模型 / Reporting grants contain only explicit observability read models.

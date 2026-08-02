@@ -11,6 +11,8 @@ recovery fact.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import logging
+from uuid import UUID
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -53,6 +55,9 @@ from fogmoe_bot.infrastructure.database import db
 
 from .workspace_attachment_receipts import _is_permanent_attachment_storage_error
 
+_logger = logging.getLogger(__name__)
+"""@brief 附件 intent adapter 的受限诊断 logger / Restricted diagnostic logger for the attachment-intent adapter."""
+
 
 class PostgresWorkspaceAttachmentImportIntentStore(
     WorkspaceAttachmentImportIntentStore
@@ -90,10 +95,24 @@ class PostgresWorkspaceAttachmentImportIntentStore(
             )
             self._validate_command_intent(command, intent)
             return intent
-        except WorkspaceAttachmentIntentConflictError:
+        except WorkspaceAttachmentIntentConflictError as error:
+            _logger.warning(
+                "Workspace attachment intent lookup conflict turn_id=%s reason=%s",
+                command.turn_id,
+                str(error),
+            )
             raise
         except SQLAlchemyError as error:
-            raise _intent_storage_error(error) from error
+            mapped = _intent_storage_error(error)
+            _logger.warning(
+                "Workspace attachment intent lookup storage failure turn_id=%s "
+                "mapped=%s cause=%s detail=%s",
+                command.turn_id,
+                type(mapped).__name__,
+                type(error.__cause__ or getattr(error, "orig", None)).__name__,
+                str(error)[:256],
+            )
+            raise mapped from error
 
     async def prepare(
         self,
@@ -177,12 +196,28 @@ class PostgresWorkspaceAttachmentImportIntentStore(
                         "Attachment import intent changed during its prepare transaction"
                     )
                 return stored
-        except WorkspaceAttachmentIntentConflictError:
+        except WorkspaceAttachmentIntentConflictError as error:
+            _logger.warning(
+                "Workspace attachment intent prepare conflict turn_id=%s reason=%s",
+                command.turn_id,
+                str(error),
+            )
             raise
         except WorkspaceAttachmentIntentUnavailableError:
             raise
         except SQLAlchemyError as error:
-            raise _intent_storage_error(error) from error
+            mapped = _intent_storage_error(error)
+            cause = error.__cause__ or getattr(error, "orig", None)
+            _logger.warning(
+                "Workspace attachment intent prepare storage failure turn_id=%s "
+                "mapped=%s cause=%s sqlstate=%s detail=%s",
+                command.turn_id,
+                type(mapped).__name__,
+                type(cause).__name__ if cause is not None else "unknown",
+                getattr(cause, "sqlstate", None),
+                str(error)[:256],
+            )
+            raise mapped from error
 
     @staticmethod
     def _validate_command(command: DurableAssistantInferenceCommand) -> None:
@@ -423,8 +458,13 @@ def _database_text(value: object, *, label: str) -> str:
     @param label 面向开发者的字段名 / Developer-facing field name.
     @return 非空字符串 / Non-empty string.
     @raise TypeError 值不是非空字符串时抛出 / Raised when the value is not a non-empty string.
+    @note PostgreSQL ``UUID`` 列可能由 asyncpg 解码为 ``UUID`` 对象；这里先规范化其文本
+        表示，再交给领域 ID 解析器。/ PostgreSQL ``UUID`` columns may be decoded by asyncpg
+        as ``UUID`` objects; normalize their text form before the domain ID parser handles them.
     """
 
+    if isinstance(value, UUID):
+        value = str(value)
     if not isinstance(value, str) or not value:
         raise TypeError(f"Attachment import intent {label} is not non-empty text")
     return value
