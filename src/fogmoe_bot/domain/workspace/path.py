@@ -50,4 +50,46 @@ class WorkspaceRelativePath:
         return "/workspace" if self.value == "." else f"/workspace/{self.value}"
 
 
-__all__ = ["WorkspaceRelativePath"]
+@dataclass(frozen=True, slots=True)
+class WorkspaceFilePath:
+    """@brief ``/workspace`` 下的强类型普通文件路径 / Strongly typed regular-file path below ``/workspace``.
+
+    @param value 不带根前缀且无父目录回退的相对路径 /
+        Relative path without a root prefix or parent traversal.
+    @note 该类型只证明路径语法；native ``openat2`` 仍负责证明目标是 no-follow 普通文件。/
+        This type proves only path syntax; native ``openat2`` still proves the target is a
+        no-follow regular file.
+    """
+
+    value: str
+    """@brief 相对 ``/workspace`` 的规范路径 / Canonical path relative to ``/workspace``."""
+
+    def __post_init__(self) -> None:
+        """@brief 验证文件路径语法 / Validate file-path syntax.
+
+        @return None / None.
+        @raise TypeError 路径不是字符串时抛出 / Raised when the path is not a string.
+        @raise ValueError 路径为空、为 ``.``、越界或不安全时抛出 /
+            Raised when the path is empty, ``.``, oversized, or unsafe.
+        """
+
+        if not isinstance(self.value, str):
+            raise TypeError("Workspace file path must be a string")
+        if (
+            self.value == "."
+            or len(self.value.encode("utf-8")) > 4096
+            or _WORKSPACE_RELATIVE_PATH_PATTERN.fullmatch(self.value) is None
+        ):
+            raise ValueError("Workspace file path must be a safe relative file path")
+
+    @property
+    def runtime_path(self) -> str:
+        """@brief 返回 runtime 内绝对路径 / Return the absolute in-runtime path.
+
+        @return ``/workspace`` 下的绝对路径 / Absolute path below ``/workspace``.
+        """
+
+        return f"/workspace/{self.value}"
+
+
+__all__ = ["WorkspaceFilePath", "WorkspaceRelativePath"]

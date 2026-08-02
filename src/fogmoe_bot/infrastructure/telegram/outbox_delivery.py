@@ -90,7 +90,15 @@ _MAX_TEXT_LENGTH = 4096
 """@brief Telegram 文本消息字符上限 / Telegram text-message character limit."""
 
 _ARTIFACT_KEYS = frozenset(
-    {"chat_id", "artifact_id", "kind", "filename", "mime_type", "size_bytes"}
+    {
+        "chat_id",
+        "artifact_id",
+        "kind",
+        "filename",
+        "mime_type",
+        "size_bytes",
+        "message_thread_id",
+    }
 )
 """@brief artifact outbox 允许字段 / Allowed artifact-outbox fields."""
 
@@ -193,6 +201,8 @@ class SendArtifactPayload:
     filename: str
     mime_type: str
     size_bytes: int
+    message_thread_id: int | None
+    """@brief 可选 Telegram topic ID / Optional Telegram topic ID."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,12 +472,21 @@ class TelegramOutboxDeliveryAdapter:
                     sent = await self._bot.send_photo(
                         chat_id=parsed.chat_id,
                         photo=handle,
+                        message_thread_id=parsed.message_thread_id,
                     )
-                else:
+                elif parsed.kind is ArtifactKind.AUDIO:
                     sent = await self._bot.send_voice(
                         chat_id=parsed.chat_id,
                         voice=handle,
                         filename=parsed.filename,
+                        message_thread_id=parsed.message_thread_id,
+                    )
+                else:
+                    sent = await self._bot.send_document(
+                        chat_id=parsed.chat_id,
+                        document=handle,
+                        filename=parsed.filename,
+                        message_thread_id=parsed.message_thread_id,
                     )
         except BaseException:
             artifacts.release(claim)
@@ -534,7 +553,11 @@ def parse_send_artifact_payload(payload: JsonObject) -> SendArtifactPayload:
     @raise OutboundPayloadError 字段集或字段语义非法 / Invalid keys or field semantics.
     """
 
-    _validate_keys(payload, allowed=_ARTIFACT_KEYS, required=_ARTIFACT_KEYS)
+    _validate_keys(
+        payload,
+        allowed=_ARTIFACT_KEYS,
+        required=_ARTIFACT_KEYS - {"message_thread_id"},
+    )
     artifact_id = payload["artifact_id"]
     kind = payload["kind"]
     filename = payload["filename"]
@@ -547,7 +570,7 @@ def parse_send_artifact_payload(payload: JsonObject) -> SendArtifactPayload:
     try:
         artifact_kind = ArtifactKind(kind)
     except ValueError as error:
-        raise _payload_error("kind must be image or audio") from error
+        raise _payload_error("kind must be image, audio, or document") from error
     if not isinstance(filename, str) or not filename or len(filename) > 255:
         raise _payload_error("filename must be 1..255 characters")
     if not isinstance(mime_type, str) or not mime_type or len(mime_type) > 255:
@@ -572,6 +595,7 @@ def parse_send_artifact_payload(payload: JsonObject) -> SendArtifactPayload:
         filename=filename,
         mime_type=mime_type,
         size_bytes=size_bytes,
+        message_thread_id=_optional_positive_int(payload, "message_thread_id"),
     )
 
 

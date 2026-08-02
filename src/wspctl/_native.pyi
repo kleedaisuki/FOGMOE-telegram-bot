@@ -195,6 +195,23 @@ class RuntimeProcess:
         """
         ...
 
+    def fetch_file(
+        self,
+        path: str,
+        max_bytes: int = 52_428_800,
+    ) -> Mapping[str, object]:
+        """@brief 从 persistent workspace 读取一个普通文件 / Fetch one regular file from the persistent workspace.
+
+        @param path 相对 ``/workspace`` 的受限文件路径 / Constrained file path relative to ``/workspace``.
+        @param max_bytes 最大返回字节数，硬上限 50 MiB / Maximum returned bytes, hard-capped at 50 MiB.
+        @return ``path``、``content``、``byte_size`` 与 ``sha256`` / ``path``, ``content``, ``byte_size``, and ``sha256``.
+        @raise NativeError 文件不存在、不是普通文件、路径不安全、过大或 broker 不可用时抛出 /
+            Raised when the file is missing, non-regular, unsafe, oversized, or the broker is unavailable.
+        @note 本方法不接受 host path、不跟随符号链接，也不创建 journal。/
+            This method accepts no host path, follows no symlink, and creates no journal.
+        """
+        ...
+
     def close(self) -> None:
         """@brief 释放本地 client 资源 / Release local client resources.
 

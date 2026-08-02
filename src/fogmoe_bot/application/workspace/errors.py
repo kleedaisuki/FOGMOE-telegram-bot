@@ -120,6 +120,14 @@ class WorkspaceFileReplayNotFoundError(RuntimeError):
         super().__init__(f"Workspace file replay was not found: {request_id}")
 
 
+class WorkspaceFileNotFoundError(RuntimeError):
+    """@brief native 已证明请求的 workspace 普通文件不存在 / Native proved that the requested regular workspace file is absent."""
+
+
+class WorkspaceFileTooLargeError(RuntimeError):
+    """@brief workspace 文件超过调用方/native 读取预算 / The workspace file exceeds the caller/native fetch budget."""
+
+
 class WorkspaceInvocationOutcomeUnknownError(RuntimeError):
     """@brief command 可能已产生副作用但结果不可恢复 / A command may have had side effects but its result is unrecoverable.
 
@@ -194,6 +202,8 @@ def _normalize_diagnostic_message(value: str | None) -> str | None:
 __all__ = [
     "WorkspaceBindingQuarantinedError",
     "WorkspaceFileReplayNotFoundError",
+    "WorkspaceFileNotFoundError",
+    "WorkspaceFileTooLargeError",
     "WorkspaceInvocationOutcomeUnknownError",
     "WorkspaceQuotaRecoveryRequiredError",
     "WorkspaceRuntimeProtocolError",

@@ -453,6 +453,60 @@ void test_protocol() {
     expect(!wspctl::validate_runtime_status_result(invalid_status).has_value(),
            "reject failed runtime claiming a live reusable supervisor");
 
+    const wspctl::FetchFileRequest fetch_request{
+        .runtime_key = original.runtime_key,
+        .path = "reports/result.bin",
+        .max_bytes = 4096U,
+    };
+    const auto encoded_fetch_request = wspctl::encode_fetch_file_request(fetch_request);
+    const auto decoded_fetch_request =
+        encoded_fetch_request ? wspctl::decode_fetch_file_request(*encoded_fetch_request)
+                              : wspctl::Result<wspctl::FetchFileRequest>{
+                                    std::unexpected(encoded_fetch_request.error())};
+    expect(decoded_fetch_request.has_value() &&
+               decoded_fetch_request->runtime_key == fetch_request.runtime_key &&
+               decoded_fetch_request->path == fetch_request.path &&
+               decoded_fetch_request->max_bytes == fetch_request.max_bytes,
+           "round-trip bounded workspace file-fetch request");
+    wspctl::FetchFileRequest unsafe_fetch = fetch_request;
+    unsafe_fetch.path = "../etc/passwd";
+    expect(!wspctl::validate_fetch_file_request(unsafe_fetch).has_value(),
+           "reject workspace file-fetch parent traversal");
+    const wspctl::FetchFileResult fetch_result{
+        .path = fetch_request.path,
+        .byte_size = 2U,
+        .sha256 = "2689367b205c16ce32ed4200942b8b8b"
+                  "1e262dfc70d9bc9fbc77c49699a4f1df",
+    };
+    const auto encoded_fetch_result = wspctl::encode_fetch_file_result(fetch_result);
+    const auto decoded_fetch_result =
+        encoded_fetch_result ? wspctl::decode_fetch_file_result(*encoded_fetch_result)
+                             : wspctl::Result<wspctl::FetchFileResult>{
+                                   std::unexpected(encoded_fetch_result.error())};
+    expect(decoded_fetch_result.has_value() && decoded_fetch_result->path == fetch_result.path &&
+               decoded_fetch_result->byte_size == fetch_result.byte_size &&
+               decoded_fetch_result->sha256 == fetch_result.sha256,
+           "round-trip workspace file-fetch metadata");
+    const wspctl::FetchFileChunk fetch_chunk{.bytes = bytes_from_text("ok")};
+    const auto encoded_fetch_chunk = wspctl::encode_fetch_file_chunk(fetch_chunk);
+    const auto decoded_fetch_chunk =
+        encoded_fetch_chunk ? wspctl::decode_fetch_file_chunk(*encoded_fetch_chunk)
+                            : wspctl::Result<wspctl::FetchFileChunk>{
+                                  std::unexpected(encoded_fetch_chunk.error())};
+    expect(decoded_fetch_chunk.has_value() && decoded_fetch_chunk->bytes == fetch_chunk.bytes,
+           "round-trip workspace file-fetch chunk");
+    const auto fetch_frame = encoded_fetch_request
+                                 ? wspctl::encode_frame(wspctl::MessageKind::fetch_file,
+                                                        *encoded_fetch_request)
+                                 : wspctl::Result<std::vector<std::byte>>{
+                                       std::unexpected(encoded_fetch_request.error())};
+    const auto decoded_fetch_frame =
+        fetch_frame ? wspctl::decode_frame(*fetch_frame)
+                    : wspctl::Result<wspctl::Frame>{std::unexpected(fetch_frame.error())};
+    expect(decoded_fetch_frame.has_value() &&
+               decoded_fetch_frame->kind == wspctl::MessageKind::fetch_file,
+           "recognize workspace file-fetch frame kind");
+
     const wspctl::PayloadBeginRequest file = file_request();
     const auto encoded_file_begin = wspctl::encode_payload_begin_request(file);
     expect(encoded_file_begin.has_value(), "encode file begin request");

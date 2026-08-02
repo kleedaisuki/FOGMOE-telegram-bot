@@ -234,6 +234,17 @@ private:
     [[nodiscard]] Result<PayloadResult> replay_payload(const PayloadReplayRequest& request);
 
     /**
+     * @brief 读取并流式返回一个 persistent workspace 普通文件 / Read and stream one persistent-workspace regular file.
+     * @param client_fd 已认证 client socket / Authenticated client socket.
+     * @param request 已验证文件读取请求 / Validated file-fetch request.
+     * @return 完整发送成功或精确错误 / Successful complete transfer or a precise error.
+     * @note 此路径不激活 RuntimeProcess、不创建 journal，也不接受宿主机路径。/
+     *       This path does not activate a RuntimeProcess, create a journal, or accept a host path.
+     */
+    [[nodiscard]] Result<void> dispatch_fetch_file(int client_fd,
+                                                   const FetchFileRequest& request);
+
+    /**
      * @brief 在 worker 启动前创建单线程 fork-server / Create the single-threaded fork server before
      * workers start.
      * @return 成功或 fail-closed 错误 / Success or a fail-closed error.

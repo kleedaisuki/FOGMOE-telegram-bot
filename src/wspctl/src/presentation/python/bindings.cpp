@@ -493,6 +493,42 @@ public:
         return dictionary;
     }
 
+    /**
+     * @brief 从 persistent workspace 读取一个普通文件 / Fetch one regular file from the persistent workspace.
+     * @param path 相对 ``/workspace`` 的受限路径 / Constrained path relative to ``/workspace``.
+     * @param max_bytes 最大接收字节数 / Maximum accepted byte count.
+     * @return 路径、bytes、长度与 SHA-256 的 Python dictionary / Python dictionary containing path, bytes, length, and SHA-256.
+     * @note 该入口不接受 host path，也不会跟随 workspace 内符号链接。/
+     *       This entry accepts no host path and follows no workspace symlink.
+     */
+    [[nodiscard]] py::dict fetch_file(const std::string& path, const std::size_t max_bytes) {
+        std::lock_guard lock(mutex_);
+        if (closed_) {
+            throw NativeFailure(
+                make_error(ErrorCode::permission_denied, "RuntimeProcess is closed"), {});
+        }
+        presentation::ClientFetchFileResult result;
+        {
+            py::gil_scoped_release release;
+            const auto fetched = gateway_.fetch_file(presentation::ClientFetchFileRequest{
+                .runtime_key = runtime_key_,
+                .path = path,
+                .max_bytes = max_bytes,
+            });
+            if (!fetched) {
+                throw NativeFailure(fetched.error(), {});
+            }
+            result = *fetched;
+        }
+        py::dict dictionary;
+        dictionary["path"] = result.path;
+        dictionary["content"] = py::bytes(
+            reinterpret_cast<const char*>(result.contents.data()), result.contents.size());
+        dictionary["byte_size"] = result.contents.size();
+        dictionary["sha256"] = result.sha256;
+        return dictionary;
+    }
+
     /** @brief 关闭逻辑 handle / Close the logical handle. */
     void close() noexcept {
         std::lock_guard lock(mutex_);
@@ -559,5 +595,7 @@ PYBIND11_MODULE(_native, module) {
         .def("replay_file", &wspctl::RuntimeProcess::replay_file, py::arg("opaque_id"),
              py::arg("byte_size"), py::arg("sha256"), py::arg("request_id") = "",
              py::arg("request_hash") = "")
+        .def("fetch_file", &wspctl::RuntimeProcess::fetch_file, py::arg("path"),
+             py::arg("max_bytes") = wspctl::kMaxFetchFileBytes)
         .def("close", &wspctl::RuntimeProcess::close);
 }

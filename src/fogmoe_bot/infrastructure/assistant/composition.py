@@ -253,6 +253,12 @@ def build_durable_assistant(
         call_timeout=max(90.0, float(generated_settings.image_timeout_seconds + 30)),
         task_name="assistant-generated-media",
     )
+    workspace_file_bulkhead = AsyncBlockingBulkhead(
+        capacity=2,
+        queue_timeout=5.0,
+        call_timeout=120.0,
+        task_name="assistant-workspace-file-artifact",
+    )
     sticker_timeout_seconds = 20
     sticker_bulkhead = AsyncBlockingBulkhead(
         capacity=2,
@@ -311,6 +317,8 @@ def build_durable_assistant(
         ),
         scheduling=SchedulingService(),
         runtime_process=runtime_process,
+        artifacts=artifacts,
+        workspace_file_bulkhead=workspace_file_bulkhead,
         workspace_output_limit_bytes=runtime.workspace.output_limit_bytes,
     )
     store = PostgresAssistantToolStore(
@@ -434,6 +442,7 @@ def build_durable_assistant(
             external_bulkhead,
             media_bulkhead,
             sticker_bulkhead,
+            workspace_file_bulkhead,
         ),
         runtime_process_lifecycle=RuntimeProcessLifecycle(runtime_process),
     )

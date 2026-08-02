@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import hashlib
 import importlib
 import sys
 import threading
@@ -45,6 +46,7 @@ from fogmoe_bot.application.workspace.errors import (  # noqa: E402
 )
 from fogmoe_bot.application.workspace.models import (  # noqa: E402
     AddFileCommand,
+    FetchFileCommand,
     RunBashCommand,
     RunBashResult,
 )
@@ -54,7 +56,10 @@ from fogmoe_bot.domain.conversation.identity import (  # noqa: E402
     TurnId,
 )
 from fogmoe_bot.domain.conversation.payloads import JsonObject  # noqa: E402
-from fogmoe_bot.domain.workspace.path import WorkspaceRelativePath  # noqa: E402
+from fogmoe_bot.domain.workspace.path import (  # noqa: E402
+    WorkspaceFilePath,
+    WorkspaceRelativePath,
+)
 from fogmoe_bot.domain.workspace.runtime import (  # noqa: E402
     WorkspaceRequestHash,
     WorkspaceRequestId,
@@ -203,6 +208,7 @@ class _FakeNativeProcess:
         self.release = threading.Event()
         self.calls: list[tuple[list[str], dict[str, object]]] = []
         self.file_calls: list[dict[str, object]] = []
+        self.fetch_calls: list[dict[str, object]] = []
         self.close_count = 0
 
     def execute(
@@ -312,6 +318,23 @@ class _FakeNativeProcess:
         """
 
         self.close_count += 1
+
+    def fetch_file(self, path: str, max_bytes: int) -> Mapping[str, object]:
+        """@brief 返回固定、摘要绑定的文件 / Return a fixed digest-bound file.
+
+        @param path workspace 相对路径 / Workspace-relative path.
+        @param max_bytes 最大读取预算 / Maximum fetch budget.
+        @return native 文件读取 mapping / Native file-fetch mapping.
+        """
+
+        content = b"fetched-workspace-file"
+        self.fetch_calls.append({"path": path, "max_bytes": max_bytes})
+        return {
+            "path": path,
+            "content": content,
+            "byte_size": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
 
 
 class _KeyedFactory:
@@ -761,6 +784,34 @@ class WorkspaceLayerTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ValueError):
             WorkspaceRelativePath("../host")
+
+    async def test_fetch_file_uses_runtime_cache_and_returns_verified_bytes(
+        self,
+    ) -> None:
+        """@brief fetch_file 复用 runtime cache 并严格返回 bytes / fetch_file reuses the runtime cache and returns strict bytes.
+
+        @return None / None.
+        """
+
+        key = WorkspaceRuntimeKey.new()
+        process = _FakeNativeProcess()
+        runner = WspctlRuntimeProcess(
+            registry=_StaticRegistry(key),
+            process_factory=_FakeFactory(process),
+        )
+        result = await runner.fetch_file(
+            FetchFileCommand(
+                scope=PersonalRuntimeScope(42),
+                path=WorkspaceFilePath("reports/result.bin"),
+                max_bytes=1024,
+            )
+        )
+        self.assertEqual(result.content, b"fetched-workspace-file")
+        self.assertEqual(
+            process.fetch_calls,
+            [{"path": "reports/result.bin", "max_bytes": 1024}],
+        )
+        await runner.close()
 
     def test_scope_rejects_conversation_and_topic_substitution(self) -> None:
         """@brief Runtime scope 只接受用户或整群 ID / Runtime scope accepts only user or whole-group IDs.

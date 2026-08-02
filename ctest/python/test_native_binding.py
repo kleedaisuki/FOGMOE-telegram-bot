@@ -301,6 +301,30 @@ def test_add_file_rejects_one_raw_binary_buffer_as_chunks() -> None:
     )
 
 
+def test_fetch_file_rejects_unsafe_paths_before_connecting() -> None:
+    """@brief fetch_file 在 socket 前拒绝 traversal，且不接受 activation override / fetch_file rejects traversal before socket I/O and accepts no activation override.
+
+    @return None / None.
+    """
+
+    process = RuntimeProcess(
+        "/tmp/nonexistent-wspctld.sock",
+        "123e4567-e89b-12d3-a456-426614174000",
+        "activation-native-fetch-test",
+    )
+    try:
+        process.fetch_file("../etc/passwd")
+    except NativeError as error:
+        assert getattr(error, "code", None) == "invalid_argument"
+    else:
+        raise AssertionError("RuntimeProcess.fetch_file accepted parent traversal")
+    try:
+        process.fetch_file("safe.txt", activation_id="other")  # type: ignore[call-arg]
+    except TypeError:
+        return
+    raise AssertionError("RuntimeProcess.fetch_file accepted an activation override")
+
+
 def _run_contract_tests() -> None:
     """@brief 以 CTest 直接运行 pybind ABI 契约 / Run pybind ABI contracts directly under CTest.
 
@@ -321,6 +345,7 @@ def _run_contract_tests() -> None:
     test_add_file_is_the_only_public_mutating_file_ingress_method()
     test_replay_file_has_no_activation_or_chunk_source_abi()
     test_add_file_rejects_one_raw_binary_buffer_as_chunks()
+    test_fetch_file_rejects_unsafe_paths_before_connecting()
 
 
 if __name__ == "__main__":

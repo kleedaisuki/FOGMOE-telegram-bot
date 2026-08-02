@@ -16,7 +16,7 @@ namespace wspctl {
 /** @brief 协议魔数 / Control protocol magic number. */
 inline constexpr std::uint32_t kProtocolMagic = 0x31505357U; // "WSP1" in little endian.
 /** @brief 当前协议版本 / Current control protocol version. */
-inline constexpr std::uint16_t kProtocolVersion = 3;
+inline constexpr std::uint16_t kProtocolVersion = 4;
 /** @brief 固定帧头长度 / Fixed wire-frame header length. */
 inline constexpr std::size_t kFrameHeaderBytes = 12;
 /** @brief 单个 SOCK_SEQPACKET 消息的硬上限 / Hard maximum one SOCK_SEQPACKET message. */
@@ -33,6 +33,10 @@ inline constexpr std::size_t kMaxAddFileBytes = 8U * 1024U * 1024U;
 inline constexpr std::size_t kMaxAddFileChunkBytes = 64U * 1024U;
 /** @brief 文件 opaque ID 的最大字节数 / Maximum byte count of a file opaque ID. */
 inline constexpr std::size_t kMaxFileOpaqueIdBytes = 128U;
+/** @brief 单次 workspace 文件读取的总字节硬上限 / Hard total-byte cap for one workspace file fetch. */
+inline constexpr std::size_t kMaxFetchFileBytes = 50U * 1024U * 1024U;
+/** @brief workspace 相对文件路径的最大字节数 / Maximum byte count of a workspace-relative file path. */
+inline constexpr std::size_t kMaxWorkspaceFilePathBytes = 4096U;
 
 /**
  * @brief 控制帧类别 / Control frame kinds.
@@ -67,6 +71,12 @@ enum class MessageKind : std::uint16_t {
     runtime_status = 13,
     /** @brief allowlisted runtime 状态快照 / Allowlisted runtime-status snapshot. */
     runtime_status_result = 14,
+    /** @brief 从 persistent workspace 读取一个普通文件 / Fetch one regular file from the persistent workspace. */
+    fetch_file = 15,
+    /** @brief workspace 文件读取的完整元数据 / Complete metadata for a workspace file fetch. */
+    fetch_file_result = 16,
+    /** @brief workspace 文件读取的一段原始 bytes / One raw-byte chunk of a workspace file fetch. */
+    fetch_file_chunk = 17,
 };
 
 /**
@@ -269,6 +279,38 @@ struct PayloadResult final {
     std::string sha256;
 };
 
+/**
+ * @brief workspace 普通文件读取请求 / Request to fetch one regular workspace file.
+ *
+ * @note 路径相对 ``/workspace``，不允许绝对路径、空分量、``.``、``..`` 或符号链接。
+ * The path is relative to ``/workspace`` and permits no absolute path, empty component,
+ * ``.``, ``..``, or symbolic-link traversal.
+ */
+struct FetchFileRequest final {
+    /** @brief 持久 runtime 标识 / Persistent runtime key. */
+    std::string runtime_key;
+    /** @brief 相对 ``/workspace`` 的文件路径 / File path relative to ``/workspace``. */
+    std::string path;
+    /** @brief 调用方愿意接收的最大字节数 / Maximum byte count accepted by the caller. */
+    std::size_t max_bytes{kMaxFetchFileBytes};
+};
+
+/** @brief workspace 文件读取元数据 / Metadata for a fetched workspace file. */
+struct FetchFileResult final {
+    /** @brief 已规范化的相对文件路径 / Canonical relative file path. */
+    std::string path;
+    /** @brief 完整文件字节数 / Complete file byte count. */
+    std::size_t byte_size{};
+    /** @brief 完整内容 SHA-256 / SHA-256 of the complete content. */
+    std::string sha256;
+};
+
+/** @brief workspace 文件读取的一段原始 bytes / One raw-byte chunk of a workspace file fetch. */
+struct FetchFileChunk final {
+    /** @brief 未解释的文件内容 / Uninterpreted file content. */
+    std::vector<std::byte> bytes;
+};
+
 /** @brief 解码后的完整帧 / Fully decoded wire frame. */
 struct Frame final {
     /** @brief 帧类别 / Frame kind. */
@@ -334,6 +376,13 @@ struct Frame final {
  * @return 成功或精确错误 / Success or precise error.
  */
 [[nodiscard]] Result<void> validate_payload_result(const PayloadResult& result);
+
+/** @brief 校验 workspace 文件读取请求 / Validate a workspace file-fetch request. */
+[[nodiscard]] Result<void> validate_fetch_file_request(const FetchFileRequest& request);
+/** @brief 校验 workspace 文件读取元数据 / Validate workspace file-fetch metadata. */
+[[nodiscard]] Result<void> validate_fetch_file_result(const FetchFileResult& result);
+/** @brief 校验 workspace 文件读取分块 / Validate a workspace file-fetch chunk. */
+[[nodiscard]] Result<void> validate_fetch_file_chunk(const FetchFileChunk& chunk);
 
 /**
  * @brief 计算不含 request_hash 的规范载荷 SHA-256 / Hash canonical payload excluding request_hash.
@@ -419,6 +468,25 @@ decode_payload_control_request(std::span<const std::byte> payload);
 [[nodiscard]] Result<std::vector<std::byte>> encode_payload_result(const PayloadResult& result);
 /** @brief 解码文件写入收据 / Decode a file-ingress receipt. */
 [[nodiscard]] Result<PayloadResult> decode_payload_result(std::span<const std::byte> payload);
+
+/** @brief 编码 workspace 文件读取请求 / Encode a workspace file-fetch request. */
+[[nodiscard]] Result<std::vector<std::byte>>
+encode_fetch_file_request(const FetchFileRequest& request);
+/** @brief 解码 workspace 文件读取请求 / Decode a workspace file-fetch request. */
+[[nodiscard]] Result<FetchFileRequest>
+decode_fetch_file_request(std::span<const std::byte> payload);
+/** @brief 编码 workspace 文件读取元数据 / Encode workspace file-fetch metadata. */
+[[nodiscard]] Result<std::vector<std::byte>>
+encode_fetch_file_result(const FetchFileResult& result);
+/** @brief 解码 workspace 文件读取元数据 / Decode workspace file-fetch metadata. */
+[[nodiscard]] Result<FetchFileResult>
+decode_fetch_file_result(std::span<const std::byte> payload);
+/** @brief 编码 workspace 文件读取分块 / Encode a workspace file-fetch chunk. */
+[[nodiscard]] Result<std::vector<std::byte>>
+encode_fetch_file_chunk(const FetchFileChunk& chunk);
+/** @brief 解码 workspace 文件读取分块 / Decode a workspace file-fetch chunk. */
+[[nodiscard]] Result<FetchFileChunk>
+decode_fetch_file_chunk(std::span<const std::byte> payload);
 
 /**
  * @brief 编码执行结果 / Encode an execution result.

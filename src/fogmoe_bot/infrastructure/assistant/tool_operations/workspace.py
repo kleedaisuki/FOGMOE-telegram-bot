@@ -11,21 +11,29 @@ from __future__ import annotations
 
 import asyncio
 import math
+import mimetypes
+from datetime import timedelta
+from pathlib import PurePosixPath
 
 from fogmoe_bot.application.assistant.tool_runtime import (
     ToolEffectRequest,
     ToolExecutionContext,
 )
 from fogmoe_bot.application.workspace.errors import (
+    WorkspaceFileNotFoundError,
+    WorkspaceFileTooLargeError,
     WorkspaceInvocationOutcomeUnknownError,
 )
 from fogmoe_bot.application.workspace.models import (
     MAX_BASH_OUTPUT_LIMIT_BYTES,
+    MAX_FETCH_FILE_BYTES,
+    FetchFileCommand,
     RunBashCommand,
 )
 from fogmoe_bot.application.workspace.ports import RuntimeProcess
 from fogmoe_bot.domain.conversation.payloads import JsonValue
 from fogmoe_bot.domain.workspace.path import WorkspaceRelativePath
+from fogmoe_bot.domain.workspace.path import WorkspaceFilePath
 from fogmoe_bot.domain.workspace.runtime import (
     WorkspaceRequestHash,
     WorkspaceRequestId,
@@ -35,6 +43,10 @@ from fogmoe_bot.domain.workspace.scope import (
     PersonalRuntimeScope,
     RuntimeScope,
 )
+from fogmoe_bot.domain.media.artifact import ArtifactKind
+from fogmoe_bot.domain.media.artifact import ArtifactRecord
+from fogmoe_bot.infrastructure.blocking import AsyncBlockingBulkhead
+from fogmoe_bot.infrastructure.media.file_artifact_store import FileArtifactStore
 
 
 _WORKSPACE_COMPLETION_RESERVE_SECONDS = 15.0
@@ -131,6 +143,106 @@ async def execute_run_bash(
         "stdout": result.stdout,
         "stderr": result.stderr,
     }
+
+
+async def execute_send_workspace_file(
+    request: ToolEffectRequest,
+    *,
+    runtime_process: RuntimeProcess,
+    artifacts: FileArtifactStore,
+    artifact_bulkhead: AsyncBlockingBulkhead,
+) -> JsonValue:
+    """@brief 读取 workspace 文件并持久化为待投递 document / Fetch a workspace file and persist it as a pending document.
+
+    @param request 已由 catalog 验证且受 receipt 保护的工具调用 /
+        Catalog-validated tool call protected by a receipt.
+    @param runtime_process fail-closed workspace 能力端口 / Fail-closed workspace capability port.
+    @param artifacts crash-resilient artifact store / Crash-resilient artifact store.
+    @param artifact_bulkhead artifact fsync 的有界线程隔舱 / Bounded thread bulkhead for artifact fsync.
+    @return 可由 finalize transaction 写入 outbox 的 artifact 引用 /
+        Artifact reference suitable for outbox enqueue in the finalize transaction.
+    @note Telegram 网络 I/O 不发生在这里；bytes 先 durable 落盘，使 outbox 重试不依赖
+        RuntimeProcess 仍存活。/ Telegram network I/O does not happen here; bytes become durable
+        first so outbox retry does not depend on a still-live RuntimeProcess.
+    """
+
+    if (
+        request.tool_name != "send_workspace_file"
+        or request.effect_kind != "telegram.send_workspace_file"
+        or not request.mutating
+    ):
+        raise ValueError(
+            "send_workspace_file requires the mutating telegram.send_workspace_file effect kind"
+        )
+    path = WorkspaceFilePath(_required_string(request.arguments, "path"))
+    try:
+        fetched = await runtime_process.fetch_file(
+            FetchFileCommand(
+                scope=_workspace_scope(request.context),
+                path=path,
+                max_bytes=MAX_FETCH_FILE_BYTES,
+            )
+        )
+    except WorkspaceFileNotFoundError:
+        return {"error": "Workspace file was not found", "path": path.value}
+    except WorkspaceFileTooLargeError:
+        return {
+            "error": "Workspace file exceeds the Telegram document size limit",
+            "path": path.value,
+            "max_bytes": MAX_FETCH_FILE_BYTES,
+        }
+    if not fetched.content:
+        return {"error": "Workspace file is empty", "path": path.value}
+    filename = PurePosixPath(path.value).name
+    mime_type = mimetypes.guess_type(filename, strict=False)[0] or "application/octet-stream"
+    record = await artifact_bulkhead.call(
+        lambda: _store_workspace_document(
+            artifacts,
+            content=fetched.content,
+            filename=filename,
+            mime_type=mime_type,
+        )
+    )
+    return {
+        "status": "queued",
+        "path": path.value,
+        "artifacts": [
+            {
+                "artifact_id": str(record.artifact_id),
+                "kind": record.kind.value,
+                "filename": record.filename,
+                "mime_type": record.mime_type,
+                "size_bytes": record.size_bytes,
+            }
+        ],
+    }
+
+
+def _store_workspace_document(
+    artifacts: FileArtifactStore,
+    *,
+    content: bytes,
+    filename: str,
+    mime_type: str,
+) -> ArtifactRecord:
+    """@brief 在 blocking bulkhead 内持久化 workspace document / Persist a workspace document inside a blocking bulkhead.
+
+    @param artifacts crash-resilient artifact store / Crash-resilient artifact store.
+    @param content 完整文件 bytes / Complete file bytes.
+    @param filename 用户可见文件名 / User-facing filename.
+    @param mime_type 推断 MIME / Inferred MIME type.
+    @return durable artifact record / Durable artifact record.
+    """
+
+    artifacts.cleanup_expired(scan_limit=1000)
+    return artifacts.store(
+        kind=ArtifactKind.DOCUMENT,
+        content=content,
+        filename=filename,
+        mime_type=mime_type,
+        ttl=timedelta(hours=1),
+        max_bytes=MAX_FETCH_FILE_BYTES,
+    )
 
 
 def _deadline_exhausted_result(

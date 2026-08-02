@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -64,6 +65,14 @@ MAX_ADD_FILE_CHUNK_BYTES = 64 * 1024
 
 @note 该值为经 metadata 包装后的 SOCK_SEQPACKET frame 留出余量；native 层仍必须独立校验。
     This leaves room for metadata inside a SOCK_SEQPACKET frame; the native layer must validate it independently.
+"""
+
+MAX_FETCH_FILE_BYTES = 50 * 1024 * 1024
+"""@brief 单次 workspace 文件读取硬上限（50 MiB） / Hard limit for one workspace file fetch (50 MiB).
+
+@note 与 Telegram Bot API 的 multipart document 上限对齐；native 与应用层均独立执行该边界。/
+    This matches Telegram Bot API's multipart-document limit; native and application layers
+    enforce the boundary independently.
 """
 
 _PAYLOAD_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
@@ -444,6 +453,79 @@ class AddFileResult:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class FetchFileCommand:
+    """@brief 从已认证 persistent workspace 读取普通文件 / Fetch a regular file from an authenticated persistent workspace.
+
+    @param scope 个人或整群隔离范围 / Personal-or-whole-group isolation scope.
+    @param path 相对 ``/workspace`` 的强类型文件路径 / Strongly typed file path relative to ``/workspace``.
+    @param max_bytes 最大接收字节数 / Maximum accepted byte count.
+    """
+
+    scope: RuntimeScope
+    """@brief 文件所属强类型 runtime scope / Typed runtime scope owning the file."""
+    path: workspace_path.WorkspaceFilePath
+    """@brief workspace 内受限相对路径 / Constrained workspace-relative path."""
+    max_bytes: int = MAX_FETCH_FILE_BYTES
+    """@brief 调用方接收上限 / Caller byte limit."""
+
+    def __post_init__(self) -> None:
+        """@brief 验证读取能力边界 / Validate file-fetch capability boundaries.
+
+        @return None / None.
+        @raise TypeError scope、path 或 size 类型非法时抛出 / Raised for invalid scope, path, or size types.
+        @raise ValueError size 超出协议预算时抛出 / Raised when size exceeds the protocol budget.
+        """
+
+        if not isinstance(self.scope, PersonalRuntimeScope | GroupRuntimeScope):
+            raise TypeError("FetchFileCommand requires a typed workspace runtime scope")
+        if not isinstance(self.path, workspace_path.WorkspaceFilePath):
+            raise TypeError("FetchFileCommand requires a WorkspaceFilePath")
+        if isinstance(self.max_bytes, bool) or not isinstance(self.max_bytes, int):
+            raise TypeError("FetchFileCommand max_bytes must be an integer")
+        if not 1 <= self.max_bytes <= MAX_FETCH_FILE_BYTES:
+            raise ValueError("FetchFileCommand max_bytes must be within the fetch budget")
+
+
+@dataclass(frozen=True, slots=True)
+class FetchFileResult:
+    """@brief 已验证的完整 workspace 文件 / Verified complete workspace file.
+
+    @param path 相对 workspace 路径 / Workspace-relative path.
+    @param content 未解释 bytes / Uninterpreted bytes.
+    @param sha256 完整内容 SHA-256 / SHA-256 of complete content.
+    """
+
+    path: workspace_path.WorkspaceFilePath
+    """@brief 已读取文件路径 / Fetched file path."""
+    content: bytes
+    """@brief 完整原始内容 / Complete raw content."""
+    sha256: str
+    """@brief 完整内容摘要 / Complete-content digest."""
+
+    def __post_init__(self) -> None:
+        """@brief 验证 native 返回值与内容绑定 / Validate that the native result is bound to its content.
+
+        @return None / None.
+        @raise TypeError 字段类型非法时抛出 / Raised for invalid field types.
+        @raise ValueError 内容过大或摘要不匹配时抛出 / Raised for oversized content or digest mismatch.
+        """
+
+        if not isinstance(self.path, workspace_path.WorkspaceFilePath):
+            raise TypeError("FetchFileResult requires a WorkspaceFilePath")
+        if not isinstance(self.content, bytes):
+            raise TypeError("FetchFileResult content must be bytes")
+        if len(self.content) > MAX_FETCH_FILE_BYTES:
+            raise ValueError("FetchFileResult content exceeds the fetch budget")
+        if not isinstance(self.sha256, str):
+            raise TypeError("FetchFileResult sha256 must be a string")
+        if (
+            _PAYLOAD_SHA256_PATTERN.fullmatch(self.sha256) is None
+            or hashlib.sha256(self.content).hexdigest() != self.sha256
+        ):
+            raise ValueError("FetchFileResult sha256 does not match its content")
+
+
 def _require_utf8(value: str, *, label: str) -> int:
     """@brief 验证文本可无损传给 native UTF-8 协议 / Verify text can be losslessly sent through the native UTF-8 protocol.
 
@@ -465,6 +547,8 @@ __all__ = [
     "AddFileResult",
     "DEFAULT_BASH_OUTPUT_LIMIT_BYTES",
     "DEFAULT_BASH_TIMEOUT_SECONDS",
+    "FetchFileCommand",
+    "FetchFileResult",
     "MAX_ADD_FILE_BYTES",
     "MAX_ADD_FILE_CHUNK_BYTES",
     "MAX_BASH_COMMAND_BYTES",
@@ -472,6 +556,7 @@ __all__ = [
     "MAX_BASH_OUTPUT_LIMIT_BYTES",
     "MAX_BASH_STDIN_BYTES",
     "MAX_BASH_TIMEOUT_SECONDS",
+    "MAX_FETCH_FILE_BYTES",
     "RunBashCommand",
     "RunBashResult",
     "ReplayFileCommand",

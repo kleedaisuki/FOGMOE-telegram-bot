@@ -14,6 +14,8 @@ from uuid import uuid4
 from fogmoe_bot.application.workspace.errors import (
     WorkspaceBindingQuarantinedError,
     WorkspaceFileReplayNotFoundError,
+    WorkspaceFileNotFoundError,
+    WorkspaceFileTooLargeError,
     WorkspaceInvocationOutcomeUnknownError,
     WorkspaceQuotaRecoveryRequiredError,
     WorkspaceRuntimeProtocolError,
@@ -22,6 +24,8 @@ from fogmoe_bot.application.workspace.errors import (
 from fogmoe_bot.application.workspace.models import (
     AddFileCommand,
     AddFileResult,
+    FetchFileCommand,
+    FetchFileResult,
     ReplayFileCommand,
     RunBashCommand,
     RunBashResult,
@@ -147,6 +151,20 @@ class NativeRuntimeProcess(Protocol):
         @note 该调用没有 chunks，binding 不得创建 pending journal、读取 payload bytes 或激活
             runtime。/ This call has no chunks; the binding must not create a pending journal,
             read payload bytes, or activate a runtime.
+        """
+
+        ...
+
+    def fetch_file(
+        self,
+        path: str,
+        max_bytes: int,
+    ) -> Mapping[str, object]:
+        """@brief 从 persistent workspace 读取普通文件 / Fetch a regular file from the persistent workspace.
+
+        @param path 相对 ``/workspace`` 的受限路径 / Constrained path relative to ``/workspace``.
+        @param max_bytes 最大接收字节数 / Maximum accepted byte count.
+        @return path/content/byte_size/sha256 mapping / Path/content/byte-size/SHA-256 mapping.
         """
 
         ...
@@ -795,6 +813,37 @@ class WspctlRuntimeProcess(RuntimeProcess):
         )
         return await asyncio.shield(task)
 
+    async def fetch_file(self, command: FetchFileCommand) -> FetchFileResult:
+        """@brief 解析 runtime key 并串行读取普通文件 / Resolve the runtime key and serially fetch a regular file.
+
+        @param command 已验证 scope、路径与预算 / Validated scope, path, and budget.
+        @return 已验证完整文件 / Verified complete file.
+        @raise WorkspaceRuntimeUnavailableError native runtime 不可安全读取时抛出 /
+            Raised when native cannot read safely.
+        @note 读取与同 key 的 Bash/add_file 共用 cache lease、execution lock 与公平 admission。/
+            The read shares the cache lease, execution lock, and fair admission with same-key
+            Bash/add_file operations.
+        """
+
+        runtime = await self._registry.resolve(command.scope)
+        if not runtime.belongs_to(command.scope):
+            raise WorkspaceRuntimeUnavailableError(
+                "Workspace runtime registry returned a cross-scope binding"
+            )
+        entry = await self._acquire(runtime.key)
+        try:
+            task = asyncio.create_task(
+                self._fetch_file_entry(runtime.key, entry, command),
+                name="workspace.fetch-file",
+            )
+        except BaseException:
+            await self._release(runtime.key, entry)
+            raise
+        task.add_done_callback(
+            lambda completed: self._schedule_release(runtime.key, entry, completed)
+        )
+        return await asyncio.shield(task)
+
     async def close(self) -> None:
         """@brief 停止新命令、排空已借出命令并关闭所有 client / Stop new commands, drain borrowed commands, and close all clients.
 
@@ -1185,6 +1234,41 @@ class WspctlRuntimeProcess(RuntimeProcess):
             finally:
                 await lease.release()
 
+    async def _fetch_file_entry(
+        self,
+        key: WorkspaceRuntimeKey,
+        entry: _CachedRuntimeProcess,
+        command: FetchFileCommand,
+    ) -> FetchFileResult:
+        """@brief 在共享 serial/fair admission 下读取文件 / Fetch a file under shared serial/fair admission.
+
+        @param key 请求 runtime key / Requested runtime key.
+        @param entry 已借出 native client / Borrowed native client.
+        @param command 已验证读取命令 / Validated fetch command.
+        @return 已验证完整文件 / Verified complete file.
+        """
+
+        async with entry.execution_lock:
+            if not entry.reusable:
+                raise WorkspaceRuntimeUnavailableError(
+                    "Workspace native handle was retired after an earlier failure"
+                )
+            lease = await self._execution_admission.acquire(key)
+            try:
+                try:
+                    return await asyncio.to_thread(
+                        _fetch_file_native_process,
+                        entry.process,
+                        command,
+                    )
+                except (WorkspaceFileNotFoundError, WorkspaceFileTooLargeError):
+                    raise
+                except BaseException:
+                    entry.reusable = False
+                    raise
+            finally:
+                await lease.release()
+
     def _schedule_release(
         self,
         key: WorkspaceRuntimeKey,
@@ -1423,6 +1507,72 @@ def _replay_file_native_process(
             error, "wspctl RuntimeProcess payload replay failed"
         ) from error
     return _decode_native_file_result(raw_result, command, require_replayed=True)
+
+
+def _fetch_file_native_process(
+    process: NativeRuntimeProcess,
+    command: FetchFileCommand,
+) -> FetchFileResult:
+    """@brief 在线程内读取并严格解码 workspace 文件 / Fetch and strictly decode a workspace file in a worker thread.
+
+    @param process native RuntimeProcess / Native RuntimeProcess.
+    @param command 已验证文件读取命令 / Validated file-fetch command.
+    @return 已验证完整文件 / Verified complete file.
+    @raise WorkspaceRuntimeUnavailableError native/transport 故障时抛出 /
+        Raised for native or transport failures.
+    @raise WorkspaceRuntimeProtocolError native 返回值违反固定形状时抛出 /
+        Raised when the native result violates the fixed shape.
+    """
+
+    try:
+        raw_result = process.fetch_file(command.path.value, command.max_bytes)
+    except WorkspaceRuntimeUnavailableError:
+        raise
+    except Exception as error:
+        error_code = _native_error_code(error)
+        if error_code == "not_found":
+            raise WorkspaceFileNotFoundError("Workspace file was not found") from error
+        if error_code == "frame_too_large":
+            raise WorkspaceFileTooLargeError(
+                "Workspace file exceeds the fetch limit"
+            ) from error
+        raise _native_runtime_unavailable_error(
+            error, "wspctl RuntimeProcess file fetch failed"
+        ) from error
+    if not isinstance(raw_result, Mapping):
+        raise WorkspaceRuntimeProtocolError("wspctl fetch_file result must be a mapping")
+    required_fields = {"path", "content", "byte_size", "sha256"}
+    if set(raw_result) != required_fields:
+        raise WorkspaceRuntimeProtocolError(
+            "wspctl fetch_file result has an unsupported field set"
+        )
+    path = raw_result["path"]
+    content = raw_result["content"]
+    byte_size = raw_result["byte_size"]
+    sha256 = raw_result["sha256"]
+    if not isinstance(path, str) or path != command.path.value:
+        raise WorkspaceRuntimeProtocolError(
+            "wspctl fetch_file result path does not match"
+        )
+    if not isinstance(content, bytes):
+        raise WorkspaceRuntimeProtocolError("wspctl fetch_file content must be bytes")
+    if (
+        isinstance(byte_size, bool)
+        or not isinstance(byte_size, int)
+        or byte_size != len(content)
+        or byte_size > command.max_bytes
+    ):
+        raise WorkspaceRuntimeProtocolError(
+            "wspctl fetch_file byte size does not match"
+        )
+    if not isinstance(sha256, str):
+        raise WorkspaceRuntimeProtocolError("wspctl fetch_file sha256 must be a string")
+    try:
+        return FetchFileResult(path=command.path, content=content, sha256=sha256)
+    except (TypeError, ValueError) as error:
+        raise WorkspaceRuntimeProtocolError(
+            "wspctl fetch_file result failed content validation"
+        ) from error
 
 
 def _decode_native_file_result(

@@ -1232,7 +1232,7 @@ def test_blocking_offloads_have_explicit_admission_control() -> None:
     assert "await asyncio.to_thread(entry.process.close)" not in workspace_source
     assert "await asyncio.to_thread(process.close)" not in workspace_source
     admission_acquire = "lease = await self._execution_admission.acquire(key)"
-    assert workspace_source.count(admission_acquire) == 3
+    assert workspace_source.count(admission_acquire) == 4
     execution_entry_by_method = {
         "run_bash": "_execute_entry",
         "add_file": "_add_file_entry",

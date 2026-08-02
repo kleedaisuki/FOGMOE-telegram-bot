@@ -27,6 +27,8 @@ class ArtifactKind(StrEnum):
 
     IMAGE = "image"
     AUDIO = "audio"
+    DOCUMENT = "document"
+    """@brief 可作为 Telegram document 投递的通用文件 / General file deliverable as a Telegram document."""
 
 
 @dataclass(frozen=True, slots=True, order=True)

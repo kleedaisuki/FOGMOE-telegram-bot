@@ -179,6 +179,26 @@ struct ClientAddFileResult final {
     std::string sha256;
 };
 
+/** @brief Bot 到 Unix gateway 的 workspace 文件读取 DTO / Workspace file-fetch DTO from the Bot to the Unix gateway. */
+struct ClientFetchFileRequest final {
+    /** @brief 长期 runtime UUID / Long-lived runtime UUID. */
+    std::string runtime_key;
+    /** @brief 相对 ``/workspace`` 的普通文件路径 / Regular-file path relative to ``/workspace``. */
+    std::string path;
+    /** @brief 调用方最大接收字节数 / Maximum bytes accepted by the caller. */
+    std::size_t max_bytes{50U * 1024U * 1024U};
+};
+
+/** @brief Unix gateway 返回的完整 workspace 文件 / Complete workspace file returned by the Unix gateway. */
+struct ClientFetchFileResult final {
+    /** @brief 已规范化相对路径 / Canonical relative path. */
+    std::string path;
+    /** @brief 完整文件 bytes / Complete file bytes. */
+    std::vector<std::byte> contents;
+    /** @brief 完整内容 SHA-256 / SHA-256 of complete content. */
+    std::string sha256;
+};
+
 /**
  * @brief 非特权 Unix SOCK_SEQPACKET gateway client / Unprivileged Unix SOCK_SEQPACKET gateway
  * client.
@@ -248,6 +268,16 @@ public:
      */
     [[nodiscard]] Result<ClientAddFileResult>
     replay_file(const ClientReplayFileRequest& request) const;
+
+    /**
+     * @brief 经一条短连接读取 workspace 普通文件 / Fetch a regular workspace file over one short connection.
+     * @param request 受限相对路径与字节预算 / Constrained relative path and byte budget.
+     * @return 完整文件或精确 transport 错误 / Complete file or a precise transport error.
+     * @note 该调用不接受 host path，且 broker 通过 no-follow ``openat2`` 解析路径。/
+     *       This call accepts no host path; the broker resolves the path through no-follow ``openat2``.
+     */
+    [[nodiscard]] Result<ClientFetchFileResult>
+    fetch_file(const ClientFetchFileRequest& request) const;
 
 private:
     /** @brief broker UNIX socket 的绝对路径 / Absolute path of the broker UNIX socket. */

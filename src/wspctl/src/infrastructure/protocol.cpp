@@ -276,6 +276,15 @@ private:
     return true;
 }
 
+/** @brief 判断相对 workspace 普通文件路径是否安全 / Check a safe workspace-relative regular-file path. */
+[[nodiscard]] bool is_safe_workspace_file_path(const std::string_view path) {
+    if (path.empty() || path == "." || path.size() > kMaxWorkspaceFilePathBytes ||
+        path.front() == '/' || path.back() == '/' || path.find('\0') != std::string_view::npos) {
+        return false;
+    }
+    return is_safe_workspace_cwd("/workspace/" + std::string(path));
+}
+
 /** @brief 编码不含外部语义 hash 的规范请求 / Encode canonical request without caller semantic hash.
  */
 [[nodiscard]] std::vector<std::byte> encode_canonical_request(const ExecuteRequest& request) {
@@ -380,7 +389,7 @@ private:
 /** @brief 校验 MessageKind 枚举值 / Validate a MessageKind enum value. */
 [[nodiscard]] bool is_known_kind(const std::uint16_t raw_kind) {
     return raw_kind >= static_cast<std::uint16_t>(MessageKind::execute) &&
-           raw_kind <= static_cast<std::uint16_t>(MessageKind::runtime_status_result);
+           raw_kind <= static_cast<std::uint16_t>(MessageKind::fetch_file_chunk);
 }
 
 /** @brief 校验 execution result 可安全编码 / Validate an execution result before encoding. */
@@ -562,6 +571,35 @@ Result<void> validate_payload_result(const PayloadResult& result) {
         result.byte_size > kMaxAddFileBytes || !is_sha256(result.sha256)) {
         return std::unexpected(
             make_error(ErrorCode::invalid_argument, "invalid file ingress receipt"));
+    }
+    return {};
+}
+
+Result<void> validate_fetch_file_request(const FetchFileRequest& request) {
+    if (!is_safe_identifier(request.runtime_key) || !is_safe_workspace_file_path(request.path)) {
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid workspace file-fetch identity or path"));
+    }
+    if (request.max_bytes == 0U || request.max_bytes > kMaxFetchFileBytes) {
+        return std::unexpected(
+            make_error(ErrorCode::frame_too_large, "workspace file-fetch limit is out of range"));
+    }
+    return {};
+}
+
+Result<void> validate_fetch_file_result(const FetchFileResult& result) {
+    if (!is_safe_workspace_file_path(result.path) || result.byte_size > kMaxFetchFileBytes ||
+        !is_sha256(result.sha256)) {
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid workspace file-fetch result"));
+    }
+    return {};
+}
+
+Result<void> validate_fetch_file_chunk(const FetchFileChunk& chunk) {
+    if (chunk.bytes.empty() || chunk.bytes.size() > kMaxAddFileChunkBytes) {
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid workspace file-fetch chunk"));
     }
     return {};
 }
@@ -1008,6 +1046,96 @@ Result<PayloadResult> decode_payload_result(const std::span<const std::byte> pay
         return std::unexpected(valid.error());
     }
     return result;
+}
+
+Result<std::vector<std::byte>> encode_fetch_file_request(const FetchFileRequest& request) {
+    if (const auto valid = validate_fetch_file_request(request); !valid) {
+        return std::unexpected(valid.error());
+    }
+    Writer writer;
+    writer.string(request.runtime_key);
+    writer.string(request.path);
+    writer.u64(static_cast<std::uint64_t>(request.max_bytes));
+    return writer.take();
+}
+
+Result<FetchFileRequest>
+decode_fetch_file_request(const std::span<const std::byte> payload) {
+    Reader reader(payload);
+    const auto runtime_key = reader.string(128U);
+    const auto path = reader.string(kMaxWorkspaceFilePathBytes);
+    const auto max_bytes = reader.u64();
+    if (!runtime_key || !path || !max_bytes || !reader.finished() ||
+        *max_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid workspace file-fetch request"));
+    }
+    FetchFileRequest request{
+        .runtime_key = *runtime_key,
+        .path = *path,
+        .max_bytes = static_cast<std::size_t>(*max_bytes),
+    };
+    if (const auto valid = validate_fetch_file_request(request); !valid) {
+        return std::unexpected(valid.error());
+    }
+    return request;
+}
+
+Result<std::vector<std::byte>> encode_fetch_file_result(const FetchFileResult& result) {
+    if (const auto valid = validate_fetch_file_result(result); !valid) {
+        return std::unexpected(valid.error());
+    }
+    Writer writer;
+    writer.string(result.path);
+    writer.u64(static_cast<std::uint64_t>(result.byte_size));
+    writer.string(result.sha256);
+    return writer.take();
+}
+
+Result<FetchFileResult>
+decode_fetch_file_result(const std::span<const std::byte> payload) {
+    Reader reader(payload);
+    const auto path = reader.string(kMaxWorkspaceFilePathBytes);
+    const auto byte_size = reader.u64();
+    const auto sha256 = reader.string(64U);
+    if (!path || !byte_size || !sha256 || !reader.finished() ||
+        *byte_size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid workspace file-fetch result"));
+    }
+    FetchFileResult result{
+        .path = *path,
+        .byte_size = static_cast<std::size_t>(*byte_size),
+        .sha256 = *sha256,
+    };
+    if (const auto valid = validate_fetch_file_result(result); !valid) {
+        return std::unexpected(valid.error());
+    }
+    return result;
+}
+
+Result<std::vector<std::byte>> encode_fetch_file_chunk(const FetchFileChunk& chunk) {
+    if (const auto valid = validate_fetch_file_chunk(chunk); !valid) {
+        return std::unexpected(valid.error());
+    }
+    Writer writer;
+    writer.bytes(chunk.bytes);
+    return writer.take();
+}
+
+Result<FetchFileChunk>
+decode_fetch_file_chunk(const std::span<const std::byte> payload) {
+    Reader reader(payload);
+    const auto bytes = reader.bytes(kMaxAddFileChunkBytes);
+    if (!bytes || !reader.finished()) {
+        return std::unexpected(
+            make_error(ErrorCode::malformed_frame, "invalid workspace file-fetch chunk"));
+    }
+    FetchFileChunk chunk{.bytes = *bytes};
+    if (const auto valid = validate_fetch_file_chunk(chunk); !valid) {
+        return std::unexpected(valid.error());
+    }
+    return chunk;
 }
 
 Result<std::vector<std::byte>> encode_execution_result(const ExecutionResult& result) {

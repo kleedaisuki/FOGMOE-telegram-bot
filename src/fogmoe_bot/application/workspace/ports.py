@@ -8,6 +8,8 @@ from fogmoe_bot.domain.workspace.scope import RuntimeScope
 from .models import (
     AddFileCommand,
     AddFileResult,
+    FetchFileCommand,
+    FetchFileResult,
     ReplayFileCommand,
     RunBashCommand,
     RunBashResult,
@@ -88,6 +90,20 @@ class RuntimeProcess(Protocol):
             journal, consumes bytes, or writes the Workspace; it shares ``add_file``'s cache,
             serialization lock, and admission because payload recovery checks for one broker
             session must remain ordered with other Workspace mutations.
+        """
+
+        ...
+
+    async def fetch_file(self, command: FetchFileCommand) -> FetchFileResult:
+        """@brief 从已认证 persistent workspace 读取普通文件 / Fetch a regular file from the authenticated persistent workspace.
+
+        @param command 强类型 scope、相对路径与字节预算 / Typed scope, relative path, and byte budget.
+        @return 已验证完整 bytes 与摘要 / Verified complete bytes and digest.
+        @raise WorkspaceRuntimeUnavailableError native runtime 无法安全读取时抛出 /
+            Raised when the native runtime cannot read safely.
+        @note 实现必须与 ``run_bash``/``add_file`` 共享 per-runtime 串行边界，且不得回退到
+            Bot 宿主机路径读取。/ Implementations must share the per-runtime serialization
+            boundary with ``run_bash``/``add_file`` and must never fall back to Bot-host paths.
         """
 
         ...

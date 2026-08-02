@@ -2,7 +2,10 @@
 
 #include "wspctl/infrastructure/protocol.hpp"
 
+#include <openssl/sha.h>
+
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -178,6 +181,29 @@ to_payload_replay_request(const ClientReplayFileRequest& request) {
         .byte_size = result.byte_size,
         .sha256 = result.sha256,
     };
+}
+
+/** @brief 将 presentation 文件读取 DTO 转为 control request / Convert a presentation file-fetch DTO to a control request. */
+[[nodiscard]] FetchFileRequest to_fetch_file_request(const ClientFetchFileRequest& request) {
+    return FetchFileRequest{
+        .runtime_key = request.runtime_key,
+        .path = request.path,
+        .max_bytes = request.max_bytes,
+    };
+}
+
+/** @brief 计算 bytes 的小写 SHA-256 / Compute the lowercase SHA-256 of bytes. */
+[[nodiscard]] std::string content_sha256(const std::span<const std::byte> contents) {
+    std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
+    SHA256(reinterpret_cast<const unsigned char*>(contents.data()), contents.size(), digest.data());
+    constexpr std::string_view digits{"0123456789abcdef"};
+    std::string rendered;
+    rendered.reserve(digest.size() * 2U);
+    for (const unsigned char value : digest) {
+        rendered.push_back(digits[value >> 4U]);
+        rendered.push_back(digits[value & 0x0fU]);
+    }
+    return rendered;
 }
 
 /**
@@ -681,6 +707,87 @@ UnixGatewayClient::replay_file(const ClientReplayFileRequest& client_request) co
                                           "broker returned an invalid file replay receipt"));
     }
     return to_client_file_result(*result);
+}
+
+Result<ClientFetchFileResult>
+UnixGatewayClient::fetch_file(const ClientFetchFileRequest& client_request) const {
+    if (const auto endpoint = validate_socket_path(socket_path_); !endpoint) {
+        return std::unexpected(endpoint.error());
+    }
+    const FetchFileRequest request = to_fetch_file_request(client_request);
+    if (const auto valid = validate_fetch_file_request(request); !valid) {
+        return std::unexpected(valid.error());
+    }
+    constexpr auto kFetchIoDeadline = std::chrono::seconds(30);
+    const auto connected = connect_authenticated_broker(socket_path_, kFetchIoDeadline);
+    if (!connected) {
+        return std::unexpected(connected.error());
+    }
+    const int fd = *connected;
+    const auto close_with_error = [fd](const Error& error) -> Result<ClientFetchFileResult> {
+        close_fd(fd);
+        return std::unexpected(error);
+    };
+    const auto payload = encode_fetch_file_request(request);
+    if (!payload) {
+        return close_with_error(payload.error());
+    }
+    const auto outbound = encode_frame(MessageKind::fetch_file, *payload);
+    if (!outbound) {
+        return close_with_error(outbound.error());
+    }
+    if (const auto sent = send_frame(fd, *outbound); !sent) {
+        return close_with_error(sent.error());
+    }
+    const auto first = receive_decoded_frame(fd);
+    if (!first) {
+        return close_with_error(first.error());
+    }
+    if (first->kind == MessageKind::error) {
+        const auto error = return_broker_error(*first);
+        return close_with_error(error.error());
+    }
+    if (first->kind != MessageKind::fetch_file_result) {
+        return close_with_error(make_error(
+            ErrorCode::protocol_violation, "broker returned an unexpected file-fetch frame"));
+    }
+    const auto metadata = decode_fetch_file_result(first->payload);
+    if (!metadata || metadata->path != request.path || metadata->byte_size > request.max_bytes) {
+        return close_with_error(make_error(
+            ErrorCode::protocol_violation, "broker returned invalid file-fetch metadata"));
+    }
+    std::vector<std::byte> contents;
+    contents.reserve(metadata->byte_size);
+    while (contents.size() < metadata->byte_size) {
+        const auto inbound = receive_decoded_frame(fd);
+        if (!inbound) {
+            return close_with_error(inbound.error());
+        }
+        if (inbound->kind == MessageKind::error) {
+            const auto error = return_broker_error(*inbound);
+            return close_with_error(error.error());
+        }
+        if (inbound->kind != MessageKind::fetch_file_chunk) {
+            return close_with_error(make_error(
+                ErrorCode::protocol_violation, "broker interrupted a file-fetch stream"));
+        }
+        auto chunk = decode_fetch_file_chunk(inbound->payload);
+        if (!chunk || chunk->bytes.size() > metadata->byte_size - contents.size()) {
+            return close_with_error(make_error(
+                ErrorCode::protocol_violation, "broker returned an invalid file-fetch chunk"));
+        }
+        contents.insert(contents.end(), chunk->bytes.begin(), chunk->bytes.end());
+    }
+    close_fd(fd);
+    if (content_sha256(contents) != metadata->sha256) {
+        return std::unexpected(make_error(
+            ErrorCode::protocol_violation, "workspace file-fetch digest mismatch"));
+    }
+    return ClientFetchFileResult{
+        .path = metadata->path,
+        .contents = std::move(contents),
+        .sha256 = metadata->sha256,
+    };
 }
 
 } // namespace wspctl::presentation

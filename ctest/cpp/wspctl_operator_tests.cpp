@@ -763,6 +763,9 @@ void test_reader_uses_upper_dirfd_and_refuses_symlink_traversal() {
     }
     const std::filesystem::path escape = upper / "escape";
     expect(symlink("/tmp", escape.c_str()) == 0, "create hostile escape symlink");
+    const std::filesystem::path file_escape = upper / "safe" / "file-link";
+    expect(symlink("/etc/passwd", file_escape.c_str()) == 0,
+           "create hostile final-component symlink");
 
     const wspctl::RuntimeQuotaBinding binding{
         .runtime_dir = temporary_root / "runtime",
@@ -790,6 +793,21 @@ void test_reader_uses_upper_dirfd_and_refuses_symlink_traversal() {
     expect(!missing_listing.has_value() &&
                missing_listing.error().code == wspctl::ErrorCode::not_found,
            "reader preserves a missing logical directory as the domain not-found result");
+    const auto fetched = reader.fetch_file(binding, "safe/plain.txt", 1024U);
+    expect(fetched.has_value() && fetched->contents.size() == 2U &&
+               std::to_integer<char>(fetched->contents[0]) == 'o' &&
+               std::to_integer<char>(fetched->contents[1]) == 'k' &&
+               fetched->sha256 ==
+                   "2689367b205c16ce32ed4200942b8b8b" "1e262dfc70d9bc9fbc77c49699a4f1df",
+           "reader fetches a bounded regular file and binds its digest");
+    const auto oversized = reader.fetch_file(binding, "safe/plain.txt", 1U);
+    expect(!oversized.has_value() &&
+               oversized.error().code == wspctl::ErrorCode::frame_too_large,
+           "reader rejects a regular file above the caller budget");
+    expect(!reader.fetch_file(binding, "safe/file-link", 1024U).has_value(),
+           "reader refuses a final-component symlink");
+    expect(!reader.fetch_file(binding, "escape/passwd", 1024U).has_value(),
+           "reader refuses an intermediate symlink escape");
     std::filesystem::remove_all(temporary_root, error);
     expect(!error, "clean up self-created temporary reader root");
 }

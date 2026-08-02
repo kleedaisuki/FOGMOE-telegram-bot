@@ -34,7 +34,10 @@ async def finalize_downstream_effect(
     if request.effect_kind == SEND_TELEGRAM_STICKER.value:
         await _enqueue_sticker(request, connection=connection, outbox=outbox)
         return
-    if not request.effect_kind.startswith("media.") or not isinstance(result, dict):
+    if (
+        not request.effect_kind.startswith("media.")
+        and request.effect_kind != "telegram.send_workspace_file"
+    ) or not isinstance(result, dict):
         return
     artifacts = result.get("artifacts")
     if not isinstance(artifacts, list):
@@ -51,6 +54,8 @@ async def finalize_downstream_effect(
             "mime_type": str(artifact.get("mime_type") or "application/octet-stream"),
             "size_bytes": bounded_int(artifact, "size_bytes", minimum=1),
         }
+        if request.context.message_thread_id is not None:
+            payload["message_thread_id"] = request.context.message_thread_id
         idempotency_key = (
             f"assistant-tool:{request.context.turn_id}:"
             f"{request.invocation_id}:artifact:{index}"

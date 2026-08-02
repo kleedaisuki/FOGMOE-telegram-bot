@@ -33,6 +33,7 @@ from fogmoe_bot.application.workspace.models import (
     MAX_BASH_COMMAND_BYTES,
     MAX_BASH_COMMAND_CHARACTERS,
     MAX_BASH_STDIN_BYTES,
+    MAX_FETCH_FILE_BYTES,
 )
 from fogmoe_bot.domain.memory.models import MAX_WORKING_MEMORY_MESSAGES
 
@@ -235,10 +236,6 @@ class RunBashArgs(ToolArguments):
         @return 原始标准输入或 None / Original standard input, or None.
         @raise ValueError 不能 UTF-8 编码或超过 native 单帧预算时抛出 /
             Raised when input cannot be UTF-8 encoded or exceeds the native single-frame budget.
-        @note Pydantic 的 ``max_length`` 按 Unicode code point 计数；native protocol 的
-            64 KiB 限制按字节计数，所以这条校验必须在 schema owner 中存在。/
-            Pydantic's ``max_length`` counts Unicode code points while the native protocol's
-            64 KiB limit counts bytes, so this check must live in the schema owner.
         """
 
         if value is None:
@@ -255,6 +252,43 @@ class RunBashArgs(ToolArguments):
             )
         return value
 
+
+class SendWorkspaceFileArgs(ToolArguments):
+    """@brief 将 workspace 普通文件发送到当前 Telegram 会话 / Send a regular workspace file to the current Telegram conversation.
+
+    @note 参数只表达 runtime 内相对路径；目标 chat 永远来自已认证 execution context。/
+        The argument expresses only an in-runtime relative path; the destination chat always
+        comes from the authenticated execution context.
+    """
+
+    path: str = Field(
+        min_length=1,
+        max_length=4096,
+        pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$",
+        description=(
+            "File path relative to /workspace; absolute paths, parent traversal, empty "
+            "components, and symlinks are forbidden"
+        ),
+    )
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path_transport_budget(cls, value: str) -> str:
+        """@brief 校验 native 路径 UTF-8 字节预算 / Validate the native path UTF-8 byte budget.
+
+        @param value workspace 相对文件路径 / Workspace-relative file path.
+        @return 原始路径 / Original path.
+        @raise ValueError 路径不是 UTF-8 或超过 native 上限时抛出 /
+            Raised when the path is not UTF-8 or exceeds the native limit.
+        """
+
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError("path must be valid UTF-8") from error
+        if len(encoded) > 4096:
+            raise ValueError("path must not exceed 4096 UTF-8 bytes")
+        return value
 
 class GenerateImageArgs(ToolArguments):
     """@brief 图片生成参数 / Image-generation arguments."""
@@ -988,6 +1022,16 @@ DEFAULT_TOOL_CATALOG = ToolCatalog(
             result_residency=ToolResultResidency.AGENT_TURN,
         ),
         define_tool(
+            name="send_workspace_file",
+            description=(
+                "Queue one existing regular file from the authenticated persistent workspace "
+                "as a Telegram document. The file must be non-empty and no larger than "
+                f"{MAX_FETCH_FILE_BYTES} bytes"
+            ),
+            arguments_model=SendWorkspaceFileArgs,
+            mutation_classifier=_always("telegram.send_workspace_file"),
+        ),
+        define_tool(
             name="generate_image",
             description="Generate one image and queue durable delivery",
             arguments_model=GenerateImageArgs,
@@ -1072,6 +1116,7 @@ __all__ = [
     "SearchMemoryArgs",
     "SearchMemoryByTimeArgs",
     "SendStickerArgs",
+    "SendWorkspaceFileArgs",
     "RunBashArgs",
     "ToolArguments",
     "ToolCatalog",

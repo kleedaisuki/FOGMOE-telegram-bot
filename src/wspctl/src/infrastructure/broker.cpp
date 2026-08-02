@@ -3355,6 +3355,67 @@ Result<PayloadResult> Broker::replay_payload(const PayloadReplayRequest& request
     return *receipt;
 }
 
+Result<void> Broker::dispatch_fetch_file(const int client_fd,
+                                         const FetchFileRequest& request) {
+    if (const auto valid = validate_fetch_file_request(request); !valid) {
+        return std::unexpected(valid.error());
+    }
+    // This gate makes the opened file a stable snapshot with respect to every Bot command and
+    // payload mutation for the same persistent workspace. It deliberately does not activate a
+    // dormant RuntimeProcess.
+    const auto gate = execution_gate_.try_acquire(request.runtime_key);
+    if (!gate) {
+        return std::unexpected(gate.error());
+    }
+    const auto binding = quota_.find_ready_runtime(request.runtime_key);
+    if (!binding) {
+        return std::unexpected(binding.error());
+    }
+    OperatorWorkspaceReader reader;
+    auto fetched = reader.fetch_file(*binding, request.path, request.max_bytes);
+    if (!fetched) {
+        return std::unexpected(fetched.error());
+    }
+    FetchFileResult result{
+        .path = request.path,
+        .byte_size = fetched->contents.size(),
+        .sha256 = fetched->sha256,
+    };
+    const auto result_payload = encode_fetch_file_result(result);
+    if (!result_payload) {
+        return std::unexpected(result_payload.error());
+    }
+    const auto result_frame = encode_frame(MessageKind::fetch_file_result, *result_payload);
+    if (!result_frame) {
+        return std::unexpected(result_frame.error());
+    }
+    if (const auto sent = send_frame(client_fd, *result_frame); !sent) {
+        return std::unexpected(sent.error());
+    }
+    for (std::size_t offset = 0U; offset < fetched->contents.size();) {
+        const std::size_t chunk_size =
+            std::min(kMaxAddFileChunkBytes, fetched->contents.size() - offset);
+        FetchFileChunk chunk{
+            .bytes = std::vector<std::byte>(
+                fetched->contents.begin() + static_cast<std::ptrdiff_t>(offset),
+                fetched->contents.begin() + static_cast<std::ptrdiff_t>(offset + chunk_size)),
+        };
+        const auto chunk_payload = encode_fetch_file_chunk(chunk);
+        if (!chunk_payload) {
+            return std::unexpected(chunk_payload.error());
+        }
+        const auto chunk_frame = encode_frame(MessageKind::fetch_file_chunk, *chunk_payload);
+        if (!chunk_frame) {
+            return std::unexpected(chunk_frame.error());
+        }
+        if (const auto sent = send_frame(client_fd, *chunk_frame); !sent) {
+            return std::unexpected(sent.error());
+        }
+        offset += chunk_size;
+    }
+    return {};
+}
+
 Result<void> Broker::dispatch_payload_stream(const int client_fd,
                                              const PayloadBeginRequest& request) {
     /** @brief 单个本机文件流 I/O 的最长等待时间 / Maximum wait for one local file-stream I/O. */
@@ -3804,6 +3865,22 @@ Result<void> Broker::serve_client(const int client_fd) {
             }
             continue;
         }
+        if (frame->kind == MessageKind::fetch_file) {
+            const auto request = decode_fetch_file_request(frame->payload);
+            if (!request) {
+                if (const auto sent = send_error_frame(client_fd, request.error()); !sent) {
+                    return std::unexpected(sent.error());
+                }
+                continue;
+            }
+            const auto fetched = dispatch_fetch_file(client_fd, *request);
+            if (!fetched) {
+                if (const auto sent = send_error_frame(client_fd, fetched.error()); !sent) {
+                    return std::unexpected(sent.error());
+                }
+            }
+            return {};
+        }
         if (frame->kind == MessageKind::payload_replay) {
             const auto request = decode_payload_replay_request(frame->payload);
             if (!request) {
@@ -3886,7 +3963,8 @@ Result<void> Broker::serve_client(const int client_fd) {
             if (const auto sent =
                     send_error_frame(client_fd, make_error(ErrorCode::protocol_violation,
                                                            "broker accepts execute, file ingress, "
-                                                           "file replay, or runtime status only"));
+                                                           "file replay, file fetch, or runtime "
+                                                           "status only"));
                 !sent) {
                 return std::unexpected(sent.error());
             }

@@ -1,5 +1,8 @@
 #include "wspctl/infrastructure/operator_workspace_reader.hpp"
 
+#include <openssl/sha.h>
+
+#include <array>
 #include <cerrno>
 #include <cstring>
 #include <dirent.h>
@@ -121,6 +124,68 @@ private:
                                       "kernel headers do not expose openat2; operator workspace "
                                       "traversal refuses a weaker fallback"));
 #endif
+}
+
+/**
+ * @brief 以 openat2 打开一个不跟随链接的普通文件 / Open a no-follow regular file with openat2.
+ * @param parent_fd 已验证父目录 FD / Verified parent-directory FD.
+ * @param component 最终路径分量 / Final path component.
+ * @return 普通文件 FD 或 fail-closed 错误 / Regular-file FD or a fail-closed error.
+ */
+[[nodiscard]] Result<OwnedFileDescriptor> open_regular_file_beneath(
+    const int parent_fd, const std::string_view component) {
+    if (parent_fd < 0 || component.empty() || component == "." || component == ".." ||
+        component.find('/') != std::string_view::npos ||
+        component.find('\0') != std::string_view::npos) {
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid workspace file path component"));
+    }
+#ifdef SYS_openat2
+    std::string material(component);
+    open_how how{};
+    how.flags = static_cast<std::uint64_t>(O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NOATIME);
+    how.resolve = static_cast<std::uint64_t>(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+                                             RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV);
+    const int descriptor =
+        static_cast<int>(syscall(SYS_openat2, parent_fd, material.c_str(), &how, sizeof(how)));
+    if (descriptor < 0) {
+        const int saved_errno = errno;
+        if (saved_errno == ENOENT || saved_errno == ENOTDIR) {
+            return std::unexpected(
+                make_error(ErrorCode::not_found, "workspace file was not found"));
+        }
+        errno = saved_errno;
+        return std::unexpected(
+            errno_error(ErrorCode::permission_denied, "openat2 workspace file"));
+    }
+    struct stat metadata {};
+    if (fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
+        const int saved_errno = errno;
+        static_cast<void>(close(descriptor));
+        errno = saved_errno;
+        return std::unexpected(
+            make_error(ErrorCode::permission_denied, "workspace path is not a regular file"));
+    }
+    return OwnedFileDescriptor(descriptor);
+#else
+    static_cast<void>(component);
+    return std::unexpected(make_error(ErrorCode::sandbox_preflight_failed,
+                                      "kernel headers do not expose openat2; workspace file "
+                                      "fetch refuses a weaker fallback"));
+#endif
+}
+
+/** @brief 将 SHA-256 digest 渲染为小写十六进制 / Render a SHA-256 digest as lowercase hexadecimal. */
+[[nodiscard]] std::string render_sha256(
+    const std::array<unsigned char, SHA256_DIGEST_LENGTH>& digest) {
+    constexpr std::string_view digits{"0123456789abcdef"};
+    std::string rendered;
+    rendered.reserve(digest.size() * 2U);
+    for (const unsigned char value : digest) {
+        rendered.push_back(digits[value >> 4U]);
+        rendered.push_back(digits[value & 0x0fU]);
+    }
+    return rendered;
 }
 
 /**
@@ -284,6 +349,85 @@ OperatorWorkspaceReader::list(const RuntimeQuotaBinding& binding,
                        "operator workspace reader produced a non-canonical domain listing"));
     }
     return *listing;
+}
+
+Result<FetchedWorkspaceFile>
+OperatorWorkspaceReader::fetch_file(const RuntimeQuotaBinding& binding,
+                                    const std::string_view relative_path,
+                                    const std::size_t max_bytes) const {
+    if (relative_path.empty() || relative_path.front() == '/' || relative_path.back() == '/' ||
+        max_bytes == 0U) {
+        return std::unexpected(
+            make_error(ErrorCode::invalid_argument, "invalid workspace file-fetch request"));
+    }
+    const std::filesystem::path upper_root = binding.workspace_dir / kWorkspaceUpperDirectoryName;
+    OwnedFileDescriptor directory_fd(
+        open(upper_root.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NOATIME));
+    if (directory_fd.get() < 0) {
+        return std::unexpected(
+            errno_error(ErrorCode::io_failure, "open verified workspace upper directory"));
+    }
+
+    std::size_t component_begin = 0U;
+    for (;;) {
+        const std::size_t separator = relative_path.find('/', component_begin);
+        const std::string_view component = relative_path.substr(
+            component_begin, separator == std::string_view::npos
+                                 ? relative_path.size() - component_begin
+                                 : separator - component_begin);
+        if (separator == std::string_view::npos) {
+            auto file = open_regular_file_beneath(directory_fd.get(), component);
+            if (!file) {
+                return std::unexpected(file.error());
+            }
+            struct stat metadata {};
+            if (fstat(file->get(), &metadata) != 0 || metadata.st_size < 0) {
+                return std::unexpected(
+                    errno_error(ErrorCode::io_failure, "stat fetched workspace file"));
+            }
+            const auto declared_size = static_cast<std::uint64_t>(metadata.st_size);
+            if (declared_size > static_cast<std::uint64_t>(max_bytes)) {
+                return std::unexpected(
+                    make_error(ErrorCode::frame_too_large, "workspace file exceeds fetch limit"));
+            }
+            std::vector<std::byte> contents;
+            contents.reserve(static_cast<std::size_t>(declared_size));
+            std::array<std::byte, 64U * 1024U> buffer{};
+            for (;;) {
+                const ssize_t count = read(file->get(), buffer.data(), buffer.size());
+                if (count < 0 && errno == EINTR) {
+                    continue;
+                }
+                if (count < 0) {
+                    return std::unexpected(
+                        errno_error(ErrorCode::io_failure, "read workspace file"));
+                }
+                if (count == 0) {
+                    break;
+                }
+                const std::size_t chunk_size = static_cast<std::size_t>(count);
+                if (chunk_size > max_bytes - contents.size()) {
+                    return std::unexpected(make_error(
+                        ErrorCode::frame_too_large, "workspace file grew beyond fetch limit"));
+                }
+                contents.insert(contents.end(), buffer.begin(),
+                                buffer.begin() + static_cast<std::ptrdiff_t>(chunk_size));
+            }
+            std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
+            SHA256(reinterpret_cast<const unsigned char*>(contents.data()), contents.size(),
+                   digest.data());
+            return FetchedWorkspaceFile{
+                .contents = std::move(contents),
+                .sha256 = render_sha256(digest),
+            };
+        }
+        auto child = open_directory_beneath(directory_fd.get(), component);
+        if (!child) {
+            return std::unexpected(child.error());
+        }
+        directory_fd = std::move(*child);
+        component_begin = separator + 1U;
+    }
 }
 
 } // namespace wspctl

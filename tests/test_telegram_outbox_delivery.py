@@ -245,13 +245,37 @@ class _Bot:
         chat_id: int | str,
         voice: object,
         filename: str,
+        message_thread_id: int | None = None,
     ) -> _TelegramMessage:
         """@brief 记录 artifact voice / Record an artifact voice."""
 
         self._raise_if_configured()
         self.artifact_calls.append((filename, chat_id))
+        assert message_thread_id is None or message_thread_id > 0
         assert voice
         return _TelegramMessage(89)
+
+    async def send_document(
+        self,
+        *,
+        chat_id: int | str,
+        document: object,
+        filename: str,
+        message_thread_id: int | None = None,
+    ) -> _TelegramMessage:
+        """@brief 记录 artifact document / Record an artifact document.
+
+        @param chat_id Telegram chat / Telegram chat.
+        @param document 打开的 artifact 文件 / Open artifact file.
+        @param filename 用户文件名 / User-facing filename.
+        @param message_thread_id 可选 topic / Optional topic.
+        @return Telegram 消息替身 / Telegram message double.
+        """
+
+        self._raise_if_configured()
+        self.artifact_calls.append((f"document:{filename}:{message_thread_id}", chat_id))
+        assert document
+        return _TelegramMessage(90)
 
     async def get_sticker_set(self, name: str) -> StickerSet:
         """@brief 记录 sticker-set lookup / Record a sticker-set lookup.
@@ -461,6 +485,46 @@ def test_artifact_delivery_claims_and_completes_only_through_outbox(
     assert receipt.external_message_id == "88"
     assert bot.artifact_calls == [("image", 7)]
     assert artifacts.claim(record.artifact_id, expected_kind=ArtifactKind.IMAGE) is None
+
+
+def test_document_artifact_delivery_uses_send_document_and_preserves_topic(
+    tmp_path: Path,
+) -> None:
+    """@brief document artifact 经 send_document 投递并保留 topic / Document artifacts use send_document and preserve the topic.
+
+    @param tmp_path 临时 artifact root / Temporary artifact root.
+    """
+
+    artifacts = FileArtifactStore(tmp_path)
+    record = artifacts.store(
+        kind=ArtifactKind.DOCUMENT,
+        content=b"workspace-result",
+        filename="result.txt",
+        mime_type="text/plain",
+        ttl=timedelta(minutes=5),
+        max_bytes=1024,
+    )
+    bot = _Bot()
+    receipt = asyncio.run(
+        TelegramOutboxDeliveryAdapter(cast(Bot, bot), artifacts=artifacts).deliver(
+            _message(
+                {
+                    "chat_id": -100,
+                    "artifact_id": str(record.artifact_id),
+                    "kind": record.kind.value,
+                    "filename": record.filename,
+                    "mime_type": record.mime_type,
+                    "size_bytes": record.size_bytes,
+                    "message_thread_id": 11,
+                },
+                kind=SEND_TELEGRAM_ARTIFACT,
+            )
+        )
+    )
+
+    assert receipt.external_message_id == "90"
+    assert bot.artifact_calls == [("document:result.txt:11", -100)]
+    assert artifacts.claim(record.artifact_id, expected_kind=ArtifactKind.DOCUMENT) is None
 
 
 def test_malformed_nonempty_artifact_id_is_normalized_before_delivery(
