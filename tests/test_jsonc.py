@@ -178,3 +178,83 @@ def test_loader_wraps_file_read_errors(tmp_path: Path) -> None:
 
     with pytest.raises(JsoncDecodeError, match="cannot read JSONC file"):
         load_jsonc(missing_path)
+
+
+def test_loader_inlines_recursive_jsonc_and_json_values(tmp_path: Path) -> None:
+    """@brief 精确 include 字符串递归内联 JSONC/JSON 值 / Recursively inline JSONC/JSON values
+    referenced by exact include strings.
+
+    @param tmp_path pytest 提供的隔离临时目录 / Isolated temporary directory supplied by pytest.
+    @return None / None.
+    """
+
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (tmp_path / "object.jsonc").write_text(
+        '{"name": "雾萌" // child JSONC\n}', encoding="utf-8"
+    )
+    (tmp_path / "array.json").write_text("[1, 2, 3]", encoding="utf-8")
+    (nested / "enabled.jsonc").write_text("true", encoding="utf-8")
+    root = tmp_path / "root.jsonc"
+    root.write_text(
+        """{
+            "object": "$<object.jsonc>",
+            "array": "$<array.json>",
+            "enabled": "$<nested/enabled.jsonc>",
+            "literal": "prefix $<object.jsonc>"
+        }""",
+        encoding="utf-8",
+    )
+
+    assert load_jsonc(root) == {
+        "object": {"name": "雾萌"},
+        "array": [1, 2, 3],
+        "enabled": True,
+        "literal": "prefix $<object.jsonc>",
+    }
+
+
+def test_parse_jsonc_can_resolve_includes_from_explicit_source_path(
+    tmp_path: Path,
+) -> None:
+    """@brief 内存 JSONC 可通过源路径解析 include / In-memory JSONC resolves includes through
+    an explicit source path.
+
+    @param tmp_path pytest 提供的隔离临时目录 / Isolated temporary directory supplied by pytest.
+    @return None / None.
+    """
+
+    source_directory = tmp_path / "config"
+    source_directory.mkdir()
+    (source_directory / "fragment.json").write_text('{"value": 42}', encoding="utf-8")
+
+    assert parse_jsonc(
+        '{"fragment": "$<fragment.json>"}',
+        source_path=source_directory / "virtual.jsonc",
+    ) == {"fragment": {"value": 42}}
+
+
+def test_loader_rejects_include_cycles(tmp_path: Path) -> None:
+    """@brief include 循环必须失败 / Include cycles must fail.
+
+    @param tmp_path pytest 提供的隔离临时目录 / Isolated temporary directory supplied by pytest.
+    @return None / None.
+    """
+
+    first = tmp_path / "first.jsonc"
+    second = tmp_path / "second.jsonc"
+    first.write_text('{"next": "$<second.jsonc>"}', encoding="utf-8")
+    second.write_text('{"next": "$<first.jsonc>"}', encoding="utf-8")
+
+    with pytest.raises(JsoncDecodeError, match="include cycle"):
+        load_jsonc(first)
+
+
+def test_parser_rejects_empty_include_paths() -> None:
+    """@brief 空 include 路径必须失败 / Empty include paths must fail.
+
+    @return None / None.
+    """
+
+    with pytest.raises(JsoncDecodeError, match="include path must not be empty"):
+        parse_jsonc('{"child": "$<>"}')

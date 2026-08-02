@@ -75,6 +75,11 @@ wheel.packages = [
     "src/fogmoe_dashboard",
     "src/fogmoe_dbctl",
 ]
+wheel.exclude = [
+    "fogmoe_config/CMakeLists.txt",
+    "fogmoe_config/include/**",
+    "fogmoe_config/src/**",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

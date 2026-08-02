@@ -8,8 +8,20 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(WSPCTL_BUILD_TESTING "构建 wspctl 的 CTest 测试 / Build wspctl CTest suites" ON)
 
+# The workspace supervisor image does not depend on the configuration parser.  Keep the
+# independent library opt-out explicit so narrowly scoped CMake source contexts do not have to
+# copy or build unrelated Python-facing configuration sources.
+option(
+    FOGMOE_CONFIG_BUILD
+    "构建 fogmoe_config 静态库 / Build the fogmoe_config static library"
+    ON
+)
+
 include(CTest)
 
+if(FOGMOE_CONFIG_BUILD)
+    add_subdirectory(src/fogmoe_config)
+endif()
 add_subdirectory(src/wspctl)
 
 # Host deployment assets are deliberately absent from the Bot wheel and publisher-only

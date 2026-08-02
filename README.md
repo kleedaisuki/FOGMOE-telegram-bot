@@ -88,6 +88,11 @@ nano config.json
 [`example.config.json`](example.config.json)；README 只展示最常用的 AI 路由片段，避免成为
 第二份会漂移的配置规范。
 
+JSONC 还支持精确字符串形式的文件内联（include）：例如 `"database": "$<database.jsonc>"`
+会把 `database.jsonc` 解析后的 JSON 值替换这个字符串。相对路径相对于当前文件所在目录，
+支持递归内联 `.jsonc` 与 `.json` 文件；普通字符串中包含 `$<...>` 时不会触发。include 循环、
+空路径和无法读取的文件都会被拒绝，根配置展开后仍必须是对象。
+
 AI 调用只经过原生 OpenAI-style 或 Anthropic-style HTTP adapter。provider 是配置数据；route
 同时声明模型链、工具能力和可选 `meta`，不会再由代码猜测 provider 或拼接 endpoint：
 
